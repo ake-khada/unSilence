@@ -198,13 +198,6 @@ class FeedSubscriptionManager(
 
     fun refreshFeed() {
         _isRefreshing.value = true
-        if (_feedType.value == FeedType.RELAY) {
-            eventRepo.clearRelayFeed()
-            subscribeRelayFeed()
-        } else {
-            eventRepo.resetFeedDisplay()
-            resubscribeFeed()
-        }
         scope.launch {
             delay(3000)
             _isRefreshing.value = false
