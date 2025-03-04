@@ -19,6 +19,7 @@
         android:label="Barq"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
+        android:largeHeap="true"
         android:theme="@style/Theme.Barq.Splash">
         <activity
             android:name=".MainActivity"
