@@ -54,7 +54,7 @@ fun RelayScreen(
     val blockedRelays by viewModel.blockedRelays.collectAsState()
     val newRelayUrl by viewModel.newRelayUrl.collectAsState()
 
-    val tabs = RelaySetType.entries
+    val tabs = RelaySetType.entries.filter { it != RelaySetType.DM }
 
     Scaffold(
         topBar = {
