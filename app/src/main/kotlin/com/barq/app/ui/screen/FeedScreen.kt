@@ -34,14 +34,14 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -126,7 +126,7 @@ fun FeedScreen(
     val ownLists by viewModel.listRepo.ownLists.collectAsState()
     var showRelayPicker by remember { mutableStateOf(false) }
     var showListPicker by remember { mutableStateOf(false) }
-    var showFeedTypeSheet by remember { mutableStateOf(false) }
+    var showFeedTypeDropdown by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     val newNoteCount by viewModel.newNoteCount.collectAsState()
@@ -290,38 +290,83 @@ fun FeedScreen(
                     ),
                     scrollBehavior = scrollBehavior,
                     navigationIcon = {
-                        Surface(
-                            onClick = { showFeedTypeSheet = true },
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier.padding(start = 8.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                        Box {
+                            Surface(
+                                onClick = { showFeedTypeDropdown = true },
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp)
                             ) {
-                                val feedLabel = when (feedType) {
-                                    FeedType.FOLLOWS -> "Follows"
-                                    FeedType.EXTENDED_FOLLOWS -> "Global"
-                                    FeedType.RELAY -> if (selectedRelay != null) {
-                                        selectedRelay!!.removePrefix("wss://").removeSuffix("/")
-                                    } else "Relay"
-                                    FeedType.LIST -> if (selectedList != null) {
-                                        selectedList!!.name
-                                    } else "List"
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val feedLabel = when (feedType) {
+                                        FeedType.FOLLOWS -> "Follows"
+                                        FeedType.EXTENDED_FOLLOWS -> "Global"
+                                        FeedType.RELAY -> if (selectedRelay != null) {
+                                            selectedRelay!!.removePrefix("wss://").removeSuffix("/")
+                                        } else "Relay"
+                                        FeedType.LIST -> if (selectedList != null) {
+                                            selectedList!!.name
+                                        } else "List"
+                                    }
+                                    Text(
+                                        feedLabel,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 160.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Icon(
+                                        Icons.Default.ArrowDropDown,
+                                        contentDescription = "Change feed",
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 }
-                                Text(
-                                    feedLabel,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    modifier = Modifier.widthIn(max = 160.dp)
+                            }
+                            DropdownMenu(
+                                expanded = showFeedTypeDropdown,
+                                onDismissRequest = { showFeedTypeDropdown = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Follows") },
+                                    onClick = {
+                                        showFeedTypeDropdown = false
+                                        viewModel.setFeedType(FeedType.FOLLOWS)
+                                    }
                                 )
-                                Spacer(Modifier.width(4.dp))
-                                Icon(
-                                    Icons.Default.ArrowDropDown,
-                                    contentDescription = "Change feed",
-                                    modifier = Modifier.size(20.dp)
+                                DropdownMenuItem(
+                                    text = { Text("Global") },
+                                    onClick = {
+                                        showFeedTypeDropdown = false
+                                        viewModel.setFeedType(FeedType.EXTENDED_FOLLOWS)
+                                    }
+                                )
+                                ownRelaySets.forEach { relaySet ->
+                                    DropdownMenuItem(
+                                        text = { Text(relaySet.name) },
+                                        onClick = {
+                                            showFeedTypeDropdown = false
+                                            viewModel.setSelectedRelaySet(relaySet)
+                                            viewModel.setFeedType(FeedType.RELAY)
+                                        }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Relay") },
+                                    onClick = {
+                                        showFeedTypeDropdown = false
+                                        showRelayPicker = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("List") },
+                                    onClick = {
+                                        showFeedTypeDropdown = false
+                                        showListPicker = true
+                                    }
                                 )
                             }
                         }
@@ -512,65 +557,6 @@ fun FeedScreen(
             }
             } // Column
         }
-
-    if (showFeedTypeSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showFeedTypeSheet = false },
-            sheetState = sheetState
-        ) {
-            Column(Modifier.padding(vertical = 8.dp)) {
-                androidx.compose.material3.NavigationDrawerItem(
-                    label = { Text("Follows") },
-                    selected = feedType == FeedType.FOLLOWS,
-                    onClick = {
-                        showFeedTypeSheet = false
-                        viewModel.setFeedType(FeedType.FOLLOWS)
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                androidx.compose.material3.NavigationDrawerItem(
-                    label = { Text("Global") },
-                    selected = feedType == FeedType.EXTENDED_FOLLOWS,
-                    onClick = {
-                        showFeedTypeSheet = false
-                        viewModel.setFeedType(FeedType.EXTENDED_FOLLOWS)
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                ownRelaySets.forEach { relaySet ->
-                    androidx.compose.material3.NavigationDrawerItem(
-                        label = { Text(relaySet.name) },
-                        selected = feedType == FeedType.RELAY && selectedRelaySet?.dTag == relaySet.dTag,
-                        onClick = {
-                            showFeedTypeSheet = false
-                            viewModel.setSelectedRelaySet(relaySet)
-                            viewModel.setFeedType(FeedType.RELAY)
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-                }
-                androidx.compose.material3.NavigationDrawerItem(
-                    label = { Text("Relay") },
-                    selected = feedType == FeedType.RELAY && selectedRelaySet == null,
-                    onClick = {
-                        showFeedTypeSheet = false
-                        showRelayPicker = true
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                androidx.compose.material3.NavigationDrawerItem(
-                    label = { Text("List") },
-                    selected = feedType == FeedType.LIST,
-                    onClick = {
-                        showFeedTypeSheet = false
-                        showListPicker = true
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-            }
-        }
-    }
 
     if (showEmojiLibrary) {
         val sheetUnicodeEmojis by viewModel.customEmojiRepo.unicodeEmojis.collectAsState()
