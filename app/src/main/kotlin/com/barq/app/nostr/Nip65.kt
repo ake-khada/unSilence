@@ -5,7 +5,7 @@ import com.barq.app.relay.RelayConfig
 object Nip65 {
     fun parseRelayList(event: NostrEvent): List<RelayConfig> {
         if (event.kind != 10002) return emptyList()
-        return event.tags.mapNotNull { tag ->
+        val result = event.tags.mapNotNull { tag ->
             if (tag.size < 2 || tag[0] != "r") return@mapNotNull null
             val url = tag[1].trim().trimEnd('/')
             if (!RelayConfig.isAcceptableUrl(url)) return@mapNotNull null
@@ -14,6 +14,13 @@ object Nip65 {
                 url = url,
                 read = marker == null || marker == "read",
                 write = marker == null || marker == "write"
+            )
+        }
+        return result.groupBy { it.url }.map { (url, configs) ->
+            RelayConfig(
+                url = url,
+                read = configs.any { it.read },
+                write = configs.any { it.write }
             )
         }
     }
