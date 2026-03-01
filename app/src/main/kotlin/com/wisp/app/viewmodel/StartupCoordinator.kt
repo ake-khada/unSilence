@@ -42,6 +42,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.coroutines.CoroutineContext
 
@@ -473,6 +474,18 @@ class StartupCoordinator(
         // from several relays ensures we don't proceed with a stale follow list from
         // a single fast relay.
         val eoseCount = subManager.awaitEoseCount("self-data", expectedCount = indexerRelays.size, timeoutMs = 4_000)
+
+        // EOSE and events travel on separate SharedFlows, so the kind 3 event may still
+        // be buffered in relayEvents waiting for the processing loop on Dispatchers.Default.
+        // Poll briefly to let it catch up before the caller reads the follow list.
+        if (contactRepo.getFollowList().isEmpty() && eoseCount > 0) {
+            withTimeoutOrNull(2_000) {
+                while (contactRepo.getFollowList().isEmpty()) {
+                    delay(50)
+                }
+            }
+        }
+
         val gotFollowList = contactRepo.getFollowList().isNotEmpty()
         Log.d("StartupCoord", "subscribeSelfData: eoseCount=$eoseCount")
         Log.d("StartupCoord", "subscribeSelfData: gotFollowList=$gotFollowList, follows=${contactRepo.getFollowList().size}")
