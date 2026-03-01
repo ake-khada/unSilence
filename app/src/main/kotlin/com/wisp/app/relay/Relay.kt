@@ -247,6 +247,20 @@ class Relay(
         }
     }
 
+    /** Immediate TCP teardown — no graceful close handshake. Use when replacing the
+     *  OkHttpClient (e.g. Tor switch) to avoid duplicate connections from the server's
+     *  perspective while the graceful close waits for server ACK. */
+    fun forceDisconnect() {
+        synchronized(connectLock) {
+            val ws = webSocket
+            isConnected = false
+            webSocket = null
+            pendingReconnect?.cancel(false)
+            pendingReconnect = null
+            ws?.cancel()
+        }
+    }
+
     /** Reset backoff state — call when user explicitly reconnects */
     fun resetBackoff() {
         cooldownUntil = 0L
