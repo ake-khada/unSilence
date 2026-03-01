@@ -404,9 +404,8 @@ fun UserProfileScreen(
                                 } ?: emptyList()
                             }
                             val repostPubkey = viewModel.repostAuthors[event.id]
-                            val repostedByName = repostPubkey?.let { pk ->
-                                eventRepo?.getProfileData(pk)?.displayString
-                                    ?: pk.take(8) + "..."
+                            val profileRepostPubkeys = remember(repostPubkey) {
+                                if (repostPubkey != null) listOf(repostPubkey) else emptyList()
                             }
                             val hasUserReposted = eventRepo?.hasUserReposted(event.id) == true
                             val hasUserZapped = zapVersion.let { eventRepo?.hasUserZapped(event.id) == true }
@@ -435,7 +434,7 @@ fun UserProfileScreen(
                                 isZapAnimating = event.id in zapAnimatingIds,
                                 isZapInProgress = event.id in zapInProgressIds,
                                 eventRepo = eventRepo,
-                                repostedBy = repostedByName,
+                                repostPubkeys = profileRepostPubkeys,
                                 reactionDetails = reactionDetails,
                                 zapDetails = zapDetails,
                                 reactionEmojiUrls = eventReactionEmojiUrls,

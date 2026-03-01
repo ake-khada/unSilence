@@ -756,14 +756,8 @@ private fun FeedItem(
             url to viewModel.relayInfoRepo.getIconUrl(url)
         }
     }
-    val repostAuthorPubkey = remember(event.id) {
-        viewModel.eventRepo.getRepostAuthor(event.id)
-    }
-    val repostedByName = remember(repostAuthorPubkey, profileVersion) {
-        repostAuthorPubkey?.let { pk ->
-            viewModel.eventRepo.getProfileData(pk)?.displayString
-                ?: pk.take(8) + "..."
-        }
+    val repostTime = remember(repostVersion, event.id) {
+        viewModel.eventRepo.getRepostTime(event.id)
     }
     val reactionDetails = remember(reactionVersion, event.id) {
         viewModel.eventRepo.getReactionDetails(event.id)
@@ -816,7 +810,8 @@ private fun FeedItem(
         isZapInProgress = isZapInProgress,
         eventRepo = viewModel.eventRepo,
         relayIcons = relayIcons,
-        repostedBy = repostedByName,
+        repostPubkeys = repostPubkeys,
+        repostTime = repostTime,
         reactionDetails = reactionDetails,
         zapDetails = zapDetails,
         repostDetails = repostPubkeys,
