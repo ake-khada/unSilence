@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
@@ -217,6 +218,7 @@ fun UserProfileScreen(
     }
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var blockedContentRevealed by remember { mutableStateOf(false) }
     val tabTitles = listOf("Notes", "Replies", "Following", "Relays")
 
     Scaffold(
@@ -322,7 +324,8 @@ fun UserProfileScreen(
                     onSendDm = onSendDm,
                     followingCount = followList.size,
                     followedBy = followedBy,
-                    followsYou = !isOwnProfile && userPubkey != null && followList.any { it.pubkey == userPubkey }
+                    followsYou = !isOwnProfile && userPubkey != null && followList.any { it.pubkey == userPubkey },
+                    isBlocked = isBlocked
                 )
             }
 
@@ -342,7 +345,9 @@ fun UserProfileScreen(
             }
 
             when (selectedTab) {
-                0 -> {
+                0 -> if (isBlocked && !blockedContentRevealed) {
+                    item { BlockedContentOverlay(onReveal = { blockedContentRevealed = true }) }
+                } else {
                     // Pinned notes at the top of the Notes tab
                     val pinnedEvents = pinnedIds.mapNotNull { id -> eventRepo?.getEvent(id) }
                         .sortedByDescending { it.created_at }
@@ -461,7 +466,9 @@ fun UserProfileScreen(
                         }
                     }
                 }
-                1 -> {
+                1 -> if (isBlocked && !blockedContentRevealed) {
+                    item { BlockedContentOverlay(onReveal = { blockedContentRevealed = true }) }
+                } else {
                     if (replies.isEmpty()) {
                         item { EmptyTabContent("No replies yet") }
                     } else {
@@ -596,7 +603,8 @@ private fun ProfileHeader(
     onSendDm: (() -> Unit)? = null,
     followingCount: Int = 0,
     followedBy: List<String> = emptyList(),
-    followsYou: Boolean = false
+    followsYou: Boolean = false,
+    isBlocked: Boolean = false
 ) {
     var fullScreenImageUrl by remember { mutableStateOf<String?>(null) }
 
@@ -639,6 +647,7 @@ private fun ProfileHeader(
             ProfilePicture(
                 url = profile?.picture,
                 size = 72,
+                showBlockedBadge = isBlocked,
                 onClick = profile?.picture?.let { url -> { fullScreenImageUrl = url } }
             )
             Spacer(Modifier.weight(1f))
@@ -1122,5 +1131,42 @@ private fun EmptyTabContent(message: String) {
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun BlockedContentOverlay(onReveal: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(200.dp)
+            .padding(16.dp)
+            .background(
+                MaterialTheme.colorScheme.errorContainer,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onReveal)
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                Icons.Default.Block,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(32.dp)
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "This user is blocked",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Tap to reveal content",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+            )
+        }
     }
 }
