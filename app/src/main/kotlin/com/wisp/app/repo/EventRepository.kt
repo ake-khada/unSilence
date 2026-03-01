@@ -274,7 +274,7 @@ class EventRepository(val profileRepo: ProfileRepository? = null, val muteRepo: 
         val dedupSet = countedReactionIds.get(targetEventId)
             ?: mutableSetOf<String>().also { countedReactionIds.put(targetEventId, it) }
         synchronized(dedupSet) { if (!dedupSet.add(event.id)) return }
-        val emoji = event.content.ifBlank { "❤️" }
+        val emoji = if (event.content.isBlank() || event.content == "+") "❤️" else event.content
 
         // Cache custom emoji URLs from reaction event tags
         val emojiTags = Nip30.parseEmojiTags(event)
@@ -529,6 +529,8 @@ class EventRepository(val profileRepo: ProfileRepository? = null, val muteRepo: 
     }
 
     fun getRepostCount(eventId: String): Int = repostAuthors.get(eventId)?.size ?: 0
+
+    fun getRepostTime(eventId: String): Long? = feedSortTime.get(eventId)
 
     fun markUserRepost(eventId: String) {
         userReposts.put(eventId, true)

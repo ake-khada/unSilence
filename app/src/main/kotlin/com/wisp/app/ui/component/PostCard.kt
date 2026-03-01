@@ -95,7 +95,8 @@ fun PostCard(
     eventRepo: EventRepository? = null,
     relayIcons: List<Pair<String, String?>> = emptyList(),
     onRelayClick: (String) -> Unit = {},
-    repostedBy: String? = null,
+    repostPubkeys: List<String> = emptyList(),
+    repostTime: Long? = null,
     reactionDetails: Map<String, List<String>> = emptyMap(),
     zapDetails: List<Triple<String, Long, String>> = emptyList(),
     onNavigateToProfileFromDetails: ((String) -> Unit)? = null,
@@ -145,10 +146,16 @@ fun PostCard(
             .clickable(onClick = onNoteClick)
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        if (repostedBy != null) {
+        if (repostPubkeys.isNotEmpty()) {
+            val maxAvatars = 10
+            val displayPubkeys = repostPubkeys.take(maxAvatars)
+            val overflow = repostPubkeys.size - maxAvatars
+            val formattedRepostTime = repostTime?.let { formatTimestamp(it) }
+
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 40.dp, bottom = 4.dp)
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
             ) {
                 Icon(
                     Icons.Outlined.Repeat,
@@ -157,11 +164,47 @@ fun PostCard(
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(Modifier.width(4.dp))
+
+                // Overlapping avatars
+                Box(modifier = Modifier.height(20.dp).width((displayPubkeys.size * 14 + 6 + 4).dp)) {
+                    displayPubkeys.forEachIndexed { index, pubkey ->
+                        val avatarUrl = eventRepo?.getProfileData(pubkey)?.picture
+                        Box(modifier = Modifier.offset(x = (index * 14).dp)) {
+                            ProfilePicture(
+                                url = avatarUrl,
+                                size = 20,
+                                showFollowBadge = false,
+                                onClick = { onNavigateToProfileFromDetails?.invoke(pubkey) }
+                            )
+                        }
+                    }
+                }
+
+                // Label text
+                val labelText = if (repostPubkeys.size == 1) {
+                    val name = eventRepo?.getProfileData(repostPubkeys.first())?.displayString
+                        ?: (repostPubkeys.first().take(8) + "...")
+                    "$name retweeted"
+                } else if (overflow > 0) {
+                    "and $overflow others retweeted"
+                } else {
+                    "retweeted"
+                }
                 Text(
-                    text = "$repostedBy retweeted",
+                    text = labelText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+
+                if (formattedRepostTime != null) {
+                    Text(
+                        text = " \u00B7 $formattedRepostTime",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
