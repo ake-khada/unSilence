@@ -892,11 +892,11 @@ class RelayPool {
     }
 
     fun disconnectAll() {
-        relays.forEach { it.disconnect() }
+        relays.forEach { it.forceDisconnect() }
         relays.clear()
-        dmRelays.forEach { it.disconnect() }
+        dmRelays.forEach { it.forceDisconnect() }
         dmRelays.clear()
-        ephemeralRelays.values.forEach { it.disconnect() }
+        ephemeralRelays.values.forEach { it.forceDisconnect() }
         ephemeralRelays.clear()
         ephemeralLastUsed.clear()
         relayCooldowns.clear()
