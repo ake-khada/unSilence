@@ -224,7 +224,7 @@ fun WispNavHost(
         if (torStatus == com.wisp.app.relay.TorStatus.CONNECTED ||
             torStatus == com.wisp.app.relay.TorStatus.DISABLED) {
             if (authViewModel.isLoggedIn) {
-                feedViewModel.relayPool.swapClientAndReconnect()
+                feedViewModel.lifecycleManager.onTorSwitch()
             }
         }
     }
@@ -399,6 +399,9 @@ fun WispNavHost(
         composable(Routes.AUTH) {
             AuthScreen(
                 viewModel = authViewModel,
+                isTorEnabled = isTorEnabled,
+                torStatus = torStatus,
+                onToggleTor = onToggleTor,
                 onAuthenticated = { isNewAccount ->
                     if (isNewAccount) {
                         navController.navigate(Routes.ONBOARDING_PROFILE) {

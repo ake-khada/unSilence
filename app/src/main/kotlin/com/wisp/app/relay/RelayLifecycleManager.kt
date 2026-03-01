@@ -140,6 +140,21 @@ class RelayLifecycleManager(
     }
 
     /**
+     * Handle Tor on/off switch. Swaps the OkHttpClient, reconnects all relays,
+     * and re-establishes subscriptions via [onReconnected].
+     * Uses a longer timeout since Tor connections are slower.
+     */
+    fun onTorSwitch() {
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            relayPool.swapClientAndReconnect()
+            relayPool.awaitAnyConnected(minCount = 3, timeoutMs = 10_000)
+            relayPool.appIsActive = true
+            onReconnected(true)
+        }
+    }
+
+    /**
      * Stop observing. Call on account switch or cleanup.
      */
     fun stop() {
