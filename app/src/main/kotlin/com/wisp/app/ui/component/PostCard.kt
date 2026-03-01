@@ -53,6 +53,9 @@ import androidx.compose.ui.zIndex
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.material3.Surface
 import com.wisp.app.nostr.Nip19
 import com.wisp.app.nostr.NostrEvent
 import com.wisp.app.nostr.ProfileData
@@ -134,6 +137,11 @@ fun PostCard(
     val displayIcons = remember(relayIcons) {
         if (relayIcons.size <= 5) relayIcons else relayIcons.take(5)
     }
+
+    val contentWarning = remember(event.id) {
+        event.tags.firstOrNull { it.size >= 1 && it[0] == "content-warning" }
+    }
+    var contentRevealed by remember { mutableStateOf(false) }
 
     val hasReactionDetails = reactionDetails.isNotEmpty() || zapDetails.isNotEmpty() || repostDetails.isNotEmpty()
     var expandedDetails by remember { mutableStateOf(false) }
@@ -346,155 +354,206 @@ fun PostCard(
         }
         Spacer(Modifier.height(6.dp))
 
-        // Collapsible content with max height (~1 viewport)
-        val collapsedMaxHeight = 500.dp
-        var contentExpanded by remember { mutableStateOf(false) }
-        var contentExceedsMax by remember { mutableStateOf(false) }
-        val density = LocalDensity.current
-
-        Box {
-            Box(
+        if (contentWarning != null && !contentRevealed) {
+            // Content warning overlay
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier
-                    .then(
-                        if (!contentExpanded) Modifier.heightIn(max = collapsedMaxHeight) else Modifier
-                    )
-                    .clipToBounds()
-                    .onGloballyPositioned { coordinates ->
-                        if (!contentExpanded) {
-                            val maxPx = with(density) { collapsedMaxHeight.toPx() }
-                            contentExceedsMax = coordinates.size.height >= maxPx.toInt()
-                        }
-                    },
-                contentAlignment = Alignment.TopStart
+                    .fillMaxWidth()
+                    .clickable { contentRevealed = true }
             ) {
-                val emojiMap = remember(event.id) { Nip30.parseEmojiTags(event) }
-                RichContent(
-                    content = event.content,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    emojiMap = emojiMap,
-                    eventRepo = eventRepo,
-                    onProfileClick = onNavigateToProfile,
-                    onNoteClick = onQuotedNoteClick,
-                    noteActions = noteActions
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(vertical = 24.dp, horizontal = 16.dp)
+                ) {
+                    Icon(
+                        Icons.Outlined.Warning,
+                        contentDescription = "Content warning",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val reason = contentWarning.getOrNull(1)?.takeIf { it.isNotBlank() }
+                    Text(
+                        text = reason ?: "Sensitive content",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Tap to reveal",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
             }
+        } else {
+            // Normal content display
+            // Collapsible content with max height (~1 viewport)
+            val collapsedMaxHeight = 500.dp
+            var contentExpanded by remember { mutableStateOf(false) }
+            var contentExceedsMax by remember { mutableStateOf(false) }
+            val density = LocalDensity.current
 
-            // Gradient fade overlay when collapsed and content overflows
-            if (contentExceedsMax && !contentExpanded) {
+            Box {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(80.dp)
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    MaterialTheme.colorScheme.surface
+                        .then(
+                            if (!contentExpanded) Modifier.heightIn(max = collapsedMaxHeight) else Modifier
+                        )
+                        .clipToBounds()
+                        .onGloballyPositioned { coordinates ->
+                            if (!contentExpanded) {
+                                val maxPx = with(density) { collapsedMaxHeight.toPx() }
+                                contentExceedsMax = coordinates.size.height >= maxPx.toInt()
+                            }
+                        },
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    val emojiMap = remember(event.id) { Nip30.parseEmojiTags(event) }
+                    RichContent(
+                        content = event.content,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        emojiMap = emojiMap,
+                        eventRepo = eventRepo,
+                        onProfileClick = onNavigateToProfile,
+                        onNoteClick = onQuotedNoteClick,
+                        noteActions = noteActions
+                    )
+                }
+
+                // Gradient fade overlay when collapsed and content overflows
+                if (contentExceedsMax && !contentExpanded) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(80.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        MaterialTheme.colorScheme.surface
+                                    )
                                 )
                             )
-                        )
-                )
+                    )
+                }
             }
-        }
 
-        if (contentExceedsMax) {
-            TextButton(
-                onClick = { contentExpanded = !contentExpanded },
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            ) {
-                Text(
-                    text = if (contentExpanded) "Show less" else "Show more",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-
-        // Inline translation display
-        when (translationState.status) {
-            TranslationStatus.IDENTIFYING_LANGUAGE,
-            TranslationStatus.DOWNLOADING_MODEL,
-            TranslationStatus.TRANSLATING -> {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(vertical = 4.dp)
+            if (contentExceedsMax) {
+                TextButton(
+                    onClick = { contentExpanded = !contentExpanded },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        strokeWidth = 1.5.dp,
+                    Text(
+                        text = if (contentExpanded) "Show less" else "Show more",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
+                }
+            }
+
+            // Hide button to re-collapse CW content
+            if (contentWarning != null) {
+                TextButton(
+                    onClick = { contentRevealed = false },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
                     Text(
-                        text = when (translationState.status) {
-                            TranslationStatus.IDENTIFYING_LANGUAGE -> "Detecting language..."
-                            TranslationStatus.DOWNLOADING_MODEL -> "Downloading language model..."
-                            else -> "Translating..."
-                        },
+                        text = "Hide",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-            TranslationStatus.DONE -> {
-                if (showTranslation) {
-                    Column(modifier = Modifier.padding(top = 4.dp)) {
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                            thickness = 0.5.dp
+
+            // Inline translation display
+            when (translationState.status) {
+                TranslationStatus.IDENTIFYING_LANGUAGE,
+                TranslationStatus.DOWNLOADING_MODEL,
+                TranslationStatus.TRANSLATING -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = "Translated from ${translationState.sourceLanguage}",
+                            text = when (translationState.status) {
+                                TranslationStatus.IDENTIFYING_LANGUAGE -> "Detecting language..."
+                                TranslationStatus.DOWNLOADING_MODEL -> "Downloading language model..."
+                                else -> "Translating..."
+                            },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-                        )
-                        val emojiMap = remember(event.id) { Nip30.parseEmojiTags(event) }
-                        RichContent(
-                            content = translationState.translatedText,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            emojiMap = emojiMap,
-                            eventRepo = eventRepo,
-                            onProfileClick = onNavigateToProfile,
-                            onNoteClick = onQuotedNoteClick,
-                            noteActions = noteActions
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-            }
-            TranslationStatus.ERROR -> {
-                Text(
-                    text = translationState.errorMessage,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(vertical = 4.dp)
-                )
-            }
-            else -> {}
-        }
-
-        // Top zapper banner
-        if (zapDetails.isNotEmpty()) {
-            val topZap = remember(zapDetails) {
-                zapDetails.maxByOrNull { it.second }
-            }
-            if (topZap != null) {
-                val zapperProfile = eventRepo?.getProfileData(topZap.first)
-                val zapperName = zapperProfile?.displayString
-                    ?: (topZap.first.take(8) + "...")
-                TopZapperBanner(
-                    avatarUrl = zapperProfile?.picture,
-                    name = zapperName,
-                    sats = topZap.second,
-                    message = topZap.third,
-                    onClick = {
-                        val nav = onNavigateToProfileFromDetails ?: onNavigateToProfile
-                        nav?.invoke(topZap.first)
+                TranslationStatus.DONE -> {
+                    if (showTranslation) {
+                        Column(modifier = Modifier.padding(top = 4.dp)) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                thickness = 0.5.dp
+                            )
+                            Text(
+                                text = "Translated from ${translationState.sourceLanguage}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                            )
+                            val emojiMap = remember(event.id) { Nip30.parseEmojiTags(event) }
+                            RichContent(
+                                content = translationState.translatedText,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                emojiMap = emojiMap,
+                                eventRepo = eventRepo,
+                                onProfileClick = onNavigateToProfile,
+                                onNoteClick = onQuotedNoteClick,
+                                noteActions = noteActions
+                            )
+                        }
                     }
-                )
+                }
+                TranslationStatus.ERROR -> {
+                    Text(
+                        text = translationState.errorMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+                else -> {}
+            }
+
+            // Top zapper banner
+            if (zapDetails.isNotEmpty()) {
+                val topZap = remember(zapDetails) {
+                    zapDetails.maxByOrNull { it.second }
+                }
+                if (topZap != null) {
+                    val zapperProfile = eventRepo?.getProfileData(topZap.first)
+                    val zapperName = zapperProfile?.displayString
+                        ?: (topZap.first.take(8) + "...")
+                    TopZapperBanner(
+                        avatarUrl = zapperProfile?.picture,
+                        name = zapperName,
+                        sats = topZap.second,
+                        message = topZap.third,
+                        onClick = {
+                            val nav = onNavigateToProfileFromDetails ?: onNavigateToProfile
+                            nav?.invoke(topZap.first)
+                        }
+                    )
+                }
             }
         }
 
