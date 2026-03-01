@@ -167,7 +167,8 @@ class EventRouter(
             // (engagement subs fetch reposts for all viewed posts, not just ours).
             val myPubkey = getUserPubkey()
             val isNotifEligible = myPubkey != null && event.pubkey != myPubkey &&
-                event.kind in intArrayOf(1, 6, 7, 9735)
+                event.kind in intArrayOf(1, 6, 7, 9735) &&
+                !muteRepo.isBlocked(event.pubkey)
             val isRepostOfOther = event.kind == 6 && run {
                 val repostedId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
                 val repostedEvent = repostedId?.let { eventRepo.getEvent(it) }
