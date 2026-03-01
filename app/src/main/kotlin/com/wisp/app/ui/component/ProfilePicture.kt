@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -43,14 +44,15 @@ fun ProfilePicture(
     modifier: Modifier = Modifier,
     size: Int = 40,
     showFollowBadge: Boolean = false,
+    showBlockedBadge: Boolean = false,
     highlighted: Boolean = false,
     onClick: (() -> Unit)? = null,
     onLongPress: (() -> Unit)? = null
 ) {
     if (highlighted) {
-        HighlightedProfilePicture(url, modifier, size, showFollowBadge, onClick, onLongPress)
+        HighlightedProfilePicture(url, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
     } else {
-        BaseProfilePicture(url, modifier, size, showFollowBadge, onClick, onLongPress)
+        BaseProfilePicture(url, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
     }
 }
 
@@ -61,6 +63,7 @@ private fun HighlightedProfilePicture(
     modifier: Modifier,
     size: Int,
     showFollowBadge: Boolean,
+    showBlockedBadge: Boolean,
     onClick: (() -> Unit)?,
     onLongPress: (() -> Unit)?
 ) {
@@ -137,7 +140,9 @@ private fun HighlightedProfilePicture(
                 )
         )
 
-        if (showFollowBadge) {
+        if (showBlockedBadge) {
+            BlockedBadge(size, Modifier.align(Alignment.BottomEnd))
+        } else if (showFollowBadge) {
             FollowBadge(size, Modifier.align(Alignment.BottomEnd))
         }
     }
@@ -150,6 +155,7 @@ private fun BaseProfilePicture(
     modifier: Modifier,
     size: Int,
     showFollowBadge: Boolean,
+    showBlockedBadge: Boolean,
     onClick: (() -> Unit)?,
     onLongPress: (() -> Unit)?
 ) {
@@ -178,7 +184,9 @@ private fun BaseProfilePicture(
                     } else Modifier
                 )
         )
-        if (showFollowBadge) {
+        if (showBlockedBadge) {
+            BlockedBadge(size, Modifier.align(Alignment.BottomEnd))
+        } else if (showFollowBadge) {
             FollowBadge(size, Modifier.align(Alignment.BottomEnd))
         }
     }
@@ -199,6 +207,26 @@ private fun FollowBadge(size: Int, modifier: Modifier = Modifier) {
             Icons.Default.Check,
             contentDescription = "Following",
             tint = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.size((badgeSize * 0.65f).dp)
+        )
+    }
+}
+
+@Composable
+private fun BlockedBadge(size: Int, modifier: Modifier = Modifier) {
+    val badgeSize = (size * 0.3f).coerceIn(10f, 16f)
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .offset(x = 1.dp, y = 1.dp)
+            .size(badgeSize.dp)
+            .background(MaterialTheme.colorScheme.error, CircleShape)
+            .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape)
+    ) {
+        Icon(
+            Icons.Default.Block,
+            contentDescription = "Blocked",
+            tint = MaterialTheme.colorScheme.onError,
             modifier = Modifier.size((badgeSize * 0.65f).dp)
         )
     }

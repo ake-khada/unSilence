@@ -49,6 +49,7 @@ class ThreadViewModel : ViewModel() {
     private var loadJob: Job? = null
     private var rebuildJob: Job? = null
     private var metadataBatchJob: Job? = null
+    private var muteObserverJob: Job? = null
 
     // Incremental metadata tracking
     private val metadataSubscribedIds = mutableSetOf<String>()
@@ -72,6 +73,13 @@ class ThreadViewModel : ViewModel() {
         relayHintStore: RelayHintStore? = null
     ) {
         this.muteRepo = muteRepo
+        // Reactively rebuild thread when blocked users change (e.g. blocking mid-thread)
+        muteObserverJob?.cancel()
+        muteObserverJob = muteRepo?.let { repo ->
+            viewModelScope.launch {
+                repo.blockedPubkeys.collect { scheduleRebuild() }
+            }
+        }
         this.relayPoolRef = relayPool
         this.topRelayUrls = topRelayUrls
         this.relayListRepoRef = relayListRepo
@@ -309,6 +317,7 @@ class ThreadViewModel : ViewModel() {
         loadJob?.cancel()
         rebuildJob?.cancel()
         metadataBatchJob?.cancel()
+        muteObserverJob?.cancel()
         relayPoolRef?.let { pool ->
             pool.closeOnAllRelays("thread-root")
             pool.closeOnAllRelays("thread-replies")
