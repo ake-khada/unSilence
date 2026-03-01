@@ -265,9 +265,10 @@ class MetadataFetcher(
             if (eventRepo.getProfileData(event.pubkey) == null) {
                 addToPendingProfiles(event.pubkey)
             }
-            val reposter = eventRepo.getRepostAuthor(event.id)
-            if (reposter != null && eventRepo.getProfileData(reposter) == null) {
-                addToPendingProfiles(reposter)
+            for (reposter in eventRepo.getReposterPubkeys(event.id).take(5)) {
+                if (eventRepo.getProfileData(reposter) == null) {
+                    addToPendingProfiles(reposter)
+                }
             }
             if (event.kind == 1 && event.id !in scannedQuoteEvents) {
                 scannedQuoteEvents.add(event.id)
