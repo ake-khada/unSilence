@@ -10,17 +10,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 
@@ -29,7 +23,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import coil3.compose.AsyncImage
-private val DEFAULT_UNICODE_EMOJIS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83E\uDD19", "\uD83D\uDE80")
+private val DEFAULT_UNICODE_EMOJIS = listOf("\uD83E\uDDE1", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83E\uDD19", "\uD83D\uDE80", "\uD83E\uDD17", "\uD83D\uDE02", "\uD83D\uDE22", "\uD83D\uDC68\u200D\uD83D\uDCBB", "\uD83D\uDC40", "\u2705", "\uD83E\uDD21", "\uD83D\uDC38", "\uD83D\uDC80", "\u26A1", "\uD83D\uDE4F", "\uD83C\uDF46")
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -39,10 +33,9 @@ fun EmojiReactionPopup(
     selectedEmojis: Set<String> = emptySet(),
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null
+    onOpenEmojiLibrary: (() -> Unit)? = null
 ) {
     val effectiveUnicode = unicodeEmojis.ifEmpty { DEFAULT_UNICODE_EMOJIS }
-    var showCustomDialog by remember { mutableStateOf(false) }
 
     Popup(
         alignment = Alignment.BottomStart,
@@ -101,62 +94,13 @@ fun EmojiReactionPopup(
                     }
                 }
                 TextButton(onClick = {
-                    if (onManageEmojis != null) {
-                        onDismiss()
-                        onManageEmojis()
-                    } else {
-                        showCustomDialog = true
-                    }
+                    onDismiss()
+                    onOpenEmojiLibrary?.invoke()
                 }) {
                     Text("+", fontSize = 24.sp)
                 }
             }
         }
     }
-
-    if (showCustomDialog) {
-        CustomEmojiDialog(
-            onConfirm = { emoji ->
-                onSelect(emoji)
-                onDismiss()
-            },
-            onDismiss = { showCustomDialog = false }
-        )
-    }
-
-}
-
-@Composable
-private fun CustomEmojiDialog(
-    onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var text by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Custom Reaction") },
-        text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                placeholder = { Text("Type an emoji") },
-                singleLine = true
-            )
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onConfirm(text.trim()) },
-                enabled = text.isNotBlank()
-            ) {
-                Text("React")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
 }
 

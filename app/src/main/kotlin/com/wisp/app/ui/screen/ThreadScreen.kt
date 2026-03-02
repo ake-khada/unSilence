@@ -84,7 +84,7 @@ fun ThreadScreen(
     translationRepo: TranslationRepository? = null,
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null
+    onOpenEmojiLibrary: (() -> Unit)? = null
 ) {
     val flatThread by viewModel.flatThread.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
@@ -227,7 +227,7 @@ fun ThreadScreen(
                             reactionEmojiUrls = eventReactionEmojiUrls,
                             resolvedEmojis = resolvedEmojis,
                             unicodeEmojis = unicodeEmojis,
-                            onManageEmojis = onManageEmojis,
+                            onOpenEmojiLibrary = onOpenEmojiLibrary,
                             relayIcons = relayIcons,
                             onNavigateToProfileFromDetails = onProfileClick,
                             onFollowAuthor = { onToggleFollow(event.pubkey) },
