@@ -868,6 +868,7 @@ fun WispNavHost(
             val threadZapInProgress by feedViewModel.zapInProgress.collectAsState()
             var threadZapAnimatingIds by remember { mutableStateOf(emptySet<String>()) }
             val isNwcConnected = feedViewModel.nwcRepo.hasConnection()
+            var showThreadEmojiLibrary by remember { mutableStateOf(false) }
 
             LaunchedEffect(Unit) {
                 feedViewModel.zapSuccess.collect { eventId ->
@@ -953,8 +954,18 @@ fun WispNavHost(
                 translationRepo = feedViewModel.translationRepo,
                 resolvedEmojis = threadResolvedEmojis,
                 unicodeEmojis = threadUnicodeEmojis,
-                onManageEmojis = { navController.navigate(Routes.CUSTOM_EMOJIS) }
+                onOpenEmojiLibrary = { showThreadEmojiLibrary = true }
             )
+
+            if (showThreadEmojiLibrary) {
+                com.wisp.app.ui.component.EmojiLibrarySheet(
+                    currentEmojis = threadUnicodeEmojis,
+                    onAddEmojis = { emojis ->
+                        emojis.forEach { feedViewModel.customEmojiRepo.addUnicodeEmoji(it) }
+                    },
+                    onDismiss = { showThreadEmojiLibrary = false }
+                )
+            }
         }
 
         composable(
@@ -1305,6 +1316,7 @@ fun WispNavHost(
             var notifZapAnimatingIds by remember { mutableStateOf(emptySet<String>()) }
             val notifListedIds by feedViewModel.bookmarkSetRepo.allListedEventIds.collectAsState()
             val isNwcConnected = feedViewModel.nwcRepo.hasConnection()
+            var showNotifEmojiLibrary by remember { mutableStateOf(false) }
 
             LaunchedEffect(Unit) {
                 feedViewModel.zapSuccess.collect { eventId ->
@@ -1374,11 +1386,21 @@ fun WispNavHost(
                 isInList = { it in notifListedIds },
                 resolvedEmojis = notifResolvedEmojis,
                 unicodeEmojis = notifUnicodeEmojis,
-                onManageEmojis = { navController.navigate(Routes.CUSTOM_EMOJIS) },
+                onOpenEmojiLibrary = { showNotifEmojiLibrary = true },
                 zapError = feedViewModel.zapError,
                 onRefresh = { feedViewModel.refreshDmsAndNotifications() },
                 translationRepo = feedViewModel.translationRepo
             )
+
+            if (showNotifEmojiLibrary) {
+                com.wisp.app.ui.component.EmojiLibrarySheet(
+                    currentEmojis = notifUnicodeEmojis,
+                    onAddEmojis = { emojis ->
+                        emojis.forEach { feedViewModel.customEmojiRepo.addUnicodeEmoji(it) }
+                    },
+                    onDismiss = { showNotifEmojiLibrary = false }
+                )
+            }
         }
     }
 

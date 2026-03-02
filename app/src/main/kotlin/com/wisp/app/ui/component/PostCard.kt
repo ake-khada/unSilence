@@ -120,7 +120,7 @@ fun PostCard(
     reactionEmojiUrls: Map<String, String> = emptyMap(),
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null,
+    onOpenEmojiLibrary: (() -> Unit)? = null,
     translationState: TranslationState = TranslationState(),
     onTranslate: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -637,7 +637,7 @@ fun PostCard(
                 reactionEmojiUrls = reactionEmojiUrls,
                 resolvedEmojis = resolvedEmojis,
                 unicodeEmojis = unicodeEmojis,
-                onManageEmojis = onManageEmojis,
+                onOpenEmojiLibrary = onOpenEmojiLibrary,
                 modifier = Modifier.weight(1f)
             )
             Icon(
