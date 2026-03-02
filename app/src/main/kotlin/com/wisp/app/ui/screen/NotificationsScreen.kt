@@ -1011,6 +1011,7 @@ private fun ReferencedNotePostCard(
 }
 
 private val notifDateTimeFormat = SimpleDateFormat("MMM d, HH:mm", Locale.US)
+private val notifDateTimeYearFormat = SimpleDateFormat("MMM d, yyyy", Locale.US)
 
 private fun formatNotifTimestamp(epoch: Long): String {
     if (epoch == 0L) return ""
@@ -1031,7 +1032,17 @@ private fun formatNotifTimestamp(epoch: Long): String {
     val days = diff / (24 * 60 * 60 * 1000L)
     if (days == 1L) return "yesterday"
 
-    return notifDateTimeFormat.format(Date(millis))
+    val date = Date(millis)
+    val cal = java.util.Calendar.getInstance()
+    val currentYear = cal.get(java.util.Calendar.YEAR)
+    cal.time = date
+    val dateYear = cal.get(java.util.Calendar.YEAR)
+
+    return if (dateYear != currentYear) {
+        notifDateTimeYearFormat.format(date)
+    } else {
+        notifDateTimeFormat.format(date)
+    }
 }
 
 private fun formatSats(sats: Long): String = when {

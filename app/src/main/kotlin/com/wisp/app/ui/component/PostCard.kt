@@ -752,6 +752,7 @@ private fun formatZapAmount(sats: Long): String = when {
 }
 
 private val dateTimeFormat = SimpleDateFormat("MMM d, HH:mm", Locale.US)
+private val dateTimeYearFormat = SimpleDateFormat("MMM d, yyyy", Locale.US)
 
 /**
  * Format an epoch timestamp into a relative or absolute time string.
@@ -775,5 +776,15 @@ private fun formatTimestamp(epoch: Long): String {
     val days = diff / (24 * 60 * 60 * 1000L)
     if (days == 1L) return "yesterday"
 
-    return dateTimeFormat.format(Date(millis))
+    val date = Date(millis)
+    val cal = java.util.Calendar.getInstance()
+    val currentYear = cal.get(java.util.Calendar.YEAR)
+    cal.time = date
+    val dateYear = cal.get(java.util.Calendar.YEAR)
+
+    return if (dateYear != currentYear) {
+        dateTimeYearFormat.format(date)
+    } else {
+        dateTimeFormat.format(date)
+    }
 }
