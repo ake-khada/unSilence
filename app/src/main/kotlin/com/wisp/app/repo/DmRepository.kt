@@ -16,7 +16,7 @@ class DmRepository(context: Context? = null, pubkeyHex: String? = null) {
     private var lastReadDmTimestamp: Long = prefs?.getLong("last_read_dm", 0L) ?: 0L
     private val lock = Any()
     private val conversations = LruCache<String, MutableList<DmMessage>>(100)
-    private val conversationKeyCache = object : LruCache<String, ByteArray>(50) {
+    private val conversationKeyCache = object : LruCache<String, ByteArray>(200) {
         override fun entryRemoved(evicted: Boolean, key: String?, oldValue: ByteArray?, newValue: ByteArray?) {
             oldValue?.wipe()
         }

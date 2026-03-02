@@ -686,13 +686,16 @@ class RelayPool {
     }
 
     private fun isRateLimitMessage(message: String): Boolean {
-        val lower = message.lowercase()
-        return "rate" in lower || "throttle" in lower || "slow down" in lower || "too many" in lower
+        return message.contains("rate", ignoreCase = true) ||
+            message.contains("throttle", ignoreCase = true) ||
+            message.contains("slow down", ignoreCase = true) ||
+            message.contains("too many", ignoreCase = true)
     }
 
     private fun isUnsupportedMessage(message: String): Boolean {
-        val lower = message.lowercase()
-        return "unsupported" in lower || "not supported" in lower || "unknown message" in lower
+        return message.contains("unsupported", ignoreCase = true) ||
+            message.contains("not supported", ignoreCase = true) ||
+            message.contains("unknown message", ignoreCase = true)
     }
 
     fun reconnectAll(): Int {
