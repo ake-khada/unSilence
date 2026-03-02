@@ -37,7 +37,8 @@ class CustomEmojiRepository(private val context: Context, pubkeyHex: String? = n
     private var ownerPubkey: String? = pubkeyHex
 
     companion object {
-        private val DEFAULT_UNICODE_EMOJIS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83E\uDD19", "\uD83D\uDE80")
+        private val DEFAULT_UNICODE_EMOJIS = listOf("\uD83E\uDDE1", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83E\uDD19", "\uD83D\uDE80", "\uD83E\uDD17", "\uD83D\uDE02", "\uD83D\uDE22", "\uD83D\uDC68\u200D\uD83D\uDCBB", "\uD83D\uDC40", "\u2705", "\uD83E\uDD21", "\uD83D\uDC38", "\uD83D\uDC80", "\u26A1", "\uD83D\uDE4F", "\uD83C\uDF46")
+        private val OLD_DEFAULT_UNICODE_EMOJIS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83E\uDD19", "\uD83D\uDE80")
 
         private fun prefsName(pubkeyHex: String?): String =
             if (pubkeyHex != null) "wisp_custom_emoji_$pubkeyHex" else "wisp_custom_emoji"
@@ -195,7 +196,13 @@ class CustomEmojiRepository(private val context: Context, pubkeyHex: String? = n
             try {
                 val arr = JSONArray(unicodeJson)
                 val list = (0 until arr.length()).map { arr.getString(it) }
-                _unicodeEmojis.value = list
+                // Migrate: if stored list matches old defaults exactly, upgrade to new defaults
+                if (list == OLD_DEFAULT_UNICODE_EMOJIS) {
+                    _unicodeEmojis.value = DEFAULT_UNICODE_EMOJIS
+                    saveUnicodeToPrefs()
+                } else {
+                    _unicodeEmojis.value = list
+                }
             } catch (_: Exception) {
                 _unicodeEmojis.value = DEFAULT_UNICODE_EMOJIS
             }
