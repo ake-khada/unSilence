@@ -8,6 +8,7 @@ import java.security.SecureRandom
 
 object Nip04 {
     private val random = SecureRandom()
+    private val cipherLocal = ThreadLocal.withInitial { Cipher.getInstance("AES/CBC/PKCS5Padding") }
 
     /**
      * Compute the NIP-04 shared secret from a private key and public key.
@@ -25,7 +26,7 @@ object Nip04 {
     fun encrypt(plaintext: String, sharedSecret: ByteArray): String {
         val iv = ByteArray(16).also { random.nextBytes(it) }
         val key = SecretKeySpec(sharedSecret, "AES")
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        val cipher = cipherLocal.get()
         cipher.init(Cipher.ENCRYPT_MODE, key, IvParameterSpec(iv))
         val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
         val ctB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
@@ -42,7 +43,7 @@ object Nip04 {
         val ciphertext = Base64.decode(parts[0], Base64.DEFAULT)
         val iv = Base64.decode(parts[1], Base64.DEFAULT)
         val key = SecretKeySpec(sharedSecret, "AES")
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        val cipher = cipherLocal.get()
         cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(iv))
         return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
     }
