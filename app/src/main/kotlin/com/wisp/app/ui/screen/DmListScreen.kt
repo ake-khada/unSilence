@@ -91,7 +91,7 @@ fun DmListScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                items(items = conversations, key = { it.peerPubkey }) { convo ->
+                items(items = conversations, key = { it.peerPubkey }, contentType = { "conversation" }) { convo ->
                     val profile = eventRepo.getProfileData(convo.peerPubkey)
                     val displayName = profile?.displayString
                         ?: convo.peerPubkey.take(8) + "..." + convo.peerPubkey.takeLast(4)

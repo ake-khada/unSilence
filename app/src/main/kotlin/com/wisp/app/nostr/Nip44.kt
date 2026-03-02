@@ -11,6 +11,8 @@ import javax.crypto.spec.SecretKeySpec
 object Nip44 {
     private const val VERSION: Byte = 0x02
     private val random = SecureRandom()
+    private val hmacLocal = ThreadLocal.withInitial { Mac.getInstance("HmacSHA256") }
+    private val chachaLocal = ThreadLocal.withInitial { ChaCha7539Engine() }
 
     /**
      * Derive conversation key from privkey + pubkey via ECDH + HKDF.
@@ -150,13 +152,13 @@ object Nip44 {
     // --- Crypto Primitives ---
 
     private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
+        val mac = hmacLocal.get()
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         return mac.doFinal(data)
     }
 
     private fun chacha20Encrypt(key: ByteArray, nonce: ByteArray, input: ByteArray): ByteArray {
-        val engine = ChaCha7539Engine()
+        val engine = chachaLocal.get()
         engine.init(true, ParametersWithIV(KeyParameter(key), nonce))
         val output = ByteArray(input.size)
         engine.processBytes(input, 0, input.size, output, 0)

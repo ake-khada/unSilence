@@ -179,7 +179,7 @@ fun ThreadScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(items = flatThread, key = { it.first.id }) { (event, depth) ->
+                    items(items = flatThread, key = { it.first.id }, contentType = { "post" }) { (event, depth) ->
                         val profileData = eventRepo.getProfileData(event.pubkey)
                         val likeCount = reactionVersion.let { eventRepo.getReactionCount(event.id) }
                         val replyCount = replyCountVersion.let { eventRepo.getReplyCount(event.id) }
