@@ -62,6 +62,7 @@ import coil3.compose.AsyncImage
 import com.wisp.app.nostr.CustomEmoji
 import com.wisp.app.nostr.EmojiSet
 import com.wisp.app.repo.CustomEmojiRepository
+import com.wisp.app.ui.component.EmojiLibrarySheet
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -81,7 +82,7 @@ fun CustomEmojiScreen(
     val ownSets by customEmojiRepo.ownSets.collectAsState()
     val userEmojiList by customEmojiRepo.userEmojiList.collectAsState()
 
-    var showAddUnicodeDialog by remember { mutableStateOf(false) }
+    var showEmojiLibrary by remember { mutableStateOf(false) }
     var showCreateSetDialog by remember { mutableStateOf(false) }
     var showAddDirectEmojiDialog by remember { mutableStateOf(false) }
     var editingSet by remember { mutableStateOf<EmojiSet?>(null) }
@@ -150,7 +151,7 @@ fun CustomEmojiScreen(
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.clickable { showAddUnicodeDialog = true }
+                        modifier = Modifier.clickable { showEmojiLibrary = true }
                     ) {
                         Text(
                             text = "+",
@@ -355,31 +356,13 @@ fun CustomEmojiScreen(
         }
     }
 
-    if (showAddUnicodeDialog) {
-        var text by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showAddUnicodeDialog = false },
-            title = { Text("Add Unicode Emoji") },
-            text = {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    placeholder = { Text("Paste an emoji") },
-                    singleLine = true
-                )
+    if (showEmojiLibrary) {
+        EmojiLibrarySheet(
+            currentEmojis = unicodeEmojis,
+            onAddEmojis = { emojis ->
+                emojis.forEach { customEmojiRepo.addUnicodeEmoji(it) }
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        customEmojiRepo.addUnicodeEmoji(text.trim())
-                        showAddUnicodeDialog = false
-                    },
-                    enabled = text.isNotBlank()
-                ) { Text("Add") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddUnicodeDialog = false }) { Text("Cancel") }
-            }
+            onDismiss = { showEmojiLibrary = false }
         )
     }
 
