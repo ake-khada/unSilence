@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.Surface
+import com.wisp.app.nostr.Nip13
 import com.wisp.app.nostr.Nip19
 import com.wisp.app.nostr.NostrEvent
 import com.wisp.app.nostr.ProfileData
@@ -273,6 +274,21 @@ fun PostCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             )
+            val powBits = remember(event.id) { Nip13.verifyDifficulty(event) }
+            if (powBits >= 16) {
+                Spacer(Modifier.width(4.dp))
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color(0xFFFF9800).copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = "PoW $powBits",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFF9800),
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+            }
             Box {
                 var menuExpanded by remember { mutableStateOf(false) }
                 val context = LocalContext.current

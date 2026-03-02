@@ -20,6 +20,7 @@ import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.content.hasMediaType
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -112,6 +114,9 @@ fun ComposeScreen(
     val mentionCandidates by viewModel.mentionCandidates.collectAsState()
     val mentionQuery by viewModel.mentionQuery.collectAsState()
     val explicit by viewModel.explicit.collectAsState()
+    val powEnabled by viewModel.powEnabled.collectAsState()
+    val powDifficulty by viewModel.powDifficulty.collectAsState()
+    val miningProgress by viewModel.miningProgress.collectAsState()
     val context = LocalContext.current
 
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -386,6 +391,15 @@ fun ComposeScreen(
                         )
                     }
 
+                    IconButton(onClick = { viewModel.togglePow() }) {
+                        Icon(
+                            Icons.Outlined.Shield,
+                            contentDescription = "Proof of Work",
+                            tint = if (powEnabled) Color(0xFFFF9800)
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
                     if (uploadProgress != null) {
                         Spacer(Modifier.width(8.dp))
                         CircularProgressIndicator(
@@ -432,6 +446,83 @@ fun ComposeScreen(
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
                         }
+                    }
+                }
+
+                // PoW settings banner
+                AnimatedVisibility(
+                    visible = powEnabled,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFFF9800).copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        val orange = Color(0xFFFF9800)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Shield,
+                                contentDescription = null,
+                                tint = orange,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "PoW: $powDifficulty bits",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = orange,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { viewModel.setPowDifficulty(powDifficulty - 1) },
+                                enabled = powDifficulty > 16,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Text(
+                                    "\u2212",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = orange
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.setPowDifficulty(powDifficulty + 1) },
+                                enabled = powDifficulty < 32,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Text(
+                                    "+",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = orange
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Mining progress
+                if (miningProgress != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = miningProgress ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
 
