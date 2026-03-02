@@ -69,7 +69,7 @@ fun ActionBar(
     reactionEmojiUrls: Map<String, String> = emptyMap(),
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null,
+    onOpenEmojiLibrary: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showEmojiPicker by remember { mutableStateOf(false) }
@@ -120,7 +120,7 @@ fun ActionBar(
                     selectedEmojis = userReactionEmojis,
                     resolvedEmojis = resolvedEmojis,
                     unicodeEmojis = unicodeEmojis,
-                    onManageEmojis = onManageEmojis
+                    onOpenEmojiLibrary = onOpenEmojiLibrary
                 )
             }
         }
