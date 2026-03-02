@@ -106,7 +106,7 @@ fun NotificationsScreen(
     isInList: (String) -> Boolean = { false },
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null,
+    onOpenEmojiLibrary: (() -> Unit)? = null,
     zapError: SharedFlow<String>? = null,
     onRefresh: () -> Unit = {},
     translationRepo: TranslationRepository? = null
@@ -292,7 +292,7 @@ fun NotificationsScreen(
                             isInList = isInList,
                             resolvedEmojis = resolvedEmojis,
                             unicodeEmojis = unicodeEmojis,
-                            onManageEmojis = onManageEmojis,
+                            onOpenEmojiLibrary = onOpenEmojiLibrary,
                             translationRepo = translationRepo
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
@@ -330,7 +330,7 @@ fun NotificationsScreen(
                             isInList = isInList,
                             resolvedEmojis = resolvedEmojis,
                             unicodeEmojis = unicodeEmojis,
-                            onManageEmojis = onManageEmojis,
+                            onOpenEmojiLibrary = onOpenEmojiLibrary,
                             translationRepo = translationRepo
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
@@ -445,7 +445,7 @@ private fun NotificationItem(
     isInList: (String) -> Boolean,
     resolvedEmojis: Map<String, String> = emptyMap(),
     unicodeEmojis: List<String> = emptyList(),
-    onManageEmojis: (() -> Unit)? = null,
+    onOpenEmojiLibrary: (() -> Unit)? = null,
     translationRepo: TranslationRepository? = null
 ) {
     // Shared PostCard params for rendering referenced notes with full action bar
@@ -460,7 +460,7 @@ private fun NotificationItem(
         followListSize = followListSize,
         resolvedEmojis = resolvedEmojis,
         unicodeEmojis = unicodeEmojis,
-        onManageEmojis = onManageEmojis,
+        onOpenEmojiLibrary = onOpenEmojiLibrary,
         isFollowing = { viewModel.isFollowing(it) },
         onNoteClick = onNoteClick,
         onProfileClick = onProfileClick,
@@ -876,7 +876,7 @@ private data class NotifPostCardParams(
     val followListSize: Int = 0,
     val resolvedEmojis: Map<String, String> = emptyMap(),
     val unicodeEmojis: List<String> = emptyList(),
-    val onManageEmojis: (() -> Unit)? = null,
+    val onOpenEmojiLibrary: (() -> Unit)? = null,
     val isFollowing: (String) -> Boolean,
     val onNoteClick: (String) -> Unit,
     val onProfileClick: (String) -> Unit,
@@ -993,7 +993,7 @@ private fun ReferencedNotePostCard(
         reactionEmojiUrls = eventReactionEmojiUrls,
         resolvedEmojis = params.resolvedEmojis,
         unicodeEmojis = params.unicodeEmojis,
-        onManageEmojis = params.onManageEmojis,
+        onOpenEmojiLibrary = params.onOpenEmojiLibrary,
         onNavigateToProfileFromDetails = params.onProfileClick,
         onFollowAuthor = { params.onFollowToggle(event.pubkey) },
         onBlockAuthor = { params.onBlockUser(event.pubkey) },

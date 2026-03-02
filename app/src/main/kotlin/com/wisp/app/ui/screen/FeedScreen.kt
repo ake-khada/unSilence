@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import com.wisp.app.nostr.FollowSet
 import com.wisp.app.nostr.NostrEvent
 import com.wisp.app.ui.component.NoteActions
+import com.wisp.app.ui.component.EmojiLibrarySheet
 import com.wisp.app.ui.component.PostCard
 import com.wisp.app.ui.component.ProfilePicture
 import com.wisp.app.ui.component.RelayIcon
@@ -155,6 +156,7 @@ fun FeedScreen(
     var zapTargetEvent by remember { mutableStateOf<NostrEvent?>(null) }
     var zapAnimatingIds by remember { mutableStateOf(emptySet<String>()) }
     var zapErrorMessage by remember { mutableStateOf<String?>(null) }
+    var showEmojiLibrary by remember { mutableStateOf(false) }
 
     val isWalletConnected = viewModel.nwcRepo.hasConnection()
 
@@ -656,7 +658,7 @@ fun FeedScreen(
                                         viewModel.setFeedType(FeedType.RELAY)
                                     },
                                     noteActions = noteActions,
-                                    onManageEmojis = onCustomEmojis,
+                                    onOpenEmojiLibrary = { showEmojiLibrary = true },
                                     translationVersion = translationVersion
                                 )
                             }
@@ -696,6 +698,17 @@ fun FeedScreen(
             } // Column
         }
     }
+
+    if (showEmojiLibrary) {
+        val sheetUnicodeEmojis by viewModel.customEmojiRepo.unicodeEmojis.collectAsState()
+        EmojiLibrarySheet(
+            currentEmojis = sheetUnicodeEmojis,
+            onAddEmojis = { emojis ->
+                emojis.forEach { viewModel.customEmojiRepo.addUnicodeEmoji(it) }
+            },
+            onDismiss = { showEmojiLibrary = false }
+        )
+    }
 }
 
 /**
@@ -733,7 +746,7 @@ private fun FeedItem(
     onDelete: () -> Unit = {},
     onRelayClick: (String) -> Unit = {},
     noteActions: NoteActions? = null,
-    onManageEmojis: (() -> Unit)? = null,
+    onOpenEmojiLibrary: (() -> Unit)? = null,
     translationVersion: Int = 0
 ) {
     val profileData = remember(profileVersion, event.pubkey) {
@@ -832,7 +845,7 @@ private fun FeedItem(
         reactionEmojiUrls = eventReactionEmojiUrls,
         resolvedEmojis = resolvedEmojis,
         unicodeEmojis = unicodeEmojis,
-        onManageEmojis = onManageEmojis,
+        onOpenEmojiLibrary = onOpenEmojiLibrary,
         translationState = translationState,
         onTranslate = { viewModel.translateEvent(event.id, event.content) }
     )
