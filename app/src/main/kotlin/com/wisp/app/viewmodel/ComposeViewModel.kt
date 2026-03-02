@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.wisp.app.nostr.ClientMessage
 import com.wisp.app.nostr.Keys
 import com.wisp.app.nostr.Nip10
+import com.wisp.app.nostr.Nip13
 import com.wisp.app.nostr.Nip18
 import com.wisp.app.nostr.Nip19
 import com.wisp.app.nostr.Nip37
@@ -27,11 +28,13 @@ import com.wisp.app.repo.MentionCandidate
 import com.wisp.app.repo.MentionSearchRepository
 import com.wisp.app.repo.EventRepository
 import com.wisp.app.repo.ProfileRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val NOSTR_URI_REGEX = Regex("nostr:(npub1[a-z0-9]{58}|nprofile1[a-z0-9]+|note1[a-z0-9]{58}|nevent1[a-z0-9]+)")
 // Matches bare bech32 IDs not already preceded by "nostr:"
@@ -76,6 +79,23 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
 
     fun toggleExplicit() {
         _explicit.value = !_explicit.value
+    }
+
+    private val _powEnabled = MutableStateFlow(false)
+    val powEnabled: StateFlow<Boolean> = _powEnabled
+
+    private val _powDifficulty = MutableStateFlow(21)
+    val powDifficulty: StateFlow<Int> = _powDifficulty
+
+    private val _miningProgress = MutableStateFlow<String?>(null)
+    val miningProgress: StateFlow<String?> = _miningProgress
+
+    fun togglePow() {
+        _powEnabled.value = !_powEnabled.value
+    }
+
+    fun setPowDifficulty(bits: Int) {
+        _powDifficulty.value = bits.coerceIn(16, 32)
     }
 
     private var mentionStartIndex: Int = -1
@@ -350,7 +370,43 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         } else {
             content
         }
-        val event = signer.signEvent(kind = 1, content = finalContent, tags = tags)
+
+        // Mine proof of work if enabled
+        val finalTags: List<List<String>>
+        val finalCreatedAt: Long?
+        if (_powEnabled.value) {
+            val difficulty = _powDifficulty.value
+            val createdAt = System.currentTimeMillis() / 1000
+            _miningProgress.value = "Mining PoW ($difficulty bits)..."
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    Nip13.mine(
+                        pubkeyHex = signer.pubkeyHex,
+                        kind = 1,
+                        content = finalContent,
+                        tags = tags,
+                        targetDifficulty = difficulty,
+                        createdAt = createdAt,
+                        onProgress = { attempts ->
+                            _miningProgress.value = "Mining PoW... ${attempts / 1000}k attempts"
+                        }
+                    )
+                }
+                finalTags = result.tags
+                finalCreatedAt = result.createdAt
+            } finally {
+                _miningProgress.value = null
+            }
+        } else {
+            finalTags = tags
+            finalCreatedAt = null
+        }
+
+        val event = if (finalCreatedAt != null) {
+            signer.signEvent(kind = 1, content = finalContent, tags = finalTags, createdAt = finalCreatedAt)
+        } else {
+            signer.signEvent(kind = 1, content = finalContent, tags = finalTags)
+        }
         val msg = ClientMessage.event(event)
         var sentCount = if (replyTo != null && outboxRouter != null) {
             outboxRouter.publishToInbox(msg, replyTo.pubkey)
@@ -495,6 +551,8 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         _uploadedUrls.value = emptyList()
         _uploadProgress.value = null
         _explicit.value = false
+        _powEnabled.value = false
+        _miningProgress.value = null
         clearMentionState()
     }
 }
