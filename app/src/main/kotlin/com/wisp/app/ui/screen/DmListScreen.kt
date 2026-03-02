@@ -138,8 +138,17 @@ fun DmListScreen(
 }
 
 private val timeFormat = SimpleDateFormat("MMM d", Locale.US)
+private val timeYearFormat = SimpleDateFormat("MMM d, yyyy", Locale.US)
 
 private fun formatTimestamp(epoch: Long): String {
     if (epoch == 0L) return ""
-    return timeFormat.format(Date(epoch * 1000))
+    val date = Date(epoch * 1000)
+    val cal = java.util.Calendar.getInstance()
+    val currentYear = cal.get(java.util.Calendar.YEAR)
+    cal.time = date
+    return if (cal.get(java.util.Calendar.YEAR) != currentYear) {
+        timeYearFormat.format(date)
+    } else {
+        timeFormat.format(date)
+    }
 }
