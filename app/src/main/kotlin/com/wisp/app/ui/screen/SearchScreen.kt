@@ -265,7 +265,7 @@ private fun MyDeviceTab(
                     contactRepo?.isFollowing(it.pubkey) == true
                 }
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(sortedLocalUsers, key = { it.pubkey }) { profile ->
+                    items(sortedLocalUsers, key = { it.pubkey }, contentType = { "user" }) { profile ->
                         UserResultItem(
                             profile = profile,
                             isFollowing = contactRepo?.isFollowing(profile.pubkey) == true,
@@ -279,7 +279,7 @@ private fun MyDeviceTab(
             localFilter == LocalFilter.NOTES -> {
                 val translationVersion by translationRepo?.version?.collectAsState() ?: remember { androidx.compose.runtime.mutableIntStateOf(0) }
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(localNotes, key = { it.id }) { event ->
+                    items(localNotes, key = { it.id }, contentType = { "post" }) { event ->
                         val profile = eventRepo.getProfileData(event.pubkey)
                         val translationState = remember(translationVersion, event.id) {
                             translationRepo?.getState(event.id) ?: com.wisp.app.repo.TranslationState()
@@ -402,7 +402,7 @@ private fun RelaysTab(
                     val sortedUsers = users.sortedByDescending {
                         contactRepo?.isFollowing(it.pubkey) == true
                     }
-                    items(sortedUsers, key = { it.pubkey }) { profile ->
+                    items(sortedUsers, key = { it.pubkey }, contentType = { "user" }) { profile ->
                         UserResultItem(
                             profile = profile,
                             isFollowing = contactRepo?.isFollowing(profile.pubkey) == true,
@@ -420,7 +420,7 @@ private fun RelaysTab(
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                         }
-                        items(lists, key = { "${it.pubkey}:${it.dTag}" }) { list ->
+                        items(lists, key = { "${it.pubkey}:${it.dTag}" }, contentType = { "list" }) { list ->
                             ListResultItem(
                                 followSet = list,
                                 eventRepo = eventRepo,
@@ -434,7 +434,7 @@ private fun RelaysTab(
                         }
                     }
 
-                    items(notes, key = { it.id }) { event ->
+                    items(notes, key = { it.id }, contentType = { "post" }) { event ->
                         val profile = eventRepo.getProfileData(event.pubkey)
                         val translationState = remember(relayTranslationVersion, event.id) {
                             translationRepo?.getState(event.id) ?: com.wisp.app.repo.TranslationState()

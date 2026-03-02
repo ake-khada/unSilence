@@ -254,17 +254,17 @@ fun NotificationsScreen(
                 modifier = Modifier
                     .fillMaxSize()
             ) {
-                item(key = "summary_24h") {
+                item(key = "summary_24h", contentType = "summary") {
                     DailySummaryBar(
                         summary = summary,
                         onFilterSelect = { viewModel.setFilter(it) }
                     )
                 }
                 if (recentNotifs.isNotEmpty()) {
-                    item(key = "header_recent") {
+                    item(key = "header_recent", contentType = "header") {
                         SectionHeader("Recent")
                     }
-                    items(items = recentNotifs, key = { it.groupId }) { group ->
+                    items(items = recentNotifs, key = { it.groupId }, contentType = { "notification" }) { group ->
                         NotificationItem(
                             group = group,
                             viewModel = viewModel,
@@ -299,10 +299,10 @@ fun NotificationsScreen(
                     }
                 }
                 if (olderNotifs.isNotEmpty()) {
-                    item(key = "header_earlier") {
+                    item(key = "header_earlier", contentType = "header") {
                         SectionHeader("Earlier")
                     }
-                    items(items = olderNotifs, key = { it.groupId }) { group ->
+                    items(items = olderNotifs, key = { it.groupId }, contentType = { "notification" }) { group ->
                         NotificationItem(
                             group = group,
                             viewModel = viewModel,

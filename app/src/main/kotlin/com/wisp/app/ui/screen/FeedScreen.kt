@@ -622,7 +622,7 @@ fun FeedScreen(
                             state = listState,
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(items = feed, key = { it.id }) { event ->
+                            items(items = feed, key = { it.id }, contentType = { "post" }) { event ->
                                 FeedItem(
                                     event = event,
                                     viewModel = viewModel,
@@ -661,7 +661,7 @@ fun FeedScreen(
                                 )
                             }
                             if (initialLoadDone) {
-                                item(key = "load-more") {
+                                item(key = "load-more", contentType = "loader") {
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()

@@ -239,7 +239,7 @@ fun RichContent(
     noteActions: NoteActions? = null,
     modifier: Modifier = Modifier
 ) {
-    val segments = parseContent(content.trimEnd('\n', '\r'), emojiMap)
+    val segments = remember(content, emojiMap) { parseContent(content.trimEnd('\n', '\r'), emojiMap) }
     var fullScreenImageUrl by remember { mutableStateOf<String?>(null) }
     var fullScreenVideoUrl by remember { mutableStateOf<String?>(null) }
 
