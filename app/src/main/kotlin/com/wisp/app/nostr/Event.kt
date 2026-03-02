@@ -29,6 +29,7 @@ data class NostrEvent(
 ) {
     companion object {
         private val json = Json { ignoreUnknownKeys = true }
+        private val sha256Local = ThreadLocal.withInitial { MessageDigest.getInstance("SHA-256") }
 
         fun create(
             privkey: ByteArray,
@@ -83,7 +84,7 @@ data class NostrEvent(
                 append('"')
                 append(']')
             }
-            val digest = MessageDigest.getInstance("SHA-256")
+            val digest = sha256Local.get().apply { reset() }
             return digest.digest(serialized.toByteArray(Charsets.UTF_8)).toHex()
         }
 
@@ -136,7 +137,17 @@ private object LongAsStringSerializer : KSerializer<Long> {
     override fun deserialize(decoder: Decoder): Long = decoder.decodeLong()
 }
 
-fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+private const val HEX_CHARS = "0123456789abcdef"
+
+fun ByteArray.toHex(): String {
+    val result = CharArray(size * 2)
+    for (i in indices) {
+        val v = this[i].toInt() and 0xFF
+        result[i * 2] = HEX_CHARS[v ushr 4]
+        result[i * 2 + 1] = HEX_CHARS[v and 0x0F]
+    }
+    return String(result)
+}
 
 fun String.hexToByteArray(): ByteArray {
     require(length % 2 == 0) { "Hex string must have even length" }
