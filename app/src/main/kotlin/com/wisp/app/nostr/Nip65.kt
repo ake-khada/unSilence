@@ -1,14 +1,15 @@
 package com.wisp.app.nostr
 
+import android.util.Log
 import com.wisp.app.relay.RelayConfig
 
 object Nip65 {
     fun parseRelayList(event: NostrEvent): List<RelayConfig> {
         if (event.kind != 10002) return emptyList()
-        return event.tags.mapNotNull { tag ->
+        val result = event.tags.mapNotNull { tag ->
             if (tag.size < 2 || tag[0] != "r") return@mapNotNull null
             val url = tag[1].trim().trimEnd('/')
-            if (!RelayConfig.isAcceptableUrl(url)) return@mapNotNull null
+            if (!RelayConfig.isValidUrl(url)) return@mapNotNull null
             val marker = tag.getOrNull(2)
             RelayConfig(
                 url = url,
@@ -16,6 +17,11 @@ object Nip65 {
                 write = marker == null || marker == "write"
             )
         }
+        val onionRelays = result.filter { RelayConfig.isOnionUrl(it.url) }
+        if (onionRelays.isNotEmpty()) {
+            Log.d("TorRelay", "[Nip65] parseRelayList: pubkey=${event.pubkey.take(8)}… has ${onionRelays.size} .onion relay(s): ${onionRelays.map { it.url }}")
+        }
+        return result
     }
 
     fun buildRelayTags(relays: List<RelayConfig>): List<List<String>> {

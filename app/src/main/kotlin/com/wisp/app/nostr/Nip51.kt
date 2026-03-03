@@ -62,7 +62,7 @@ object Nip51 {
         return event.tags.mapNotNull { tag ->
             if (tag.size >= 2 && (tag[0] == "relay" || tag[0] == "r")) {
                 val url = tag[1].trim().trimEnd('/')
-                if (RelayConfig.isAcceptableUrl(url)) url else null
+                if (RelayConfig.isValidUrl(url)) url else null
             } else null
         }
     }
@@ -81,7 +81,7 @@ object Nip51 {
             when (tag[0]) {
                 "relay", "r" -> {
                     val url = tag[1].trim().trimEnd('/')
-                    if (RelayConfig.isAcceptableUrl(url)) relays.add(url)
+                    if (RelayConfig.isValidUrl(url)) relays.add(url)
                 }
                 "title" -> title = tag[1]
             }

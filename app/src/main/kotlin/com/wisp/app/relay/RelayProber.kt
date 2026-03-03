@@ -172,7 +172,7 @@ object RelayProber {
             val relays = Nip65.parseRelayList(event)
             for (relay in relays) {
                 val url = relay.url.trimEnd('/')
-                if (RelayConfig.isAcceptableUrl(url)) {
+                if (RelayConfig.isValidUrl(url)) {
                     tally[url] = (tally[url] ?: 0) + 1
                 }
             }
