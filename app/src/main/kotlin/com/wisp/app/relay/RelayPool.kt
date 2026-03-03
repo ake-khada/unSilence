@@ -29,6 +29,7 @@ data class BroadcastState(val accepted: Int, val sent: Int)
 
 class RelayPool {
     private var client: OkHttpClient = Relay.createClient()
+    private var clientBuiltWithTor: Boolean = TorManager.isEnabled()
     private val relays = CopyOnWriteArrayList<Relay>()
     private val dmRelays = CopyOnWriteArrayList<Relay>()
     private val ephemeralRelays = java.util.concurrent.ConcurrentHashMap<String, Relay>()
@@ -37,6 +38,19 @@ class RelayPool {
     @Volatile private var pinnedRelayUrls = emptySet<String>()
     private var blockedUrls = emptySet<String>()
     fun getBlockedUrls(): Set<String> = blockedUrls
+
+    /**
+     * Ensure the OkHttpClient matches the current Tor state.
+     * If Tor was enabled/disabled since the client was built, rebuild it.
+     */
+    private fun ensureClientCurrent() {
+        val torNow = TorManager.isEnabled()
+        if (torNow != clientBuiltWithTor) {
+            Log.d("TorRelay", "[Pool] ensureClientCurrent: rebuilding client (was tor=$clientBuiltWithTor, now tor=$torNow)")
+            client = HttpClientFactory.createRelayClient()
+            clientBuiltWithTor = torNow
+        }
+    }
 
     @Volatile var appIsActive = false
         set(value) {
@@ -154,8 +168,22 @@ class RelayPool {
     }
 
     fun updateRelays(configs: List<RelayConfig>) {
+        ensureClientCurrent()
         val badRelays = healthTracker?.getBadRelays() ?: emptySet()
-        val filtered = configs.filter { it.url !in blockedUrls && it.url !in badRelays }.take(MAX_PERSISTENT)
+        val onionConfigs = configs.filter { RelayConfig.isOnionUrl(it.url) }
+        if (onionConfigs.isNotEmpty()) {
+            Log.d("TorRelay", "[Pool] updateRelays: ${onionConfigs.size} .onion relays in config: ${onionConfigs.map { it.url }}")
+            Log.d("TorRelay", "[Pool] updateRelays: torEnabled=${TorManager.isEnabled()} socksPort=${TorManager.socksPort.value}")
+            for (cfg in onionConfigs) {
+                val blocked = cfg.url in blockedUrls
+                val bad = cfg.url in badRelays
+                val connectable = RelayConfig.isConnectableUrl(cfg.url)
+                Log.d("TorRelay", "[Pool] updateRelays: ${cfg.url} blocked=$blocked bad=$bad connectable=$connectable")
+            }
+        }
+        val filtered = configs.filter {
+            it.url !in blockedUrls && it.url !in badRelays && RelayConfig.isConnectableUrl(it.url)
+        }.take(MAX_PERSISTENT)
 
         // Disconnect removed relays
         val currentUrls = filtered.map { it.url }.toSet()
@@ -183,7 +211,8 @@ class RelayPool {
     }
 
     fun updateDmRelays(urls: List<String>) {
-        val filtered = urls.filter { it !in blockedUrls }.take(MAX_DM_RELAYS)
+        ensureClientCurrent()
+        val filtered = urls.filter { it !in blockedUrls && RelayConfig.isConnectableUrl(it) }.take(MAX_DM_RELAYS)
         val currentUrls = filtered.toSet()
         dmRelays.filter { it.config.url !in currentUrls }.forEach {
             it.disconnect()
@@ -590,9 +619,15 @@ class RelayPool {
     }
 
     fun sendToRelayOrEphemeral(url: String, message: String, skipBadCheck: Boolean = false): Boolean {
+        ensureClientCurrent()
         if (url in blockedUrls) return false
         if (!skipBadCheck && healthTracker?.isBad(url) == true) return false
-        if (!RelayConfig.isAcceptableUrl(url)) return false
+        if (!RelayConfig.isConnectableUrl(url)) {
+            if (RelayConfig.isOnionUrl(url)) {
+                Log.d("TorRelay", "[Pool] sendToRelayOrEphemeral: skipping .onion '$url' — torEnabled=${TorManager.isEnabled()}")
+            }
+            return false
+        }
 
         // Check cooldown for failed relays
         val cooldownUntil = relayCooldowns[url]
@@ -903,16 +938,28 @@ class RelayPool {
 
     /**
      * Rebuild the OkHttpClient (e.g. after Tor toggle) and reconnect all relays.
+     * When [allConfigs] / [allDmUrls] are provided (e.g. from saved prefs), they
+     * are used instead of the currently-connected set so that .onion relays are
+     * picked up when Tor turns on.
      */
-    fun swapClientAndReconnect() {
-        val savedConfigs = relays.map { it.config }.toList()
-        val savedDmUrls = dmRelays.map { it.config.url }.toList()
-        Log.d("RLC", "[Pool] swapClientAndReconnect — persistent=${savedConfigs.size} dm=${savedDmUrls.size}")
+    fun swapClientAndReconnect(
+        allConfigs: List<RelayConfig>? = null,
+        allDmUrls: List<String>? = null
+    ) {
+        val configs = allConfigs ?: relays.map { it.config }.toList()
+        val dmUrls = allDmUrls ?: dmRelays.map { it.config.url }.toList()
+        val onionConfigs = configs.filter { RelayConfig.isOnionUrl(it.url) }
+        val onionDm = dmUrls.filter { RelayConfig.isOnionUrl(it) }
+        Log.d("RLC", "[Pool] swapClientAndReconnect — persistent=${configs.size} dm=${dmUrls.size}")
+        Log.d("TorRelay", "[Pool] swapClientAndReconnect: torEnabled=${TorManager.isEnabled()} onionPersistent=${onionConfigs.size} onionDm=${onionDm.size}")
+        if (onionConfigs.isNotEmpty()) Log.d("TorRelay", "[Pool] swapClientAndReconnect .onion relays: ${onionConfigs.map { it.url }}")
+        if (allConfigs != null) Log.d("TorRelay", "[Pool] swapClientAndReconnect: using saved configs (not pool snapshot)")
 
         disconnectAll()
         client = HttpClientFactory.createRelayClient()
-        updateRelays(savedConfigs)
-        updateDmRelays(savedDmUrls)
+        clientBuiltWithTor = TorManager.isEnabled()
+        updateRelays(configs)
+        updateDmRelays(dmUrls)
     }
 
     fun disconnectAll() {

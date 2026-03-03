@@ -227,7 +227,10 @@ fun WispNavHost(
         if (torStatus == com.wisp.app.relay.TorStatus.CONNECTED ||
             torStatus == com.wisp.app.relay.TorStatus.DISABLED) {
             if (authViewModel.isLoggedIn) {
-                feedViewModel.lifecycleManager.onTorSwitch()
+                feedViewModel.lifecycleManager.onTorSwitch(
+                    savedConfigs = feedViewModel.keyRepo.getRelays(),
+                    savedDmUrls = feedViewModel.keyRepo.getDmRelays()
+                )
             }
         }
     }

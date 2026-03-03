@@ -33,16 +33,15 @@ data class RelayConfig(
 
         private val IP_HOST_REGEX = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
 
-        /**
-         * Returns true if the relay URL is safe to use.
-         * Rejects: localhost, IP addresses, URLs with ports (unless .onion with Tor active).
-         * When Tor is enabled, .onion addresses are allowed with ws:// or wss:// and any port.
-         */
-        fun isAcceptableUrl(url: String): Boolean {
-            val isOnion = url.contains(".onion")
+        fun isOnionUrl(url: String): Boolean = url.contains(".onion")
 
-            if (isOnion) {
-                if (!TorManager.isEnabled()) return false
+        /**
+         * Structural URL validation — can this URL be stored in a relay list?
+         * Always allows .onion addresses (with ws:// or wss://) regardless of Tor state.
+         * Rejects: localhost, IP addresses, URLs with ports (unless .onion).
+         */
+        fun isValidUrl(url: String): Boolean {
+            if (isOnionUrl(url)) {
                 // .onion relays can use ws:// (TLS redundant over Tor) or wss://
                 if (!url.startsWith("wss://") && !url.startsWith("ws://")) return false
                 return true
@@ -55,6 +54,16 @@ data class RelayConfig(
             val host = hostPort.lowercase()
             if (host == "localhost" || host.endsWith(".localhost")) return false
             if (IP_HOST_REGEX.matches(host)) return false
+            return true
+        }
+
+        /**
+         * Returns true if the relay URL can be connected to right now.
+         * .onion addresses require Tor to be active.
+         */
+        fun isConnectableUrl(url: String): Boolean {
+            if (!isValidUrl(url)) return false
+            if (isOnionUrl(url) && !TorManager.isEnabled()) return false
             return true
         }
     }
