@@ -1,6 +1,6 @@
 # NIP-25: Reactions
 
-**Status in Wisp:** Not yet implemented
+**Status in Barq:** Not yet implemented
 **Depends on:** NIP-01, NIP-10 (for e-tag format)
 **Kind:** 7 (regular)
 

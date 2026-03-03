@@ -1,6 +1,6 @@
 # NIP-57: Zaps (Lightning Payments)
 
-**Status in Wisp:** Not yet implemented
+**Status in Barq:** Not yet implemented
 **Depends on:** NIP-01, NIP-05 (for LNURL discovery)
 **Kinds:** 9734 (zap request), 9735 (zap receipt)
 
