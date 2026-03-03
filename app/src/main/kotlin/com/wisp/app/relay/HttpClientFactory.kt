@@ -1,6 +1,5 @@
 package com.wisp.app.relay
 
-import android.util.Log
 import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.OkHttpClient
@@ -48,9 +47,7 @@ object HttpClientFactory {
             }
 
         if (isTor) {
-            val proxy = TorManager.proxy
-            Log.d("TorRelay", "[HttpClient] createRelayClient: Tor active, proxy=$proxy socksPort=${TorManager.socksPort.value}")
-            proxy?.let { builder.proxy(it) }
+            TorManager.proxy?.let { builder.proxy(it) }
             builder.dns(torSafeDns)
         }
 

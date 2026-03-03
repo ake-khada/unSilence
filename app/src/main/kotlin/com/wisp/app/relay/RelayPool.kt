@@ -46,7 +46,6 @@ class RelayPool {
     private fun ensureClientCurrent() {
         val torNow = TorManager.isEnabled()
         if (torNow != clientBuiltWithTor) {
-            Log.d("TorRelay", "[Pool] ensureClientCurrent: rebuilding client (was tor=$clientBuiltWithTor, now tor=$torNow)")
             client = HttpClientFactory.createRelayClient()
             clientBuiltWithTor = torNow
         }
@@ -170,17 +169,6 @@ class RelayPool {
     fun updateRelays(configs: List<RelayConfig>) {
         ensureClientCurrent()
         val badRelays = healthTracker?.getBadRelays() ?: emptySet()
-        val onionConfigs = configs.filter { RelayConfig.isOnionUrl(it.url) }
-        if (onionConfigs.isNotEmpty()) {
-            Log.d("TorRelay", "[Pool] updateRelays: ${onionConfigs.size} .onion relays in config: ${onionConfigs.map { it.url }}")
-            Log.d("TorRelay", "[Pool] updateRelays: torEnabled=${TorManager.isEnabled()} socksPort=${TorManager.socksPort.value}")
-            for (cfg in onionConfigs) {
-                val blocked = cfg.url in blockedUrls
-                val bad = cfg.url in badRelays
-                val connectable = RelayConfig.isConnectableUrl(cfg.url)
-                Log.d("TorRelay", "[Pool] updateRelays: ${cfg.url} blocked=$blocked bad=$bad connectable=$connectable")
-            }
-        }
         val filtered = configs.filter {
             it.url !in blockedUrls && it.url !in badRelays && RelayConfig.isConnectableUrl(it.url)
         }.take(MAX_PERSISTENT)
@@ -622,12 +610,7 @@ class RelayPool {
         ensureClientCurrent()
         if (url in blockedUrls) return false
         if (!skipBadCheck && healthTracker?.isBad(url) == true) return false
-        if (!RelayConfig.isConnectableUrl(url)) {
-            if (RelayConfig.isOnionUrl(url)) {
-                Log.d("TorRelay", "[Pool] sendToRelayOrEphemeral: skipping .onion '$url' — torEnabled=${TorManager.isEnabled()}")
-            }
-            return false
-        }
+        if (!RelayConfig.isConnectableUrl(url)) return false
 
         // Check cooldown for failed relays
         val cooldownUntil = relayCooldowns[url]
@@ -684,11 +667,7 @@ class RelayPool {
         }
         ephemeralLastUsed[url] = System.currentTimeMillis()
         val sent = ephemeral.send(message)
-        // Return true if: message was sent immediately, OR relay is new (will drain
-        // queue on connect), OR relay exists but is still connecting (message was queued
-        // and will drain on connect — returning false here would incorrectly signal failure).
-        val isConnecting = !ephemeral.isConnected
-        return sent || isNew || isConnecting
+        return sent || isNew
     }
 
     private fun cooldownForFailure(httpCode: Int?): Long {
@@ -948,12 +927,7 @@ class RelayPool {
     ) {
         val configs = allConfigs ?: relays.map { it.config }.toList()
         val dmUrls = allDmUrls ?: dmRelays.map { it.config.url }.toList()
-        val onionConfigs = configs.filter { RelayConfig.isOnionUrl(it.url) }
-        val onionDm = dmUrls.filter { RelayConfig.isOnionUrl(it) }
         Log.d("RLC", "[Pool] swapClientAndReconnect — persistent=${configs.size} dm=${dmUrls.size}")
-        Log.d("TorRelay", "[Pool] swapClientAndReconnect: torEnabled=${TorManager.isEnabled()} onionPersistent=${onionConfigs.size} onionDm=${onionDm.size}")
-        if (onionConfigs.isNotEmpty()) Log.d("TorRelay", "[Pool] swapClientAndReconnect .onion relays: ${onionConfigs.map { it.url }}")
-        if (allConfigs != null) Log.d("TorRelay", "[Pool] swapClientAndReconnect: using saved configs (not pool snapshot)")
 
         disconnectAll()
         client = HttpClientFactory.createRelayClient()
