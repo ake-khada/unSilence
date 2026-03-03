@@ -1,5 +1,6 @@
 package com.wisp.app.relay
 
+import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import java.net.InetAddress
@@ -25,7 +26,16 @@ object HttpClientFactory {
         val isTor = TorManager.isEnabled()
         val connectTimeout = if (isTor) 30L else 10L
 
+        // OkHttp's default Dispatcher.maxRequests is 64, which caps concurrent
+        // WebSocket upgrade requests. With outbox routing creating 50+ ephemeral
+        // connections, new user-initiated connections get queued and time out.
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 256
+            maxRequestsPerHost = 10
+        }
+
         val builder = OkHttpClient.Builder()
+            .dispatcher(dispatcher)
             .connectTimeout(connectTimeout, TimeUnit.SECONDS)
             .pingInterval(30, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)

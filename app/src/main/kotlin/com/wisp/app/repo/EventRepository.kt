@@ -670,7 +670,7 @@ class EventRepository(val profileRepo: ProfileRepository? = null, val muteRepo: 
     // -- Isolated relay feed methods --
 
     fun addRelayFeedEvent(event: NostrEvent) {
-        if (event.created_at > System.currentTimeMillis() / 1000 + 30) return  // reject future-dated notes (30s grace for clock skew)
+        if (event.created_at > System.currentTimeMillis() / 1000 + 30) return
         if (muteRepo?.isBlocked(event.pubkey) == true) return
         if (deletedEventsRepo?.isDeleted(event.id) == true) return
 
@@ -713,7 +713,7 @@ class EventRepository(val profileRepo: ProfileRepository? = null, val muteRepo: 
 
     private fun relayFeedBinaryInsert(event: NostrEvent, sortTime: Long = event.created_at) {
         synchronized(relayFeedList) {
-            if (!relayFeedIds.add(event.id)) return  // already in relay feed
+            if (!relayFeedIds.add(event.id)) return
             var low = 0
             var high = relayFeedList.size
             while (low < high) {

@@ -219,10 +219,15 @@ class Relay(
 
     private fun drainPendingMessages(ws: WebSocket) {
         synchronized(sendLock) {
+            var count = 0
             var msg = pendingMessages.poll()
             while (msg != null) {
                 ws.send(msg)
+                count++
                 msg = pendingMessages.poll()
+            }
+            if (count > 0) {
+                Log.d("RLC", "[Relay] drainPendingMessages(${config.url}): $count msgs drained")
             }
         }
     }
