@@ -90,7 +90,7 @@ class SearchViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addSearchRelay(url: String): Boolean {
         val trimmed = url.trim().trimEnd('/')
-        if (!RelayConfig.isAcceptableUrl(trimmed)) return false
+        if (!RelayConfig.isValidUrl(trimmed)) return false
         if (trimmed in _searchRelays.value) return false
         val updated = _searchRelays.value + trimmed
         keyRepo.saveSearchRelays(updated)
