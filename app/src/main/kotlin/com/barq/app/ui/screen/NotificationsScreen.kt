@@ -1,0 +1,1052 @@
+package com.barq.app.ui.screen
+
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.outlined.AlternateEmail
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.CurrencyBitcoin
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Repeat
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
+import coil3.compose.AsyncImage
+import com.barq.app.nostr.Nip30
+import com.barq.app.nostr.NostrEvent
+import com.barq.app.nostr.NotificationGroup
+import com.barq.app.nostr.NotificationSummary
+import com.barq.app.nostr.ProfileData
+import kotlinx.coroutines.flow.SharedFlow
+import com.barq.app.nostr.ZapEntry
+import com.barq.app.repo.EventRepository
+import com.barq.app.repo.Nip05Repository
+import com.barq.app.repo.TranslationRepository
+import com.barq.app.ui.component.PostCard
+import com.barq.app.ui.component.ProfilePicture
+import com.barq.app.ui.component.StackedAvatarRow
+import com.barq.app.viewmodel.NotificationFilter
+import com.barq.app.viewmodel.NotificationsViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NotificationsScreen(
+    viewModel: NotificationsViewModel,
+    scrollToTopTrigger: Int = 0,
+    userPubkey: String? = null,
+    notifSoundEnabled: Boolean = true,
+    onToggleNotifSound: () -> Unit = {},
+    onBack: () -> Unit = {},
+    onNoteClick: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
+    onReply: (NostrEvent) -> Unit = {},
+    onReact: (NostrEvent, String) -> Unit = { _, _ -> },
+    onRepost: (NostrEvent) -> Unit = {},
+    onQuote: (NostrEvent) -> Unit = {},
+    onZap: (NostrEvent) -> Unit = {},
+    onFollowToggle: (String) -> Unit = {},
+    onBlockUser: (String) -> Unit = {},
+    onAddToList: (String) -> Unit = {},
+    nip05Repo: Nip05Repository? = null,
+    isZapAnimating: (String) -> Boolean = { false },
+    isZapInProgress: (String) -> Boolean = { false },
+    isInList: (String) -> Boolean = { false },
+    resolvedEmojis: Map<String, String> = emptyMap(),
+    unicodeEmojis: List<String> = emptyList(),
+    onOpenEmojiLibrary: (() -> Unit)? = null,
+    zapError: SharedFlow<String>? = null,
+    onRefresh: () -> Unit = {},
+    translationRepo: TranslationRepository? = null
+) {
+    val notifications by viewModel.filteredNotifications.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val currentFilter by viewModel.filter.collectAsState()
+    val summary by viewModel.summary24h.collectAsState()
+    val eventRepo = viewModel.eventRepository
+    val listState = rememberLazyListState()
+    var showFilterDropdown by remember { mutableStateOf(false) }
+    var zapErrorMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        zapError?.collect { error ->
+            zapErrorMessage = error
+        }
+    }
+
+    if (zapErrorMessage != null) {
+        AlertDialog(
+            onDismissRequest = { zapErrorMessage = null },
+            title = { Text("Zap Failed") },
+            text = { Text(zapErrorMessage ?: "") },
+            confirmButton = {
+                TextButton(onClick = { zapErrorMessage = null }) { Text("OK") }
+            }
+        )
+    }
+
+    LaunchedEffect(scrollToTopTrigger) {
+        if (scrollToTopTrigger > 0) listState.scrollToItem(0)
+    }
+
+    // Version flows for cache invalidation on reply PostCards
+    val reactionVersion = eventRepo?.reactionVersion?.collectAsState()?.value ?: 0
+    val zapVersion = eventRepo?.zapVersion?.collectAsState()?.value ?: 0
+    val replyCountVersion = eventRepo?.replyCountVersion?.collectAsState()?.value ?: 0
+    val repostVersion = eventRepo?.repostVersion?.collectAsState()?.value ?: 0
+    val profileVersion = eventRepo?.profileVersion?.collectAsState()?.value ?: 0
+    val followListSize = viewModel.contactRepository?.followList?.collectAsState()?.value?.size ?: 0
+
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box {
+                            Surface(
+                                onClick = { showFilterDropdown = true },
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        currentFilter.label,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 160.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Icon(
+                                        Icons.Default.ArrowDropDown,
+                                        contentDescription = "Filter notifications",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                            DropdownMenu(
+                                expanded = showFilterDropdown,
+                                onDismissRequest = { showFilterDropdown = false }
+                            ) {
+                                NotificationFilter.entries.forEach { filterOption ->
+                                    DropdownMenuItem(
+                                        text = { Text(filterOption.label) },
+                                        onClick = {
+                                            showFilterDropdown = false
+                                            viewModel.setFilter(filterOption)
+                                        },
+                                        trailingIcon = if (currentFilter == filterOption) {{
+                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        }} else null
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onToggleNotifSound) {
+                        Icon(
+                            if (notifSoundEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                            contentDescription = if (notifSoundEnabled) "Mute notifications" else "Unmute notifications"
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+        }
+    ) { padding ->
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = { viewModel.refresh(onRefresh) },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+        if (notifications.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(Modifier.height(64.dp))
+                Text(
+                    "No notifications yet",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            val recentCutoff = System.currentTimeMillis() / 1000 - 600
+            val (recentNotifs, olderNotifs) = remember(notifications, recentCutoff / 60) {
+                notifications.partition { it.groupId.endsWith(":recent") || it.latestTimestamp >= recentCutoff }
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+            ) {
+                item(key = "summary_24h", contentType = "summary") {
+                    DailySummaryBar(
+                        summary = summary,
+                        onFilterSelect = { viewModel.setFilter(it) }
+                    )
+                }
+                if (recentNotifs.isNotEmpty()) {
+                    item(key = "header_recent", contentType = "header") {
+                        SectionHeader("Recent")
+                    }
+                    items(items = recentNotifs, key = { it.groupId }, contentType = { "notification" }) { group ->
+                        NotificationItem(
+                            group = group,
+                            viewModel = viewModel,
+                            eventRepo = eventRepo,
+                            userPubkey = userPubkey,
+                            profileVersion = profileVersion,
+                            reactionVersion = reactionVersion,
+                            replyCountVersion = replyCountVersion,
+                            zapVersion = zapVersion,
+                            repostVersion = repostVersion,
+                            followListSize = followListSize,
+                            onNoteClick = onNoteClick,
+                            onProfileClick = onProfileClick,
+                            onReply = onReply,
+                            onReact = onReact,
+                            onRepost = onRepost,
+                            onQuote = onQuote,
+                            onZap = onZap,
+                            onFollowToggle = onFollowToggle,
+                            onBlockUser = onBlockUser,
+                            onAddToList = onAddToList,
+                            nip05Repo = nip05Repo,
+                            isZapAnimating = isZapAnimating,
+                            isZapInProgress = isZapInProgress,
+                            isInList = isInList,
+                            resolvedEmojis = resolvedEmojis,
+                            unicodeEmojis = unicodeEmojis,
+                            onOpenEmojiLibrary = onOpenEmojiLibrary,
+                            translationRepo = translationRepo
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
+                    }
+                }
+                if (olderNotifs.isNotEmpty()) {
+                    item(key = "header_earlier", contentType = "header") {
+                        SectionHeader("Earlier")
+                    }
+                    items(items = olderNotifs, key = { it.groupId }, contentType = { "notification" }) { group ->
+                        NotificationItem(
+                            group = group,
+                            viewModel = viewModel,
+                            eventRepo = eventRepo,
+                            userPubkey = userPubkey,
+                            profileVersion = profileVersion,
+                            reactionVersion = reactionVersion,
+                            replyCountVersion = replyCountVersion,
+                            zapVersion = zapVersion,
+                            repostVersion = repostVersion,
+                            followListSize = followListSize,
+                            onNoteClick = onNoteClick,
+                            onProfileClick = onProfileClick,
+                            onReply = onReply,
+                            onReact = onReact,
+                            onRepost = onRepost,
+                            onQuote = onQuote,
+                            onZap = onZap,
+                            onFollowToggle = onFollowToggle,
+                            onBlockUser = onBlockUser,
+                            onAddToList = onAddToList,
+                            nip05Repo = nip05Repo,
+                            isZapAnimating = isZapAnimating,
+                            isZapInProgress = isZapInProgress,
+                            isInList = isInList,
+                            resolvedEmojis = resolvedEmojis,
+                            unicodeEmojis = unicodeEmojis,
+                            onOpenEmojiLibrary = onOpenEmojiLibrary,
+                            translationRepo = translationRepo
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
+                    }
+                }
+            }
+        }
+        } // PullToRefreshBox
+    }
+}
+
+// ── Section Header ──────────────────────────────────────────────────────
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+    )
+}
+
+// ── Daily Summary Bar ──────────────────────────────────────────────────
+
+@Composable
+private fun DailySummaryBar(summary: NotificationSummary, onFilterSelect: (NotificationFilter) -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "24h",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            SummaryStat(Icons.Outlined.ChatBubbleOutline, summary.replyCount.toString()) { onFilterSelect(NotificationFilter.REPLIES) }
+            SummaryStat(Icons.Outlined.FavoriteBorder, summary.reactionCount.toString()) { onFilterSelect(NotificationFilter.REACTIONS) }
+            SummaryStat(Icons.Outlined.CurrencyBitcoin, formatSatsCompact(summary.zapSats)) { onFilterSelect(NotificationFilter.ZAPS) }
+            SummaryStat(Icons.Outlined.Repeat, summary.repostCount.toString()) { onFilterSelect(NotificationFilter.REPOSTS) }
+            SummaryStat(Icons.Outlined.AlternateEmail, (summary.mentionCount + summary.quoteCount).toString()) { onFilterSelect(NotificationFilter.MENTIONS) }
+        }
+    }
+}
+
+@Composable
+private fun SummaryStat(icon: androidx.compose.ui.graphics.vector.ImageVector, value: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+private fun formatSatsCompact(sats: Long): String = when {
+    sats >= 1_000_000 -> "${sats / 1_000_000}M"
+    sats >= 1_000 -> "${sats / 1_000}K"
+    else -> sats.toString()
+}
+
+// ── Notification Item Router ────────────────────────────────────────────
+
+@Composable
+private fun NotificationItem(
+    group: NotificationGroup,
+    viewModel: NotificationsViewModel,
+    eventRepo: EventRepository?,
+    userPubkey: String?,
+    profileVersion: Int,
+    reactionVersion: Int,
+    replyCountVersion: Int,
+    zapVersion: Int,
+    repostVersion: Int,
+    followListSize: Int = 0,
+    onNoteClick: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
+    onReply: (NostrEvent) -> Unit,
+    onReact: (NostrEvent, String) -> Unit,
+    onRepost: (NostrEvent) -> Unit,
+    onQuote: (NostrEvent) -> Unit,
+    onZap: (NostrEvent) -> Unit,
+    onFollowToggle: (String) -> Unit,
+    onBlockUser: (String) -> Unit,
+    onAddToList: (String) -> Unit = {},
+    nip05Repo: Nip05Repository?,
+    isZapAnimating: (String) -> Boolean,
+    isZapInProgress: (String) -> Boolean,
+    isInList: (String) -> Boolean,
+    resolvedEmojis: Map<String, String> = emptyMap(),
+    unicodeEmojis: List<String> = emptyList(),
+    onOpenEmojiLibrary: (() -> Unit)? = null,
+    translationRepo: TranslationRepository? = null
+) {
+    // Shared PostCard params for rendering referenced notes with full action bar
+    val postCardParams = NotifPostCardParams(
+        eventRepo = eventRepo,
+        userPubkey = userPubkey,
+        profileVersion = profileVersion,
+        reactionVersion = reactionVersion,
+        replyCountVersion = replyCountVersion,
+        zapVersion = zapVersion,
+        repostVersion = repostVersion,
+        followListSize = followListSize,
+        resolvedEmojis = resolvedEmojis,
+        unicodeEmojis = unicodeEmojis,
+        onOpenEmojiLibrary = onOpenEmojiLibrary,
+        isFollowing = { viewModel.isFollowing(it) },
+        onNoteClick = onNoteClick,
+        onProfileClick = onProfileClick,
+        onReply = onReply,
+        onReact = onReact,
+        onRepost = onRepost,
+        onQuote = onQuote,
+        onZap = onZap,
+        onFollowToggle = onFollowToggle,
+        onBlockUser = onBlockUser,
+        onAddToList = onAddToList,
+        nip05Repo = nip05Repo,
+        isZapAnimating = isZapAnimating,
+        isZapInProgress = isZapInProgress,
+        isInList = isInList,
+        translationRepo = translationRepo
+    )
+
+    when (group) {
+        is NotificationGroup.ReactionGroup -> ReactionGroupRow(
+            group = group,
+            resolveProfile = { viewModel.getProfileData(it) },
+            isFollowing = { viewModel.isFollowing(it) },
+            onProfileClick = onProfileClick,
+            onFollowToggle = postCardParams.onFollowToggle,
+            postCardParams = postCardParams
+        )
+        is NotificationGroup.ReplyNotification -> ReplyPostCard(
+            item = group,
+            postCardParams = postCardParams
+        )
+        is NotificationGroup.QuoteNotification -> QuoteNotificationRow(
+            item = group,
+            resolveProfile = { viewModel.getProfileData(it) },
+            isFollowing = viewModel.isFollowing(group.senderPubkey),
+            onProfileClick = onProfileClick,
+            postCardParams = postCardParams
+        )
+        is NotificationGroup.MentionNotification -> MentionNotificationRow(
+            item = group,
+            resolveProfile = { viewModel.getProfileData(it) },
+            isFollowing = viewModel.isFollowing(group.senderPubkey),
+            onProfileClick = onProfileClick,
+            postCardParams = postCardParams
+        )
+    }
+}
+
+// ── Reaction Group ──────────────────────────────────────────────────────
+// Each emoji on its own row: <emoji> <stacked avatars of that emoji's reactors>
+// Then the referenced note rendered as a full PostCard with action bar.
+
+@Composable
+private fun ReactionGroupRow(
+    group: NotificationGroup.ReactionGroup,
+    resolveProfile: (String) -> ProfileData?,
+    isFollowing: (String) -> Boolean,
+    onProfileClick: (String) -> Unit,
+    onFollowToggle: ((String) -> Unit)? = null,
+    postCardParams: NotifPostCardParams
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Emoji summary header
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            // Timestamp on top-right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = formatNotifTimestamp(group.latestTimestamp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            // Zap rows (most recent first)
+            if (group.zapEntries.isNotEmpty()) {
+                val sortedZaps = remember(group.zapEntries) { group.zapEntries.sortedByDescending { it.createdAt } }
+                sortedZaps.forEachIndexed { index, zap ->
+                    ZapEntryRow(
+                        zap = zap,
+                        profile = resolveProfile(zap.pubkey),
+                        showFollowBadge = isFollowing(zap.pubkey),
+                        highlighted = index == 0 && sortedZaps.size > 1,
+                        onProfileClick = onProfileClick
+                    )
+                }
+            }
+            // Repost row (from EventRepository for older splits, from reactions map for recent)
+            val isRecentSplit = group.groupId.endsWith(":recent")
+            val repostPubkeys = if (isRecentSplit) {
+                group.reactions[NotificationGroup.REPOST_EMOJI] ?: emptyList()
+            } else {
+                val eventRepo = postCardParams.eventRepo
+                remember(postCardParams.repostVersion, group.referencedEventId) {
+                    eventRepo?.getReposterPubkeys(group.referencedEventId) ?: emptyList()
+                }
+            }
+            if (repostPubkeys.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Outlined.Repeat,
+                        contentDescription = "reposted",
+                        modifier = Modifier
+                            .size(24.dp)
+                            .padding(top = 6.dp),
+                        tint = Color(0xFF4CAF50)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    StackedAvatarRow(
+                        pubkeys = repostPubkeys.reversed(),
+                        resolveProfile = resolveProfile,
+                        isFollowing = isFollowing,
+                        onProfileClick = onProfileClick,
+                        highlightFirst = repostPubkeys.size > 1,
+                        onProfileLongPress = onFollowToggle,
+                        showAll = true
+                    )
+                }
+            }
+            // Each emoji row: <emoji> <avatars> (newest reactor first)
+            group.reactions.forEach { (emoji, pubkeys) ->
+                if (emoji == NotificationGroup.REPOST_EMOJI || emoji == NotificationGroup.ZAP_EMOJI) return@forEach
+                val displayEmoji = if (emoji == "+") "\u2764\uFE0F" else emoji
+                val shortcode = Nip30.shortcodeRegex.matchEntire(displayEmoji)?.groupValues?.get(1)
+                val customEmojiUrl = group.emojiUrls[displayEmoji]
+                    ?: shortcode?.let { group.emojiUrls[":$it:"] }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    if (customEmojiUrl != null) {
+                        AsyncImage(
+                            model = customEmojiUrl,
+                            contentDescription = shortcode ?: displayEmoji,
+                            modifier = Modifier
+                                .size(24.dp)
+                                .padding(top = 6.dp)
+                        )
+                    } else {
+                        Text(
+                            text = displayEmoji,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    StackedAvatarRow(
+                        pubkeys = pubkeys.reversed(),
+                        resolveProfile = resolveProfile,
+                        isFollowing = isFollowing,
+                        onProfileClick = onProfileClick,
+                        highlightFirst = pubkeys.size > 1,
+                        onProfileLongPress = onFollowToggle,
+                        showAll = true
+                    )
+                }
+            }
+        }
+        // Referenced note as full PostCard
+        ReferencedNotePostCard(
+            eventId = group.referencedEventId,
+            params = postCardParams
+        )
+    }
+}
+
+@Composable
+private fun ZapEntryRow(
+    zap: ZapEntry,
+    profile: ProfileData?,
+    showFollowBadge: Boolean,
+    highlighted: Boolean = false,
+    onProfileClick: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "\u26A1",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = formatSats(zap.sats),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.tertiary
+        )
+        Spacer(Modifier.width(8.dp))
+        ProfilePicture(
+            url = profile?.picture,
+            size = 24,
+            showFollowBadge = showFollowBadge,
+            highlighted = highlighted,
+            modifier = Modifier.clickable { onProfileClick(zap.pubkey) }
+        )
+        Spacer(Modifier.width(6.dp))
+        if (zap.message.isNotBlank()) {
+            Text(
+                text = zap.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            val name = profile?.displayString
+                ?: zap.pubkey.take(8) + "..."
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+// ── Reply ───────────────────────────────────────────────────────────────
+// Full PostCard for reply notifications — same rendering as feed items.
+
+@Composable
+private fun ReplyPostCard(
+    item: NotificationGroup.ReplyNotification,
+    postCardParams: NotifPostCardParams
+) {
+    val eventRepo = postCardParams.eventRepo ?: return
+
+    // Render the parent note inline above the reply
+    if (item.referencedEventId != null) {
+        Text(
+            text = "replying to",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            ReferencedNotePostCard(
+                eventId = item.referencedEventId,
+                params = postCardParams
+            )
+        }
+    }
+
+    Column(modifier = Modifier.padding(start = 24.dp)) {
+        ReferencedNotePostCard(
+            eventId = item.replyEventId,
+            params = postCardParams
+        )
+    }
+}
+
+// ── Quote ───────────────────────────────────────────────────────────────
+
+@Composable
+private fun QuoteNotificationRow(
+    item: NotificationGroup.QuoteNotification,
+    resolveProfile: (String) -> ProfileData?,
+    isFollowing: Boolean,
+    onProfileClick: (String) -> Unit,
+    postCardParams: NotifPostCardParams
+) {
+    val profile = resolveProfile(item.senderPubkey)
+    val displayName = profile?.displayString
+        ?: item.senderPubkey.take(8) + "..." + item.senderPubkey.takeLast(4)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Quote header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ProfilePicture(
+                url = profile?.picture,
+                size = 34,
+                showFollowBadge = isFollowing,
+                modifier = Modifier.clickable { onProfileClick(item.senderPubkey) }
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = displayName,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = "quoted your note",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = formatNotifTimestamp(item.latestTimestamp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        // Quote event as full PostCard
+        ReferencedNotePostCard(
+            eventId = item.quoteEventId,
+            params = postCardParams
+        )
+    }
+}
+
+// ── Mention ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun MentionNotificationRow(
+    item: NotificationGroup.MentionNotification,
+    resolveProfile: (String) -> ProfileData?,
+    isFollowing: Boolean,
+    onProfileClick: (String) -> Unit,
+    postCardParams: NotifPostCardParams
+) {
+    val profile = resolveProfile(item.senderPubkey)
+    val displayName = profile?.displayString
+        ?: item.senderPubkey.take(8) + "..." + item.senderPubkey.takeLast(4)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Mention header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ProfilePicture(
+                url = profile?.picture,
+                size = 34,
+                showFollowBadge = isFollowing,
+                modifier = Modifier.clickable { onProfileClick(item.senderPubkey) }
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = displayName,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = "@",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(2.dp))
+            Text(
+                text = "mentioned you",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = formatNotifTimestamp(item.latestTimestamp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        // Mention event as full PostCard
+        ReferencedNotePostCard(
+            eventId = item.eventId,
+            params = postCardParams
+        )
+    }
+}
+
+// ── Shared PostCard params ───────────────────────────────────────────────
+
+private data class NotifPostCardParams(
+    val eventRepo: EventRepository?,
+    val userPubkey: String?,
+    val profileVersion: Int,
+    val reactionVersion: Int,
+    val replyCountVersion: Int,
+    val zapVersion: Int,
+    val repostVersion: Int,
+    val followListSize: Int = 0,
+    val resolvedEmojis: Map<String, String> = emptyMap(),
+    val unicodeEmojis: List<String> = emptyList(),
+    val onOpenEmojiLibrary: (() -> Unit)? = null,
+    val isFollowing: (String) -> Boolean,
+    val onNoteClick: (String) -> Unit,
+    val onProfileClick: (String) -> Unit,
+    val onReply: (NostrEvent) -> Unit,
+    val onReact: (NostrEvent, String) -> Unit,
+    val onRepost: (NostrEvent) -> Unit,
+    val onQuote: (NostrEvent) -> Unit,
+    val onZap: (NostrEvent) -> Unit,
+    val onFollowToggle: (String) -> Unit,
+    val onBlockUser: (String) -> Unit,
+    val onAddToList: (String) -> Unit,
+    val nip05Repo: Nip05Repository?,
+    val isZapAnimating: (String) -> Boolean,
+    val isZapInProgress: (String) -> Boolean,
+    val isInList: (String) -> Boolean,
+    val translationRepo: TranslationRepository? = null
+)
+
+// ── Referenced Note PostCard ────────────────────────────────────────────
+// Renders any event ID as a full PostCard with action bar (reactions, zaps, etc.)
+
+@Composable
+private fun ReferencedNotePostCard(
+    eventId: String,
+    params: NotifPostCardParams
+) {
+    val eventRepo = params.eventRepo ?: return
+
+    val version by eventRepo.quotedEventVersion.collectAsState()
+    val event = remember(eventId, version) { eventRepo.getEvent(eventId) }
+
+    LaunchedEffect(eventId) {
+        if (eventRepo.getEvent(eventId) == null) {
+            eventRepo.requestQuotedEvent(eventId)
+        }
+    }
+
+    if (event == null) {
+        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+        }
+        return
+    }
+
+    val profile = remember(params.profileVersion, event.pubkey) {
+        eventRepo.getProfileData(event.pubkey)
+    }
+    val likeCount = remember(params.reactionVersion, event.id) {
+        eventRepo.getReactionCount(event.id)
+    }
+    val replyCount = remember(params.replyCountVersion, event.id) {
+        eventRepo.getReplyCount(event.id)
+    }
+    val zapSats = remember(params.zapVersion, event.id) {
+        eventRepo.getZapSats(event.id)
+    }
+    val userEmojis = remember(params.reactionVersion, event.id, params.userPubkey) {
+        params.userPubkey?.let { eventRepo.getUserReactionEmojis(event.id, it) } ?: emptySet()
+    }
+    val reactionDetails = remember(params.reactionVersion, event.id) {
+        eventRepo.getReactionDetails(event.id)
+    }
+    val zapDetails = remember(params.zapVersion, event.id) {
+        eventRepo.getZapDetails(event.id)
+    }
+    val repostCount = remember(params.repostVersion, event.id) {
+        eventRepo.getRepostCount(event.id)
+    }
+    val repostPubkeys = remember(params.repostVersion, event.id) {
+        eventRepo.getReposterPubkeys(event.id)
+    }
+    val hasUserReposted = remember(params.repostVersion, event.id) {
+        eventRepo.hasUserReposted(event.id)
+    }
+    val hasUserZapped = remember(params.zapVersion, event.id) {
+        eventRepo.hasUserZapped(event.id)
+    }
+    val followingAuthor = remember(params.followListSize, event.pubkey) {
+        params.isFollowing(event.pubkey)
+    }
+
+    val eventReactionEmojiUrls = remember(params.reactionVersion, event.id) {
+        eventRepo.getReactionEmojiUrls(event.id)
+    }
+    val translationVersion by params.translationRepo?.version?.collectAsState() ?: remember { mutableIntStateOf(0) }
+    val translationState = remember(translationVersion, event.id) {
+        params.translationRepo?.getState(event.id) ?: com.barq.app.repo.TranslationState()
+    }
+
+    PostCard(
+        event = event,
+        profile = profile,
+        onReply = { params.onReply(event) },
+        onProfileClick = { params.onProfileClick(event.pubkey) },
+        onNavigateToProfile = params.onProfileClick,
+        onNoteClick = { params.onNoteClick(event.id) },
+        onReact = { emoji -> params.onReact(event, emoji) },
+        userReactionEmojis = userEmojis,
+        onRepost = { params.onRepost(event) },
+        onQuote = { params.onQuote(event) },
+        hasUserReposted = hasUserReposted,
+        repostCount = repostCount,
+        onZap = { params.onZap(event) },
+        hasUserZapped = hasUserZapped,
+        likeCount = likeCount,
+        replyCount = replyCount,
+        zapSats = zapSats,
+        isZapAnimating = params.isZapAnimating(event.id),
+        isZapInProgress = params.isZapInProgress(event.id),
+        eventRepo = eventRepo,
+        reactionDetails = reactionDetails,
+        zapDetails = zapDetails,
+        repostDetails = repostPubkeys,
+        reactionEmojiUrls = eventReactionEmojiUrls,
+        resolvedEmojis = params.resolvedEmojis,
+        unicodeEmojis = params.unicodeEmojis,
+        onOpenEmojiLibrary = params.onOpenEmojiLibrary,
+        onNavigateToProfileFromDetails = params.onProfileClick,
+        onFollowAuthor = { params.onFollowToggle(event.pubkey) },
+        onBlockAuthor = { params.onBlockUser(event.pubkey) },
+        isFollowingAuthor = followingAuthor,
+        isOwnEvent = event.pubkey == params.userPubkey,
+        nip05Repo = params.nip05Repo,
+        onAddToList = { params.onAddToList(event.id) },
+        isInList = params.isInList(event.id),
+        onQuotedNoteClick = params.onNoteClick,
+        translationState = translationState,
+        onTranslate = { params.translationRepo?.translate(event.id, event.content) },
+        showDivider = false
+    )
+
+}
+
+private val notifDateTimeFormat = SimpleDateFormat("MMM d, HH:mm", Locale.US)
+private val notifDateTimeYearFormat = SimpleDateFormat("MMM d, yyyy", Locale.US)
+
+private fun formatNotifTimestamp(epoch: Long): String {
+    if (epoch == 0L) return ""
+    val now = System.currentTimeMillis()
+    val millis = epoch * 1000
+    val diff = now - millis
+
+    if (diff < 0) return notifDateTimeFormat.format(Date(millis))
+
+    val seconds = diff / 1000
+    val minutes = seconds / 60
+    val hours = minutes / 60
+
+    if (seconds < 60) return "${seconds}s"
+    if (minutes < 60) return "${minutes}m"
+    if (hours < 24) return "${hours}h"
+
+    val days = diff / (24 * 60 * 60 * 1000L)
+    if (days == 1L) return "yesterday"
+
+    val date = Date(millis)
+    val cal = java.util.Calendar.getInstance()
+    val currentYear = cal.get(java.util.Calendar.YEAR)
+    cal.time = date
+    val dateYear = cal.get(java.util.Calendar.YEAR)
+
+    return if (dateYear != currentYear) {
+        notifDateTimeYearFormat.format(date)
+    } else {
+        notifDateTimeFormat.format(date)
+    }
+}
+
+private fun formatSats(sats: Long): String = when {
+    sats >= 1_000_000 -> "${sats / 1_000_000}M sats"
+    sats >= 1_000 -> "${sats / 1_000}K sats"
+    else -> "$sats sats"
+}
