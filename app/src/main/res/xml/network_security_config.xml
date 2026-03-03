@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext ws:// for .onion domains (TLS is redundant over Tor) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">onion</domain>
+    </domain-config>
+</network-security-config>

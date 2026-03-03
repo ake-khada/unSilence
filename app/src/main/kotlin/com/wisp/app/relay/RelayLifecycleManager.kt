@@ -142,12 +142,15 @@ class RelayLifecycleManager(
     /**
      * Handle Tor on/off switch. Swaps the OkHttpClient, reconnects all relays,
      * and re-establishes subscriptions via [onReconnected].
-     * Uses a longer timeout since Tor connections are slower.
+     * Pass the full saved relay list so .onion relays are included when Tor turns on.
      */
-    fun onTorSwitch() {
+    fun onTorSwitch(
+        savedConfigs: List<RelayConfig>? = null,
+        savedDmUrls: List<String>? = null
+    ) {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            relayPool.swapClientAndReconnect()
+            relayPool.swapClientAndReconnect(savedConfigs, savedDmUrls)
             relayPool.awaitAnyConnected(minCount = 3, timeoutMs = 10_000)
             relayPool.appIsActive = true
             onReconnected(true)
