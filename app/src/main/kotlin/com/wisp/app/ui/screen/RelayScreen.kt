@@ -28,11 +28,13 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.wisp.app.relay.RelayConfig
 import com.wisp.app.relay.RelayPool
@@ -47,6 +49,7 @@ fun RelayScreen(
     onBack: () -> Unit,
     signer: com.wisp.app.nostr.NostrSigner? = null
 ) {
+    val context = LocalContext.current
     val selectedTab by viewModel.selectedTab.collectAsState()
     val relays by viewModel.relays.collectAsState()
     val dmRelays by viewModel.dmRelays.collectAsState()
@@ -94,7 +97,7 @@ fun RelayScreen(
                     OutlinedTextField(
                         value = newRelayUrl,
                         onValueChange = { viewModel.updateNewRelayUrl(it) },
-                        label = { Text("wss://...") },
+                        label = { Text("wss:// or ws://.onion") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -114,7 +117,11 @@ fun RelayScreen(
                         RelaySetType.BLOCKED -> "Broadcast Blocked Relays"
                     }
                     Button(
-                        onClick = { viewModel.publishRelayList(relayPool, signer = signer) },
+                        onClick = {
+                            val ok = viewModel.publishRelayList(relayPool, signer = signer)
+                            val msg = if (ok) "Relay list broadcast" else "Failed to broadcast"
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(buttonLabel)

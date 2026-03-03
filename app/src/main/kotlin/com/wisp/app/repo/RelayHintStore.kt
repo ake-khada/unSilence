@@ -33,7 +33,7 @@ class RelayHintStore(context: Context) {
 
     /** Add a single relay hint for a pubkey. */
     fun addHint(pubkey: String, relayUrl: String) {
-        if (relayUrl.isBlank() || !RelayConfig.isAcceptableUrl(relayUrl)) return
+        if (relayUrl.isBlank() || !RelayConfig.isValidUrl(relayUrl)) return
         @Suppress("NAME_SHADOWING")
         val relayUrl = relayUrl.trimEnd('/')
         val hints = cache.get(pubkey)
@@ -50,7 +50,7 @@ class RelayHintStore(context: Context) {
         for (tag in event.tags) {
             if (tag.size >= 3 && tag[0] == "p") {
                 val url = tag[2]
-                if (RelayConfig.isAcceptableUrl(url)) {
+                if (RelayConfig.isValidUrl(url)) {
                     addHint(tag[1], url)
                 }
             }

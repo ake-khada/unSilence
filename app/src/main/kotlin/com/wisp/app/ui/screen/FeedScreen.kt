@@ -899,15 +899,20 @@ private fun RelayPickerDialog(
                         } else {
                             IconButton(
                                 onClick = {
-                                    val domain = urlInput.trim()
+                                    val input = urlInput.trim().removeSuffix("/")
+                                    val domain = input
                                         .removePrefix("wss://")
                                         .removePrefix("ws://")
-                                        .removeSuffix("/")
                                     if (domain.isNotBlank()) {
                                         isProbing = true
                                         probeError = null
                                         scope.launch {
-                                            val result = onProbe(domain)
+                                            // If the user specified a protocol, try only that
+                                            val result = when {
+                                                input.startsWith("ws://") || input.startsWith("wss://") ->
+                                                    onProbe(input)
+                                                else -> onProbe(domain)
+                                            }
                                             isProbing = false
                                             if (result != null) {
                                                 onSelect(result)

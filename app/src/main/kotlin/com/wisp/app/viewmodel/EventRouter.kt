@@ -300,7 +300,7 @@ class EventRouter(
             for (tag in event.tags) {
                 if (tag.size >= 3 && tag[0] == "p") {
                     val url = tag[2].trimEnd('/')
-                    if (RelayConfig.isAcceptableUrl(url) && !relayListRepo.hasRelayList(tag[1])) {
+                    if (RelayConfig.isValidUrl(url) && !relayListRepo.hasRelayList(tag[1])) {
                         relayScoreBoard.addHintRelays(tag[1], listOf(url))
                     }
                 }
