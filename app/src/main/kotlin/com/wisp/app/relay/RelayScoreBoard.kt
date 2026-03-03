@@ -83,9 +83,19 @@ class RelayScoreBoard(
             }
         }
 
+        val onionRelays = newRelayAuthors.keys.filter { RelayConfig.isOnionUrl(it) }
         Log.d(TAG, "recompute(): ${follows.size} follows, $knownCount have relay lists, " +
                 "${follows.size - knownCount} missing, ${newRelayAuthors.size} unique relays" +
                 if (excludeRelays.isNotEmpty()) ", ${excludeRelays.size} excluded" else "")
+        if (onionRelays.isNotEmpty()) {
+            Log.d("TorRelay", "[ScoreBoard] recompute: ${onionRelays.size} .onion relays found: $onionRelays")
+            for (url in onionRelays) {
+                val authors = newRelayAuthors[url]?.size ?: 0
+                Log.d("TorRelay", "[ScoreBoard]   $url — $authors author(s)")
+            }
+        } else {
+            Log.d("TorRelay", "[ScoreBoard] recompute: no .onion relays found among ${newRelayAuthors.size} unique relays")
+        }
 
         if (newRelayAuthors.isEmpty()) {
             scoredRelays = emptyList()
@@ -182,7 +192,7 @@ class RelayScoreBoard(
     @Synchronized fun addHintRelays(pubkey: String, urls: List<String>) {
         if (pubkey !in cachedFollowSet) return  // only for followed authors
         if (pubkey in authorToRelays) return     // already has confirmed relay list
-        val validUrls = urls.map { it.trimEnd('/') }.filter { RelayConfig.isAcceptableUrl(it) }
+        val validUrls = urls.map { it.trimEnd('/') }.filter { RelayConfig.isValidUrl(it) }
         if (validUrls.isEmpty()) return
 
         val hints = hintAuthorRelays.getOrPut(pubkey) { mutableSetOf() }

@@ -106,7 +106,7 @@ class RelaySetRepository(private val context: Context, pubkeyHex: String? = null
             pubkey = owner,
             dTag = tag,
             name = name,
-            relays = relays.map { it.trim().trimEnd('/') }.filter { RelayConfig.isAcceptableUrl(it) }.toSet(),
+            relays = relays.map { it.trim().trimEnd('/') }.filter { RelayConfig.isValidUrl(it) }.toSet(),
             createdAt = System.currentTimeMillis() / 1000
         )
         relaySets["$owner:$tag"] = set
