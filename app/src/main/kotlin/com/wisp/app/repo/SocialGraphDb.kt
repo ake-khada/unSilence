@@ -61,6 +61,22 @@ class SocialGraphDb(context: Context) : SQLiteOpenHelper(context, "social_graph.
         }
     }
 
+    fun getTopByFollowerCount(limit: Int, fromPubkeys: Set<String>): List<Pair<String, Int>> {
+        if (fromPubkeys.isEmpty()) return emptyList()
+        val result = mutableListOf<Pair<String, Int>>()
+        val db = readableDatabase
+        val placeholders = fromPubkeys.joinToString(",") { "?" }
+        db.rawQuery(
+            "SELECT pubkey, COUNT(*) as cnt FROM followed_by WHERE follower IN ($placeholders) GROUP BY pubkey ORDER BY cnt DESC LIMIT ?",
+            fromPubkeys.toTypedArray() + limit.toString()
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(cursor.getString(0) to cursor.getInt(1))
+            }
+        }
+        return result
+    }
+
     fun clearAll() {
         try {
             writableDatabase.execSQL("DELETE FROM followed_by")
