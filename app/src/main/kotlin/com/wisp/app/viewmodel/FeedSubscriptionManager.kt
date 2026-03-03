@@ -144,6 +144,13 @@ class FeedSubscriptionManager(
                 }
             }
             FeedType.RELAY -> {
+                // Skip if already in RELAY mode — setSelectedRelay() already triggered
+                // subscribeRelayFeed(). Double-subscribing causes a race where the second
+                // call finds the ephemeral relay still connecting and fails.
+                if (prev == FeedType.RELAY) {
+                    Log.d("RLC", "[FeedSub] setFeedType RELAY → RELAY — skipping, already subscribed")
+                    return
+                }
                 eventRepo.clearRelayFeed()
                 subscribeRelayFeed()
             }
@@ -447,7 +454,6 @@ class FeedSubscriptionManager(
     // -- Isolated relay feed subscription --
 
     private fun subscribeRelayFeed() {
-        Log.d("RLC", "[FeedSub] subscribeRelayFeed()")
         val oldSubId = relayFeedSubId
         relayFeedGeneration++
         relayFeedSubId = "relay-feed-$relayFeedGeneration"

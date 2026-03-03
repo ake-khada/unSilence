@@ -606,10 +606,26 @@ class RelayPool {
             }
         }
 
-        // Cap ephemeral relays to prevent connection explosion
+        // Cap ephemeral relays to prevent connection explosion.
+        // Evict the least-recently-used ephemeral relay to make room — user-initiated
+        // connections (relay feed, thread views) shouldn't fail because stale outbox
+        // routing connections filled the pool.
         if (!ephemeralRelays.containsKey(url) && ephemeralRelays.size >= MAX_EPHEMERAL) {
-            Log.d("RLC", "[Pool] sendToRelayOrEphemeral($url) SKIPPED — ephemeral cap ($MAX_EPHEMERAL) reached")
-            return false
+            val lruEntry = ephemeralLastUsed.minByOrNull { it.value }
+            if (lruEntry != null) {
+                val evictUrl = lruEntry.key
+                Log.d("RLC", "[Pool] ephemeral cap reached — evicting LRU ephemeral $evictUrl")
+                ephemeralRelays.remove(evictUrl)?.disconnect()
+                ephemeralLastUsed.remove(evictUrl)
+                relayIndex.remove(evictUrl)
+                cancelRelayJobs(evictUrl)
+                activeSubscriptions.remove(evictUrl)
+                subscriptionTracker.untrackRelay(evictUrl)
+                updateConnectedCount()
+            } else {
+                Log.d("RLC", "[Pool] sendToRelayOrEphemeral($url) SKIPPED — ephemeral cap ($MAX_EPHEMERAL) reached")
+                return false
+            }
         }
 
         // Create ephemeral relay if needed — computeIfAbsent is atomic on ConcurrentHashMap
@@ -632,7 +648,11 @@ class RelayPool {
         }
         ephemeralLastUsed[url] = System.currentTimeMillis()
         val sent = ephemeral.send(message)
-        return sent || isNew  // new relays will drain queue on connect
+        // Return true if: message was sent immediately, OR relay is new (will drain
+        // queue on connect), OR relay exists but is still connecting (message was queued
+        // and will drain on connect — returning false here would incorrectly signal failure).
+        val isConnecting = !ephemeral.isConnected
+        return sent || isNew || isConnecting
     }
 
     private fun cooldownForFailure(httpCode: Int?): Long {
