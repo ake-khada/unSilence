@@ -52,7 +52,7 @@ private enum class OnboardingStep {
     WELCOME, DECENTRALIZATION, LONG_PRESS_DEMO, NWC_SETUP, WAITING
 }
 
-private const val UTXO_PICTURE = "https://nostr.build/i/p/e2ccf7cf20403f3f2a4a55b328f0de3be38558a7d5f33632fdaaefc726c1c8eb/pfp/1710366908.webp"
+private val UTXO_PICTURE: String? = null  // Generic avatar — avoids stale relay images
 
 @Composable
 fun ExistingUserOnboardingScreen(
