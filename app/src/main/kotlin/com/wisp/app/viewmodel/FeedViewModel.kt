@@ -285,17 +285,14 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun probeRelay(input: String): String? {
-        Log.d("TorRelay", "probeRelay input='$input' torEnabled=${TorManager.isEnabled()} socksPort=${TorManager.socksPort.value} proxy=${TorManager.proxy}")
         // If the caller already provided a full URL, try only that
         if (input.startsWith("ws://") || input.startsWith("wss://")) {
-            Log.d("TorRelay", "probeRelay: full URL provided, trying directly")
             return if (tryConnect(input)) input else null
         }
         // Bare domain — try both protocols
         val isOnion = input.contains(".onion")
         // .onion relays typically use ws:// (TLS is redundant over Tor), try that first
         if (isOnion) {
-            Log.d("TorRelay", "probeRelay: .onion domain, trying ws:// first")
             val wsUrl = "ws://$input"
             if (tryConnect(wsUrl)) return wsUrl
             val wssUrl = "wss://$input"
@@ -306,26 +303,21 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
             val wsUrl = "ws://$input"
             if (tryConnect(wsUrl)) return wsUrl
         }
-        Log.d("TorRelay", "probeRelay: all attempts failed for '$input'")
         return null
     }
 
     private suspend fun tryConnect(url: String): Boolean {
         val isTor = TorManager.isEnabled()
         val timeoutMs = if (isTor) 15_000L else 4_000L
-        Log.d("TorRelay", "tryConnect url='$url' isTor=$isTor timeoutMs=$timeoutMs")
         val client = HttpClientFactory.createRelayClient()
-        Log.d("TorRelay", "tryConnect client proxy=${client.proxy} dns=${client.dns.javaClass.simpleName}")
         val relay = Relay(RelayConfig(url, read = true, write = false), client)
         relay.autoReconnect = false
         return try {
             relay.connect()
             val connected = relay.awaitConnected(timeoutMs = timeoutMs)
-            Log.d("TorRelay", "tryConnect result: url='$url' connected=$connected")
             relay.disconnect()
             connected
         } catch (e: Exception) {
-            Log.e("TorRelay", "tryConnect exception: url='$url' error=${e.message}", e)
             relay.disconnect()
             false
         }
