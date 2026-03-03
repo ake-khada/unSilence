@@ -1080,8 +1080,12 @@ fun WispNavHost(
             SocialGraphScreen(
                 extendedNetworkRepo = feedViewModel.extendedNetworkRepo,
                 profileRepo = feedViewModel.profileRepo,
+                socialGraphDb = feedViewModel.socialGraphDb,
                 userPubkey = feedViewModel.getUserPubkey(),
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onNavigateToProfile = { pubkey ->
+                    navController.navigate("profile/$pubkey")
+                }
             )
         }
 
