@@ -340,7 +340,7 @@ class StartupCoordinator(
 
                     val subscriptionSent = fetchRelayListsForFollows(includeProfiles = true)
                     if (subscriptionSent) {
-                        val target = (follows.size * 0.7).toInt()
+                        val target = (follows.size * 0.8).toInt()
                         val deadline = System.currentTimeMillis() + 7_000
                         while (System.currentTimeMillis() < deadline) {
                             val covered = follows.size - relayListRepo.getMissingPubkeys(follows).size

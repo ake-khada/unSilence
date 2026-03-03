@@ -515,7 +515,7 @@ class RelayPool {
      * Send to only the first [maxRelays] connected relays (prioritizing pinned relays).
      * Used for metadata fetches where full broadcast is wasteful.
      */
-    fun sendToTopRelays(message: String, maxRelays: Int = 10) {
+    fun sendToTopRelays(message: String, maxRelays: Int = 10): Int {
         val subId = extractSubId(message)
         var sentCount = 0
         // Send to pinned relays first
@@ -545,6 +545,7 @@ class RelayPool {
             }
         }
         if (subId != null) Log.d("RLC", "[Pool] sendToTopRelays sub=$subId → $sentCount/$maxRelays relays")
+        return sentCount
     }
 
     fun sendToRelay(url: String, message: String) {
