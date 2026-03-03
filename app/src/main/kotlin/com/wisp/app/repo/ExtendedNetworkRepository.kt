@@ -12,6 +12,8 @@ import com.wisp.app.relay.RelayPool
 import com.wisp.app.relay.RelayScoreBoard
 import com.wisp.app.relay.SubscriptionManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -79,7 +81,7 @@ class ExtendedNetworkRepository(
     companion object {
         private const val TAG = "ExtendedNetworkRepo"
         private const val THRESHOLD = 10
-        private const val FOLLOW_LIST_TIMEOUT_MS = 3_000L
+        private const val FOLLOW_LIST_TIMEOUT_MS = 8_000L
         private const val RELAY_LIST_CHUNK_SIZE = 500
         private const val RELAY_LIST_TIMEOUT_MS = 8_000L
         private const val MAX_EXTENDED_RELAYS = 100
@@ -165,10 +167,32 @@ class ExtendedNetworkRepository(
             val allFilters = chunks.map { chunk -> Filter(kinds = listOf(3), authors = chunk) }
             val msg = if (allFilters.size == 1) ClientMessage.req(subId, allFilters[0])
             else ClientMessage.req(subId, allFilters)
-            relayPool.sendToTopRelays(msg, maxRelays = 15)
+            val sentCount = relayPool.sendToTopRelays(msg, maxRelays = 15)
 
-            // Wait with timeout, then close the single subscription
-            kotlinx.coroutines.delay(FOLLOW_LIST_TIMEOUT_MS)
+            // Coverage-based waiting: poll until 70% of follow lists received,
+            // EOSE from all relays, or hard timeout (8s).
+            val coverageTarget = (firstDegree.size * 0.7).toInt()
+            val deadline = System.currentTimeMillis() + FOLLOW_LIST_TIMEOUT_MS
+            coroutineScope {
+                val eoseDeferred = async {
+                    subManager.awaitEoseCount(subId, sentCount, FOLLOW_LIST_TIMEOUT_MS)
+                }
+                while (System.currentTimeMillis() < deadline) {
+                    val fetched = pendingFollowLists.size
+                    if (fetched >= coverageTarget) {
+                        Log.d(TAG, "Follow list coverage target met: $fetched/$coverageTarget")
+                        break
+                    }
+                    if (eoseDeferred.isCompleted) {
+                        Log.d(TAG, "All EOSE received, $fetched follow lists collected")
+                        break
+                    }
+                    kotlinx.coroutines.delay(200)
+                }
+                // Grace period for buffered events to flush through the processing pipeline
+                kotlinx.coroutines.delay(300)
+                eoseDeferred.cancel()
+            }
             subManager.closeSubscription(subId)
             discoveryTotal = 0
 
@@ -244,20 +268,41 @@ class ExtendedNetworkRepository(
                 val rlSubIds = mutableListOf<String>()
                 _discoveryState.value = DiscoveryState.FetchingRelayLists(0, missingRelayLists.size)
 
+                val sentCounts = mutableListOf<Pair<String, Int>>()
                 for ((i, chunk) in chunks.withIndex()) {
                     val rlSubId = "extnet-rl-$i"
                     rlSubIds.add(rlSubId)
                     val filter = Filter(kinds = listOf(10002), authors = chunk)
-                    relayPool.sendToTopRelays(ClientMessage.req(rlSubId, filter), maxRelays = 10)
+                    val sent = relayPool.sendToTopRelays(ClientMessage.req(rlSubId, filter), maxRelays = 10)
+                    sentCounts.add(rlSubId to sent)
                 }
 
-                kotlinx.coroutines.delay(RELAY_LIST_TIMEOUT_MS)
+                // Coverage-based waiting: poll until 70% of relay lists received,
+                // EOSE from all relays, or hard timeout.
+                val rlCoverageTarget = (missingRelayLists.size * 0.7).toInt()
+                val rlDeadline = System.currentTimeMillis() + RELAY_LIST_TIMEOUT_MS
+                coroutineScope {
+                    val eoseDeferreds = sentCounts.map { (subId, count) ->
+                        async { subManager.awaitEoseCount(subId, count, RELAY_LIST_TIMEOUT_MS) }
+                    }
+                    while (System.currentTimeMillis() < rlDeadline) {
+                        val stillMissing = relayListRepo.getMissingPubkeys(qualified.toList()).size
+                        val fetched = missingRelayLists.size - stillMissing
+                        _discoveryState.value = DiscoveryState.FetchingRelayLists(fetched, missingRelayLists.size)
+                        if (fetched >= rlCoverageTarget) {
+                            Log.d(TAG, "Relay list coverage target met: $fetched/$rlCoverageTarget")
+                            break
+                        }
+                        if (eoseDeferreds.all { it.isCompleted }) {
+                            Log.d(TAG, "All relay list EOSE received, $fetched relay lists collected")
+                            break
+                        }
+                        kotlinx.coroutines.delay(200)
+                    }
+                    kotlinx.coroutines.delay(300)
+                    eoseDeferreds.forEach { it.cancel() }
+                }
                 for (rlSubId in rlSubIds) subManager.closeSubscription(rlSubId)
-
-                _discoveryState.value = DiscoveryState.FetchingRelayLists(
-                    fetched = missingRelayLists.size,
-                    total = missingRelayLists.size
-                )
             }
 
             // Step 5: Greedy set-cover to find optimal relays for the extended network
