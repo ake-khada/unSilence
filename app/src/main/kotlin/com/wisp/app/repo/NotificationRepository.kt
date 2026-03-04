@@ -51,6 +51,9 @@ class NotificationRepository(
 
     private var lastReadTimestamp: Long = prefs.getLong(KEY_LAST_READ, 0L)
 
+    private val _replyReceived = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val replyReceived: SharedFlow<Unit> = _replyReceived
+
     private val _notifReceived = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val notifReceived: SharedFlow<Unit> = _notifReceived
 
@@ -88,10 +91,15 @@ class NotificationRepository(
                     _hasUnread.value = true
                 }
                 if (event.created_at >= soundEligibleAfter && appIsActive) {
-                    if (event.kind == 9735) {
-                        _zapReceived.tryEmit(Unit)
-                    } else {
-                        _notifReceived.tryEmit(Unit)
+                    when (event.kind) {
+                        9735 -> _zapReceived.tryEmit(Unit)
+                        1 -> {
+                            // Replies get the ICQ flower effect; quotes/mentions get generic blip
+                            val isReply = Nip10.getReplyTarget(event) != null
+                            if (isReply) _replyReceived.tryEmit(Unit)
+                            else _notifReceived.tryEmit(Unit)
+                        }
+                        else -> _notifReceived.tryEmit(Unit)
                     }
                 }
             }
