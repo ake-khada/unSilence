@@ -6,7 +6,14 @@
       "Bash(cd /home/aivii/projects/barq\nBASE=app/src/main/kotlin/com/barq/app\ngit mv \"$BASE/WispApp.kt\" \"$BASE/BarqApp.kt\"\ngit mv \"$BASE/ui/component/WispDrawerContent.kt\" \"$BASE/ui/component/BarqDrawerContent.kt\"\ngit mv \"$BASE/ui/component/WispLogo.kt\" \"$BASE/ui/component/BarqLogo.kt\"\necho \"File renames done: exit code $?\")",
       "Bash(./gradlew assembleDebug 2>&1)",
       "Bash(./gradlew assembleDebug --stacktrace 2>&1 | tail -80)",
-      "Bash(./gradlew assembleDebug --stacktrace 2>&1 | head -60)"
+      "Bash(./gradlew assembleDebug --stacktrace 2>&1 | head -60)",
+      "Bash(find /home/aivii/projects/barq -type f -name \"*wisp*\" 2>/dev/null | head -50)",
+      "Bash(find /home/aivii/projects/barq -type f \\\\\\( -name \"*.kt\" -o -name \"*.xml\" -o -name \"*.gradle\" -o -name \"*.pro\" -o -name \"*.json\" \\\\\\) 2>/dev/null | head -100)",
+      "Bash(git rm -r --quiet app/src/main/kotlin/com/wisp/ 2>&1 | head -5)",
+      "Bash(git rm -r --quiet --force app/src/main/kotlin/com/wisp/ 2>&1)",
+      "Bash(grep -l \"Wisp\\\\|wisp\" /home/aivii/projects/barq/.claude/nips/*.md /home/aivii/projects/barq/.claude/skills/nostr-protocol.md 2>/dev/null)",
+      "Bash(grep -ri \"wisp\" /home/aivii/projects/barq/ --include=\"*.kt\" --include=\"*.xml\" --include=\"*.kts\" --include=\"*.gradle\" --include=\"*.json\" --include=\"*.md\" --include=\"*.pro\" --include=\"*.txt\" 2>/dev/null | grep -v \"/build/\" | grep -v \"LICENSE\" | grep -v \"settings.local.json\")",
+      "Bash(git add .claude/nips/ .claude/skills/ .claude/settings.local.json CLAUDE.md README.md app/build.gradle.kts app/release/output-metadata.json app/src/main/AndroidManifest.xml app/src/main/baseline-prof.txt app/src/main/res/values/themes.xml settings.gradle.kts)"
     ]
   }
 }
