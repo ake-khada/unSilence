@@ -1,6 +1,6 @@
 # NIP-42: Authentication
 
-**Status in Wisp:** Not yet implemented
+**Status in Barq:** Not yet implemented
 **Depends on:** NIP-01
 **Kind:** 22242 (regular, ephemeral-like)
 

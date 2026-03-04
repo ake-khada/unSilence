@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.wisp.app"
+    namespace = "com.barq.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.wisp.app"
+        applicationId = "com.barq.app"
         minSdk = 26
         targetSdk = 35
         versionCode = 14
