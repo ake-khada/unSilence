@@ -55,11 +55,13 @@ fun DmBubble(
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Column {
+                val textColor = if (isSent) MaterialTheme.colorScheme.onPrimary
+                    else MaterialTheme.colorScheme.onSurface
                 RichContent(
                     content = content,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (isSent) MaterialTheme.colorScheme.onPrimary
-                    else MaterialTheme.colorScheme.onSurface,
+                    color = textColor,
+                    linkColor = textColor,
                     eventRepo = eventRepo
                 )
                 Row(
