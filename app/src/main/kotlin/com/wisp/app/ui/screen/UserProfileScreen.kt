@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -29,6 +31,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -39,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -54,6 +58,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -74,8 +79,10 @@ import com.wisp.app.repo.Nip05Status
 import com.wisp.app.repo.RelayInfoRepository
 import com.wisp.app.repo.TranslationRepository
 import com.wisp.app.ui.component.FollowButton
+import com.wisp.app.ui.component.ContentSegment
 import com.wisp.app.ui.component.FullScreenImageViewer
 import com.wisp.app.ui.component.PostCard
+import com.wisp.app.ui.component.parseContent
 import com.wisp.app.ui.component.QrCodeDialog
 import com.wisp.app.ui.component.ProfilePicture
 import com.wisp.app.ui.component.RichContent
@@ -219,7 +226,23 @@ fun UserProfileScreen(
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var blockedContentRevealed by remember { mutableStateOf(false) }
-    val tabTitles = listOf("Notes", "Replies", "Following", "Relays")
+    var fullScreenMediaImageUrl by remember { mutableStateOf<String?>(null) }
+    var fullScreenMediaVideoUrl by remember { mutableStateOf<String?>(null) }
+    val tabTitles = listOf("Notes", "Replies", "Media", "Following", "Relays")
+
+    if (fullScreenMediaImageUrl != null) {
+        FullScreenImageViewer(
+            imageUrl = fullScreenMediaImageUrl!!,
+            onDismiss = { fullScreenMediaImageUrl = null }
+        )
+    }
+
+    if (fullScreenMediaVideoUrl != null) {
+        com.wisp.app.ui.component.FullScreenVideoPlayer(
+            videoUrl = fullScreenMediaVideoUrl!!,
+            onDismiss = { fullScreenMediaVideoUrl = null }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -303,7 +326,42 @@ fun UserProfileScreen(
             )
         }
     ) { padding ->
+        val mediaItems = remember(rootNotes.size, replies.size, selectedTab) {
+            if (selectedTab != 2) emptyList()
+            else (rootNotes + replies)
+                .sortedByDescending { it.created_at }
+                .flatMap { event ->
+                    parseContent(event.content).mapNotNull { segment ->
+                        when (segment) {
+                            is ContentSegment.ImageSegment -> MediaItem(segment.url, MediaType.IMAGE)
+                            is ContentSegment.VideoSegment -> MediaItem(segment.url, MediaType.VIDEO)
+                            else -> null
+                        }
+                    }
+                }
+                .distinctBy { it.url }
+        }
+
+        val listState = rememberLazyListState()
+
+        // Auto-load more media when scrolling near the bottom of the grid
+        if (selectedTab == 2 && mediaItems.isNotEmpty()) {
+            LaunchedEffect(listState) {
+                snapshotFlow {
+                    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                    val totalItems = listState.layoutInfo.totalItemsCount
+                    lastVisible to totalItems
+                }.collect { (lastVisible, totalItems) ->
+                    if (totalItems > 0 && lastVisible >= totalItems - 3) {
+                        viewModel.loadMoreNotes()
+                        viewModel.loadMoreReplies()
+                    }
+                }
+            }
+        }
+
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -330,9 +388,10 @@ fun UserProfileScreen(
             }
 
             stickyHeader {
-                TabRow(
+                ScrollableTabRow(
                     selectedTabIndex = selectedTab,
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    edgePadding = 16.dp
                 ) {
                     tabTitles.forEachIndexed { index, title ->
                         Tab(
@@ -541,6 +600,19 @@ fun UserProfileScreen(
                     }
                 }
                 2 -> {
+                    if (mediaItems.isEmpty()) {
+                        item { EmptyTabContent("No media yet") }
+                    } else {
+                        items(items = mediaItems.chunked(3), key = { row -> row.first().url }) { row ->
+                            MediaGridRow(
+                                items = row,
+                                onImageClick = { url -> fullScreenMediaImageUrl = url },
+                                onVideoClick = { url -> fullScreenMediaVideoUrl = url }
+                            )
+                        }
+                    }
+                }
+                3 -> {
                     if (followList.isEmpty()) {
                         item { EmptyTabContent("Not following anyone") }
                     } else {
@@ -559,7 +631,7 @@ fun UserProfileScreen(
                         }
                     }
                 }
-                3 -> {
+                4 -> {
                     if (relayList.isEmpty() && relayHints.isEmpty()) {
                         item { EmptyTabContent("No relay list published") }
                     } else {
@@ -1131,6 +1203,64 @@ private fun EmptyTabContent(message: String) {
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+private enum class MediaType { IMAGE, VIDEO }
+
+private data class MediaItem(val url: String, val type: MediaType)
+
+@Composable
+private fun MediaGridRow(
+    items: List<MediaItem>,
+    onImageClick: (String) -> Unit,
+    onVideoClick: (String) -> Unit
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 2.dp)
+    ) {
+        items.forEach { item ->
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .aspectRatio(1f)
+                    .clickable {
+                        when (item.type) {
+                            MediaType.IMAGE -> onImageClick(item.url)
+                            MediaType.VIDEO -> onVideoClick(item.url)
+                        }
+                    }
+            ) {
+                AsyncImage(
+                    model = item.url,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (item.type == MediaType.VIDEO) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.3f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Play video",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                }
+            }
+        }
+        // Fill remaining cells in incomplete rows
+        repeat(3 - items.size) {
+            Spacer(modifier = Modifier.weight(1f))
+        }
     }
 }
 

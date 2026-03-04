@@ -102,7 +102,7 @@ data class NoteActions(
     val onRelayClick: ((String) -> Unit)? = null,
 )
 
-private sealed interface ContentSegment {
+internal sealed interface ContentSegment {
     data class TextSegment(val text: String) : ContentSegment
     data class ImageSegment(val url: String) : ContentSegment
     data class VideoSegment(val url: String) : ContentSegment
@@ -138,7 +138,7 @@ private fun isStandaloneUrl(content: String, matchRange: IntRange): Boolean {
     return true
 }
 
-private fun parseContent(content: String, emojiMap: Map<String, String> = emptyMap()): List<ContentSegment> {
+internal fun parseContent(content: String, emojiMap: Map<String, String> = emptyMap()): List<ContentSegment> {
     val segments = mutableListOf<ContentSegment>()
     var lastEnd = 0
 

@@ -344,6 +344,15 @@ fun WispNavHost(
         }
     }
 
+    var isReplyAnimating by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        notificationsViewModel.replyReceived.collect {
+            isReplyAnimating = true
+            kotlinx.coroutines.delay(1000)
+            isReplyAnimating = false
+        }
+    }
+
     val notifPrefs = remember { context.getSharedPreferences("wisp_settings", Context.MODE_PRIVATE) }
     var notifSoundEnabled by rememberSaveable { mutableStateOf(notifPrefs.getBoolean("notif_sound_enabled", true)) }
     val notifBlipSound = remember { NotifBlipSound(context) }
@@ -380,6 +389,7 @@ fun WispNavHost(
                     hasUnreadMessages = hasUnreadDms,
                     hasUnreadNotifications = hasUnreadNotifications,
                     isZapAnimating = isZapAnimating,
+                    isReplyAnimating = isReplyAnimating,
                     onTabSelected = { tab ->
                         if (currentRoute == tab.route) {
                             scrollToTopTrigger++
