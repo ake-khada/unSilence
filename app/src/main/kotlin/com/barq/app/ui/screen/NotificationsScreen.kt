@@ -27,7 +27,7 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.AlternateEmail
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.CurrencyBitcoin
+import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.AlertDialog
@@ -378,7 +378,7 @@ private fun DailySummaryBar(summary: NotificationSummary, onFilterSelect: (Notif
             )
             SummaryStat(Icons.Outlined.ChatBubbleOutline, summary.replyCount.toString()) { onFilterSelect(NotificationFilter.REPLIES) }
             SummaryStat(Icons.Outlined.FavoriteBorder, summary.reactionCount.toString()) { onFilterSelect(NotificationFilter.REACTIONS) }
-            SummaryStat(Icons.Outlined.CurrencyBitcoin, formatSatsCompact(summary.zapSats)) { onFilterSelect(NotificationFilter.ZAPS) }
+            SummaryStat(Icons.Outlined.ElectricBolt, formatSatsCompact(summary.zapSats)) { onFilterSelect(NotificationFilter.ZAPS) }
             SummaryStat(Icons.Outlined.Repeat, summary.repostCount.toString()) { onFilterSelect(NotificationFilter.REPOSTS) }
             SummaryStat(Icons.Outlined.AlternateEmail, (summary.mentionCount + summary.quoteCount).toString()) { onFilterSelect(NotificationFilter.MENTIONS) }
         }

@@ -2,6 +2,7 @@ package com.barq.app
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.padding
@@ -91,6 +92,11 @@ import com.barq.app.viewmodel.SearchViewModel
 import com.barq.app.viewmodel.HashtagFeedViewModel
 import com.barq.app.viewmodel.OnboardingViewModel
 import com.barq.app.viewmodel.WalletViewModel
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import kotlinx.coroutines.launch
 
 object Routes {
@@ -125,10 +131,7 @@ object Routes {
 }
 
 @Composable
-fun BarqNavHost(
-    isDarkTheme: Boolean = true,
-    onToggleTheme: () -> Unit = {}
-) {
+fun BarqNavHost() {
     val navController = rememberNavController()
     val authViewModel: AuthViewModel = viewModel()
     val feedViewModel: FeedViewModel = viewModel()
@@ -329,6 +332,18 @@ fun BarqNavHost(
     val hasUnreadDms by dmListViewModel.hasUnreadDms.collectAsState()
     val hasUnreadNotifications by notificationsViewModel.hasUnread.collectAsState()
 
+    // Immersive scrolling: FeedScreen reports scroll direction; bottom bar hides/shows accordingly
+    var feedScrolledDown by remember { mutableStateOf(false) }
+    LaunchedEffect(currentRoute) {
+        if (currentRoute != Routes.FEED) feedScrolledDown = false
+    }
+    var bottomBarHeightPx by remember { mutableStateOf(0) }
+    val bottomBarOffsetFraction by animateFloatAsState(
+        targetValue = if (showBottomBar && !(currentRoute == Routes.FEED && feedScrolledDown)) 0f else 1f,
+        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+        label = "bottomBarOffset"
+    )
+
     var isZapAnimating by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         notificationsViewModel.zapReceived.collect {
@@ -364,29 +379,9 @@ fun BarqNavHost(
         )
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        bottomBar = {
-            if (showBottomBar) {
-                BarqBottomBar(
-                    currentRoute = currentRoute,
-                    hasUnreadHome = newNoteCount > 0,
-                    hasUnreadMessages = hasUnreadDms,
-                    hasUnreadNotifications = hasUnreadNotifications,
-                    isZapAnimating = isZapAnimating,
-                    onTabSelected = { tab ->
-                        if (currentRoute == tab.route) {
-                            scrollToTopTrigger++
-                        } else {
-                            navController.navigate(tab.route) {
-                                popUpTo(Routes.FEED) { inclusive = false }
-                                launchSingleTop = true
-                            }
-                        }
-                    }
-                )
-            }
-        }
     ) { innerPadding ->
 
     val broadcastState by feedViewModel.relayPool.broadcastState.collectAsState()
@@ -450,12 +445,11 @@ fun BarqNavHost(
         composable(Routes.FEED) {
             FeedScreen(
                 viewModel = feedViewModel,
-                isDarkTheme = isDarkTheme,
-                onToggleTheme = onToggleTheme,
                 isTorEnabled = isTorEnabled,
                 torStatus = torStatus,
                 onToggleTor = onToggleTor,
                 scrollToTopTrigger = scrollToTopTrigger,
+                onScrollDirectionChanged = { feedScrolledDown = it },
                 onCompose = {
                     replyTarget = null
                     quoteTarget = null
@@ -1417,4 +1411,34 @@ fun BarqNavHost(
     } // Box
 
     } // Scaffold
+
+    if (showBottomBar) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 8.dp)
+                .onSizeChanged { bottomBarHeightPx = it.height }
+                .graphicsLayer { translationY = bottomBarHeightPx * bottomBarOffsetFraction }
+        ) {
+            BarqBottomBar(
+                currentRoute = currentRoute,
+                hasUnreadHome = newNoteCount > 0,
+                hasUnreadMessages = hasUnreadDms,
+                hasUnreadNotifications = hasUnreadNotifications,
+                isZapAnimating = isZapAnimating,
+                onTabSelected = { tab ->
+                    if (currentRoute == tab.route) {
+                        scrollToTopTrigger++
+                    } else {
+                        navController.navigate(tab.route) {
+                            popUpTo(Routes.FEED) { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    } // outer Box
 }

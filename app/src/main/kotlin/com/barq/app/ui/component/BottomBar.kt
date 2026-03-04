@@ -16,15 +16,17 @@ import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material.icons.outlined.CurrencyBitcoin
+import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.dp
@@ -52,7 +54,10 @@ fun BarqBottomBar(
     isZapAnimating: Boolean = false,
     onTabSelected: (BottomTab) -> Unit
 ) {
-    NavigationBar {
+    NavigationBar(
+        containerColor = Color(0xFF000000),
+        windowInsets = WindowInsets(0, 0, 0, 0)
+    ) {
         BottomTab.entries.forEach { tab ->
             val selected = currentRoute == tab.route
             val hasUnread = when (tab) {
@@ -72,7 +77,7 @@ fun BarqBottomBar(
                         contentAlignment = Alignment.Center
                     ) {
                         val icon = if (tab == BottomTab.NOTIFICATIONS && isZapAnimating)
-                            Icons.Outlined.CurrencyBitcoin
+                            Icons.Outlined.ElectricBolt
                         else if (selected) tab.selectedIcon
                         else tab.unselectedIcon
                         Icon(
