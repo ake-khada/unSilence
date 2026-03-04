@@ -50,6 +50,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -230,6 +231,7 @@ fun RichContent(
     content: String,
     style: TextStyle = MaterialTheme.typography.bodyLarge,
     color: Color = MaterialTheme.colorScheme.onSurface,
+    linkColor: Color = Color.Unspecified,
     emojiMap: Map<String, String> = emptyMap(),
     plainLinks: Boolean = false,
     eventRepo: EventRepository? = null,
@@ -280,7 +282,9 @@ fun RichContent(
         }
     }
 
-    val primaryColor = MaterialTheme.colorScheme.primary
+    val defaultLinkColor = MaterialTheme.colorScheme.primary
+    val effectiveLinkColor = if (linkColor == Color.Unspecified) defaultLinkColor else linkColor
+    val linkDecoration = if (linkColor == Color.Unspecified) TextDecoration.None else TextDecoration.Underline
     val uriHandler = LocalUriHandler.current
     val effectiveHashtagClick = onHashtagClick ?: noteActions?.onHashtagClick
     val effectiveRelayClick = noteActions?.onRelayClick
@@ -350,7 +354,7 @@ fun RichContent(
                                             effectiveHashtagClick?.invoke(tag)
                                         }
                                     ) {
-                                        withStyle(SpanStyle(color = primaryColor)) {
+                                        withStyle(SpanStyle(color = effectiveLinkColor, textDecoration = linkDecoration)) {
                                             append("#${seg.tag}")
                                         }
                                     }
@@ -363,7 +367,7 @@ fun RichContent(
                                             onProfileClick?.invoke(pubkey)
                                         }
                                     ) {
-                                        withStyle(SpanStyle(color = primaryColor)) {
+                                        withStyle(SpanStyle(color = effectiveLinkColor, textDecoration = linkDecoration)) {
                                             append("@$displayName")
                                         }
                                     }
@@ -376,7 +380,7 @@ fun RichContent(
                                             uriHandler.openUri(linkUrl)
                                         }
                                     ) {
-                                        withStyle(SpanStyle(color = primaryColor)) {
+                                        withStyle(SpanStyle(color = effectiveLinkColor, textDecoration = linkDecoration)) {
                                             append(displayUrl)
                                         }
                                     }
@@ -396,7 +400,7 @@ fun RichContent(
                                             }
                                         }
                                     ) {
-                                        withStyle(SpanStyle(color = primaryColor)) {
+                                        withStyle(SpanStyle(color = effectiveLinkColor, textDecoration = linkDecoration)) {
                                             append(displayUrl)
                                         }
                                     }
