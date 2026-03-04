@@ -15,11 +15,11 @@ No test suite exists yet. JDK 17 and Android SDK 35 are required.
 
 ## Architecture
 
-Barq is a minimal Android Nostr client using Kotlin + Jetpack Compose (Material 3). MVVM with five layers:
+Wisp is a minimal Android Nostr client using Kotlin + Jetpack Compose (Material 3). MVVM with five layers:
 
 **UI** (`ui/screen/`, `ui/component/`) → **ViewModel** (`viewmodel/`) → **Repository** (`repo/`) → **Protocol** (`nostr/`) → **Relay** (`relay/`)
 
-All source lives under `app/src/main/kotlin/com/barq/app/`.
+All source lives under `app/src/main/kotlin/com/wisp/app/`.
 
 ### Key Design Decisions
 

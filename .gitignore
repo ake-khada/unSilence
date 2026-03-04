@@ -5,11 +5,10 @@
 .DS_Store
 /build
 /app/build
+/app/release
 /captures
 .externalNativeBuild
 .cxx
 local.properties
 *.hprof
 node_modules/
-app/release/
-app/release/

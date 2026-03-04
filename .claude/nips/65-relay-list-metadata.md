@@ -1,6 +1,6 @@
 # NIP-65: Relay List Metadata
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 **Kind:** 10002 (replaceable)
 
@@ -102,4 +102,4 @@ Kind 10002 is replaceable — same pattern as NIP-02:
 - The outbox model requires fetching relay lists for every user you want to follow
 - Batch relay list fetches to avoid N+1 query patterns
 - Some relays may not store kind 10002 events
-- Barq currently uses hardcoded default relays — kind 10002 would make this dynamic
+- Wisp currently uses hardcoded default relays — kind 10002 would make this dynamic

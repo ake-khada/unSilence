@@ -1,4 +1,4 @@
-# Nostr NIP Reference — Barq Project
+# Nostr NIP Reference — Wisp Project
 
 Local condensed NIP references for development. Each file is an actionable
 developer summary (not a full spec copy).

@@ -1,6 +1,6 @@
 # NIP-51: Lists
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 
 ## Overview

@@ -1,6 +1,6 @@
 # NIP-05: DNS-Based Verification
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 
 ## Overview

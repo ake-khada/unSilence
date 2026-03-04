@@ -1,0 +1,677 @@
+package com.wisp.app.ui.screen
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.ReceiveContentListener
+import androidx.compose.foundation.content.TransferableContent
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import coil3.compose.AsyncImage
+import com.wisp.app.nostr.Nip19
+import com.wisp.app.nostr.NostrEvent
+import com.wisp.app.relay.RelayPool
+import com.wisp.app.repo.EventRepository
+import com.wisp.app.repo.MentionCandidate
+import com.wisp.app.repo.ProfileRepository
+import com.wisp.app.ui.component.MentionVisualTransformation
+import com.wisp.app.ui.component.ProfilePicture
+import com.wisp.app.ui.component.RichContent
+import com.wisp.app.viewmodel.ComposeViewModel
+import com.wisp.app.viewmodel.PowManager
+import com.wisp.app.viewmodel.PowStatus
+import com.wisp.app.repo.PowPreferences
+import androidx.compose.foundation.border
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.animation.animateContentSize
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun ComposeScreen(
+    viewModel: ComposeViewModel,
+    relayPool: RelayPool,
+    replyTo: NostrEvent?,
+    quoteTo: NostrEvent? = null,
+    onBack: () -> Unit,
+    outboxRouter: com.wisp.app.relay.OutboxRouter? = null,
+    eventRepo: EventRepository? = null,
+    profileRepo: ProfileRepository? = null,
+    userPubkey: String? = null,
+    signer: com.wisp.app.nostr.NostrSigner? = null,
+    onNotePublished: (() -> Unit)? = null,
+    powManager: PowManager? = null,
+    powPrefs: PowPreferences? = null
+) {
+    val content by viewModel.content.collectAsState()
+    val publishing by viewModel.publishing.collectAsState()
+    val error by viewModel.error.collectAsState()
+    val uploadedUrls by viewModel.uploadedUrls.collectAsState()
+    val uploadProgress by viewModel.uploadProgress.collectAsState()
+    val countdownSeconds by viewModel.countdownSeconds.collectAsState()
+    val mentionCandidates by viewModel.mentionCandidates.collectAsState()
+    val mentionQuery by viewModel.mentionQuery.collectAsState()
+    val explicit by viewModel.explicit.collectAsState()
+    val powEnabled by viewModel.powEnabled.collectAsState()
+    val powStatus = powManager?.status?.collectAsState()?.value ?: PowStatus.Idle
+    val isMiningBusy = powStatus is PowStatus.Mining
+    val context = LocalContext.current
+
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        if (uris.isNotEmpty()) viewModel.uploadMedia(uris, context.contentResolver, signer)
+    }
+
+    val accentColor = MaterialTheme.colorScheme.primary
+    val visualTransformation = remember(accentColor, profileRepo) {
+        MentionVisualTransformation(
+            accentColor = accentColor,
+            resolveDisplayName = { bech32 ->
+                if (profileRepo == null) return@MentionVisualTransformation null
+                try {
+                    val data = Nip19.decodeNostrUri("nostr:$bech32")
+                    if (data is com.wisp.app.nostr.NostrUriData.ProfileRef) {
+                        profileRepo.get(data.pubkey)?.displayString
+                    } else null
+                } catch (_: Exception) { null }
+            }
+        )
+    }
+
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        when {
+                            quoteTo != null -> "Quote"
+                            replyTo != null -> "Reply"
+                            else -> "New Post"
+                        }
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+        }
+    ) { padding ->
+        // Outer non-scrollable Column handles IME padding
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .imePadding()
+        ) {
+            // Inner scrollable content takes remaining space
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 16.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Reply context (expandable)
+                replyTo?.let {
+                    val replyProfile = profileRepo?.get(it.pubkey)
+                    val replyAuthorName = replyProfile?.displayString
+                        ?: "${it.pubkey.take(8)}..."
+                    var replyExpanded by remember { mutableStateOf(false) }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .clickable { replyExpanded = !replyExpanded }
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .animateContentSize()
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                ProfilePicture(url = replyProfile?.picture, size = 24)
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "Replying to ",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = replyAuthorName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    imageVector = if (replyExpanded) Icons.Filled.KeyboardArrowUp
+                                        else Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = if (replyExpanded) "Collapse" else "Expand",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            if (it.content.isNotBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = if (replyExpanded) it.content
+                                        else it.content.take(140) + if (it.content.length > 140) "..." else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = if (replyExpanded) Int.MAX_VALUE else 2
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Quote context with resolved display names
+                quoteTo?.let {
+                    val quoteAuthorName = profileRepo?.get(it.pubkey)?.displayString
+                        ?: "${it.pubkey.take(8)}..."
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = quoteAuthorName,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = it.content.take(200) + if (it.content.length > 200) "..." else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 4
+                            )
+                        }
+                    }
+                }
+
+                // Mention autocomplete dropdown
+                AnimatedVisibility(
+                    visible = mentionQuery != null && mentionCandidates.isNotEmpty(),
+                    enter = fadeIn() + slideInVertically(),
+                    exit = fadeOut() + slideOutVertically()
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        tonalElevation = 3.dp,
+                        shadowElevation = 2.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .padding(bottom = 4.dp)
+                    ) {
+                        LazyColumn {
+                            items(mentionCandidates, key = { it.profile.pubkey }) { candidate ->
+                                MentionCandidateRow(
+                                    candidate = candidate,
+                                    onClick = { viewModel.selectMention(candidate) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Text field with GIF keyboard support via BasicTextField(TextFieldState)
+                val textFieldState = remember { TextFieldState(content.text) }
+                val interactionSource = remember { MutableInteractionSource() }
+                val enabled = !publishing && countdownSeconds == null
+
+                // Sync ViewModel → TextFieldState (for programmatic updates: upload URL, mention select, etc.)
+                LaunchedEffect(content) {
+                    if (textFieldState.text.toString() != content.text) {
+                        textFieldState.edit {
+                            replace(0, length, content.text)
+                            selection = content.selection
+                        }
+                    }
+                }
+
+                // Sync TextFieldState → ViewModel (for user typing)
+                LaunchedEffect(textFieldState) {
+                    snapshotFlow {
+                        textFieldState.text.toString() to textFieldState.selection
+                    }.collect { (text, selection) ->
+                        if (text != content.text) {
+                            viewModel.updateContent(TextFieldValue(text, selection))
+                        }
+                    }
+                }
+
+                BasicTextField(
+                    state = textFieldState,
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .contentReceiver(object : ReceiveContentListener {
+                            override fun onReceive(
+                                transferableContent: TransferableContent
+                            ): TransferableContent? {
+                                if (!transferableContent.hasMediaType(MediaType.Image)) {
+                                    return transferableContent
+                                }
+                                val clipData = transferableContent.clipEntry.clipData
+                                val uris = (0 until clipData.itemCount)
+                                    .mapNotNull { i -> clipData.getItemAt(i).uri }
+                                if (uris.isNotEmpty()) {
+                                    viewModel.uploadMedia(uris, context.contentResolver, signer)
+                                }
+                                return transferableContent.consume { item -> item.uri != null }
+                            }
+                        }),
+                    enabled = enabled,
+                    lineLimits = TextFieldLineLimits.MultiLine(),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface
+                    ),
+                    decorator = { innerTextField ->
+                        OutlinedTextFieldDefaults.DecorationBox(
+                            value = textFieldState.text.toString(),
+                            innerTextField = innerTextField,
+                            enabled = enabled,
+                            singleLine = false,
+                            visualTransformation = visualTransformation,
+                            interactionSource = interactionSource,
+                            label = { Text("What's on your mind?") }
+                        )
+                    }
+                )
+
+                // Media previews
+                if (uploadedUrls.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    uploadedUrls.forEach { url ->
+                        Box(modifier = Modifier.padding(bottom = 8.dp)) {
+                            AsyncImage(
+                                model = url,
+                                contentDescription = "Attached media",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            IconButton(
+                                onClick = { viewModel.removeMediaUrl(url) },
+                                modifier = Modifier.align(Alignment.TopEnd)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Remove",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Attach row with preview toggle
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        },
+                        enabled = uploadProgress == null && countdownSeconds == null
+                    ) {
+                        Icon(Icons.Outlined.Image, contentDescription = "Attach media")
+                    }
+
+                    IconButton(onClick = { viewModel.toggleExplicit() }) {
+                        Icon(
+                            Icons.Outlined.Warning,
+                            contentDescription = "Mark as explicit",
+                            tint = if (explicit) MaterialTheme.colorScheme.error
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    IconButton(onClick = { powPrefs?.let { viewModel.togglePow(it) } }) {
+                        Icon(
+                            Icons.Outlined.Shield,
+                            contentDescription = "Proof of Work",
+                            tint = if (powEnabled) Color(0xFFFF9800)
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    if (uploadProgress != null) {
+                        Spacer(Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Uploading...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // NSFW feedback banner
+                AnimatedVisibility(
+                    visible = explicit,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Marked as NSFW",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+
+                // PoW enabled banner
+                AnimatedVisibility(
+                    visible = powEnabled,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    val difficulty = powPrefs?.getNoteDifficulty() ?: 16
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFFF9800).copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        val orange = Color(0xFFFF9800)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Shield,
+                                contentDescription = null,
+                                tint = orange,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "PoW: $difficulty bits (mined in background)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = orange
+                            )
+                        }
+                    }
+                }
+
+                // Live preview
+                AnimatedVisibility(
+                    visible = !imeVisible && content.text.isNotBlank() && eventRepo != null
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            val userProfile = userPubkey?.let { profileRepo?.get(it) }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            ) {
+                                ProfilePicture(url = userProfile?.picture, size = 32)
+                                Spacer(Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = userProfile?.displayString ?: "You",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = "Preview",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            RichContent(
+                                content = content.text,
+                                eventRepo = eventRepo
+                            )
+                        }
+                    }
+                }
+
+                error?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            // Bottom bar — always visible above keyboard
+            Column(modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp, top = 4.dp)) {
+                if (countdownSeconds != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { viewModel.cancelPublish() },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("Undo")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = { viewModel.publishNow() },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Post now (${countdownSeconds}s)")
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            viewModel.publish(
+                                relayPool = relayPool,
+                                replyTo = replyTo,
+                                quoteTo = quoteTo,
+                                onSuccess = { onBack() },
+                                outboxRouter = outboxRouter,
+                                signer = signer,
+                                onNotePublished = onNotePublished,
+                                powManager = powManager
+                            )
+                        },
+                        enabled = !publishing && !isMiningBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            when {
+                                isMiningBusy -> "Mining in progress..."
+                                publishing -> "Publishing..."
+                                else -> "Publish"
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MentionCandidateRow(
+    candidate: MentionCandidate,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ProfilePicture(
+            url = candidate.profile.picture,
+            size = 32,
+            showFollowBadge = candidate.isContact
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = candidate.profile.displayString,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+            val subtitle = candidate.profile.name?.let { "@$it" }
+                ?: candidate.profile.nip05
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+        }
+        if (candidate.isContact) {
+            Text(
+                text = "Following",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
