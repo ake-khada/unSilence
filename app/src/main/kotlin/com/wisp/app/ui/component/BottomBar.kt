@@ -50,6 +50,7 @@ fun WispBottomBar(
     hasUnreadMessages: Boolean,
     hasUnreadNotifications: Boolean,
     isZapAnimating: Boolean = false,
+    isReplyAnimating: Boolean = false,
     onTabSelected: (BottomTab) -> Unit
 ) {
     NavigationBar {
@@ -92,24 +93,29 @@ fun WispBottomBar(
                             )
                         }
                         if (tab == BottomTab.NOTIFICATIONS) {
+                            val zeroFootprintModifier = Modifier
+                                .size(120.dp)
+                                .layout { measurable, constraints ->
+                                    val placeable = measurable.measure(
+                                        constraints.copy(
+                                            minWidth = 0,
+                                            minHeight = 0
+                                        )
+                                    )
+                                    layout(0, 0) {
+                                        placeable.place(
+                                            -placeable.width / 2,
+                                            -placeable.height / 2
+                                        )
+                                    }
+                                }
                             ZapBurstEffect(
                                 isActive = isZapAnimating,
-                                modifier = Modifier
-                                    .size(120.dp)
-                                    .layout { measurable, constraints ->
-                                        val placeable = measurable.measure(
-                                            constraints.copy(
-                                                minWidth = 0,
-                                                minHeight = 0
-                                            )
-                                        )
-                                        layout(0, 0) {
-                                            placeable.place(
-                                                -placeable.width / 2,
-                                                -placeable.height / 2
-                                            )
-                                        }
-                                    }
+                                modifier = zeroFootprintModifier
+                            )
+                            IcqFlowerBurstEffect(
+                                isActive = isReplyAnimating,
+                                modifier = zeroFootprintModifier
                             )
                         }
                     }
