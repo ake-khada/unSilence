@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -78,6 +79,8 @@ import com.barq.app.viewmodel.FeedType
 import com.barq.app.viewmodel.FeedViewModel
 import com.barq.app.viewmodel.InitLoadingState
 import com.barq.app.viewmodel.RelayFeedStatus
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -85,8 +88,6 @@ import kotlinx.coroutines.launch
 @Composable
 fun FeedScreen(
     viewModel: FeedViewModel,
-    isDarkTheme: Boolean = true,
-    onToggleTheme: () -> Unit = {},
     isTorEnabled: Boolean = false,
     torStatus: com.barq.app.relay.TorStatus = com.barq.app.relay.TorStatus.DISABLED,
     onToggleTor: (Boolean) -> Unit = {},
@@ -115,7 +116,8 @@ fun FeedScreen(
     onAddToList: (String) -> Unit = {},
     onRelayDetail: (String) -> Unit = {},
     onHashtagClick: ((String) -> Unit)? = null,
-    scrollToTopTrigger: Int = 0
+    scrollToTopTrigger: Int = 0,
+    onScrollDirectionChanged: ((isScrollingDown: Boolean) -> Unit)? = null
 ) {
     val feed by viewModel.feed.collectAsState()
     val feedType by viewModel.feedType.collectAsState()
@@ -131,6 +133,7 @@ fun FeedScreen(
     val nip05Version by viewModel.nip05Repo.version.collectAsState()
     val translationVersion by viewModel.translationRepo.version.collectAsState()
     val connectedCount by viewModel.relayPool.connectedCount.collectAsState()
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     val listState = rememberLazyListState()
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.scrollToItem(0)
@@ -215,6 +218,20 @@ fun FeedScreen(
         if (isAtTop) viewModel.resetNewNoteCount()
     }
 
+    // Notify Navigation.kt about scroll direction so the bottom bar can hide/show
+    LaunchedEffect(listState) {
+        var prevIndex = 0
+        var prevOffset = 0
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                if (index != prevIndex || offset != prevOffset) {
+                    val scrollingDown = index > prevIndex || (index == prevIndex && offset > prevOffset)
+                    onScrollDirectionChanged?.invoke(scrollingDown)
+                    prevIndex = index
+                    prevOffset = offset
+                }
+            }
+    }
 
     val favoriteRelays by viewModel.relaySetRepo.favoriteRelays.collectAsState()
     val ownRelaySets by viewModel.relaySetRepo.ownRelaySets.collectAsState()
@@ -287,8 +304,6 @@ fun FeedScreen(
             BarqDrawerContent(
                 profile = userProfile,
                 pubkey = userPubkey,
-                isDarkTheme = isDarkTheme,
-                onToggleTheme = onToggleTheme,
                 isTorEnabled = isTorEnabled,
                 torStatus = torStatus,
                 onToggleTor = onToggleTor,
@@ -355,6 +370,7 @@ fun FeedScreen(
         }
     ) {
         Scaffold(
+            modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
                 TopAppBar(
@@ -451,8 +467,10 @@ fun FeedScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        scrolledContainerColor = MaterialTheme.colorScheme.surface
                     ),
+                    scrollBehavior = scrollBehavior,
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
                             ProfilePicture(url = userProfile?.picture, size = 32)
@@ -622,7 +640,8 @@ fun FeedScreen(
                     ) {
                         LazyColumn(
                             state = listState,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 80.dp)
                         ) {
                             items(items = feed, key = { it.id }, contentType = { "post" }) { event ->
                                 FeedItem(

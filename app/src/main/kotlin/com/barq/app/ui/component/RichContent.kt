@@ -42,10 +42,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -55,10 +59,13 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -72,6 +79,7 @@ import com.barq.app.repo.EventRepository
 import com.barq.app.repo.Nip05Repository
 import com.barq.app.util.MediaDownloader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -237,7 +245,8 @@ fun RichContent(
     onNoteClick: ((String) -> Unit)? = null,
     onHashtagClick: ((String) -> Unit)? = null,
     noteActions: NoteActions? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    parentHorizontalPadding: Dp = 16.dp
 ) {
     val segments = remember(content, emojiMap) { parseContent(content.trimEnd('\n', '\r'), emojiMap) }
     var fullScreenImageUrl by remember { mutableStateOf<String?>(null) }
@@ -420,7 +429,8 @@ fun RichContent(
                     is ContentSegment.VideoSegment -> {
                         InlineVideoPlayerWithFullscreen(
                             url = segment.url,
-                            onFullScreen = { fullScreenVideoUrl = segment.url }
+                            onFullScreen = { fullScreenVideoUrl = segment.url },
+                            parentHorizontalPadding = parentHorizontalPadding
                         )
                     }
                     is ContentSegment.LinkSegment -> {
@@ -615,7 +625,8 @@ fun QuotedNote(
                     content = event.content,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
-                    eventRepo = eventRepo
+                    eventRepo = eventRepo,
+                    parentHorizontalPadding = 14.dp
                 )
             }
         }
@@ -938,16 +949,24 @@ private fun ImageWithContextMenu(url: String, onFullScreen: () -> Unit) {
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun InlineVideoPlayerWithFullscreen(url: String, onFullScreen: () -> Unit) {
+private fun InlineVideoPlayerWithFullscreen(
+    url: String,
+    onFullScreen: () -> Unit,
+    parentHorizontalPadding: Dp = 16.dp
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .layout { measurable, constraints ->
+                val extraWidth = (parentHorizontalPadding * 2).roundToPx()
+                val placeable = measurable.measure(constraints.copy(maxWidth = constraints.maxWidth + extraWidth))
+                layout(placeable.width, placeable.height) {
+                    placeable.place(-extraWidth / 2, 0)
+                }
+            }
             .clip(RoundedCornerShape(12.dp))
     ) {
-        InlineVideoPlayer(
-            url = url,
-            modifier = Modifier.fillMaxWidth()
-        )
+        InlineVideoPlayer(url = url, modifier = Modifier.fillMaxWidth())
         IconButton(
             onClick = onFullScreen,
             colors = IconButtonDefaults.iconButtonColors(
@@ -971,27 +990,78 @@ private fun InlineVideoPlayerWithFullscreen(url: String, onFullScreen: () -> Uni
 @Composable
 private fun InlineVideoPlayer(url: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val view = LocalView.current
     val exoPlayer = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
             prepare()
             playWhenReady = false
+            volume = 0f
         }
     }
 
+    // Reset to 0 on URL change so we don't flash wrong ratio from a prior video
+    var videoWidth by remember(url) { mutableStateOf(0) }
+    var videoHeight by remember(url) { mutableStateOf(0) }
+
     DisposableEffect(url) {
-        onDispose { exoPlayer.release() }
+        val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(size: VideoSize) {
+                videoWidth = size.width
+                videoHeight = size.height
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
     }
 
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = true
-            }
-        },
-        modifier = modifier.aspectRatio(16f / 9f)
-    )
+    val aspectRatio = if (videoWidth > 0 && videoHeight > 0) videoWidth.toFloat() / videoHeight.toFloat() else 16f / 9f
+
+    var showControls by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showControls) {
+        if (showControls) {
+            delay(3000)
+            showControls = false
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .aspectRatio(aspectRatio)
+            .clickable { showControls = !showControls }
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = false
+                }
+            },
+            update = { playerView -> playerView.useController = showControls },
+            modifier = Modifier
+                .matchParentSize()
+                .onGloballyPositioned { coords ->
+                    val screenHeight = view.height.toFloat()
+                    val pos = coords.positionInWindow()
+                    val top = pos.y
+                    val bottom = pos.y + coords.size.height
+                    val visibleTop = maxOf(top, 0f)
+                    val visibleBottom = minOf(bottom, screenHeight)
+                    val visibleHeight = (visibleBottom - visibleTop).coerceAtLeast(0f)
+                    val fraction = if (coords.size.height > 0) visibleHeight / coords.size.height else 0f
+                    if (fraction >= 0.5f) {
+                        exoPlayer.volume = 0f
+                        exoPlayer.play()
+                    } else {
+                        exoPlayer.pause()
+                    }
+                }
+        )
+    }
 }
 
 // --- Link Preview (OG tags) ---

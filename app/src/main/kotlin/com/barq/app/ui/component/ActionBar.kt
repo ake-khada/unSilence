@@ -19,7 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
-import androidx.compose.material.icons.outlined.CurrencyBitcoin
+import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.Icon
@@ -134,7 +134,7 @@ fun ActionBar(
             IconButton(onClick = { showRepostMenu = true }) {
                 Icon(
                     Icons.Outlined.Repeat,
-                    contentDescription = "Repost",
+                    contentDescription = "Boost",
                     tint = if (hasUserReposted) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(22.dp)
                 )
@@ -165,10 +165,10 @@ fun ActionBar(
                     LightningAnimation(modifier = Modifier.size(22.dp))
                 } else {
                     Icon(
-                        Icons.Outlined.CurrencyBitcoin,
+                        Icons.Outlined.ElectricBolt,
                         contentDescription = "Zaps",
                         tint = if (hasUserZapped) Color(0xFFFF9800) else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
@@ -298,7 +298,7 @@ private fun RepostPopup(
         ) {
             Row(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
                 TextButton(onClick = onRepost) {
-                    Text("Retweet")
+                    Text("Boost")
                 }
                 TextButton(onClick = onQuote) {
                     Text("Quote")
