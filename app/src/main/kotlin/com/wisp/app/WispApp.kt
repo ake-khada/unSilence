@@ -4,6 +4,7 @@ import android.app.Application
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.gif.AnimatedImageDecoder
+import coil3.video.VideoFrameDecoder
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.wisp.app.relay.HttpClientFactory
@@ -19,14 +20,12 @@ class WispApp : Application(), SingletonImageLoader.Factory {
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {
         val torAwareCallFactory = Call.Factory { request ->
-            HttpClientFactory.createHttpClient(
-                connectTimeoutSeconds = 10,
-                readTimeoutSeconds = 30
-            ).newCall(request)
+            HttpClientFactory.getImageClient().newCall(request)
         }
         return ImageLoader.Builder(context)
             .components {
                 add(AnimatedImageDecoder.Factory())
+                add(VideoFrameDecoder.Factory())
                 add(OkHttpNetworkFetcherFactory(callFactory = { torAwareCallFactory }))
             }
             .crossfade(true)
