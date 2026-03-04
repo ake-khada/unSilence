@@ -6,15 +6,15 @@ plugins {
 }
 
 android {
-    namespace = "com.barq.app"
+    namespace = "com.wisp.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.barq.app"
+        applicationId = "com.wisp.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.3.3"
+        versionCode = 14
+        versionName = "0.3.6"
     }
 
     buildTypes {
@@ -61,6 +61,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.coil.video)
     implementation(libs.security.crypto)
     implementation(libs.bouncycastle)
     implementation(libs.media3.exoplayer)
