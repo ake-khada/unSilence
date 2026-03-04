@@ -1,11 +1,12 @@
 package com.barq.app.ui.component
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,9 +15,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.Repeat
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -24,11 +27,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import com.barq.app.nostr.ProfileData
+
+private val ICON_COL_WIDTH = 26.dp
+private val AVATAR_SIZE = 24
+private val BADGE_BG = Color(0xCC000000)
+private val ZAP_ORANGE = Color(0xFFFF8C00)
+private val BOOST_GREEN = Color(0xFF4CAF50)
+
+// ---------------------------------------------------------------------------
+// Public API — StackedAvatarRow kept for NotificationsScreen
+// ---------------------------------------------------------------------------
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -53,7 +66,7 @@ fun StackedAvatarRow(
                 val profile = resolveProfile(pubkey)
                 ProfilePicture(
                     url = profile?.picture,
-                    size = 36,
+                    size = AVATAR_SIZE,
                     showFollowBadge = isFollowing?.invoke(pubkey) ?: false,
                     highlighted = highlightFirst && index == 0,
                     onClick = { onProfileClick(pubkey) },
@@ -65,17 +78,13 @@ fun StackedAvatarRow(
     } else {
         val displayed = if (pubkeys.size <= maxAvatars) pubkeys else pubkeys.take(maxAvatars)
         val overflow = pubkeys.size - displayed.size
-
-        Row(
-            modifier = modifier,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
             Box {
                 displayed.forEachIndexed { index, pubkey ->
                     val profile = resolveProfile(pubkey)
                     ProfilePicture(
                         url = profile?.picture,
-                        size = 36,
+                        size = AVATAR_SIZE,
                         showFollowBadge = isFollowing?.invoke(pubkey) ?: false,
                         highlighted = highlightFirst && index == 0,
                         onClick = { onProfileClick(pubkey) },
@@ -86,8 +95,7 @@ fun StackedAvatarRow(
                     )
                 }
             }
-            // Account for the stacked width
-            Spacer(Modifier.width((27 * (displayed.size - 1) + 36).dp))
+            Spacer(Modifier.width((27 * (displayed.size - 1) + AVATAR_SIZE).dp))
             if (overflow > 0) {
                 Spacer(Modifier.width(4.dp))
                 Text(
@@ -100,6 +108,7 @@ fun StackedAvatarRow(
     }
 }
 
+// Keep ZapRow in public API — used directly in some screens
 @Composable
 fun ZapRow(
     pubkey: String,
@@ -109,37 +118,44 @@ fun ZapRow(
     onProfileClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val name = profile?.displayString ?: (pubkey.take(8) + "...")
     Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
+        modifier = modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ProfilePicture(
-            url = profile?.picture,
-            size = 30,
-            modifier = Modifier.clickable { onProfileClick(pubkey) }
-        )
+        ProfilePicture(url = profile?.picture, size = 20, onClick = { onProfileClick(pubkey) })
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = message.ifBlank { profile?.displayString ?: (pubkey.take(8) + "...") },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f)
-                .clickable { onProfileClick(pubkey) }
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                modifier = Modifier.clickable { onProfileClick(pubkey) }
+            )
+            if (message.isNotBlank()) {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2
+                )
+            }
+        }
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = "\u26A1 ${formatSats(sats)}",
-            style = MaterialTheme.typography.labelLarge,
-            color = Color(0xFFFF8C00)
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.ElectricBolt, contentDescription = null, tint = ZAP_ORANGE, modifier = Modifier.size(13.dp))
+            Spacer(Modifier.width(2.dp))
+            Text(text = formatSats(sats), style = MaterialTheme.typography.labelMedium, color = ZAP_ORANGE)
+        }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Main redesigned section
+// ---------------------------------------------------------------------------
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReactionDetailsSection(
     reactionDetails: Map<String, List<String>>,
@@ -150,97 +166,103 @@ fun ReactionDetailsSection(
     reactionEmojiUrls: Map<String, String> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
-    val sortedZaps = zapDetails.sortedByDescending { it.second }
-    val hasZaps = sortedZaps.isNotEmpty()
-    val hasReactions = reactionDetails.isNotEmpty()
-    val hasReposts = repostDetails.isNotEmpty()
-
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+        modifier = modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        if (hasZaps) {
-            sortedZaps.forEach { (pubkey, sats, message) ->
-                ZapRow(
-                    pubkey = pubkey,
-                    sats = sats,
-                    message = message,
-                    profile = resolveProfile(pubkey),
-                    onProfileClick = onProfileClick
-                )
-            }
-        }
-
-        if (hasZaps && (hasReactions || hasReposts)) {
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 6.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-            )
-        }
-
-        if (hasReposts) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically
+        // ── Zaps ─────────────────────────────────────────────────────────────
+        if (zapDetails.isNotEmpty()) {
+            val sortedZaps = zapDetails.sortedByDescending { it.second }
+            SectionRow(
+                icon = {
+                    Icon(
+                        Icons.Outlined.ElectricBolt,
+                        contentDescription = "Zaps",
+                        tint = ZAP_ORANGE,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
             ) {
-                Icon(
-                    Icons.Outlined.Repeat,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = Color(0xFF4CAF50)
-                )
-                Spacer(Modifier.width(8.dp))
-                StackedAvatarRow(
-                    pubkeys = repostDetails,
-                    resolveProfile = resolveProfile,
-                    onProfileClick = onProfileClick
-                )
-            }
-        }
-
-        if (hasReposts && hasReactions) {
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 6.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-            )
-        }
-
-        if (hasReactions) {
-            reactionDetails.forEach { (emoji, pubkeys) ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    val emojiUrl = reactionEmojiUrls[emoji]
-                    if (emojiUrl != null) {
-                        AsyncImage(
-                            model = emojiUrl,
-                            contentDescription = emoji,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    } else {
-                        Text(
-                            text = emoji,
-                            style = MaterialTheme.typography.bodyMedium
+                    sortedZaps.forEach { (pubkey, sats, _) ->
+                        ZapAvatarChip(
+                            profile = resolveProfile(pubkey),
+                            sats = sats,
+                            onClick = { onProfileClick(pubkey) }
                         )
                     }
-                    Spacer(Modifier.width(8.dp))
-                    StackedAvatarRow(
-                        pubkeys = pubkeys,
-                        resolveProfile = resolveProfile,
-                        onProfileClick = onProfileClick
-                    )
                 }
             }
         }
+
+        // ── Boosts ───────────────────────────────────────────────────────────
+        if (repostDetails.isNotEmpty()) {
+            SectionRow(
+                icon = {
+                    Icon(
+                        Icons.Outlined.Repeat,
+                        contentDescription = "Boosts",
+                        tint = BOOST_GREEN,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    repostDetails.forEach { pubkey ->
+                        ProfilePicture(
+                            url = resolveProfile(pubkey)?.picture,
+                            size = AVATAR_SIZE,
+                            onClick = { onProfileClick(pubkey) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Reactions ─────────────────────────────────────────────────────────
+        reactionDetails.entries
+            .sortedByDescending { it.value.size }
+            .forEach { (emoji, pubkeys) ->
+                val emojiUrl = reactionEmojiUrls[emoji]
+                SectionRow(
+                    icon = {
+                        if (emojiUrl != null) {
+                            AsyncImage(
+                                model = emojiUrl,
+                                contentDescription = emoji,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Text(text = emoji, fontSize = 18.sp, lineHeight = 20.sp)
+                        }
+                    }
+                ) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        pubkeys.forEach { pubkey ->
+                            ProfilePicture(
+                                url = resolveProfile(pubkey)?.picture,
+                                size = AVATAR_SIZE,
+                                onClick = { onProfileClick(pubkey) }
+                            )
+                        }
+                    }
+                }
+            }
     }
 }
+
+// ---------------------------------------------------------------------------
+// SeenOnSection — unchanged
+// ---------------------------------------------------------------------------
 
 @Composable
 fun SeenOnSection(
@@ -252,16 +274,8 @@ fun SeenOnSection(
     val displayed = if (relayIcons.size <= maxIcons) relayIcons else relayIcons.take(maxIcons)
     val overflow = relayIcons.size - displayed.size
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Column(modifier = modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "Seen on",
                 style = MaterialTheme.typography.labelSmall,
@@ -284,20 +298,72 @@ fun SeenOnSection(
             Spacer(Modifier.width((18 * (displayed.size - 1) + 24).dp))
             if (overflow > 0) {
                 Spacer(Modifier.width(4.dp))
-                Text(
-                    text = "+$overflow",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Text(text = "+$overflow", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
-private fun formatSats(sats: Long): String {
-    return when {
-        sats >= 1_000_000 -> "${sats / 1_000_000}M sats"
-        sats >= 1_000 -> "${sats / 1_000}K sats"
-        else -> "$sats sats"
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SectionRow(
+    icon: @Composable () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .width(ICON_COL_WIDTH)
+                .height(AVATAR_SIZE.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            icon()
+        }
+        content()
     }
+}
+
+@Composable
+private fun ZapAvatarChip(
+    profile: ProfileData?,
+    sats: Long,
+    onClick: () -> Unit
+) {
+    Box(contentAlignment = Alignment.BottomCenter) {
+        ProfilePicture(
+            url = profile?.picture,
+            size = AVATAR_SIZE,
+            onClick = onClick
+        )
+        // Sats badge overlaid at bottom center
+        Text(
+            text = formatSatsCompact(sats),
+            style = MaterialTheme.typography.labelSmall,
+            color = ZAP_ORANGE,
+            fontSize = 8.sp,
+            modifier = Modifier
+                .offset(y = 2.dp)
+                .background(color = BADGE_BG, shape = RoundedCornerShape(4.dp))
+                .padding(horizontal = 3.dp, vertical = 1.dp)
+                .widthIn(max = (AVATAR_SIZE).dp)
+        )
+    }
+}
+
+private fun formatSats(sats: Long): String = when {
+    sats >= 1_000_000 -> "${sats / 1_000_000}M sats"
+    sats >= 1_000 -> "${sats / 1_000}K sats"
+    else -> "$sats sats"
+}
+
+private fun formatSatsCompact(sats: Long): String = when {
+    sats >= 1_000_000 -> "${sats / 1_000_000}M"
+    sats >= 1_000 -> "${sats / 1_000}K"
+    else -> "$sats"
 }

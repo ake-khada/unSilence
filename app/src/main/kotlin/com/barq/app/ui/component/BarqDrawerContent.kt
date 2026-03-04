@@ -59,8 +59,6 @@ import com.barq.app.nostr.ProfileData
 fun BarqDrawerContent(
     profile: ProfileData?,
     pubkey: String?,
-    isDarkTheme: Boolean = true,
-    onToggleTheme: () -> Unit = {},
     isTorEnabled: Boolean = false,
     torStatus: TorStatus = TorStatus.DISABLED,
     onToggleTor: (Boolean) -> Unit = {},
@@ -116,14 +114,6 @@ fun BarqDrawerContent(
                             )
                         }
                     }
-                }
-                IconButton(onClick = onToggleTheme) {
-                    Icon(
-                        if (isDarkTheme) Icons.Outlined.DarkMode else Icons.Outlined.LightMode,
-                        contentDescription = "Toggle theme",
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
                 IconButton(onClick = { showQrDialog = true }) {
                     Icon(

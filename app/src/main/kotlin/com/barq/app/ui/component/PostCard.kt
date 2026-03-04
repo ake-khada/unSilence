@@ -1,6 +1,7 @@
 package com.barq.app.ui.component
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -62,7 +63,7 @@ import com.barq.app.nostr.NostrEvent
 import com.barq.app.nostr.ProfileData
 import com.barq.app.nostr.hexToByteArray
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.outlined.CurrencyBitcoin
+import androidx.compose.material.icons.outlined.ElectricBolt
 import com.barq.app.nostr.Nip30
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.CircularProgressIndicator
@@ -156,64 +157,57 @@ fun PostCard(
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         if (repostPubkeys.isNotEmpty()) {
-            val maxAvatars = 10
-            val displayPubkeys = repostPubkeys.take(maxAvatars)
-            val overflow = repostPubkeys.size - maxAvatars
-            val formattedRepostTime = repostTime?.let { formatTimestamp(it) }
+            val reposterPubkey = repostPubkeys.first()
+            val reposterProfile = eventRepo?.getProfileData(reposterPubkey)
+            val reposterName = reposterProfile?.displayString
+                ?: (reposterPubkey.take(8) + "...")
+            val boostTimestamp = repostTime?.let { formatTimestamp(it) }
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
             ) {
+                // Overlapping avatars: OP behind (20dp), reposter in front (16dp)
+                Box(modifier = Modifier.size(28.dp)) {
+                    ProfilePicture(
+                        url = profile?.picture,
+                        size = 20,
+                        modifier = Modifier.align(Alignment.BottomEnd)
+                    )
+                    ProfilePicture(
+                        url = reposterProfile?.picture,
+                        size = 16,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .offset(x = (-1).dp, y = (-1).dp),
+                        onClick = { onNavigateToProfileFromDetails?.invoke(reposterPubkey) }
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
                 Icon(
                     Icons.Outlined.Repeat,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier.size(11.dp)
                 )
                 Spacer(Modifier.width(4.dp))
-
-                // Overlapping avatars
-                Box(modifier = Modifier.height(20.dp).width((displayPubkeys.size * 14 + 6 + 4).dp)) {
-                    displayPubkeys.forEachIndexed { index, pubkey ->
-                        val avatarUrl = eventRepo?.getProfileData(pubkey)?.picture
-                        Box(modifier = Modifier.offset(x = (index * 14).dp)) {
-                            ProfilePicture(
-                                url = avatarUrl,
-                                size = 20,
-                                showFollowBadge = false,
-                                onClick = { onNavigateToProfileFromDetails?.invoke(pubkey) }
-                            )
-                        }
-                    }
-                }
-
-                // Label text
-                val labelText = if (repostPubkeys.size == 1) {
-                    val name = eventRepo?.getProfileData(repostPubkeys.first())?.displayString
-                        ?: (repostPubkeys.first().take(8) + "...")
-                    "$name retweeted"
-                } else if (overflow > 0) {
-                    "and $overflow others retweeted"
-                } else {
-                    "retweeted"
-                }
                 Text(
-                    text = labelText,
-                    style = MaterialTheme.typography.labelSmall,
+                    text = reposterName,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-
-                if (formattedRepostTime != null) {
-                    Text(
-                        text = " \u00B7 $formattedRepostTime",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = "boosted${if (boostTimestamp != null) " · $boostTimestamp" else ""}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    maxLines = 1
+                )
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -450,7 +444,7 @@ fun PostCard(
         } else {
             // Normal content display
             // Collapsible content with max height (~1 viewport)
-            val collapsedMaxHeight = 500.dp
+            val collapsedMaxHeight = 600.dp
             var contentExpanded by remember { mutableStateOf(false) }
             var contentExceedsMax by remember { mutableStateOf(false) }
             val density = LocalDensity.current
@@ -461,6 +455,7 @@ fun PostCard(
                         .then(
                             if (!contentExpanded) Modifier.heightIn(max = collapsedMaxHeight) else Modifier
                         )
+                        .animateContentSize()
                         .clipToBounds()
                         .onGloballyPositioned { coordinates ->
                             if (!contentExpanded) {
@@ -715,12 +710,11 @@ private fun TopZapperBanner(
             )
             Spacer(Modifier.width(5.dp))
 
-            // Bitcoin icon
             Icon(
-                Icons.Outlined.CurrencyBitcoin,
+                Icons.Outlined.ElectricBolt,
                 contentDescription = null,
                 tint = orange,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(14.dp)
             )
 
             // Amount

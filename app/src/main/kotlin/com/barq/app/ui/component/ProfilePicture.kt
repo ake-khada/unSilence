@@ -19,8 +19,10 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,8 +34,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.barq.app.R
 
@@ -42,6 +46,7 @@ import com.barq.app.R
 fun ProfilePicture(
     url: String?,
     modifier: Modifier = Modifier,
+    pubkey: String? = null,
     size: Int = 40,
     showFollowBadge: Boolean = false,
     showBlockedBadge: Boolean = false,
@@ -50,9 +55,9 @@ fun ProfilePicture(
     onLongPress: (() -> Unit)? = null
 ) {
     if (highlighted) {
-        HighlightedProfilePicture(url, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
+        HighlightedProfilePicture(url, pubkey, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
     } else {
-        BaseProfilePicture(url, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
+        BaseProfilePicture(url, pubkey, modifier, size, showFollowBadge, showBlockedBadge, onClick, onLongPress)
     }
 }
 
@@ -60,6 +65,7 @@ fun ProfilePicture(
 @Composable
 private fun HighlightedProfilePicture(
     url: String?,
+    pubkey: String?,
     modifier: Modifier,
     size: Int,
     showFollowBadge: Boolean,
@@ -70,7 +76,6 @@ private fun HighlightedProfilePicture(
     val haptic = LocalHapticFeedback.current
     val transition = rememberInfiniteTransition(label = "highlight")
 
-    // Breathing scale
     val scale by transition.animateFloat(
         initialValue = 1f,
         targetValue = 1.10f,
@@ -81,7 +86,6 @@ private fun HighlightedProfilePicture(
         label = "scale"
     )
 
-    // Glow alpha synced with scale
     val glowAlpha by transition.animateFloat(
         initialValue = 0.4f,
         targetValue = 0.9f,
@@ -116,30 +120,14 @@ private fun HighlightedProfilePicture(
                 )
             }
     ) {
-        val fallbackPainter = painterResource(R.drawable.ic_launcher_foreground)
-        AsyncImage(
-            model = url,
-            contentDescription = "Profile picture",
-            contentScale = ContentScale.Crop,
-            fallback = fallbackPainter,
-            error = fallbackPainter,
-            modifier = Modifier
-                .size(size.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-                .then(
-                    if (onClick != null || onLongPress != null) {
-                        Modifier.combinedClickable(
-                            onClick = { onClick?.invoke() },
-                            onLongClick = onLongPress?.let { lp -> {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                lp()
-                            }}
-                        )
-                    } else Modifier
-                )
+        AvatarContent(
+            url = url,
+            pubkey = pubkey,
+            size = size,
+            onClick = onClick,
+            onLongPress = onLongPress,
+            haptic = haptic
         )
-
         if (showBlockedBadge) {
             BlockedBadge(size, Modifier.align(Alignment.BottomEnd))
         } else if (showFollowBadge) {
@@ -152,6 +140,7 @@ private fun HighlightedProfilePicture(
 @Composable
 private fun BaseProfilePicture(
     url: String?,
+    pubkey: String?,
     modifier: Modifier,
     size: Int,
     showFollowBadge: Boolean,
@@ -161,34 +150,99 @@ private fun BaseProfilePicture(
 ) {
     val haptic = LocalHapticFeedback.current
     Box(modifier = modifier) {
-        val fallbackPainter = painterResource(R.drawable.ic_launcher_foreground)
-        AsyncImage(
-            model = url,
-            contentDescription = "Profile picture",
-            contentScale = ContentScale.Crop,
-            fallback = fallbackPainter,
-            error = fallbackPainter,
-            modifier = Modifier
-                .size(size.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-                .then(
-                    if (onClick != null || onLongPress != null) {
-                        Modifier.combinedClickable(
-                            onClick = { onClick?.invoke() },
-                            onLongClick = onLongPress?.let { lp -> {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                lp()
-                            }}
-                        )
-                    } else Modifier
-                )
+        AvatarContent(
+            url = url,
+            pubkey = pubkey,
+            size = size,
+            onClick = onClick,
+            onLongPress = onLongPress,
+            haptic = haptic
         )
         if (showBlockedBadge) {
             BlockedBadge(size, Modifier.align(Alignment.BottomEnd))
         } else if (showFollowBadge) {
             FollowBadge(size, Modifier.align(Alignment.BottomEnd))
         }
+    }
+}
+
+// Shared avatar rendering: generated circle behind, AsyncImage on top.
+// When url is null/blank or fails to load, the generated avatar shows through.
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AvatarContent(
+    url: String?,
+    pubkey: String?,
+    size: Int,
+    onClick: (() -> Unit)?,
+    onLongPress: (() -> Unit)?,
+    haptic: androidx.compose.ui.hapticfeedback.HapticFeedback
+) {
+    val interactionModifier = if (onClick != null || onLongPress != null) {
+        Modifier.combinedClickable(
+            onClick = { onClick?.invoke() },
+            onLongClick = onLongPress?.let { lp -> {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                lp()
+            }}
+        )
+    } else Modifier
+
+    Box(
+        modifier = Modifier
+            .size(size.dp)
+            .clip(CircleShape)
+            .then(interactionModifier),
+        contentAlignment = Alignment.Center
+    ) {
+        // Generated avatar — always present as fallback
+        GeneratedAvatar(pubkey = pubkey, size = size)
+
+        // Profile image on top — fallback/error set to null so generated avatar shows through
+        if (!url.isNullOrBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = "Profile picture",
+                contentScale = ContentScale.Crop,
+                fallback = null,
+                error = null,
+                modifier = Modifier
+                    .size(size.dp)
+                    .clip(CircleShape)
+            )
+        }
+    }
+}
+
+@Composable
+private fun GeneratedAvatar(pubkey: String?, size: Int) {
+    val bgColor = remember(pubkey) {
+        if (pubkey.isNullOrBlank()) {
+            Color(0xFF444444)
+        } else {
+            val hue = (pubkey.hashCode().and(0x7FFFFFFF) % 360).toFloat()
+            Color.hsl(hue, 0.6f, 0.4f)
+        }
+    }
+    val initials = remember(pubkey) {
+        pubkey?.take(2)?.uppercase() ?: "??"
+    }
+    val fontSize = (size * 0.35f).sp
+
+    Box(
+        modifier = Modifier
+            .size(size.dp)
+            .background(bgColor, CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = initials,
+            color = Color.White,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.Center,
+            lineHeight = fontSize
+        )
     }
 }
 

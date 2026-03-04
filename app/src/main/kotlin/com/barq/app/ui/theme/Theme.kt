@@ -2,7 +2,6 @@ package com.barq.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -11,29 +10,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFFFF9800),
-    onPrimary = Color.White,
+    primary = Color(0xFFF7931A),
+    onPrimary = Color.Black,
     secondary = Color(0xFFFFB74D),
-    background = Color(0xFF131215),
-    surface = Color(0xFF1F1E21),
-    surfaceVariant = Color(0xFF2B2A2E),
+    background = Color(0xFF000000),
+    surface = Color(0xFF000000),
+    surfaceVariant = Color(0xFF000000),
     onBackground = Color(0xFFE0E0E0),
     onSurface = Color(0xFFE0E0E0),
     onSurfaceVariant = Color(0xFF9998A0),
-    outline = Color(0xFF343338)
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFFFF9800),
-    onPrimary = Color.White,
-    secondary = Color(0xFFFFB74D),
-    background = Color(0xFFECECEC),
-    surface = Color(0xFFF5F5F5),
-    surfaceVariant = Color(0xFFE0E0E0),
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    onSurfaceVariant = Color(0xFF6B6B6B),
-    outline = Color(0xFFCCCCCC)
+    outline = Color(0xFF2A2A2A)
 )
 
 private val BarqTypography = Typography(
@@ -46,9 +32,9 @@ private val BarqTypography = Typography(
 )
 
 @Composable
-fun BarqTheme(isDarkTheme: Boolean = true, content: @Composable () -> Unit) {
+fun BarqTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = if (isDarkTheme) DarkColorScheme else LightColorScheme,
+        colorScheme = DarkColorScheme,
         typography = BarqTypography,
         content = content
     )
