@@ -1,6 +1,6 @@
 # NIP-02: Follow List
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 **Kind:** 3 (replaceable)
 

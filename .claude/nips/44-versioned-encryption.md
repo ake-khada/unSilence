@@ -1,6 +1,6 @@
 # NIP-44: Versioned Encryption
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 **Required by:** NIP-17 (private DMs)
 

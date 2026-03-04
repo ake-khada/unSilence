@@ -1,0 +1,270 @@
+package com.wisp.app.viewmodel
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.wisp.app.nostr.ClientMessage
+import com.wisp.app.nostr.Filter
+import com.wisp.app.nostr.FollowSet
+import com.wisp.app.nostr.Nip51
+import com.wisp.app.nostr.NostrEvent
+import com.wisp.app.nostr.ProfileData
+import com.wisp.app.relay.RelayConfig
+import com.wisp.app.relay.RelayPool
+import com.wisp.app.repo.EventRepository
+import com.wisp.app.repo.KeyRepository
+import com.wisp.app.repo.MuteRepository
+import com.wisp.app.repo.ProfileRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+enum class SearchTab { MY_DEVICE, RELAYS }
+enum class LocalFilter { PEOPLE, NOTES }
+
+class SearchViewModel(app: Application) : AndroidViewModel(app) {
+    private val keyRepo = KeyRepository(app)
+
+    private val _query = MutableStateFlow("")
+    val query: StateFlow<String> = _query
+
+    // Tab and filter state
+    private val _selectedTab = MutableStateFlow(SearchTab.MY_DEVICE)
+    val selectedTab: StateFlow<SearchTab> = _selectedTab
+
+    private val _localFilter = MutableStateFlow(LocalFilter.PEOPLE)
+    val localFilter: StateFlow<LocalFilter> = _localFilter
+
+    // Local search results
+    private val _localUsers = MutableStateFlow<List<ProfileData>>(emptyList())
+    val localUsers: StateFlow<List<ProfileData>> = _localUsers
+
+    private val _localNotes = MutableStateFlow<List<NostrEvent>>(emptyList())
+    val localNotes: StateFlow<List<NostrEvent>> = _localNotes
+
+    // Relay search results
+    private val _users = MutableStateFlow<List<ProfileData>>(emptyList())
+    val users: StateFlow<List<ProfileData>> = _users
+
+    private val _notes = MutableStateFlow<List<NostrEvent>>(emptyList())
+    val notes: StateFlow<List<NostrEvent>> = _notes
+
+    private val _lists = MutableStateFlow<List<FollowSet>>(emptyList())
+    val lists: StateFlow<List<FollowSet>> = _lists
+
+    private val _isSearching = MutableStateFlow(false)
+    val isSearching: StateFlow<Boolean> = _isSearching
+
+    // Search relay selection
+    private val _searchRelays = MutableStateFlow(
+        keyRepo.getSearchRelays().ifEmpty { DEFAULT_SEARCH_RELAYS }
+    )
+    val searchRelays: StateFlow<List<String>> = _searchRelays
+
+    private val _selectedRelay = MutableStateFlow<String?>(null)
+    val selectedRelay: StateFlow<String?> = _selectedRelay
+
+    private var searchJob: Job? = null
+    private var localSearchJob: Job? = null
+    private var relayPool: RelayPool? = null
+
+    private val userSubId = "search-users"
+    private val noteSubId = "search-notes"
+    private val listSubId = "search-lists"
+
+    fun selectTab(tab: SearchTab) {
+        _selectedTab.value = tab
+    }
+
+    fun selectLocalFilter(filter: LocalFilter) {
+        _localFilter.value = filter
+    }
+
+    fun selectRelay(url: String?) {
+        _selectedRelay.value = url
+    }
+
+    fun addSearchRelay(url: String): Boolean {
+        val trimmed = url.trim().trimEnd('/')
+        if (!RelayConfig.isValidUrl(trimmed)) return false
+        if (trimmed in _searchRelays.value) return false
+        val updated = _searchRelays.value + trimmed
+        keyRepo.saveSearchRelays(updated)
+        _searchRelays.value = updated
+        return true
+    }
+
+    fun removeSearchRelay(url: String) {
+        val updated = _searchRelays.value - url
+        keyRepo.saveSearchRelays(updated)
+        _searchRelays.value = updated
+        if (_selectedRelay.value == url) {
+            _selectedRelay.value = null
+        }
+    }
+
+    fun updateQuery(newQuery: String, profileRepo: ProfileRepository? = null, eventRepo: EventRepository? = null) {
+        _query.value = newQuery
+        if (profileRepo != null && eventRepo != null) {
+            searchLocal(newQuery, profileRepo, eventRepo)
+        }
+    }
+
+    private fun searchLocal(query: String, profileRepo: ProfileRepository, eventRepo: EventRepository) {
+        localSearchJob?.cancel()
+        if (query.isBlank()) {
+            _localUsers.value = emptyList()
+            _localNotes.value = emptyList()
+            return
+        }
+        localSearchJob = viewModelScope.launch {
+            delay(150) // debounce
+            withContext(Dispatchers.Default) {
+                val users = profileRepo.search(query, limit = 50)
+                val notes = eventRepo.searchNotes(query, limit = 50)
+                _localUsers.value = users
+                _localNotes.value = notes
+            }
+        }
+    }
+
+    fun search(query: String, relayPool: RelayPool, eventRepo: EventRepository, muteRepo: MuteRepository? = null) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            clear()
+            return
+        }
+
+        searchJob?.cancel()
+        this.relayPool = relayPool
+
+        // Close previous subscriptions
+        closeSubscriptions(relayPool)
+
+        _query.value = trimmed
+        _isSearching.value = true
+        _users.value = emptyList()
+        _notes.value = emptyList()
+        _lists.value = emptyList()
+
+        val userFilter = Filter(kinds = listOf(0), search = trimmed, limit = 20)
+        val noteFilter = Filter(kinds = listOf(1), search = trimmed, limit = 50)
+        val listFilter = Filter(kinds = listOf(Nip51.KIND_FOLLOW_SET), search = trimmed, limit = 20)
+
+        val userReq = ClientMessage.req(userSubId, userFilter)
+        val noteReq = ClientMessage.req(noteSubId, noteFilter)
+        val listReq = ClientMessage.req(listSubId, listFilter)
+
+        val selected = _selectedRelay.value
+        val relaysToQuery = if (selected != null) listOf(selected) else _searchRelays.value
+
+        for (url in relaysToQuery) {
+            relayPool.sendToRelayOrEphemeral(url, userReq)
+            relayPool.sendToRelayOrEphemeral(url, noteReq)
+            relayPool.sendToRelayOrEphemeral(url, listReq)
+        }
+
+        val seenUserPubkeys = mutableSetOf<String>()
+        val seenNoteIds = mutableSetOf<String>()
+        val seenListKeys = mutableSetOf<String>()
+        var userEose = false
+        var noteEose = false
+        var listEose = false
+
+        searchJob = viewModelScope.launch {
+            // Collect events
+            val eventJob = launch {
+                relayPool.relayEvents.collect { relayEvent ->
+                    when (relayEvent.subscriptionId) {
+                        userSubId -> {
+                            val event = relayEvent.event
+                            if (event.kind == 0 && event.pubkey !in seenUserPubkeys) {
+                                if (muteRepo?.isBlocked(event.pubkey) == true) return@collect
+                                seenUserPubkeys.add(event.pubkey)
+                                eventRepo.cacheEvent(event)
+                                val profile = ProfileData.fromEvent(event)
+                                if (profile != null) {
+                                    _users.value = _users.value + profile
+                                }
+                            }
+                        }
+                        noteSubId -> {
+                            val event = relayEvent.event
+                            if (event.kind == 1 && event.id !in seenNoteIds) {
+                                if (muteRepo?.isBlocked(event.pubkey) == true) return@collect
+                                seenNoteIds.add(event.id)
+                                _notes.value = _notes.value + event
+                                eventRepo.cacheEvent(event)
+                            }
+                        }
+                        listSubId -> {
+                            val event = relayEvent.event
+                            val key = "${event.pubkey}:${event.id}"
+                            if (event.kind == Nip51.KIND_FOLLOW_SET && key !in seenListKeys) {
+                                seenListKeys.add(key)
+                                val followSet = Nip51.parseFollowSet(event)
+                                if (followSet != null) {
+                                    _lists.value = _lists.value + followSet
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Collect EOSE signals
+            val eoseJob = launch {
+                relayPool.eoseSignals.collect { subId ->
+                    when (subId) {
+                        userSubId -> userEose = true
+                        noteSubId -> noteEose = true
+                        listSubId -> listEose = true
+                    }
+                    if (userEose && noteEose && listEose) {
+                        _isSearching.value = false
+                    }
+                }
+            }
+
+            // Timeout after 5 seconds
+            delay(5000)
+            _isSearching.value = false
+            closeSubscriptions(relayPool)
+            eventJob.cancel()
+            eoseJob.cancel()
+        }
+    }
+
+    fun clear() {
+        searchJob?.cancel()
+        localSearchJob?.cancel()
+        relayPool?.let { closeSubscriptions(it) }
+        _query.value = ""
+        _users.value = emptyList()
+        _notes.value = emptyList()
+        _lists.value = emptyList()
+        _localUsers.value = emptyList()
+        _localNotes.value = emptyList()
+        _isSearching.value = false
+    }
+
+    companion object {
+        val DEFAULT_SEARCH_RELAYS = listOf(
+            "wss://relay.nostr.band",
+            "wss://search.nos.today"
+        )
+    }
+
+    private fun closeSubscriptions(relayPool: RelayPool) {
+        val closeUsers = ClientMessage.close(userSubId)
+        val closeNotes = ClientMessage.close(noteSubId)
+        val closeLists = ClientMessage.close(listSubId)
+        relayPool.sendToAll(closeUsers)
+        relayPool.sendToAll(closeNotes)
+        relayPool.sendToAll(closeLists)
+    }
+}

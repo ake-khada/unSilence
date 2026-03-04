@@ -15,5 +15,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "barq"
+rootProject.name = "wisp"
 include(":app")

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /home/aivii/projects/barq\ngit mv app/src/main/kotlin/com/wisp app/src/main/kotlin/com/barq\necho \"Directory renamed: exit code $?\")",
+      "Bash(git config --global --add safe.directory /home/aivii/projects/barq && git mv app/src/main/kotlin/com/wisp app/src/main/kotlin/com/barq && echo \"Directory renamed successfully\")",
+      "Bash(cd /home/aivii/projects/barq\nBASE=app/src/main/kotlin/com/barq/app\ngit mv \"$BASE/WispApp.kt\" \"$BASE/BarqApp.kt\"\ngit mv \"$BASE/ui/component/WispDrawerContent.kt\" \"$BASE/ui/component/BarqDrawerContent.kt\"\ngit mv \"$BASE/ui/component/WispLogo.kt\" \"$BASE/ui/component/BarqLogo.kt\"\necho \"File renames done: exit code $?\")",
+      "Bash(./gradlew assembleDebug 2>&1)",
+      "Bash(./gradlew assembleDebug --stacktrace 2>&1 | tail -80)",
+      "Bash(./gradlew assembleDebug --stacktrace 2>&1 | head -60)"
+    ]
+  }
+}

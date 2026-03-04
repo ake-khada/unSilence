@@ -1,6 +1,6 @@
 # NIP-17: Private Direct Messages
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01, NIP-44 (encryption)
 **Kinds:** 14 (chat message), 13 (seal), 1059 (gift wrap)
 

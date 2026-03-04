@@ -1,4 +1,4 @@
-# Nostr Protocol — Barq Development Skill
+# Nostr Protocol — Wisp Development Skill
 
 ## Local NIP Reference
 
@@ -81,9 +81,9 @@ are prerequisites.
 ["r", <relay-url>, <read|write>]          # Relay (NIP-65)
 ```
 
-## Barq Codebase: Existing Nostr Implementation
+## Wisp Codebase: Existing Nostr Implementation
 
-### Protocol Layer (`app/src/main/kotlin/com/barq/app/nostr/`)
+### Protocol Layer (`app/src/main/kotlin/com/wisp/app/nostr/`)
 
 | File | Purpose | Key Types |
 |------|---------|-----------|
@@ -95,7 +95,7 @@ are prerequisites.
 | `Nip10.kt` | Reply threading tags | `Nip10.buildReplyTags(replyTo)` |
 | `Nip19.kt` | Bech32 encode/decode | `Nip19.npubEncode()`, `.nsecDecode()`, `.noteEncode()` |
 
-### Relay Layer (`app/src/main/kotlin/com/barq/app/relay/`)
+### Relay Layer (`app/src/main/kotlin/com/wisp/app/relay/`)
 
 | File | Purpose | Key Types |
 |------|---------|-----------|
@@ -103,14 +103,14 @@ are prerequisites.
 | `RelayPool.kt` | Multi-relay management | `RelayPool`, `updateRelays()`, `sendToWriteRelays()`, dedup via LruCache |
 | `RelayConfig.kt` | Relay configuration | `RelayConfig(url, read, write)` |
 
-### Data Layer (`app/src/main/kotlin/com/barq/app/repo/`)
+### Data Layer (`app/src/main/kotlin/com/wisp/app/repo/`)
 
 | File | Purpose | Key Types |
 |------|---------|-----------|
 | `KeyRepository.kt` | Encrypted key storage | `KeyRepository`, `saveKeypair()`, `getKeypair()`, EncryptedSharedPreferences |
 | `EventRepository.kt` | In-memory event cache | `EventRepository`, `feed: StateFlow`, LruCache for events + profiles |
 
-### ViewModels (`app/src/main/kotlin/com/barq/app/viewmodel/`)
+### ViewModels (`app/src/main/kotlin/com/wisp/app/viewmodel/`)
 
 | File | Purpose |
 |------|---------|
@@ -119,7 +119,7 @@ are prerequisites.
 | `ComposeViewModel.kt` | Post composition, publishing with NIP-10 reply tags |
 | `RelayViewModel.kt` | Relay configuration UI state |
 
-### UI (`app/src/main/kotlin/com/barq/app/ui/`)
+### UI (`app/src/main/kotlin/com/wisp/app/ui/`)
 
 | File | Purpose |
 |------|---------|
@@ -143,7 +143,7 @@ are prerequisites.
 
 ### Adding a New NIP Implementation
 
-1. Create `NipXX.kt` in `app/src/main/kotlin/com/barq/app/nostr/`
+1. Create `NipXX.kt` in `app/src/main/kotlin/com/wisp/app/nostr/`
 2. Use an `object` with helper functions (matches `Nip10`, `Nip19` pattern)
 3. Keep protocol logic separate from UI/ViewModel
 4. Add filter support in `Filter.kt` if new tag types are needed
@@ -195,4 +195,4 @@ NIP-01 (base protocol)
 └── NIP-57 (zaps)
 ```
 
-✓ = implemented in Barq
+✓ = implemented in Wisp

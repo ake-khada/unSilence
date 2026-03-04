@@ -1,6 +1,6 @@
 # NIP-01: Basic Protocol
 
-**Status in Barq:** Implemented
+**Status in Wisp:** Implemented
 **Files:** `Event.kt`, `Filter.kt`, `ClientMessage.kt`, `RelayMessage.kt`, `Keys.kt`
 
 ## Event Structure

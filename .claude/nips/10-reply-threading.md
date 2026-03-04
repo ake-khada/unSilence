@@ -1,6 +1,6 @@
 # NIP-10: Reply Threading
 
-**Status in Barq:** Implemented
+**Status in Wisp:** Implemented
 **File:** `Nip10.kt`
 **Depends on:** NIP-01
 
@@ -66,7 +66,7 @@ When quoting (not replying to) an event:
 - Q-tags indicate the content references/quotes another event
 - Different from reply: displayed inline, not as thread continuation
 
-## Barq Implementation
+## Wisp Implementation
 
 `Nip10.buildReplyTags(replyTo: NostrEvent)` handles:
 1. Checks if `replyTo` has a root tag (already in a thread)

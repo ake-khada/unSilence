@@ -1,6 +1,6 @@
 # NIP-04: Encrypted Direct Messages (LEGACY/DEPRECATED)
 
-**Status in Barq:** Not yet implemented
+**Status in Wisp:** Not yet implemented
 **Depends on:** NIP-01
 **Kind:** 4 (regular)
 **DEPRECATED:** Use NIP-17 (kind 14 via gift wrap) instead

@@ -1,6 +1,6 @@
 # NIP-19: Bech32-Encoded Entities
 
-**Status in Barq:** Implemented (npub/nsec/note)
+**Status in Wisp:** Implemented (npub/nsec/note)
 **File:** `Nip19.kt`
 **Depends on:** NIP-01
 
@@ -67,7 +67,7 @@ TLV: [0x00][0x20][<32-byte-event-id>][0x01][0x18][wss://relay.example.com][0x02]
 TLV: [0x00][0x02][<d-tag-utf8>][0x01][0x18][wss://relay.example.com][0x02][0x20][<32-byte-author>][0x03][0x04][<4-byte-kind-be>]
 ```
 
-## Barq Implementation
+## Wisp Implementation
 
 Currently implements basic types only:
 - `Nip19.npubEncode(pubkey: ByteArray): String`
