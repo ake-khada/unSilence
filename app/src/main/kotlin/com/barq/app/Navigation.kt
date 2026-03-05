@@ -156,6 +156,7 @@ fun BarqNavHost() {
     val searchViewModel: SearchViewModel = viewModel()
     val consoleViewModel: ConsoleViewModel = viewModel()
     val onboardingViewModel: OnboardingViewModel = viewModel()
+    val myProfileViewModel: UserProfileViewModel = viewModel()
 
     relayViewModel.relayPool = feedViewModel.relayPool
 
@@ -1352,7 +1353,7 @@ fun BarqNavHost() {
 
         composable(Routes.MY_PROFILE) {
             val pubkey = feedViewModel.getUserPubkey() ?: return@composable
-            val myProfileViewModel: UserProfileViewModel = viewModel()
+            val myProfileRelayUrls = remember { feedViewModel.getScoredRelays().take(5).map { it.url } }
             LaunchedEffect(pubkey) {
                 myProfileViewModel.loadProfile(
                     pubkey = pubkey,
@@ -1362,7 +1363,7 @@ fun BarqNavHost() {
                     outboxRouter = feedViewModel.outboxRouter,
                     relayListRepo = feedViewModel.relayListRepo,
                     subManager = feedViewModel.subManager,
-                    topRelayUrls = feedViewModel.getScoredRelays().take(5).map { it.url },
+                    topRelayUrls = myProfileRelayUrls,
                     relayHintStore = feedViewModel.relayHintStore,
                     extendedNetworkRepo = feedViewModel.extendedNetworkRepo
                 )

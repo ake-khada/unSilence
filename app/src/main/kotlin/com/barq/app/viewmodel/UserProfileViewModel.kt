@@ -81,6 +81,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
     private val activeFollowProfileSubIds = mutableListOf<String>()
     private var topRelayUrls: List<String> = emptyList()
 
+    private var loadedPubkey: String? = null
     private var extendedNetworkRepoRef: ExtendedNetworkRepository? = null
     private var isLoadingMoreNotes = false
     private var isLoadingMoreReplies = false
@@ -94,7 +95,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
     private var latestRelayListTimestamp: Long = 0
 
     companion object {
-        private val SUB_IDS = setOf("userprofile", "userposts", "userfollows", "userrelays", "userpins", "followprofiles")
+        private val SUB_IDS = setOf("userprofile", "userposts", "userfollows", "userrelays", "userpins")
     }
 
     fun loadProfile(
@@ -109,6 +110,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
         relayHintStore: RelayHintStore? = null,
         extendedNetworkRepo: ExtendedNetworkRepository? = null
     ) {
+        if (pubkey == loadedPubkey) return
         targetPubkey = pubkey
         eventRepoRef = eventRepo
         relayPoolRef = relayPool
@@ -170,6 +172,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
             relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userprofile", profileFilter))
             relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userfollows", followFilter))
         }
+        loadedPubkey = pubkey
 
         // After posts EOSE, subscribe for engagement data
         if (subManager != null) {
@@ -366,6 +369,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun closeAllSubs(relayPool: RelayPool) {
+        loadedPubkey = null
         for (subId in SUB_IDS) {
             relayPool.closeOnAllRelays(subId)
         }
@@ -383,7 +387,11 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
-        relayPoolRef?.let { closeAllSubs(it) }
+        relayPoolRef?.let { pool ->
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                closeAllSubs(pool)
+            }
+        }
     }
 
     fun loadMoreNotes() {
