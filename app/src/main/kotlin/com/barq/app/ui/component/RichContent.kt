@@ -937,7 +937,8 @@ private fun ImageWithContextMenu(url: String, onFullScreen: () -> Unit) {
         )
         DropdownMenu(
             expanded = showMenu,
-            onDismissRequest = { showMenu = false }
+            onDismissRequest = { showMenu = false },
+            containerColor = Color(0xFF0A0A0A)
         ) {
             DropdownMenuItem(
                 text = { Text("Copy URL") },

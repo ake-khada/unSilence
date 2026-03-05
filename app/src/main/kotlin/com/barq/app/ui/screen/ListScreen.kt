@@ -41,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,6 +89,7 @@ fun ListScreen(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Delete List") },
             text = { Text("Are you sure you want to delete \"${followSet?.name}\"?") },
             confirmButton = {
@@ -105,6 +107,7 @@ fun ListScreen(
     if (showFollowAllConfirm && followSet != null) {
         AlertDialog(
             onDismissRequest = { showFollowAllConfirm = false },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Follow All") },
             text = { Text("Follow ${followSet.members.size} people from this list?") },
             confirmButton = {
@@ -147,7 +150,8 @@ fun ListScreen(
                             }
                             DropdownMenu(
                                 expanded = menuExpanded,
-                                onDismissRequest = { menuExpanded = false }
+                                onDismissRequest = { menuExpanded = false },
+                                containerColor = Color(0xFF0A0A0A)
                             ) {
                                 if (!isOwnList && onFollowAll != null) {
                                     DropdownMenuItem(
@@ -301,6 +305,7 @@ private fun FollowPickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Add Members") },
         text = {
             Column {

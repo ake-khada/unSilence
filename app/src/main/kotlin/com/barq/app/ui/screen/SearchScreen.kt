@@ -46,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -511,7 +512,8 @@ private fun RelaySelector(
 
         ExposedDropdownMenu(
             expanded = expanded,
-            onDismissRequest = { expanded = false }
+            onDismissRequest = { expanded = false },
+            containerColor = Color(0xFF0A0A0A)
         ) {
             DropdownMenuItem(
                 text = { Text("All relays") },
@@ -580,6 +582,7 @@ private fun AddRelayDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Add search relay") },
         text = {
             OutlinedTextField(

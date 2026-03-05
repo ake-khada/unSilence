@@ -332,6 +332,7 @@ private fun RelayHeader(
                     if (showSetPicker) {
                         androidx.compose.material3.AlertDialog(
                             onDismissRequest = { showSetPicker = false },
+                            containerColor = Color(0xFF0A0A0A),
                             title = { Text("Add to Relay Set") },
                             text = {
                                 Column {

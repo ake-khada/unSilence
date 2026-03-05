@@ -303,7 +303,8 @@ fun PostCard(
                 }
                 DropdownMenu(
                     expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false }
+                    onDismissRequest = { menuExpanded = false },
+                    containerColor = Color(0xFF0A0A0A)
                 ) {
                     if (!isOwnEvent) {
                         DropdownMenuItem(

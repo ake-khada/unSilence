@@ -55,6 +55,7 @@ import androidx.compose.runtime.setValue
 import android.content.res.Configuration
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -355,7 +356,8 @@ private fun GraphContent(
         val node = selectedNode!!
         ModalBottomSheet(
             onDismissRequest = { graphViewModel.selectNode(null) },
-            sheetState = nodeDetailSheetState
+            sheetState = nodeDetailSheetState,
+            containerColor = Color(0xFF0A0A0A)
         ) {
             NodeDetailSheet(
                 node = node,
