@@ -16,13 +16,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.AlternateEmail
@@ -32,16 +31,15 @@ import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Surface
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -117,7 +116,6 @@ fun NotificationsScreen(
     val summary by viewModel.summary24h.collectAsState()
     val eventRepo = viewModel.eventRepository
     val listState = rememberLazyListState()
-    var showFilterDropdown by remember { mutableStateOf(false) }
     var zapErrorMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
@@ -137,8 +135,12 @@ fun NotificationsScreen(
         )
     }
 
+    var handledScrollTrigger by rememberSaveable { mutableStateOf(scrollToTopTrigger) }
     LaunchedEffect(scrollToTopTrigger) {
-        if (scrollToTopTrigger > 0) listState.scrollToItem(0)
+        if (scrollToTopTrigger != handledScrollTrigger) {
+            handledScrollTrigger = scrollToTopTrigger
+            listState.scrollToItem(0)
+        }
     }
 
     // Version flows for cache invalidation on reply PostCards
@@ -154,54 +156,7 @@ fun NotificationsScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box {
-                            Surface(
-                                onClick = { showFilterDropdown = true },
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        currentFilter.label,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 160.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Icon(
-                                        Icons.Default.ArrowDropDown,
-                                        contentDescription = "Filter notifications",
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                            DropdownMenu(
-                                expanded = showFilterDropdown,
-                                onDismissRequest = { showFilterDropdown = false }
-                            ) {
-                                NotificationFilter.entries.forEach { filterOption ->
-                                    DropdownMenuItem(
-                                        text = { Text(filterOption.label) },
-                                        onClick = {
-                                            showFilterDropdown = false
-                                            viewModel.setFilter(filterOption)
-                                        },
-                                        trailingIcon = if (currentFilter == filterOption) {{
-                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }} else null
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    Text("Notifications")
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -222,12 +177,36 @@ fun NotificationsScreen(
             )
         }
     ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val chips = listOf(
+                NotificationFilter.ZAPS to "Zaps",
+                NotificationFilter.REPOSTS to "Boosts",
+                NotificationFilter.REPLIES to "Replies",
+                NotificationFilter.MENTIONS to "Mentions"
+            )
+            items(chips) { (filter, label) ->
+                FilterChip(
+                    selected = currentFilter == filter,
+                    onClick = { viewModel.setFilter(if (currentFilter == filter) NotificationFilter.ALL else filter) },
+                    label = { Text(label) }
+                )
+            }
+        }
         PullToRefreshBox(
             isRefreshing = isRefreshing,
             onRefresh = { viewModel.refresh(onRefresh) },
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
         ) {
         if (notifications.isEmpty()) {
             Column(
@@ -339,6 +318,7 @@ fun NotificationsScreen(
             }
         }
         } // PullToRefreshBox
+        } // Column
     }
 }
 

@@ -54,6 +54,20 @@ object HttpClientFactory {
         return builder.build()
     }
 
+    private var cachedImageClient: OkHttpClient? = null
+    private var cachedImageClientTorEnabled: Boolean? = null
+
+    fun getImageClient(torEnabled: Boolean = TorManager.isEnabled()): OkHttpClient {
+        if (cachedImageClient == null || cachedImageClientTorEnabled != torEnabled) {
+            cachedImageClient = createHttpClient(
+                connectTimeoutSeconds = 10,
+                readTimeoutSeconds = 30
+            )
+            cachedImageClientTorEnabled = torEnabled
+        }
+        return cachedImageClient!!
+    }
+
     fun createHttpClient(
         connectTimeoutSeconds: Long = 10,
         readTimeoutSeconds: Long = 10,

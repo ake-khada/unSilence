@@ -35,8 +35,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -66,7 +64,6 @@ import com.barq.app.ui.component.FollowButton
 import com.barq.app.ui.component.PostCard
 import com.barq.app.ui.component.ProfilePicture
 import com.barq.app.viewmodel.LocalFilter
-import com.barq.app.viewmodel.SearchTab
 import com.barq.app.viewmodel.SearchViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,18 +91,13 @@ fun SearchScreen(
     translationRepo: TranslationRepository? = null
 ) {
     val query by viewModel.query.collectAsState()
-    val selectedTab by viewModel.selectedTab.collectAsState()
     val localFilter by viewModel.localFilter.collectAsState()
-    val localUsers by viewModel.localUsers.collectAsState()
-    val localNotes by viewModel.localNotes.collectAsState()
     val users by viewModel.users.collectAsState()
     val notes by viewModel.notes.collectAsState()
     val lists by viewModel.lists.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
     val searchRelays by viewModel.searchRelays.collectAsState()
     val selectedRelay by viewModel.selectedRelay.collectAsState()
-
-    val tabs = SearchTab.entries
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -129,76 +121,37 @@ fun SearchScreen(
                 onSelectFilter = { viewModel.selectLocalFilter(it) }
             )
 
-            // Tabs
-            TabRow(selectedTabIndex = tabs.indexOf(selectedTab)) {
-                Tab(
-                    selected = selectedTab == SearchTab.MY_DEVICE,
-                    onClick = { viewModel.selectTab(SearchTab.MY_DEVICE) },
-                    text = { Text("My Device") }
-                )
-                Tab(
-                    selected = selectedTab == SearchTab.RELAYS,
-                    onClick = { viewModel.selectTab(SearchTab.RELAYS) },
-                    text = { Text("Relays") }
-                )
-            }
-
-            when (selectedTab) {
-                SearchTab.MY_DEVICE -> MyDeviceTab(
-                    query = query,
-                    localFilter = localFilter,
-                    localUsers = localUsers,
-                    localNotes = localNotes,
-                    eventRepo = eventRepo,
-                    contactRepo = contactRepo,
-                    onQueryChange = { viewModel.updateQuery(it, profileRepo, eventRepo) },
-                    onClear = { viewModel.clear() },
-                    onProfileClick = onProfileClick,
-                    onNoteClick = onNoteClick,
-                    onQuotedNoteClick = onQuotedNoteClick,
-                    onReply = onReply,
-                    onReact = onReact,
-                    onToggleFollow = onToggleFollow,
-                    onBlockUser = onBlockUser,
-                    userPubkey = userPubkey,
-                    listedIds = listedIds,
-                    onAddToList = onAddToList,
-                    onDeleteEvent = onDeleteEvent,
-                    translationRepo = translationRepo
-                )
-
-                SearchTab.RELAYS -> RelaysTab(
-                    query = query,
-                    users = users,
-                    notes = notes,
-                    lists = lists,
-                    isSearching = isSearching,
-                    localFilter = localFilter,
-                    searchRelays = searchRelays,
-                    selectedRelay = selectedRelay,
-                    onSelectRelay = { viewModel.selectRelay(it) },
-                    onAddRelay = { viewModel.addSearchRelay(it) },
-                    onRemoveRelay = { viewModel.removeSearchRelay(it) },
-                    onQueryChange = { viewModel.updateQuery(it, profileRepo, eventRepo) },
-                    onClear = { viewModel.clear() },
-                    onSearch = { viewModel.search(query, relayPool, eventRepo, muteRepo) },
-                    eventRepo = eventRepo,
-                    contactRepo = contactRepo,
-                    onProfileClick = onProfileClick,
-                    onNoteClick = onNoteClick,
-                    onQuotedNoteClick = onQuotedNoteClick,
-                    onReply = onReply,
-                    onReact = onReact,
-                    onListClick = onListClick,
-                    onToggleFollow = onToggleFollow,
-                    onBlockUser = onBlockUser,
-                    userPubkey = userPubkey,
-                    listedIds = listedIds,
-                    onAddToList = onAddToList,
-                    onDeleteEvent = onDeleteEvent,
-                    translationRepo = translationRepo
-                )
-            }
+            RelaysTab(
+                query = query,
+                users = users,
+                notes = notes,
+                lists = lists,
+                isSearching = isSearching,
+                localFilter = localFilter,
+                searchRelays = searchRelays,
+                selectedRelay = selectedRelay,
+                onSelectRelay = { viewModel.selectRelay(it) },
+                onAddRelay = { viewModel.addSearchRelay(it) },
+                onRemoveRelay = { viewModel.removeSearchRelay(it) },
+                onQueryChange = { viewModel.updateQuery(it, profileRepo, eventRepo) },
+                onClear = { viewModel.clear() },
+                onSearch = { viewModel.search(query, relayPool, eventRepo, muteRepo) },
+                eventRepo = eventRepo,
+                contactRepo = contactRepo,
+                onProfileClick = onProfileClick,
+                onNoteClick = onNoteClick,
+                onQuotedNoteClick = onQuotedNoteClick,
+                onReply = onReply,
+                onReact = onReact,
+                onListClick = onListClick,
+                onToggleFollow = onToggleFollow,
+                onBlockUser = onBlockUser,
+                userPubkey = userPubkey,
+                listedIds = listedIds,
+                onAddToList = onAddToList,
+                onDeleteEvent = onDeleteEvent,
+                translationRepo = translationRepo
+            )
         }
     }
 }

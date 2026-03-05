@@ -7,15 +7,13 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountBalanceWallet
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.outlined.AccountBalanceWallet
-import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
@@ -39,17 +37,15 @@ enum class BottomTab(
     val unselectedIcon: ImageVector
 ) {
     HOME(Routes.FEED, "Home", Icons.Filled.Home, Icons.Outlined.Home),
-    WALLET(Routes.WALLET, "Wallet", Icons.Filled.AccountBalanceWallet, Icons.Outlined.AccountBalanceWallet),
     SEARCH(Routes.SEARCH, "Search", Icons.Filled.Search, Icons.Outlined.Search),
-    MESSAGES(Routes.DM_LIST, "Messages", Icons.Filled.Email, Icons.Outlined.Email),
-    NOTIFICATIONS(Routes.NOTIFICATIONS, "Notifications", Icons.Filled.Notifications, Icons.Outlined.Notifications)
+    NOTIFICATIONS(Routes.NOTIFICATIONS, "Notifications", Icons.Filled.Notifications, Icons.Outlined.Notifications),
+    PROFILE(Routes.MY_PROFILE, "Profile", Icons.Filled.Person, Icons.Outlined.Person)
 }
 
 @Composable
 fun BarqBottomBar(
     currentRoute: String?,
     hasUnreadHome: Boolean,
-    hasUnreadMessages: Boolean,
     hasUnreadNotifications: Boolean,
     isZapAnimating: Boolean = false,
     onTabSelected: (BottomTab) -> Unit
@@ -62,10 +58,8 @@ fun BarqBottomBar(
             val selected = currentRoute == tab.route
             val hasUnread = when (tab) {
                 BottomTab.HOME -> hasUnreadHome
-                BottomTab.WALLET -> false
-                BottomTab.SEARCH -> false
-                BottomTab.MESSAGES -> hasUnreadMessages
                 BottomTab.NOTIFICATIONS -> hasUnreadNotifications
+                else -> false
             }
 
             NavigationBarItem(
