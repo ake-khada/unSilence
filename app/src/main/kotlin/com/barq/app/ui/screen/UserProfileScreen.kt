@@ -646,6 +646,7 @@ private fun ProfileHeader(
         ) {
             ProfilePicture(
                 url = profile?.picture,
+                pubkey = pubkey,
                 size = 72,
                 showBlockedBadge = isBlocked,
                 onClick = profile?.picture?.let { url -> { fullScreenImageUrl = url } }
@@ -811,6 +812,7 @@ private fun ProfileHeader(
                         Box(modifier = Modifier.offset(x = (index * overlap).dp)) {
                             ProfilePicture(
                                 url = eventRepo?.getProfileData(pk)?.picture,
+                                pubkey = pk,
                                 size = avatarSize,
                                 onClick = { onNavigateToProfile?.invoke(pk) }
                             )
@@ -852,7 +854,7 @@ private fun FollowEntryRow(
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        ProfilePicture(url = profile?.picture, size = 40)
+        ProfilePicture(url = profile?.picture, pubkey = entry.pubkey, size = 40)
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
