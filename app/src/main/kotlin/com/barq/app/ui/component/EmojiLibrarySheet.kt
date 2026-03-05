@@ -40,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
@@ -96,7 +97,8 @@ fun EmojiLibrarySheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState
+        sheetState = sheetState,
+        containerColor = Color(0xFF0A0A0A)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Category tabs
@@ -259,6 +261,7 @@ fun EmojiLibrarySheet(
         var text by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showKeyboardDialog = false },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Add Emoji") },
             text = {
                 OutlinedTextField(

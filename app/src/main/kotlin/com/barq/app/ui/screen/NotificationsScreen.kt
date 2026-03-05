@@ -127,6 +127,7 @@ fun NotificationsScreen(
     if (zapErrorMessage != null) {
         AlertDialog(
             onDismissRequest = { zapErrorMessage = null },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Zap Failed") },
             text = { Text(zapErrorMessage ?: "") },
             confirmButton = {
