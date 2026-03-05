@@ -364,6 +364,9 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeRelaySet(dTag: String) {
         relaySetRepo.removeRelaySet(dTag)
+        if (feedType.value == FeedType.RELAY && selectedRelaySet.value?.dTag == dTag) {
+            setFeedType(FeedType.FOLLOWS)
+        }
     }
 
     private fun publishFavoriteRelays(urls: List<String>) {
