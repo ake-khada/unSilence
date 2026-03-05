@@ -42,14 +42,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -59,7 +55,6 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.viewinterop.AndroidView
@@ -245,8 +240,7 @@ fun RichContent(
     onNoteClick: ((String) -> Unit)? = null,
     onHashtagClick: ((String) -> Unit)? = null,
     noteActions: NoteActions? = null,
-    modifier: Modifier = Modifier,
-    parentHorizontalPadding: Dp = 16.dp
+    modifier: Modifier = Modifier
 ) {
     val segments = remember(content, emojiMap) { parseContent(content.trimEnd('\n', '\r'), emojiMap) }
     var fullScreenImageUrl by remember { mutableStateOf<String?>(null) }
@@ -429,8 +423,7 @@ fun RichContent(
                     is ContentSegment.VideoSegment -> {
                         InlineVideoPlayerWithFullscreen(
                             url = segment.url,
-                            onFullScreen = { fullScreenVideoUrl = segment.url },
-                            parentHorizontalPadding = parentHorizontalPadding
+                            onFullScreen = { fullScreenVideoUrl = segment.url }
                         )
                     }
                     is ContentSegment.LinkSegment -> {
@@ -625,8 +618,7 @@ fun QuotedNote(
                     content = event.content,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
-                    eventRepo = eventRepo,
-                    parentHorizontalPadding = 14.dp
+                    eventRepo = eventRepo
                 )
             }
         }
@@ -797,12 +789,7 @@ private fun LiveStreamCard(
         } else {
             Column {
                 if (streamUrl != null) {
-                    InlineVideoPlayer(
-                        url = streamUrl,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                    )
+                    InlineVideoPlayer(url = streamUrl)
                 } else if (image != null) {
                     AsyncImage(
                         model = image,
@@ -951,22 +938,14 @@ private fun ImageWithContextMenu(url: String, onFullScreen: () -> Unit) {
 @Composable
 private fun InlineVideoPlayerWithFullscreen(
     url: String,
-    onFullScreen: () -> Unit,
-    parentHorizontalPadding: Dp = 16.dp
+    onFullScreen: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .layout { measurable, constraints ->
-                val extraWidth = (parentHorizontalPadding * 2).roundToPx()
-                val placeable = measurable.measure(constraints.copy(maxWidth = constraints.maxWidth + extraWidth))
-                layout(placeable.width, placeable.height) {
-                    placeable.place(-extraWidth / 2, 0)
-                }
-            }
             .clip(RoundedCornerShape(12.dp))
     ) {
-        InlineVideoPlayer(url = url, modifier = Modifier.fillMaxWidth())
+        InlineVideoPlayer(url = url)
         IconButton(
             onClick = onFullScreen,
             colors = IconButtonDefaults.iconButtonColors(
@@ -988,9 +967,8 @@ private fun InlineVideoPlayerWithFullscreen(
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun InlineVideoPlayer(url: String, modifier: Modifier = Modifier) {
+private fun InlineVideoPlayer(url: String) {
     val context = LocalContext.current
-    val view = LocalView.current
     val exoPlayer = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
@@ -1001,14 +979,15 @@ private fun InlineVideoPlayer(url: String, modifier: Modifier = Modifier) {
     }
 
     // Reset to 0 on URL change so we don't flash wrong ratio from a prior video
-    var videoWidth by remember(url) { mutableStateOf(0) }
-    var videoHeight by remember(url) { mutableStateOf(0) }
+    var videoWidth by remember(url) { mutableStateOf(videoDimensionCache[url]?.first ?: 0) }
+    var videoHeight by remember(url) { mutableStateOf(videoDimensionCache[url]?.second ?: 0) }
 
     DisposableEffect(url) {
         val listener = object : Player.Listener {
             override fun onVideoSizeChanged(size: VideoSize) {
                 videoWidth = size.width
                 videoHeight = size.height
+                videoDimensionCache[url] = Pair(size.width, size.height)
             }
         }
         exoPlayer.addListener(listener)
@@ -1030,7 +1009,8 @@ private fun InlineVideoPlayer(url: String, modifier: Modifier = Modifier) {
     }
 
     Box(
-        modifier = modifier
+        modifier = Modifier
+            .fillMaxWidth()
             .aspectRatio(aspectRatio)
             .clickable { showControls = !showControls }
     ) {
@@ -1042,24 +1022,7 @@ private fun InlineVideoPlayer(url: String, modifier: Modifier = Modifier) {
                 }
             },
             update = { playerView -> playerView.useController = showControls },
-            modifier = Modifier
-                .matchParentSize()
-                .onGloballyPositioned { coords ->
-                    val screenHeight = view.height.toFloat()
-                    val pos = coords.positionInWindow()
-                    val top = pos.y
-                    val bottom = pos.y + coords.size.height
-                    val visibleTop = maxOf(top, 0f)
-                    val visibleBottom = minOf(bottom, screenHeight)
-                    val visibleHeight = (visibleBottom - visibleTop).coerceAtLeast(0f)
-                    val fraction = if (coords.size.height > 0) visibleHeight / coords.size.height else 0f
-                    if (fraction >= 0.5f) {
-                        exoPlayer.volume = 0f
-                        exoPlayer.play()
-                    } else {
-                        exoPlayer.pause()
-                    }
-                }
+            modifier = Modifier.matchParentSize()
         )
     }
 }
@@ -1072,6 +1035,8 @@ private data class OgData(
     val image: String?,
     val siteName: String?
 )
+
+private val videoDimensionCache = mutableMapOf<String, Pair<Int, Int>>()
 
 private val ogCache = LruCache<String, OgData>(200)
 

@@ -66,6 +66,7 @@ fun StackedAvatarRow(
                 val profile = resolveProfile(pubkey)
                 ProfilePicture(
                     url = profile?.picture,
+                    pubkey = pubkey,
                     size = AVATAR_SIZE,
                     showFollowBadge = isFollowing?.invoke(pubkey) ?: false,
                     highlighted = highlightFirst && index == 0,
@@ -84,6 +85,7 @@ fun StackedAvatarRow(
                     val profile = resolveProfile(pubkey)
                     ProfilePicture(
                         url = profile?.picture,
+                        pubkey = pubkey,
                         size = AVATAR_SIZE,
                         showFollowBadge = isFollowing?.invoke(pubkey) ?: false,
                         highlighted = highlightFirst && index == 0,
@@ -123,7 +125,7 @@ fun ZapRow(
         modifier = modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ProfilePicture(url = profile?.picture, size = 20, onClick = { onProfileClick(pubkey) })
+        ProfilePicture(url = profile?.picture, pubkey = pubkey, size = 20, onClick = { onProfileClick(pubkey) })
         Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -191,7 +193,8 @@ fun ReactionDetailsSection(
                         ZapAvatarChip(
                             profile = resolveProfile(pubkey),
                             sats = sats,
-                            onClick = { onProfileClick(pubkey) }
+                            onClick = { onProfileClick(pubkey) },
+                            pubkey = pubkey
                         )
                     }
                 }
@@ -217,6 +220,7 @@ fun ReactionDetailsSection(
                     repostDetails.forEach { pubkey ->
                         ProfilePicture(
                             url = resolveProfile(pubkey)?.picture,
+                            pubkey = pubkey,
                             size = AVATAR_SIZE,
                             onClick = { onProfileClick(pubkey) }
                         )
@@ -250,6 +254,7 @@ fun ReactionDetailsSection(
                         pubkeys.forEach { pubkey ->
                             ProfilePicture(
                                 url = resolveProfile(pubkey)?.picture,
+                                pubkey = pubkey,
                                 size = AVATAR_SIZE,
                                 onClick = { onProfileClick(pubkey) }
                             )
@@ -333,11 +338,13 @@ private fun SectionRow(
 private fun ZapAvatarChip(
     profile: ProfileData?,
     sats: Long,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    pubkey: String? = null
 ) {
     Box(contentAlignment = Alignment.BottomCenter) {
         ProfilePicture(
             url = profile?.picture,
+            pubkey = pubkey,
             size = AVATAR_SIZE,
             onClick = onClick
         )

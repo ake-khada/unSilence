@@ -8,21 +8,21 @@
     <!-- Outer glow -->
     <path
         android:pathData="M54,54 m-18,0 a18,18 0 1,1 36,0 a18,18 0 1,1 -36,0"
-        android:fillColor="#20FF9800" />
+        android:fillColor="#209C27B0" />
 
     <!-- Mid glow -->
     <path
         android:pathData="M54,54 m-13,0 a13,13 0 1,1 26,0 a13,13 0 1,1 -26,0"
-        android:fillColor="#50FF9800" />
+        android:fillColor="#509C27B0" />
 
     <!-- Core -->
     <path
         android:pathData="M54,54 m-9,0 a9,9 0 1,1 18,0 a9,9 0 1,1 -18,0"
-        android:fillColor="#FFFF9800" />
+        android:fillColor="#FF9C27B0" />
 
     <!-- Hot center -->
     <path
         android:pathData="M54,54 m-4,0 a4,4 0 1,1 8,0 a4,4 0 1,1 -8,0"
-        android:fillColor="#FFFFD180" />
+        android:fillColor="#FFCE93D8" />
 
 </vector>

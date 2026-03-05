@@ -91,7 +91,7 @@ fun BarqDrawerContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                ProfilePicture(url = profile?.picture, size = 64)
+                ProfilePicture(url = profile?.picture, pubkey = pubkey, size = 64)
                 Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = { onToggleTor(!isTorEnabled) }) {
                     Box(contentAlignment = Alignment.Center) {

@@ -667,6 +667,7 @@ private fun ZapEntryRow(
         Spacer(Modifier.width(8.dp))
         ProfilePicture(
             url = profile?.picture,
+            pubkey = zap.pubkey,
             size = 24,
             showFollowBadge = showFollowBadge,
             highlighted = highlighted,
@@ -765,6 +766,7 @@ private fun QuoteNotificationRow(
         ) {
             ProfilePicture(
                 url = profile?.picture,
+                pubkey = item.senderPubkey,
                 size = 34,
                 showFollowBadge = isFollowing,
                 modifier = Modifier.clickable { onProfileClick(item.senderPubkey) }
@@ -823,6 +825,7 @@ private fun MentionNotificationRow(
         ) {
             ProfilePicture(
                 url = profile?.picture,
+                pubkey = item.senderPubkey,
                 size = 34,
                 showFollowBadge = isFollowing,
                 modifier = Modifier.clickable { onProfileClick(item.senderPubkey) }
