@@ -25,27 +25,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -54,6 +50,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -64,9 +61,7 @@ import com.barq.app.nostr.NostrEvent
 import com.barq.app.ui.component.NoteActions
 import com.barq.app.ui.component.EmojiLibrarySheet
 import com.barq.app.ui.component.PostCard
-import com.barq.app.ui.component.ProfilePicture
 import com.barq.app.ui.component.RelayIcon
-import com.barq.app.ui.component.BarqDrawerContent
 import com.barq.app.ui.component.ZapDialog
 import com.barq.app.repo.RelayInfoRepository
 import com.barq.app.relay.ScoredRelay
@@ -88,31 +83,15 @@ import kotlinx.coroutines.launch
 @Composable
 fun FeedScreen(
     viewModel: FeedViewModel,
-    isTorEnabled: Boolean = false,
-    torStatus: com.barq.app.relay.TorStatus = com.barq.app.relay.TorStatus.DISABLED,
-    onToggleTor: (Boolean) -> Unit = {},
     onCompose: () -> Unit,
     onReply: (NostrEvent) -> Unit,
-    onRelays: () -> Unit,
-    onProfileEdit: () -> Unit = {},
     onProfileClick: (String) -> Unit = {},
-    onDms: () -> Unit = {},
     onReact: (NostrEvent, String) -> Unit = { _, _ -> },
     onRepost: (NostrEvent) -> Unit = {},
     onQuote: (NostrEvent) -> Unit = {},
     onNoteClick: (NostrEvent) -> Unit = {},
     onQuotedNoteClick: ((String) -> Unit)? = null,
-    onSearch: () -> Unit = {},
-    onLogout: () -> Unit = {},
-    onMediaServers: () -> Unit = {},
     onWallet: () -> Unit = {},
-    onLists: () -> Unit = {},
-    onDrafts: () -> Unit = {},
-    onSocialGraph: () -> Unit = {},
-    onSafety: () -> Unit = {},
-    onCustomEmojis: () -> Unit = {},
-    onConsole: () -> Unit = {},
-    onKeys: () -> Unit = {},
     onAddToList: (String) -> Unit = {},
     onRelayDetail: (String) -> Unit = {},
     onHashtagClick: ((String) -> Unit)? = null,
@@ -135,19 +114,20 @@ fun FeedScreen(
     val connectedCount by viewModel.relayPool.connectedCount.collectAsState()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     val listState = rememberLazyListState()
+    var handledScrollTrigger by rememberSaveable { mutableStateOf(scrollToTopTrigger) }
     LaunchedEffect(scrollToTopTrigger) {
-        if (scrollToTopTrigger > 0) listState.scrollToItem(0)
+        if (scrollToTopTrigger != handledScrollTrigger) {
+            handledScrollTrigger = scrollToTopTrigger
+            listState.scrollToItem(0)
+        }
     }
     val userPubkey = viewModel.getUserPubkey()
     val selectedList by viewModel.selectedList.collectAsState()
     val ownLists by viewModel.listRepo.ownLists.collectAsState()
     var showRelayPicker by remember { mutableStateOf(false) }
     var showListPicker by remember { mutableStateOf(false) }
-    var showRelayDropdown by remember { mutableStateOf(false) }
-    var showFeedTypeDropdown by remember { mutableStateOf(false) }
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    var showFeedTypeSheet by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val userProfile = profileVersion.let { userPubkey?.let { viewModel.eventRepo.getProfileData(it) } }
 
     val newNoteCount by viewModel.newNoteCount.collectAsState()
     val initLoadingState by viewModel.initLoadingState.collectAsState()
@@ -298,257 +278,73 @@ fun FeedScreen(
         )
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            BarqDrawerContent(
-                profile = userProfile,
-                pubkey = userPubkey,
-                isTorEnabled = isTorEnabled,
-                torStatus = torStatus,
-                onToggleTor = onToggleTor,
-                onProfile = {
-                    scope.launch { drawerState.close() }
-                    onProfileEdit()
-                },
-                onFeed = {
-                    scope.launch { drawerState.close() }
-                },
-                onSearch = {
-                    scope.launch { drawerState.close() }
-                    onSearch()
-                },
-                onMessages = {
-                    scope.launch { drawerState.close() }
-                    onDms()
-                },
-                onWallet = {
-                    scope.launch { drawerState.close() }
-                    onWallet()
-                },
-                onLists = {
-                    scope.launch { drawerState.close() }
-                    onLists()
-                },
-                onDrafts = {
-                    scope.launch { drawerState.close() }
-                    onDrafts()
-                },
-                onMediaServers = {
-                    scope.launch { drawerState.close() }
-                    onMediaServers()
-                },
-                onSocialGraph = {
-                    scope.launch { drawerState.close() }
-                    onSocialGraph()
-                },
-                onSafety = {
-                    scope.launch { drawerState.close() }
-                    onSafety()
-                },
-                onCustomEmojis = {
-                    scope.launch { drawerState.close() }
-                    onCustomEmojis()
-                },
-                onKeys = {
-                    scope.launch { drawerState.close() }
-                    onKeys()
-                },
-                onConsole = {
-                    scope.launch { drawerState.close() }
-                    onConsole()
-                },
-                onRelaySettings = {
-                    scope.launch { drawerState.close() }
-                    onRelays()
-                },
-                onLogout = {
-                    scope.launch { drawerState.close() }
-                    onLogout()
-                }
-            )
-        }
-    ) {
-        Scaffold(
+    Scaffold(
             modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
                 TopAppBar(
-                    title = {
-                        Box(
-                            modifier = Modifier.fillMaxWidth(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                            Box {
-                                Surface(
-                                    onClick = { showFeedTypeDropdown = true },
-                                    shape = RoundedCornerShape(20.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        val feedLabel = when (feedType) {
-                                            FeedType.FOLLOWS -> "Follows"
-                                            FeedType.EXTENDED_FOLLOWS -> "Extended"
-                                            FeedType.RELAY -> if (selectedRelay != null) {
-                                                selectedRelay!!.removePrefix("wss://").removeSuffix("/")
-                                            } else "Relay"
-                                            FeedType.LIST -> if (selectedList != null) {
-                                                selectedList!!.name
-                                            } else "List"
-                                        }
-                                        Text(
-                                            feedLabel,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                            modifier = Modifier.widthIn(max = 160.dp)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Icon(
-                                            Icons.Default.ArrowDropDown,
-                                            contentDescription = "Change feed",
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                                DropdownMenu(
-                                    expanded = showFeedTypeDropdown,
-                                    onDismissRequest = { showFeedTypeDropdown = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Follows") },
-                                        onClick = {
-                                            showFeedTypeDropdown = false
-                                            viewModel.setFeedType(FeedType.FOLLOWS)
-                                        },
-                                        trailingIcon = if (feedType == FeedType.FOLLOWS) {{
-                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }} else null
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Extended") },
-                                        onClick = {
-                                            showFeedTypeDropdown = false
-                                            viewModel.setFeedType(FeedType.EXTENDED_FOLLOWS)
-                                        },
-                                        trailingIcon = if (feedType == FeedType.EXTENDED_FOLLOWS) {{
-                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }} else null
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Relay") },
-                                        onClick = {
-                                            showFeedTypeDropdown = false
-                                            showRelayPicker = true
-                                        },
-                                        trailingIcon = if (feedType == FeedType.RELAY) {{
-                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }} else null
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("List") },
-                                        onClick = {
-                                            showFeedTypeDropdown = false
-                                            showListPicker = true
-                                        },
-                                        trailingIcon = if (feedType == FeedType.LIST) {{
-                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }} else null
-                                    )
-                                }
-                            }
-                            } // Row
-                        }
-                    },
+                    title = {},
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface,
                         scrolledContainerColor = MaterialTheme.colorScheme.surface
                     ),
                     scrollBehavior = scrollBehavior,
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            ProfilePicture(url = userProfile?.picture, pubkey = userPubkey, size = 32)
+                        Surface(
+                            onClick = { showFeedTypeSheet = true },
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val feedLabel = when (feedType) {
+                                    FeedType.FOLLOWS -> "Follows"
+                                    FeedType.EXTENDED_FOLLOWS -> "Global"
+                                    FeedType.RELAY -> if (selectedRelay != null) {
+                                        selectedRelay!!.removePrefix("wss://").removeSuffix("/")
+                                    } else "Relay"
+                                    FeedType.LIST -> if (selectedList != null) {
+                                        selectedList!!.name
+                                    } else "List"
+                                }
+                                Text(
+                                    feedLabel,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 160.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    Icons.Default.ArrowDropDown,
+                                    contentDescription = "Change feed",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     },
                     actions = {
-                        Box {
-                            Surface(
-                                onClick = { showRelayDropdown = true },
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier.size(8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        androidx.compose.foundation.Canvas(
-                                            modifier = Modifier.size(8.dp)
-                                        ) {
-                                            drawCircle(
-                                                color = if (connectedCount > 0)
-                                                    androidx.compose.ui.graphics.Color(0xFF4CAF50)
-                                                else
-                                                    androidx.compose.ui.graphics.Color(0xFFFF5252)
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        "$connectedCount",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                        Row(
+                            modifier = Modifier.padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.foundation.Canvas(modifier = Modifier.size(8.dp)) {
+                                drawCircle(
+                                    color = if (connectedCount > 0)
+                                        androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                                    else
+                                        androidx.compose.ui.graphics.Color(0xFFFF5252)
+                                )
                             }
-                            DropdownMenu(
-                                expanded = showRelayDropdown,
-                                onDismissRequest = { showRelayDropdown = false }
-                            ) {
-                                val connectedUrls = viewModel.relayPool.getAllConnectedUrls()
-                                if (connectedUrls.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                "No relays connected",
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        },
-                                        onClick = {}
-                                    )
-                                } else {
-                                    val coverageCounts = viewModel.getRelayCoverageCounts()
-                                    connectedUrls.forEach { url ->
-                                        val count = coverageCounts[url]
-                                        val label = buildString {
-                                            append(url.removePrefix("wss://").removeSuffix("/"))
-                                            if (count != null && count > 0) append(" ($count)")
-                                        }
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    label,
-                                                    style = MaterialTheme.typography.bodyMedium
-                                                )
-                                            },
-                                            onClick = {
-                                                showRelayDropdown = false
-                                                viewModel.setSelectedRelay(url)
-                                                viewModel.setFeedType(FeedType.RELAY)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "$connectedCount",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 )
@@ -715,6 +511,64 @@ fun FeedScreen(
                 }
             }
             } // Column
+        }
+
+    if (showFeedTypeSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showFeedTypeSheet = false },
+            sheetState = sheetState
+        ) {
+            Column(Modifier.padding(vertical = 8.dp)) {
+                androidx.compose.material3.NavigationDrawerItem(
+                    label = { Text("Follows") },
+                    selected = feedType == FeedType.FOLLOWS,
+                    onClick = {
+                        showFeedTypeSheet = false
+                        viewModel.setFeedType(FeedType.FOLLOWS)
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                androidx.compose.material3.NavigationDrawerItem(
+                    label = { Text("Global") },
+                    selected = feedType == FeedType.EXTENDED_FOLLOWS,
+                    onClick = {
+                        showFeedTypeSheet = false
+                        viewModel.setFeedType(FeedType.EXTENDED_FOLLOWS)
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                ownRelaySets.forEach { relaySet ->
+                    androidx.compose.material3.NavigationDrawerItem(
+                        label = { Text(relaySet.name) },
+                        selected = feedType == FeedType.RELAY && selectedRelaySet?.dTag == relaySet.dTag,
+                        onClick = {
+                            showFeedTypeSheet = false
+                            viewModel.setSelectedRelaySet(relaySet)
+                            viewModel.setFeedType(FeedType.RELAY)
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+                androidx.compose.material3.NavigationDrawerItem(
+                    label = { Text("Relay") },
+                    selected = feedType == FeedType.RELAY && selectedRelaySet == null,
+                    onClick = {
+                        showFeedTypeSheet = false
+                        showRelayPicker = true
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                androidx.compose.material3.NavigationDrawerItem(
+                    label = { Text("List") },
+                    selected = feedType == FeedType.LIST,
+                    onClick = {
+                        showFeedTypeSheet = false
+                        showListPicker = true
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+            }
         }
     }
 
