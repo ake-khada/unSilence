@@ -73,6 +73,7 @@ import com.barq.app.ui.screen.OnboardingScreen
 import com.barq.app.ui.component.AddNoteToListDialog
 import com.barq.app.ui.screen.OnboardingSuggestionsScreen
 import com.barq.app.ui.screen.RelayDetailScreen
+import com.barq.app.ui.screen.SettingsScreen
 import com.barq.app.ui.screen.WalletScreen
 import com.barq.app.viewmodel.BlossomServersViewModel
 import com.barq.app.viewmodel.AuthViewModel
@@ -128,6 +129,8 @@ object Routes {
     const val EXISTING_USER_ONBOARDING = "onboarding/existing"
     const val DRAFTS = "drafts"
     const val SOCIAL_GRAPH = "social_graph"
+    const val MY_PROFILE = "my_profile"
+    const val SETTINGS = "settings"
 }
 
 @Composable
@@ -445,9 +448,6 @@ fun BarqNavHost() {
         composable(Routes.FEED) {
             FeedScreen(
                 viewModel = feedViewModel,
-                isTorEnabled = isTorEnabled,
-                torStatus = torStatus,
-                onToggleTor = onToggleTor,
                 scrollToTopTrigger = scrollToTopTrigger,
                 onScrollDirectionChanged = { feedScrolledDown = it },
                 onCompose = {
@@ -471,20 +471,8 @@ fun BarqNavHost() {
                     composeViewModel.clear()
                     navController.navigate(Routes.COMPOSE)
                 },
-                onRelays = {
-                    navController.navigate(Routes.RELAYS)
-                },
-                onProfileEdit = {
-                    val pubkey = feedViewModel.getUserPubkey()
-                    if (pubkey != null) {
-                        navController.navigate("profile/$pubkey")
-                    }
-                },
                 onProfileClick = { pubkey ->
                     navController.navigate("profile/$pubkey")
-                },
-                onDms = {
-                    navController.navigate(Routes.DM_LIST)
                 },
                 onReact = { event, emoji ->
                     feedViewModel.toggleReaction(event, emoji)
@@ -495,47 +483,8 @@ fun BarqNavHost() {
                 onQuotedNoteClick = { eventId ->
                     navController.navigate("thread/$eventId")
                 },
-                onLogout = {
-                    feedViewModel.resetForAccountSwitch()
-                    walletViewModel.disconnectWallet()
-                    authViewModel.logOut()
-                    navController.navigate(Routes.AUTH) {
-                        popUpTo(0) { inclusive = true }
-                    }
-                },
-                onMediaServers = {
-                    navController.navigate(Routes.BLOSSOM_SERVERS)
-                },
                 onWallet = {
                     navController.navigate(Routes.WALLET)
-                },
-                onLists = {
-                    navController.navigate(Routes.LISTS_HUB)
-                },
-                onDrafts = {
-                    navController.navigate(Routes.DRAFTS)
-                },
-                onSafety = {
-                    navController.navigate(Routes.SAFETY)
-                },
-                onSearch = {
-                    navController.navigate(Routes.SEARCH) {
-                        popUpTo(Routes.FEED) { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
-                },
-                onSocialGraph = {
-                    navController.navigate(Routes.SOCIAL_GRAPH)
-                },
-                onCustomEmojis = {
-                    navController.navigate(Routes.CUSTOM_EMOJIS)
-                },
-                onConsole = {
-                    navController.navigate(Routes.CONSOLE)
-                },
-                onKeys = {
-                    navController.navigate(Routes.KEYS)
                 },
                 onAddToList = { eventId -> addToListEventId = eventId },
                 onRelayDetail = { url ->
@@ -1400,6 +1349,103 @@ fun BarqNavHost() {
                 )
             }
         }
+
+        composable(Routes.MY_PROFILE) {
+            val pubkey = feedViewModel.getUserPubkey() ?: return@composable
+            val myProfileViewModel: UserProfileViewModel = viewModel()
+            LaunchedEffect(pubkey) {
+                myProfileViewModel.loadProfile(
+                    pubkey = pubkey,
+                    eventRepo = feedViewModel.eventRepo,
+                    contactRepo = feedViewModel.contactRepo,
+                    relayPool = feedViewModel.relayPool,
+                    outboxRouter = feedViewModel.outboxRouter,
+                    relayListRepo = feedViewModel.relayListRepo,
+                    subManager = feedViewModel.subManager,
+                    topRelayUrls = feedViewModel.getScoredRelays().take(5).map { it.url },
+                    relayHintStore = feedViewModel.relayHintStore,
+                    extendedNetworkRepo = feedViewModel.extendedNetworkRepo
+                )
+            }
+            val myProfileListedIds by feedViewModel.bookmarkSetRepo.allListedEventIds.collectAsState()
+            val myProfilePinnedIds by feedViewModel.pinRepo.pinnedIds.collectAsState()
+            val myProfileZapInProgress by feedViewModel.zapInProgress.collectAsState()
+            UserProfileScreen(
+                viewModel = myProfileViewModel,
+                contactRepo = feedViewModel.contactRepo,
+                relayPool = feedViewModel.relayPool,
+                onBack = {},
+                onReply = { event ->
+                    replyTarget = event
+                    quoteTarget = null
+                    composeViewModel.clear()
+                    navController.navigate(Routes.COMPOSE)
+                },
+                onRepost = { event -> feedViewModel.sendRepost(event) },
+                onQuote = { event ->
+                    quoteTarget = event
+                    replyTarget = null
+                    composeViewModel.clear()
+                    navController.navigate(Routes.COMPOSE)
+                },
+                eventRepo = feedViewModel.eventRepo,
+                onNavigateToProfile = { pk -> navController.navigate("profile/$pk") },
+                onToggleFollow = { pk -> feedViewModel.toggleFollow(pk) },
+                isOwnProfile = true,
+                onEditProfile = {
+                    profileViewModel.loadCurrentProfile(feedViewModel.eventRepo, feedViewModel.relayPool)
+                    navController.navigate(Routes.PROFILE_EDIT)
+                },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
+                isBlocked = false,
+                onNoteClick = { event -> navController.navigate("thread/${event.id}") },
+                onQuotedNoteClick = { eventId -> navController.navigate("thread/$eventId") },
+                onReact = { event, emoji -> feedViewModel.toggleReaction(event, emoji) },
+                onZap = { event, amountMsats, message, isAnonymous -> feedViewModel.sendZap(event, amountMsats, message, isAnonymous) },
+                userPubkey = pubkey,
+                isWalletConnected = feedViewModel.nwcRepo.hasConnection(),
+                onWallet = { navController.navigate(Routes.WALLET) },
+                zapSuccess = feedViewModel.zapSuccess,
+                zapError = feedViewModel.zapError,
+                zapInProgressIds = myProfileZapInProgress,
+                ownLists = feedViewModel.listRepo.ownLists.collectAsState().value,
+                onAddToList = { dTag, pk -> feedViewModel.addToList(dTag, pk) },
+                onRemoveFromList = { dTag, pk -> feedViewModel.removeFromList(dTag, pk) },
+                onCreateList = { name, isPrivate -> feedViewModel.createList(name, isPrivate) },
+                profilePubkey = pubkey,
+                relayInfoRepo = feedViewModel.relayInfoRepo,
+                nip05Repo = feedViewModel.nip05Repo,
+                listedIds = myProfileListedIds,
+                pinnedIds = myProfilePinnedIds,
+                onTogglePin = { eventId -> feedViewModel.togglePin(eventId) },
+                onDeleteEvent = { eventId, kind -> feedViewModel.deleteEvent(eventId, kind) },
+                onAddNoteToList = { eventId -> addToListEventId = eventId },
+                signer = activeSigner,
+                translationRepo = feedViewModel.translationRepo
+            )
+        }
+
+        composable(Routes.SETTINGS) {
+            SettingsScreen(
+                onRelays = { navController.navigate(Routes.RELAYS) },
+                onMediaServers = { navController.navigate(Routes.BLOSSOM_SERVERS) },
+                onKeys = { navController.navigate(Routes.KEYS) },
+                onSafety = { navController.navigate(Routes.SAFETY) },
+                onSocialGraph = { navController.navigate(Routes.SOCIAL_GRAPH) },
+                onCustomEmojis = { navController.navigate(Routes.CUSTOM_EMOJIS) },
+                onConsole = { navController.navigate(Routes.CONSOLE) },
+                onDrafts = { navController.navigate(Routes.DRAFTS) },
+                onLists = { navController.navigate(Routes.LISTS_HUB) },
+                onLogout = {
+                    feedViewModel.resetForAccountSwitch()
+                    walletViewModel.disconnectWallet()
+                    authViewModel.logOut()
+                    navController.navigate(Routes.AUTH) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
     }
 
     BroadcastStatusBar(
@@ -1423,11 +1469,11 @@ fun BarqNavHost() {
             BarqBottomBar(
                 currentRoute = currentRoute,
                 hasUnreadHome = newNoteCount > 0,
-                hasUnreadMessages = hasUnreadDms,
                 hasUnreadNotifications = hasUnreadNotifications,
                 isZapAnimating = isZapAnimating,
                 onTabSelected = { tab ->
-                    if (currentRoute == tab.route) {
+                    val scrollableTabs = setOf(com.barq.app.ui.component.BottomTab.HOME, com.barq.app.ui.component.BottomTab.NOTIFICATIONS)
+                    if (currentRoute == tab.route && tab in scrollableTabs) {
                         scrollToTopTrigger++
                     } else {
                         navController.navigate(tab.route) {

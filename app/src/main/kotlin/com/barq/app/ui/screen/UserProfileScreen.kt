@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -132,6 +133,7 @@ fun UserProfileScreen(
     onDeleteEvent: (String, Int) -> Unit = { _, _ -> },
     onAddNoteToList: (String) -> Unit = {},
     onSendDm: (() -> Unit)? = null,
+    onSettings: () -> Unit = {},
     signer: com.barq.app.nostr.NostrSigner? = null,
     translationRepo: TranslationRepository? = null
 ) {
@@ -238,6 +240,11 @@ fun UserProfileScreen(
                 },
                 actions = {
                     val context = LocalContext.current
+                    if (isOwnProfile) {
+                        IconButton(onClick = onSettings) {
+                            Icon(Icons.Outlined.Settings, contentDescription = "Settings")
+                        }
+                    }
                     IconButton(onClick = { showQrDialog = true }) {
                         Icon(Icons.Default.QrCode2, "QR Code")
                     }

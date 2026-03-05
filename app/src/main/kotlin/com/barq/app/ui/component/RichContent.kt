@@ -1,8 +1,13 @@
 package com.barq.app.ui.component
 
+import android.database.ContentObserver
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.util.LruCache
 import androidx.annotation.OptIn
+import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -12,13 +17,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.VolumeOff
+import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -55,6 +68,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.viewinterop.AndroidView
@@ -75,6 +89,7 @@ import com.barq.app.repo.Nip05Repository
 import com.barq.app.util.MediaDownloader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -789,7 +804,9 @@ private fun LiveStreamCard(
         } else {
             Column {
                 if (streamUrl != null) {
-                    InlineVideoPlayer(url = streamUrl)
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))) {
+                        InlineVideoPlayer(url = streamUrl, maxWidth = maxWidth, onFullScreen = {})
+                    }
                 } else if (image != null) {
                     AsyncImage(
                         model = image,
@@ -940,34 +957,18 @@ private fun InlineVideoPlayerWithFullscreen(
     url: String,
     onFullScreen: () -> Unit
 ) {
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
     ) {
-        InlineVideoPlayer(url = url)
-        IconButton(
-            onClick = onFullScreen,
-            colors = IconButtonDefaults.iconButtonColors(
-                containerColor = Color.Black.copy(alpha = 0.5f),
-                contentColor = Color.White
-            ),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
-                .size(36.dp)
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_fullscreen),
-                contentDescription = "Fullscreen"
-            )
-        }
+        InlineVideoPlayer(url = url, maxWidth = maxWidth, onFullScreen = onFullScreen)
     }
 }
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun InlineVideoPlayer(url: String) {
+private fun InlineVideoPlayer(url: String, maxWidth: Dp, onFullScreen: () -> Unit) {
     val context = LocalContext.current
     val exoPlayer = remember(url) {
         ExoPlayer.Builder(context).build().apply {
@@ -981,6 +982,8 @@ private fun InlineVideoPlayer(url: String) {
     // Reset to 0 on URL change so we don't flash wrong ratio from a prior video
     var videoWidth by remember(url) { mutableStateOf(videoDimensionCache[url]?.first ?: 0) }
     var videoHeight by remember(url) { mutableStateOf(videoDimensionCache[url]?.second ?: 0) }
+    var isMuted by remember { mutableStateOf(true) }
+    var isPlaying by remember { mutableStateOf(false) }
 
     DisposableEffect(url) {
         val listener = object : Player.Listener {
@@ -988,6 +991,9 @@ private fun InlineVideoPlayer(url: String) {
                 videoWidth = size.width
                 videoHeight = size.height
                 videoDimensionCache[url] = Pair(size.width, size.height)
+            }
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
             }
         }
         exoPlayer.addListener(listener)
@@ -997,9 +1003,26 @@ private fun InlineVideoPlayer(url: String) {
         }
     }
 
+    DisposableEffect(Unit) {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                if (isMuted) {
+                    exoPlayer.volume = 1f
+                    isMuted = false
+                }
+            }
+        }
+        context.contentResolver.registerContentObserver(
+            Settings.System.CONTENT_URI, true, observer
+        )
+        onDispose { context.contentResolver.unregisterContentObserver(observer) }
+    }
+
     val aspectRatio = if (videoWidth > 0 && videoHeight > 0) videoWidth.toFloat() / videoHeight.toFloat() else 16f / 9f
 
     var showControls by remember { mutableStateOf(false) }
+    var positionMs by remember { mutableStateOf(0L) }
+    var durationMs by remember { mutableStateOf(0L) }
 
     LaunchedEffect(showControls) {
         if (showControls) {
@@ -1008,9 +1031,22 @@ private fun InlineVideoPlayer(url: String) {
         }
     }
 
+    LaunchedEffect(isPlaying) {
+        while (isPlaying && isActive) {
+            positionMs = exoPlayer.currentPosition
+            durationMs = exoPlayer.duration.coerceAtLeast(0L)
+            delay(500)
+        }
+    }
+
+    val controlBgColors = IconButtonDefaults.iconButtonColors(
+        containerColor = Color.Black.copy(alpha = 0.5f),
+        contentColor = Color.White
+    )
+
     Box(
         modifier = Modifier
-            .fillMaxWidth()
+            .width(maxWidth)
             .aspectRatio(aspectRatio)
             .clickable { showControls = !showControls }
     ) {
@@ -1021,10 +1057,114 @@ private fun InlineVideoPlayer(url: String) {
                     useController = false
                 }
             },
-            update = { playerView -> playerView.useController = showControls },
+            update = { playerView -> playerView.useController = false },
             modifier = Modifier.matchParentSize()
         )
+
+        if (showControls) {
+            // Semi-transparent scrim
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.4f))
+            )
+
+            // Top-right: volume + fullscreen
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(
+                    onClick = {
+                        if (isMuted) { exoPlayer.volume = 1f; isMuted = false }
+                        else { exoPlayer.volume = 0f; isMuted = true }
+                    },
+                    colors = controlBgColors,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        if (isMuted) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp,
+                        contentDescription = if (isMuted) "Unmute" else "Mute",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onFullScreen,
+                    colors = controlBgColors,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_fullscreen),
+                        contentDescription = "Fullscreen",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            // Center: play/pause
+            IconButton(
+                onClick = { if (isPlaying) exoPlayer.pause() else exoPlayer.play() },
+                colors = controlBgColors,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(48.dp)
+            ) {
+                Icon(
+                    if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+
+            // Bottom: position / duration
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                androidx.compose.material3.Text(
+                    text = formatVideoTime(positionMs),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                androidx.compose.material3.Text(
+                    text = formatVideoTime(durationMs),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        } else if (isMuted) {
+            // Controls hidden but muted — always show small mute indicator
+            IconButton(
+                onClick = {
+                    exoPlayer.volume = 1f
+                    isMuted = false
+                },
+                colors = controlBgColors,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(32.dp)
+            ) {
+                Icon(
+                    Icons.Outlined.VolumeOff,
+                    contentDescription = "Unmute",
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
     }
+}
+
+private fun formatVideoTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
 }
 
 // --- Link Preview (OG tags) ---
@@ -1040,11 +1180,7 @@ private val videoDimensionCache = mutableMapOf<String, Pair<Int, Int>>()
 
 private val ogCache = LruCache<String, OgData>(200)
 
-private val httpClient
-    get() = com.barq.app.relay.HttpClientFactory.createHttpClient(
-        connectTimeoutSeconds = 5,
-        readTimeoutSeconds = 5
-    )
+private val httpClient = com.barq.app.relay.HttpClientFactory.getImageClient(false)
 
 private val ogTagRegex = Regex(
     """<meta[^>]+property\s*=\s*["']og:(\w+)["'][^>]+content\s*=\s*["']([^"']*)["'][^>]*/?>|<meta[^>]+content\s*=\s*["']([^"']*)["'][^>]+property\s*=\s*["']og:(\w+)["'][^>]*/?>""",

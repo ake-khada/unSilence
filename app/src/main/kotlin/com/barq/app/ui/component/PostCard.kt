@@ -448,8 +448,8 @@ fun PostCard(
             // Normal content display
             // Collapsible content with max height (~1 viewport)
             val collapsedMaxHeight = 600.dp
-            var contentExpanded by remember { mutableStateOf(false) }
-            var contentExceedsMax by remember { mutableStateOf(false) }
+            var contentExpanded by remember(event.id) { mutableStateOf(false) }
+            var contentExceedsMax by remember(event.id) { mutableStateOf(false) }
             val density = LocalDensity.current
 
             Box {
