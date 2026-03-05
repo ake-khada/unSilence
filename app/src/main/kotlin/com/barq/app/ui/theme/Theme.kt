@@ -10,9 +10,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFFF7931A),
-    onPrimary = Color.Black,
-    secondary = Color(0xFFFFB74D),
+    primary = Color(0xFF9C27B0),
+    onPrimary = Color.White,
+    secondary = Color(0xFF00BCD4),
     background = Color(0xFF000000),
     surface = Color(0xFF000000),
     surfaceVariant = Color(0xFF000000),

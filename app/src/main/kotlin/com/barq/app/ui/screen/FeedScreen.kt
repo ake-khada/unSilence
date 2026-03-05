@@ -473,7 +473,7 @@ fun FeedScreen(
                     scrollBehavior = scrollBehavior,
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            ProfilePicture(url = userProfile?.picture, size = 32)
+                            ProfilePicture(url = userProfile?.picture, pubkey = userPubkey, size = 32)
                         }
                     },
                     actions = {

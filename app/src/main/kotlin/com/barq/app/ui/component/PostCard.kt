@@ -173,11 +173,13 @@ fun PostCard(
                 Box(modifier = Modifier.size(28.dp)) {
                     ProfilePicture(
                         url = profile?.picture,
+                        pubkey = event.pubkey,
                         size = 20,
                         modifier = Modifier.align(Alignment.BottomEnd)
                     )
                     ProfilePicture(
                         url = reposterProfile?.picture,
+                        pubkey = reposterPubkey,
                         size = 16,
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -213,6 +215,7 @@ fun PostCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             ProfilePicture(
                 url = profile?.picture,
+                pubkey = event.pubkey,
                 showFollowBadge = isFollowingAuthor && !isOwnEvent,
                 onClick = onProfileClick,
                 onLongPress = if (!isOwnEvent) onFollowAuthor else null
