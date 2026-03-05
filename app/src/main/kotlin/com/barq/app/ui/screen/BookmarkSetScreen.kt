@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import com.barq.app.nostr.BookmarkSet
 import com.barq.app.nostr.NostrEvent
@@ -80,7 +81,8 @@ fun BookmarkSetScreen(
                         }
                         DropdownMenu(
                             expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false }
+                            onDismissRequest = { menuExpanded = false },
+                            containerColor = Color(0xFF0A0A0A)
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Delete List") },

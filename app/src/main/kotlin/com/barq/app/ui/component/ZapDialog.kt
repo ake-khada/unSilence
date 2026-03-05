@@ -95,6 +95,7 @@ fun ZapDialog(
     if (!isWalletConnected) {
         AlertDialog(
             onDismissRequest = onDismiss,
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Wallet Not Connected") },
             text = { Text("Connect a Lightning wallet to send zaps.") },
             confirmButton = {
@@ -677,6 +678,7 @@ private fun SaveZapPresetDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(

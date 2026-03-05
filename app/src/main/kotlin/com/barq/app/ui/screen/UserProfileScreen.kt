@@ -190,6 +190,7 @@ fun UserProfileScreen(
     if (zapErrorMessage != null) {
         AlertDialog(
             onDismissRequest = { zapErrorMessage = null },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Zap Failed") },
             text = { Text(zapErrorMessage ?: "") },
             confirmButton = {
@@ -254,7 +255,8 @@ fun UserProfileScreen(
                     }
                     DropdownMenu(
                         expanded = menuExpanded,
-                        onDismissRequest = { menuExpanded = false }
+                        onDismissRequest = { menuExpanded = false },
+                        containerColor = Color(0xFF0A0A0A)
                     ) {
                         DropdownMenuItem(
                             text = { Text("Copy Profile JSON") },
@@ -1003,6 +1005,7 @@ private fun AddToListDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Add to List") },
         text = {
             Column {

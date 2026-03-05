@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -91,6 +92,7 @@ fun ListsHubScreen(
         val target = deleteConfirmation!!
         AlertDialog(
             onDismissRequest = { deleteConfirmation = null },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Delete List") },
             text = { Text("Are you sure you want to delete \"${target.name}\"? A deletion request will be sent to relays, but it cannot be guaranteed.") },
             confirmButton = {
@@ -312,7 +314,8 @@ private fun FollowSetRow(
         }
         DropdownMenu(
             expanded = menuExpanded,
-            onDismissRequest = { menuExpanded = false }
+            onDismissRequest = { menuExpanded = false },
+            containerColor = Color(0xFF0A0A0A)
         ) {
             DropdownMenuItem(
                 text = { Text("View JSON") },
@@ -428,7 +431,8 @@ private fun BookmarkSetRow(
         }
         DropdownMenu(
             expanded = menuExpanded,
-            onDismissRequest = { menuExpanded = false }
+            onDismissRequest = { menuExpanded = false },
+            containerColor = Color(0xFF0A0A0A)
         ) {
             DropdownMenuItem(
                 text = { Text("View JSON") },
@@ -453,6 +457,7 @@ private fun JsonViewDialog(json: String, onDismiss: () -> Unit) {
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("List JSON") },
         text = {
             androidx.compose.foundation.lazy.LazyColumn {
@@ -496,6 +501,7 @@ private fun CreateListDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Create List") },
         text = {
             Column {

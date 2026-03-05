@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -74,6 +75,7 @@ import com.barq.app.viewmodel.FeedType
 import com.barq.app.viewmodel.FeedViewModel
 import com.barq.app.viewmodel.InitLoadingState
 import com.barq.app.viewmodel.RelayFeedStatus
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
@@ -270,6 +272,7 @@ fun FeedScreen(
     if (zapErrorMessage != null) {
         AlertDialog(
             onDismissRequest = { zapErrorMessage = null },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Zap Failed") },
             text = { Text(zapErrorMessage ?: "") },
             confirmButton = {
@@ -291,44 +294,56 @@ fun FeedScreen(
                     scrollBehavior = scrollBehavior,
                     navigationIcon = {
                         Box {
-                            Surface(
-                                onClick = { showFeedTypeDropdown = true },
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant,
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(start = 8.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                Surface(
+                                    onClick = { showFeedTypeDropdown = true },
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
                                 ) {
-                                    val feedLabel = when (feedType) {
-                                        FeedType.FOLLOWS -> "Follows"
-                                        FeedType.EXTENDED_FOLLOWS -> "Global"
-                                        FeedType.RELAY -> if (selectedRelay != null) {
-                                            selectedRelay!!.removePrefix("wss://").removeSuffix("/")
-                                        } else "Relay"
-                                        FeedType.LIST -> if (selectedList != null) {
-                                            selectedList!!.name
-                                        } else "List"
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        val feedLabel = when (feedType) {
+                                            FeedType.FOLLOWS -> "Follows"
+                                            FeedType.EXTENDED_FOLLOWS -> "Global"
+                                            FeedType.RELAY -> if (selectedRelay != null) {
+                                                selectedRelay!!.removePrefix("wss://").removeSuffix("/")
+                                            } else "Relay"
+                                            FeedType.LIST -> if (selectedList != null) {
+                                                selectedList!!.name
+                                            } else "List"
+                                        }
+                                        Text(
+                                            feedLabel,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(max = 140.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Icon(
+                                            Icons.Default.ArrowDropDown,
+                                            contentDescription = "Change feed",
+                                            modifier = Modifier.size(20.dp)
+                                        )
                                     }
-                                    Text(
-                                        feedLabel,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 160.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
+                                }
+                                IconButton(onClick = { showRelayPicker = true }) {
                                     Icon(
-                                        Icons.Default.ArrowDropDown,
-                                        contentDescription = "Change feed",
+                                        Icons.Outlined.Tune,
+                                        contentDescription = "Configure relay",
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
                             }
                             DropdownMenu(
                                 expanded = showFeedTypeDropdown,
-                                onDismissRequest = { showFeedTypeDropdown = false }
+                                onDismissRequest = { showFeedTypeDropdown = false },
+                                containerColor = Color(0xFF0A0A0A)
                             ) {
                                 DropdownMenuItem(
                                     text = { Text("Follows") },
@@ -354,20 +369,16 @@ fun FeedScreen(
                                         }
                                     )
                                 }
-                                DropdownMenuItem(
-                                    text = { Text("Relay") },
-                                    onClick = {
-                                        showFeedTypeDropdown = false
-                                        showRelayPicker = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("List") },
-                                    onClick = {
-                                        showFeedTypeDropdown = false
-                                        showListPicker = true
-                                    }
-                                )
+                                ownLists.forEach { list ->
+                                    DropdownMenuItem(
+                                        text = { Text(list.name) },
+                                        onClick = {
+                                            showFeedTypeDropdown = false
+                                            viewModel.setSelectedList(list)
+                                            viewModel.setFeedType(FeedType.LIST)
+                                        }
+                                    )
+                                }
                             }
                         }
                     },
@@ -732,6 +743,7 @@ private fun RelayPickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Select Relay") },
         text = {
             Column {
@@ -1035,6 +1047,7 @@ private fun ListPickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0A),
         title = { Text("Select List") },
         text = {
             Column {
@@ -1050,7 +1063,7 @@ private fun ListPickerDialog(
                             onClick = { onSelect(list) },
                             color = if (selectedList?.dTag == list.dTag)
                                 MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surface,
+                            else Color(0xFF0A0A0A),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                         ) {
@@ -1272,6 +1285,7 @@ private fun RelayFeedBar(
     if (showSetPicker) {
         AlertDialog(
             onDismissRequest = { showSetPicker = false },
+            containerColor = Color(0xFF0A0A0A),
             title = { Text("Add to Relay Set") },
             text = {
                 Column {
