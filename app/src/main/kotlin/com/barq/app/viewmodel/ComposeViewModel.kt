@@ -27,6 +27,7 @@ import com.barq.app.repo.MentionCandidate
 import com.barq.app.repo.MentionSearchRepository
 import com.barq.app.repo.EventRepository
 import com.barq.app.repo.ProfileRepository
+import com.barq.app.repo.RelayListRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -42,6 +43,7 @@ private val BARE_BECH32_REGEX = Regex("(?<!nostr:)(?<![a-z0-9])((note1|nevent1|n
 class ComposeViewModel(app: Application, private val savedStateHandle: SavedStateHandle) : AndroidViewModel(app) {
     private val keyRepo = KeyRepository(app)
     val blossomRepo = BlossomRepository(app, keyRepo.getPubkeyHex())
+    private val relayListRepo = RelayListRepository(app)
 
     fun reloadBlossomRepo() {
         blossomRepo.reload(keyRepo.getPubkeyHex())
@@ -340,7 +342,7 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
             tags.add(listOf("content-warning", ""))
         }
         if (replyTo != null) {
-            val hint = "" // TODO: new relay model — derive relay hint from target's NIP-65 write relays
+            val hint = relayListRepo.getWriteRelays(replyTo.pubkey)?.firstOrNull() ?: ""
             tags.addAll(Nip10.buildReplyTags(replyTo, hint))
         }
 
@@ -360,7 +362,7 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         }
 
         val finalContent = if (quoteTo != null) {
-            val quoteHint = "" // TODO: new relay model — derive relay hint from target's NIP-65 write relays
+            val quoteHint = relayListRepo.getWriteRelays(quoteTo.pubkey)?.firstOrNull() ?: ""
             tags.addAll(Nip18.buildQuoteTags(quoteTo, quoteHint))
             val relayHints = if (quoteHint.isNotEmpty()) listOf(quoteHint) else emptyList()
             Nip18.appendNoteUri(content, quoteTo.id, relayHints, quoteTo.pubkey)

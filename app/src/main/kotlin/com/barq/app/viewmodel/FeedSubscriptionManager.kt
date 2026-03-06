@@ -104,6 +104,10 @@ class FeedSubscriptionManager(
         return userSearchRelays.ifEmpty { RelayConfig.DEFAULT_INDEXER_RELAYS }
     }
 
+    /** User's NIP-65 read relays from keyRepo, used as the follows/list feed relay set. */
+    private fun getFollowFeedRelays(): Set<String> =
+        keyRepo.getRelays().filter { it.read }.map { it.url }.toSet()
+
     /** Blocked + bad relay URLs combined for outbox routing exclusion. */
     private fun getExcludedRelayUrls(): Set<String> =
         relayPool.getBlockedUrls() + healthTracker.getBadRelays()
@@ -132,6 +136,7 @@ class FeedSubscriptionManager(
 
         when (type) {
             FeedType.FOLLOWS, FeedType.EXTENDED_FOLLOWS -> {
+                relayPool.setProxyRelays(getFollowFeedRelays())
                 if (prev == FeedType.LIST) {
                     Log.d("RLC", "[FeedSub] switching from $prev to $type — clearing feed and resubscribing")
                     eventRepo.resetFeedDisplay()
@@ -142,6 +147,7 @@ class FeedSubscriptionManager(
                 }
             }
             FeedType.RELAY -> {
+                relayPool.setProxyRelays(emptySet())
                 // Skip if already in RELAY mode — setSelectedRelay() already triggered
                 // subscribeRelayFeed(). Double-subscribing causes a race where the second
                 // call finds the ephemeral relay still connecting and fails.
@@ -153,6 +159,7 @@ class FeedSubscriptionManager(
                 subscribeRelayFeed()
             }
             FeedType.LIST -> {
+                relayPool.setProxyRelays(getFollowFeedRelays())
                 eventRepo.resetFeedDisplay()
                 resubscribeFeed()
             }
@@ -238,13 +245,13 @@ class FeedSubscriptionManager(
                 }
                 Log.d("RLC", "[FeedSub] resubscribeFeed: ${allAuthors.size} authors, ${indexerRelays.size} indexers, ${excludedUrls.size} excluded")
                 val notesFilter = Filter(kinds = listOf(1, 6), since = sinceTimestamp)
+                val msg = ClientMessage.req(feedSubId, notesFilter.copy(authors = allAuthors))
                 if (relayPool.isProxyModeActive()) {
-                    relayPool.sendToProxyRelays(ClientMessage.req(feedSubId, notesFilter.copy(authors = allAuthors)))
-                    setOf(feedSubId)
+                    relayPool.sendToProxyRelays(msg)
                 } else {
-                    // TODO: new relay model — send REQ only to active feed relay set (user's NIP-65 read relays)
-                    emptySet()
+                    relayPool.sendToReadRelays(msg)
                 }
+                setOf(feedSubId)
             }
             FeedType.RELAY -> {
                 // RELAY feeds use subscribeRelayFeed() — should not reach here
@@ -312,7 +319,12 @@ class FeedSubscriptionManager(
                 }
                 if (allAuthors.isEmpty()) { isLoadingMore = false; return }
                 val templateFilter = Filter(kinds = listOf(1, 6), until = oldest - 1, limit = 50)
-                // TODO: new relay model — send load-more REQ to active feed relay set only
+                val msg = ClientMessage.req("loadmore", templateFilter.copy(authors = allAuthors))
+                if (relayPool.isProxyModeActive()) {
+                    relayPool.sendToProxyRelays(msg)
+                } else {
+                    relayPool.sendToReadRelays(msg)
+                }
             }
             FeedType.RELAY -> {
                 val oldest = eventRepo.getOldestRelayFeedTimestamp() ?: run { isLoadingMore = false; return }
@@ -581,23 +593,26 @@ class FeedSubscriptionManager(
         val feedEvents = if (_feedType.value == FeedType.RELAY) eventRepo.relayFeed.value else eventRepo.feed.value
         if (feedEvents.isEmpty()) return
 
-        val eventsByAuthor = mutableMapOf<String, MutableList<String>>()
-        for (event in feedEvents) {
-            eventsByAuthor.getOrPut(event.pubkey) { mutableListOf() }.add(event.id)
+        val eventIds = feedEvents.map { it.id }
+        val engageSubId = "engage"
+        activeEngagementSubIds.add(engageSubId)
+        val engagementFilters = eventIds.chunked(150).map { chunk ->
+            Filter(kinds = listOf(7, 6, 9735), eTags = chunk)
         }
-        // TODO: new relay model — send engagement REQ to active feed relay set only
-        val relayCount = 0
+        val engageMsg = if (engagementFilters.size == 1)
+            ClientMessage.req(engageSubId, engagementFilters[0])
+        else
+            ClientMessage.req(engageSubId, engagementFilters)
+        if (relayPool.isProxyModeActive()) {
+            relayPool.sendToProxyRelays(engageMsg)
+        } else {
+            relayPool.sendToReadRelays(engageMsg)
+        }
 
-        // Await EOSE from a threshold of inbox relays so engagement counts populate
-        // before the user sees the feed. Without this, engagement is fire-and-forget
-        // and most counts show zero.
-        if (relayCount > 0) {
-            scope.launch {
-                val eoseTarget = maxOf(3, (relayCount * 0.3).toInt()).coerceIn(1, relayCount)
-                Log.d("RLC", "[FeedSub] awaiting $eoseTarget/$relayCount EOSEs for engagement")
-                subManager.awaitEoseCount("engage", eoseTarget, timeoutMs = 4_000)
-                Log.d("RLC", "[FeedSub] safety net engagement EOSE received")
-            }
+        // Await EOSE so engagement counts populate before the user sees the feed.
+        scope.launch {
+            subManager.awaitEoseCount(engageSubId, 1, timeoutMs = 4_000)
+            Log.d("RLC", "[FeedSub] engagement EOSE received")
         }
     }
 
