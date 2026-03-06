@@ -312,9 +312,11 @@ fun FeedScreen(
                                         val feedLabel = when (feedType) {
                                             FeedType.FOLLOWS -> "Follows"
                                             FeedType.EXTENDED_FOLLOWS -> "Global"
-                                            FeedType.RELAY -> if (selectedRelay != null) {
-                                                selectedRelay!!.removePrefix("wss://").removeSuffix("/")
-                                            } else "Relay"
+                                            FeedType.RELAY -> when {
+                                                selectedRelay != null -> selectedRelay!!.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                                                selectedRelaySet != null -> selectedRelaySet!!.name
+                                                else -> "Relay"
+                                            }
                                             FeedType.LIST -> if (selectedList != null) {
                                                 selectedList!!.name
                                             } else "List"
@@ -433,12 +435,6 @@ fun FeedScreen(
                     onToggleFavorite = { viewModel.toggleFavoriteRelay(selectedRelay!!) },
                     onAddToRelaySet = { dTag -> viewModel.addRelayToSet(selectedRelay!!, dTag) },
                     onCreateRelaySet = { name -> viewModel.createRelaySet(name, setOf(selectedRelay!!)) }
-                )
-            }
-            if (feedType == FeedType.RELAY && selectedRelaySet != null && selectedRelay == null) {
-                RelaySetFeedBar(
-                    relaySet = selectedRelaySet!!,
-                    relayFeedStatus = relayFeedStatus
                 )
             }
             Box(
