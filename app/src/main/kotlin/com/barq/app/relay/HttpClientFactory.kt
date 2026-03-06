@@ -22,35 +22,37 @@ object HttpClientFactory {
         }
     }
 
+    // Shared across all relay WebSocket connections. OkHttp's default maxRequests=64
+    // caps concurrent upgrade requests; 256 prevents queuing when outbox routing
+    // opens 50+ ephemeral connections simultaneously.
+    private val sharedRelayDispatcher = Dispatcher().apply {
+        maxRequests = 256
+        maxRequestsPerHost = 10
+    }
+
+    // Base relay client: shared dispatcher, ping interval, no read timeout, and the
+    // Sec-WebSocket-Extensions interceptor that disables permessage-deflate.
+    // createRelayClient() derives variants via .newBuilder() without rebuilding these.
+    private val rootRelayClient = OkHttpClient.Builder()
+        .dispatcher(sharedRelayDispatcher)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .addNetworkInterceptor { chain ->
+            val response = chain.proceed(chain.request())
+            response.newBuilder()
+                .removeHeader("Sec-WebSocket-Extensions")
+                .build()
+        }
+        .build()
+
     fun createRelayClient(): OkHttpClient {
         val isTor = TorManager.isEnabled()
-        val connectTimeout = if (isTor) 30L else 10L
-
-        // OkHttp's default Dispatcher.maxRequests is 64, which caps concurrent
-        // WebSocket upgrade requests. With outbox routing creating 50+ ephemeral
-        // connections, new user-initiated connections get queued and time out.
-        val dispatcher = Dispatcher().apply {
-            maxRequests = 256
-            maxRequestsPerHost = 10
-        }
-
-        val builder = OkHttpClient.Builder()
-            .dispatcher(dispatcher)
-            .connectTimeout(connectTimeout, TimeUnit.SECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .addNetworkInterceptor { chain ->
-                val response = chain.proceed(chain.request())
-                response.newBuilder()
-                    .removeHeader("Sec-WebSocket-Extensions")
-                    .build()
-            }
-
-        if (isTor) {
-            TorManager.proxy?.let { builder.proxy(it) }
-            builder.dns(torSafeDns)
-        }
-
+        if (!isTor) return rootRelayClient
+        val builder = rootRelayClient.newBuilder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .dns(torSafeDns)
+        TorManager.proxy?.let { builder.proxy(it) }
         return builder.build()
     }
 

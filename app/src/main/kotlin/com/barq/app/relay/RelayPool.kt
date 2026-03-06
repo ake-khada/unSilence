@@ -35,6 +35,7 @@ class RelayPool {
     private val ephemeralLastUsed = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val relayCooldowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
     @Volatile private var pinnedRelayUrls = emptySet<String>()
+    @Volatile private var proxyRelayUrls = emptySet<String>()
     private var blockedUrls = emptySet<String>()
     fun getBlockedUrls(): Set<String> = blockedUrls
 
@@ -56,6 +57,12 @@ class RelayPool {
         const val COOLDOWN_REJECTED_MS = 1 * 60 * 1000L // 1 min — 4xx like 401/403/429
         const val COOLDOWN_NETWORK_MS = 5_000L           // 5s — DNS/network failures on persistent relays
         private const val UNSUPPORTED_THRESHOLD = 3      // Disconnect after N "unsupported" notices
+
+        val INDEXER_RELAY_URLS = setOf(
+            "wss://purplepag.es",
+            "wss://indexer.coracle.social",
+            "wss://user.kindpag.es"
+        )
     }
 
     /** Tracks consecutive "unsupported message" NOTICEs per relay URL. */
@@ -157,9 +164,9 @@ class RelayPool {
         val badRelays = healthTracker?.getBadRelays() ?: emptySet()
         val filtered = configs.filter { it.url !in blockedUrls && it.url !in badRelays }.take(MAX_PERSISTENT)
 
-        // Disconnect removed relays
+        // Disconnect removed relays (always preserve indexer relays)
         val currentUrls = filtered.map { it.url }.toSet()
-        val toRemove = relays.filter { it.config.url !in currentUrls }
+        val toRemove = relays.filter { it.config.url !in currentUrls && it.config.url !in INDEXER_RELAY_URLS }
         toRemove.forEach {
             it.disconnect()
             relays.remove(it)
@@ -176,6 +183,19 @@ class RelayPool {
                 wireByteTracking(relay)
                 relays.add(relay)
                 relayIndex[config.url] = relay
+                collectMessages(relay)
+                relay.connect()
+            }
+        }
+
+        // Always keep indexer relays connected regardless of user relay config
+        val existingUrlsWithIndexers = relays.map { it.config.url }.toSet()
+        for (url in INDEXER_RELAY_URLS) {
+            if (url !in existingUrlsWithIndexers && url !in blockedUrls) {
+                val relay = Relay(RelayConfig(url, read = true, write = false), client, scope)
+                wireByteTracking(relay)
+                relays.add(relay)
+                relayIndex[url] = relay
                 collectMessages(relay)
                 relay.connect()
             }
@@ -510,6 +530,28 @@ class RelayPool {
     }
 
     fun getPinnedRelayUrls(): Set<String> = pinnedRelayUrls
+
+    fun setProxyRelays(urls: Set<String>) {
+        proxyRelayUrls = urls
+    }
+
+    fun isProxyModeActive(): Boolean = proxyRelayUrls.isNotEmpty()
+
+    fun sendToIndexerRelays(message: String) {
+        for (relay in relays) {
+            if (relay.config.url in INDEXER_RELAY_URLS && relay.isConnected) {
+                relay.send(message)
+            }
+        }
+    }
+
+    fun sendToProxyRelays(message: String) {
+        for (relay in relays) {
+            if (relay.config.url in proxyRelayUrls && relay.isConnected) {
+                relay.send(message)
+            }
+        }
+    }
 
     /**
      * Send to only the first [maxRelays] connected relays (prioritizing pinned relays).
