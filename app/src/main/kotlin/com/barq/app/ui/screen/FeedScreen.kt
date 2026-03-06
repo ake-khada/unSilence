@@ -132,7 +132,6 @@ fun FeedScreen(
     var showFeedTypeDropdown by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    val newNoteCount by viewModel.newNoteCount.collectAsState()
     val initLoadingState by viewModel.initLoadingState.collectAsState()
     val relayFeedStatus by viewModel.relayFeedStatus.collectAsState()
     val zapInProgress by viewModel.zapInProgress.collectAsState()
@@ -547,19 +546,6 @@ fun FeedScreen(
                             }
                         }
 
-                        NewNotesButton(
-                            visible = newNoteCount > 0 && !isAtTop,
-                            count = newNoteCount,
-                            onClick = {
-                                scope.launch {
-                                    listState.scrollToItem(0)
-                                    viewModel.resetNewNoteCount()
-                                }
-                            },
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 8.dp)
-                        )
 
                     }
                 }
@@ -1129,45 +1115,6 @@ private fun ListPickerDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
-}
-
-@Composable
-private fun NewNotesButton(
-    visible: Boolean,
-    count: Int,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    androidx.compose.animation.AnimatedVisibility(
-        visible = visible,
-        enter = slideInVertically { -it },
-        exit = slideOutVertically { -it },
-        modifier = modifier
-    ) {
-        Surface(
-            onClick = onClick,
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shadowElevation = 4.dp
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Default.KeyboardArrowUp,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    "$count new notes",
-                    style = MaterialTheme.typography.labelMedium
-                )
-            }
-        }
-    }
 }
 
 @Composable
