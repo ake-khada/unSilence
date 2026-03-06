@@ -79,13 +79,15 @@ fun BarqBottomBar(
                             contentDescription = tab.label
                         )
                         if (hasUnread) {
+                            val dotColor = if (tab == BottomTab.HOME) Color(0xFF9B59B6)
+                                           else MaterialTheme.colorScheme.primary
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
                                     .align(Alignment.TopEnd)
                                     .offset(x = 2.dp, y = (-2).dp)
                                     .background(
-                                        color = MaterialTheme.colorScheme.primary,
+                                        color = dotColor,
                                         shape = CircleShape
                                     )
                             )
