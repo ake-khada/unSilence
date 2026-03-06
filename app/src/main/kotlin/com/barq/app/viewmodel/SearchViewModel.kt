@@ -60,13 +60,8 @@ class SearchViewModel(app: Application) : AndroidViewModel(app) {
     val isSearching: StateFlow<Boolean> = _isSearching
 
     // Search relay selection
-    private val _searchRelays = MutableStateFlow(
-        keyRepo.getSearchRelays().ifEmpty { DEFAULT_SEARCH_RELAYS }
-    )
+    private val _searchRelays = MutableStateFlow(keyRepo.getSearchRelays())
     val searchRelays: StateFlow<List<String>> = _searchRelays
-
-    private val _selectedRelay = MutableStateFlow<String?>(null)
-    val selectedRelay: StateFlow<String?> = _selectedRelay
 
     private var searchJob: Job? = null
     private var localSearchJob: Job? = null
@@ -84,10 +79,6 @@ class SearchViewModel(app: Application) : AndroidViewModel(app) {
         _localFilter.value = filter
     }
 
-    fun selectRelay(url: String?) {
-        _selectedRelay.value = url
-    }
-
     fun addSearchRelay(url: String): Boolean {
         val trimmed = url.trim().trimEnd('/')
         if (!RelayConfig.isAcceptableUrl(trimmed)) return false
@@ -102,9 +93,6 @@ class SearchViewModel(app: Application) : AndroidViewModel(app) {
         val updated = _searchRelays.value - url
         keyRepo.saveSearchRelays(updated)
         _searchRelays.value = updated
-        if (_selectedRelay.value == url) {
-            _selectedRelay.value = null
-        }
     }
 
     fun updateQuery(newQuery: String, profileRepo: ProfileRepository? = null, eventRepo: EventRepository? = null) {
@@ -159,14 +147,14 @@ class SearchViewModel(app: Application) : AndroidViewModel(app) {
         val noteReq = ClientMessage.req(noteSubId, noteFilter)
         val listReq = ClientMessage.req(listSubId, listFilter)
 
-        val selected = _selectedRelay.value
-        val relaysToQuery = if (selected != null) listOf(selected) else _searchRelays.value
-
-        for (url in relaysToQuery) {
-            relayPool.sendToRelayOrEphemeral(url, userReq)
-            relayPool.sendToRelayOrEphemeral(url, noteReq)
-            relayPool.sendToRelayOrEphemeral(url, listReq)
+        val searchRelayUrls = _searchRelays.value
+        if (searchRelayUrls.isEmpty()) {
+            _isSearching.value = false
+            return
         }
+        relayPool.sendToSearchRelays(searchRelayUrls, userReq)
+        relayPool.sendToSearchRelays(searchRelayUrls, noteReq)
+        relayPool.sendToSearchRelays(searchRelayUrls, listReq)
 
         val seenUserPubkeys = mutableSetOf<String>()
         val seenNoteIds = mutableSetOf<String>()
