@@ -71,7 +71,6 @@ import com.barq.app.ui.screen.LoadingScreen
 import com.barq.app.ui.screen.ListsHubScreen
 import com.barq.app.ui.screen.OnboardingScreen
 import com.barq.app.ui.component.AddNoteToListDialog
-import com.barq.app.ui.screen.OnboardingSuggestionsScreen
 import com.barq.app.ui.screen.RelayDetailScreen
 import com.barq.app.ui.screen.SettingsScreen
 import com.barq.app.ui.screen.WalletScreen
@@ -314,7 +313,7 @@ fun BarqNavHost() {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    val nonAppRoutes = setOf(Routes.AUTH, Routes.LOADING, Routes.ONBOARDING_PROFILE, Routes.ONBOARDING_SUGGESTIONS, Routes.EXISTING_USER_ONBOARDING)
+    val nonAppRoutes = setOf(Routes.AUTH, Routes.LOADING, Routes.ONBOARDING_PROFILE, Routes.EXISTING_USER_ONBOARDING)
     val hideBottomBarRoutes = nonAppRoutes
     val showBottomBar by remember(currentRoute) {
         derivedStateOf { currentRoute != null && currentRoute !in hideBottomBarRoutes }
@@ -398,9 +397,6 @@ fun BarqNavHost() {
         composable(Routes.AUTH) {
             AuthScreen(
                 viewModel = authViewModel,
-                isTorEnabled = isTorEnabled,
-                torStatus = torStatus,
-                onToggleTor = onToggleTor,
                 onAuthenticated = { isNewAccount ->
                     if (isNewAccount) {
                         navController.navigate(Routes.ONBOARDING_PROFILE) {
@@ -1201,50 +1197,19 @@ fun BarqNavHost() {
                 viewModel = onboardingViewModel,
                 onContinue = {
                     if (onboardingViewModel.finishProfile(feedViewModel.relayPool, signer = activeSigner)) {
-                        navController.navigate(Routes.ONBOARDING_SUGGESTIONS) {
-                            popUpTo(Routes.ONBOARDING_PROFILE) { inclusive = true }
+                        authViewModel.keyRepo.markOnboardingComplete()
+                        feedViewModel.reloadForNewAccount()
+                        relayViewModel.reload()
+                        blossomServersViewModel.reload()
+                        composeViewModel.reloadBlossomRepo()
+                        feedViewModel.initRelays()
+                        walletViewModel.refreshState()
+                        navController.navigate(Routes.LOADING) {
+                            popUpTo(0) { inclusive = true }
                         }
                     }
                 },
                 signer = activeSigner
-            )
-        }
-
-        composable(Routes.ONBOARDING_SUGGESTIONS) {
-            LaunchedEffect(Unit) {
-                onboardingViewModel.loadSuggestions(feedViewModel.relayPool)
-            }
-            val activeNow by onboardingViewModel.activeNow.collectAsState()
-            val creators by onboardingViewModel.creators.collectAsState()
-            val news by onboardingViewModel.news.collectAsState()
-            val selectedPubkeys by onboardingViewModel.selectedPubkeys.collectAsState()
-
-            OnboardingSuggestionsScreen(
-                activeNow = activeNow,
-                creators = creators,
-                news = news,
-                selectedPubkeys = selectedPubkeys,
-                onToggleFollowAll = { section -> onboardingViewModel.toggleFollowAll(section) },
-                onTogglePubkey = { pubkey -> onboardingViewModel.togglePubkey(pubkey) },
-                totalSelected = selectedPubkeys.size,
-                onContinue = {
-                    onboardingViewModel.finishOnboarding(
-                        relayPool = feedViewModel.relayPool,
-                        contactRepo = feedViewModel.contactRepo,
-                        selectedPubkeys = selectedPubkeys,
-                        signer = activeSigner
-                    )
-                    feedViewModel.setFeedType(FeedType.EXTENDED_FOLLOWS)
-                    feedViewModel.reloadForNewAccount()
-                    relayViewModel.reload()
-                    blossomServersViewModel.reload()
-                    composeViewModel.reloadBlossomRepo()
-                    feedViewModel.initRelays()
-                    walletViewModel.refreshState()
-                    navController.navigate(Routes.LOADING) {
-                        popUpTo(0) { inclusive = true }
-                    }
-                }
             )
         }
 
