@@ -89,7 +89,8 @@ fun SearchScreen(
     listedIds: Set<String> = emptySet(),
     onAddToList: (String) -> Unit = {},
     onDeleteEvent: (String, Int) -> Unit = { _, _ -> },
-    translationRepo: TranslationRepository? = null
+    translationRepo: TranslationRepository? = null,
+    onNavigateToRelaySettings: () -> Unit = {}
 ) {
     val query by viewModel.query.collectAsState()
     val localFilter by viewModel.localFilter.collectAsState()
@@ -98,7 +99,6 @@ fun SearchScreen(
     val lists by viewModel.lists.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
     val searchRelays by viewModel.searchRelays.collectAsState()
-    val selectedRelay by viewModel.selectedRelay.collectAsState()
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -116,43 +116,59 @@ fun SearchScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // People / Notes filter
-            ResultFilterSelector(
-                localFilter = localFilter,
-                onSelectFilter = { viewModel.selectLocalFilter(it) }
-            )
+            if (searchRelays.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "Add search relays in Settings → Relays to enable search",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 32.dp)
+                        )
+                        TextButton(onClick = onNavigateToRelaySettings) {
+                            Text("Go to Settings")
+                        }
+                    }
+                }
+            } else {
+                ResultFilterSelector(
+                    localFilter = localFilter,
+                    onSelectFilter = { viewModel.selectLocalFilter(it) }
+                )
 
-            RelaysTab(
-                query = query,
-                users = users,
-                notes = notes,
-                lists = lists,
-                isSearching = isSearching,
-                localFilter = localFilter,
-                searchRelays = searchRelays,
-                selectedRelay = selectedRelay,
-                onSelectRelay = { viewModel.selectRelay(it) },
-                onAddRelay = { viewModel.addSearchRelay(it) },
-                onRemoveRelay = { viewModel.removeSearchRelay(it) },
-                onQueryChange = { viewModel.updateQuery(it, profileRepo, eventRepo) },
-                onClear = { viewModel.clear() },
-                onSearch = { viewModel.search(query, relayPool, eventRepo, muteRepo) },
-                eventRepo = eventRepo,
-                contactRepo = contactRepo,
-                onProfileClick = onProfileClick,
-                onNoteClick = onNoteClick,
-                onQuotedNoteClick = onQuotedNoteClick,
-                onReply = onReply,
-                onReact = onReact,
-                onListClick = onListClick,
-                onToggleFollow = onToggleFollow,
-                onBlockUser = onBlockUser,
-                userPubkey = userPubkey,
-                listedIds = listedIds,
-                onAddToList = onAddToList,
-                onDeleteEvent = onDeleteEvent,
-                translationRepo = translationRepo
-            )
+                RelaysTab(
+                    query = query,
+                    users = users,
+                    notes = notes,
+                    lists = lists,
+                    isSearching = isSearching,
+                    localFilter = localFilter,
+                    onQueryChange = { viewModel.updateQuery(it, profileRepo, eventRepo) },
+                    onClear = { viewModel.clear() },
+                    onSearch = { viewModel.search(query, relayPool, eventRepo, muteRepo) },
+                    eventRepo = eventRepo,
+                    contactRepo = contactRepo,
+                    onProfileClick = onProfileClick,
+                    onNoteClick = onNoteClick,
+                    onQuotedNoteClick = onQuotedNoteClick,
+                    onReply = onReply,
+                    onReact = onReact,
+                    onListClick = onListClick,
+                    onToggleFollow = onToggleFollow,
+                    onBlockUser = onBlockUser,
+                    userPubkey = userPubkey,
+                    listedIds = listedIds,
+                    onAddToList = onAddToList,
+                    onDeleteEvent = onDeleteEvent,
+                    translationRepo = translationRepo
+                )
+            }
         }
     }
 }
@@ -166,11 +182,6 @@ private fun RelaysTab(
     lists: List<FollowSet>,
     isSearching: Boolean,
     localFilter: LocalFilter,
-    searchRelays: List<String>,
-    selectedRelay: String?,
-    onSelectRelay: (String?) -> Unit,
-    onAddRelay: (String) -> Boolean,
-    onRemoveRelay: (String) -> Unit,
     onQueryChange: (String) -> Unit,
     onClear: () -> Unit,
     onSearch: () -> Unit,
@@ -191,15 +202,6 @@ private fun RelaysTab(
     translationRepo: TranslationRepository? = null
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
-        // Relay selector
-        RelaySelector(
-            searchRelays = searchRelays,
-            selectedRelay = selectedRelay,
-            onSelectRelay = onSelectRelay,
-            onAddRelay = onAddRelay,
-            onRemoveRelay = onRemoveRelay
-        )
-
         // Search bar + Go
         SearchBar(
             query = query,
@@ -373,132 +375,6 @@ private fun SearchBar(
             }
         }
     }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun RelaySelector(
-    searchRelays: List<String>,
-    selectedRelay: String?,
-    onSelectRelay: (String?) -> Unit,
-    onAddRelay: (String) -> Boolean,
-    onRemoveRelay: (String) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    var showAddDialog by remember { mutableStateOf(false) }
-
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-    ) {
-        OutlinedTextField(
-            value = selectedRelay?.removePrefix("wss://") ?: "All relays",
-            onValueChange = {},
-            readOnly = true,
-            label = { Text("Search relay") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                .fillMaxWidth()
-        )
-
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            containerColor = Color(0xFF0A0A0A)
-        ) {
-            DropdownMenuItem(
-                text = { Text("All relays") },
-                onClick = {
-                    onSelectRelay(null)
-                    expanded = false
-                }
-            )
-            searchRelays.forEach { url ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            url.removePrefix("wss://"),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    trailingIcon = {
-                        IconButton(
-                            onClick = { onRemoveRelay(url) },
-                            modifier = Modifier.size(24.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "Remove relay",
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    },
-                    onClick = {
-                        onSelectRelay(url)
-                        expanded = false
-                    }
-                )
-            }
-            HorizontalDivider()
-            DropdownMenuItem(
-                text = { Text("Add new") },
-                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
-                onClick = {
-                    expanded = false
-                    showAddDialog = true
-                }
-            )
-        }
-    }
-
-    if (showAddDialog) {
-        AddRelayDialog(
-            onDismiss = { showAddDialog = false },
-            onAdd = { url ->
-                if (onAddRelay(url)) {
-                    showAddDialog = false
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun AddRelayDialog(
-    onDismiss: () -> Unit,
-    onAdd: (String) -> Unit
-) {
-    var url by remember { mutableStateOf("wss://") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF0A0A0A),
-        title = { Text("Add search relay") },
-        text = {
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it },
-                placeholder = { Text("wss://relay.example.com") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onAdd(url) })
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { onAdd(url) }) {
-                Text("Add")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
 }
 
 @Composable
