@@ -88,6 +88,18 @@ class OnboardingViewModel(app: Application) : AndroidViewModel(app) {
 
     private var suggestionsJob: Job? = null
 
+    init {
+        initDefaultRelays()
+    }
+
+    fun initDefaultRelays() {
+        _discoveredRelays.value = listOf(
+            RelayConfig("wss://purplepag.es", read = true, write = false),
+            RelayConfig("wss://indexer.coracle.social", read = true, write = false),
+            RelayConfig("wss://user.kindpag.es", read = true, write = false)
+        )
+    }
+
     companion object {
         private const val TAG = "OnboardingSuggestions"
         val CREATOR_PUBKEYS = listOf(
