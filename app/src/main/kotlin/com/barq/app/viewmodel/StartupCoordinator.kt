@@ -6,7 +6,6 @@ import com.barq.app.nostr.ClientMessage
 import com.barq.app.nostr.Filter
 import com.barq.app.nostr.Nip30
 import com.barq.app.nostr.Nip51
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayConfig
 import com.barq.app.relay.RelayHealthTracker
 import com.barq.app.relay.RelayLifecycleManager
@@ -54,7 +53,6 @@ import kotlin.coroutines.CoroutineContext
  */
 class StartupCoordinator(
     private val relayPool: RelayPool,
-    private val outboxRouter: OutboxRouter,
     private val subManager: SubscriptionManager,
     private val eventRepo: EventRepository,
     private val contactRepo: ContactRepository,
@@ -257,7 +255,7 @@ class StartupCoordinator(
 
                 for (pubkey in removed) relayScoreBoard.removeAuthor(pubkey)
                 for (pubkey in added) {
-                    outboxRouter.requestMissingRelayLists(listOf(pubkey))
+                    // TODO: new relay model — request kind:10002 for new follow from indexer relays
                     delay(500)
                     relayScoreBoard.addAuthor(pubkey, excludeRelays = getExcludedRelayUrls())
                 }
@@ -580,7 +578,7 @@ class StartupCoordinator(
         val myEventIds = eventRepo.getRecentEventIdsByAuthor(pk, limit = 100)
         if (myEventIds.isEmpty()) return
 
-        val filters = myEventIds.chunked(OutboxRouter.MAX_ETAGS_PER_FILTER).map { chunk ->
+        val filters = myEventIds.chunked(150).map { chunk ->
             Filter(kinds = listOf(1), eTags = chunk, limit = 200)
         }
         val replyReqMsg = if (filters.size == 1) ClientMessage.req("notif-replies-etag", filters[0])
@@ -601,7 +599,7 @@ class StartupCoordinator(
             relayPool.sendToRelay(url, replyReqMsg)
         }
         // Also subscribe for quotes of our posts via #q tags
-        val quoteFilters = myEventIds.chunked(OutboxRouter.MAX_ETAGS_PER_FILTER).map { chunk ->
+        val quoteFilters = myEventIds.chunked(150).map { chunk ->
             Filter(kinds = listOf(1), qTags = chunk, limit = 200)
         }
         val quoteReqMsg = if (quoteFilters.size == 1) ClientMessage.req("notif-quotes-qtag", quoteFilters[0])
@@ -626,11 +624,8 @@ class StartupCoordinator(
             Log.d("StartupCoord", "fetchRelayListsForFollows: follow list empty")
             return false
         }
-        val sent = if (includeProfiles) {
-            outboxRouter.requestRelayListsAndProfiles(authors, profileRepo) != null
-        } else {
-            outboxRouter.requestMissingRelayLists(authors) != null
-        }
+        // TODO: new relay model — request kind:10002 (+ kind:0 if includeProfiles) from indexer relays
+        val sent = false
         Log.d("StartupCoord", "fetchRelayListsForFollows: ${authors.size} follows, includeProfiles=$includeProfiles, subscription sent=$sent")
         return sent
     }

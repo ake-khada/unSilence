@@ -98,7 +98,6 @@ fun ComposeScreen(
     replyTo: NostrEvent?,
     quoteTo: NostrEvent? = null,
     onBack: () -> Unit,
-    outboxRouter: com.barq.app.relay.OutboxRouter? = null,
     eventRepo: EventRepository? = null,
     profileRepo: ProfileRepository? = null,
     userPubkey: String? = null,
@@ -613,7 +612,6 @@ fun ComposeScreen(
                                 replyTo = replyTo,
                                 quoteTo = quoteTo,
                                 onSuccess = { onBack() },
-                                outboxRouter = outboxRouter,
                                 signer = signer,
                                 onNotePublished = onNotePublished
                             )
