@@ -240,10 +240,15 @@ class FeedSubscriptionManager(
                 }
                 Log.d("RLC", "[FeedSub] resubscribeFeed: ${allAuthors.size} authors, ${indexerRelays.size} indexers, ${excludedUrls.size} excluded")
                 val notesFilter = Filter(kinds = listOf(1, 6), since = sinceTimestamp)
-                outboxRouter.subscribeByAuthors(
-                    feedSubId, allAuthors, notesFilter,
-                    indexerRelays = indexerRelays, blockedUrls = excludedUrls
-                )
+                if (relayPool.isProxyModeActive()) {
+                    relayPool.sendToProxyRelays(ClientMessage.req(feedSubId, notesFilter.copy(authors = allAuthors)))
+                    setOf(feedSubId)
+                } else {
+                    outboxRouter.subscribeByAuthors(
+                        feedSubId, allAuthors, notesFilter,
+                        indexerRelays = indexerRelays, blockedUrls = excludedUrls
+                    )
+                }
             }
             FeedType.RELAY -> {
                 // RELAY feeds use subscribeRelayFeed() — should not reach here

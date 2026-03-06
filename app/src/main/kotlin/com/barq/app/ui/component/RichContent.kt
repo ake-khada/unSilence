@@ -1,11 +1,10 @@
 package com.barq.app.ui.component
 
-import android.database.ContentObserver
+import android.content.Context
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
-import android.provider.Settings
 import android.util.LruCache
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -963,16 +962,32 @@ private fun ImageWithContextMenu(url: String, onFullScreen: () -> Unit) {
 private fun InlineVideoPlayerWithFullscreen(url: String, onFullScreen: (positionMs: Long) -> Unit) {
     val context = LocalContext.current
     val exoPlayer = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
+        acquirePlayer(context, url).apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
             prepare()
             playWhenReady = false
         }
     }
 
+    var videoWidth by remember(url) { mutableStateOf(videoDimensionCache[url]?.first ?: 0) }
+    var videoHeight by remember(url) { mutableStateOf(videoDimensionCache[url]?.second ?: 0) }
+
     DisposableEffect(url) {
-        onDispose { exoPlayer.release() }
+        val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(size: VideoSize) {
+                videoWidth = size.width
+                videoHeight = size.height
+                videoDimensionCache[url] = Pair(size.width, size.height)
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            releasePlayer(url)
+        }
     }
+
+    val aspectRatio = if (videoWidth > 0 && videoHeight > 0) videoWidth.toFloat() / videoHeight.toFloat() else 16f / 9f
 
     Box(
         modifier = Modifier
@@ -988,7 +1003,7 @@ private fun InlineVideoPlayerWithFullscreen(url: String, onFullScreen: (position
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+                .aspectRatio(aspectRatio)
         )
         IconButton(
             onClick = {
@@ -1018,7 +1033,7 @@ private fun InlineVideoPlayerWithFullscreen(url: String, onFullScreen: (position
 private fun InlineVideoPlayer(url: String, maxWidth: Dp, onFullScreen: () -> Unit) {
     val context = LocalContext.current
     val exoPlayer = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
+        acquirePlayer(context, url).apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
             prepare()
             playWhenReady = false
@@ -1041,28 +1056,19 @@ private fun InlineVideoPlayer(url: String, maxWidth: Dp, onFullScreen: () -> Uni
             }
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (playing) {
+                    val previous = activeVideoUrl.getAndSet(url)
+                    if (previous != null && previous != url) {
+                        videoPlayerPool.get(previous)?.pause()
+                    }
+                }
             }
         }
         exoPlayer.addListener(listener)
         onDispose {
             exoPlayer.removeListener(listener)
-            exoPlayer.release()
+            releasePlayer(url)
         }
-    }
-
-    DisposableEffect(Unit) {
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean) {
-                if (isMuted) {
-                    exoPlayer.volume = 1f
-                    isMuted = false
-                }
-            }
-        }
-        context.contentResolver.registerContentObserver(
-            Settings.System.CONTENT_URI, true, observer
-        )
-        onDispose { context.contentResolver.unregisterContentObserver(observer) }
     }
 
     val aspectRatio = if (videoWidth > 0 && videoHeight > 0) videoWidth.toFloat() / videoHeight.toFloat() else 16f / 9f
@@ -1223,7 +1229,27 @@ private data class OgData(
     val siteName: String?
 )
 
-private val videoDimensionCache = mutableMapOf<String, Pair<Int, Int>>()
+private val videoDimensionCache = ConcurrentHashMap<String, Pair<Int, Int>>()
+
+private val videoPlayerPool = object : LruCache<String, ExoPlayer>(5) {
+    override fun entryRemoved(evicted: Boolean, key: String, old: ExoPlayer, new: ExoPlayer?) {
+        old.stop()
+        old.clearMediaItems()
+        old.release()
+    }
+}
+
+private fun acquirePlayer(context: Context, url: String): ExoPlayer {
+    return videoPlayerPool.get(url) ?: ExoPlayer.Builder(context).build().also {
+        videoPlayerPool.put(url, it)
+    }
+}
+
+private fun releasePlayer(url: String) {
+    videoPlayerPool.get(url)?.let { it.stop(); it.clearMediaItems() }
+}
+
+private val activeVideoUrl = AtomicReference<String?>(null)
 
 private val ogCache = LruCache<String, OgData>(200)
 

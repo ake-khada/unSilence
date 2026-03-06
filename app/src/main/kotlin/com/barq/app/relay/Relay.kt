@@ -52,7 +52,6 @@ class Relay(
         fun createClient(): OkHttpClient = HttpClientFactory.createRelayClient()
     }
 
-    private val sendLock = Any()
     private val pendingMessages = ConcurrentLinkedQueue<String>()
     private val maxPendingMessages = 50
 
@@ -123,7 +122,7 @@ class Relay(
                     // Successful connection — reset attempt tracking
                     synchronized(attemptLock) { connectAttempts.clear() }
                     _connectionState.tryEmit(true)
-                    drainPendingMessages(webSocket)
+                    scope?.launch { drainPendingMessages(webSocket) }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -191,12 +190,7 @@ class Relay(
         val ws = webSocket
         if (ws != null && isConnected) {
             onBytesSent?.invoke(config.url, message.length)
-            // OkHttp's MessageDeflater (permessage-deflate) is not thread-safe.
-            // Concurrent ws.send() calls crash with "Failed requirement" in deflate().
-            // Serialize all writes to the same WebSocket.
-            synchronized(sendLock) {
-                return ws.send(message)
-            }
+            return ws.send(message)
         }
         // Queue message for delivery when connected
         if (pendingMessages.size < maxPendingMessages) {
@@ -218,17 +212,15 @@ class Relay(
     }
 
     private fun drainPendingMessages(ws: WebSocket) {
-        synchronized(sendLock) {
-            var count = 0
-            var msg = pendingMessages.poll()
-            while (msg != null) {
-                ws.send(msg)
-                count++
-                msg = pendingMessages.poll()
-            }
-            if (count > 0) {
-                Log.d("RLC", "[Relay] drainPendingMessages(${config.url}): $count msgs drained")
-            }
+        var count = 0
+        var msg = pendingMessages.poll()
+        while (msg != null) {
+            ws.send(msg)
+            count++
+            msg = pendingMessages.poll()
+        }
+        if (count > 0) {
+            Log.d("RLC", "[Relay] drainPendingMessages(${config.url}): $count msgs drained")
         }
     }
 
