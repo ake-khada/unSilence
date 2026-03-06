@@ -19,7 +19,6 @@ import com.barq.app.nostr.Nip37
 import com.barq.app.nostr.NostrEvent
 import com.barq.app.nostr.NostrSigner
 import com.barq.app.nostr.toHex
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayPool
 import com.barq.app.repo.BlossomRepository
 import com.barq.app.repo.ContactRepository
@@ -257,7 +256,6 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         replyTo: NostrEvent? = null,
         quoteTo: NostrEvent? = null,
         onSuccess: () -> Unit = {},
-        outboxRouter: OutboxRouter? = null,
         signer: NostrSigner? = null,
         onNotePublished: (() -> Unit)? = null
     ) {
@@ -275,7 +273,7 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         }
 
         _publishing.value = true
-        startCountdown(text, s, relayPool, replyTo, quoteTo, outboxRouter, onSuccess, onNotePublished)
+        startCountdown(text, s, relayPool, replyTo, quoteTo, onSuccess, onNotePublished)
     }
 
     private fun startCountdown(
@@ -284,7 +282,6 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         relayPool: RelayPool,
         replyTo: NostrEvent?,
         quoteTo: NostrEvent?,
-        outboxRouter: OutboxRouter?,
         onSuccess: () -> Unit,
         onNotePublished: (() -> Unit)? = null
     ) {
@@ -292,7 +289,7 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         pendingPublish = {
             viewModelScope.launch {
                 try {
-                    val sentCount = publishNote(content, signer, relayPool, replyTo, quoteTo, outboxRouter)
+                    val sentCount = publishNote(content, signer, relayPool, replyTo, quoteTo)
                     if (sentCount == 0) return@launch
                     onNotePublished?.invoke()
                     onSuccess()
@@ -336,15 +333,14 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         signer: NostrSigner,
         relayPool: RelayPool,
         replyTo: NostrEvent?,
-        quoteTo: NostrEvent? = null,
-        outboxRouter: OutboxRouter? = null
+        quoteTo: NostrEvent? = null
     ): Int {
         val tags = mutableListOf<List<String>>()
         if (_explicit.value) {
             tags.add(listOf("content-warning", ""))
         }
         if (replyTo != null) {
-            val hint = outboxRouter?.getRelayHint(replyTo.pubkey) ?: ""
+            val hint = "" // TODO: new relay model — derive relay hint from target's NIP-65 write relays
             tags.addAll(Nip10.buildReplyTags(replyTo, hint))
         }
 
@@ -364,7 +360,7 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
         }
 
         val finalContent = if (quoteTo != null) {
-            val quoteHint = outboxRouter?.getRelayHint(quoteTo.pubkey) ?: ""
+            val quoteHint = "" // TODO: new relay model — derive relay hint from target's NIP-65 write relays
             tags.addAll(Nip18.buildQuoteTags(quoteTo, quoteHint))
             val relayHints = if (quoteHint.isNotEmpty()) listOf(quoteHint) else emptyList()
             Nip18.appendNoteUri(content, quoteTo.id, relayHints, quoteTo.pubkey)
@@ -409,20 +405,13 @@ class ComposeViewModel(app: Application, private val savedStateHandle: SavedStat
             signer.signEvent(kind = 1, content = finalContent, tags = finalTags)
         }
         val msg = ClientMessage.event(event)
-        var sentCount = if (replyTo != null && outboxRouter != null) {
-            outboxRouter.publishToInbox(msg, replyTo.pubkey)
-        } else {
-            relayPool.sendToWriteRelays(msg)
-        }
+        // TODO: new relay model — send EVENT to own NIP-65 write relays only
+        var sentCount = relayPool.sendToWriteRelays(msg)
         // If no relays were reachable, try reconnecting write relays and retry once
         if (sentCount == 0) {
             val reconnected = relayPool.ensureWriteRelaysConnected()
             if (reconnected > 0) {
-                sentCount = if (replyTo != null && outboxRouter != null) {
-                    outboxRouter.publishToInbox(msg, replyTo.pubkey)
-                } else {
-                    relayPool.sendToWriteRelays(msg)
-                }
+                sentCount = relayPool.sendToWriteRelays(msg)
             }
         }
         if (sentCount == 0) {

@@ -9,7 +9,6 @@ import com.barq.app.nostr.NostrSigner
 import com.barq.app.relay.HttpClientFactory
 import com.barq.app.relay.Relay
 import com.barq.app.relay.RelayLifecycleManager
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayConfig
 import com.barq.app.relay.RelayHealthTracker
 import com.barq.app.relay.RelayPool
@@ -137,7 +136,6 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     val blossomRepo = BlossomRepository(app, pubkeyHex)
     val relayInfoRepo = RelayInfoRepository()
     val relayScoreBoard = RelayScoreBoard(app, relayListRepo, contactRepo, pubkeyHex)
-    val outboxRouter = OutboxRouter(relayPool, relayListRepo, relayHintStore)
     val subManager = SubscriptionManager(relayPool)
     val lifecycleManager = RelayLifecycleManager(
         context = app,
@@ -163,7 +161,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     private val processingDispatcher = Dispatchers.Default
 
     val metadataFetcher = MetadataFetcher(
-        relayPool, outboxRouter, subManager, profileRepo, eventRepo,
+        relayPool, subManager, profileRepo, eventRepo,
         viewModelScope, processingDispatcher
     ).also {
         eventRepo.metadataFetcher = it
@@ -177,7 +175,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     // -- Manager classes --
     val feedSub: FeedSubscriptionManager = FeedSubscriptionManager(
-        relayPool, outboxRouter, subManager, eventRepo, contactRepo, listRepo, notifRepo,
+        relayPool, subManager, eventRepo, contactRepo, listRepo, notifRepo,
         extendedNetworkRepo, keyRepo, healthTracker, relayScoreBoard, profileRepo,
         metadataFetcher, viewModelScope, processingDispatcher, pubkeyHex
     )
@@ -194,7 +192,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     val socialActions: SocialActionManager = SocialActionManager(
-        relayPool, outboxRouter, eventRepo, contactRepo, muteRepo, notifRepo, dmRepo,
+        relayPool, eventRepo, contactRepo, muteRepo, notifRepo, dmRepo,
         pinRepo, deletedEventsRepo, nwcRepo, customEmojiRepo, zapSender, viewModelScope,
         getSigner = { signer },
         getUserPubkey = { getUserPubkey() }
@@ -208,7 +206,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     val startup: StartupCoordinator = StartupCoordinator(
-        relayPool, outboxRouter, subManager, eventRepo, contactRepo, muteRepo, notifRepo,
+        relayPool, subManager, eventRepo, contactRepo, muteRepo, notifRepo,
         listRepo, bookmarkRepo, bookmarkSetRepo, relaySetRepo, pinRepo, blossomRepo, customEmojiRepo,
         relayListRepo, relayScoreBoard, relayHintStore, healthTracker, keyRepo,
         extendedNetworkRepo, metadataFetcher, profileRepo, relayInfoRepo, nip05Repo,

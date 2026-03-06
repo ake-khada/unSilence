@@ -13,7 +13,8 @@
       "Bash(git rm -r --quiet --force app/src/main/kotlin/com/wisp/ 2>&1)",
       "Bash(grep -l \"Wisp\\\\|wisp\" /home/aivii/projects/barq/.claude/nips/*.md /home/aivii/projects/barq/.claude/skills/nostr-protocol.md 2>/dev/null)",
       "Bash(grep -ri \"wisp\" /home/aivii/projects/barq/ --include=\"*.kt\" --include=\"*.xml\" --include=\"*.kts\" --include=\"*.gradle\" --include=\"*.json\" --include=\"*.md\" --include=\"*.pro\" --include=\"*.txt\" 2>/dev/null | grep -v \"/build/\" | grep -v \"LICENSE\" | grep -v \"settings.local.json\")",
-      "Bash(git add .claude/nips/ .claude/skills/ .claude/settings.local.json CLAUDE.md README.md app/build.gradle.kts app/release/output-metadata.json app/src/main/AndroidManifest.xml app/src/main/baseline-prof.txt app/src/main/res/values/themes.xml settings.gradle.kts)"
+      "Bash(git add .claude/nips/ .claude/skills/ .claude/settings.local.json CLAUDE.md README.md app/build.gradle.kts app/release/output-metadata.json app/src/main/AndroidManifest.xml app/src/main/baseline-prof.txt app/src/main/res/values/themes.xml settings.gradle.kts)",
+      "Bash(git rm app/src/main/kotlin/com/barq/app/relay/OutboxRouter.kt)"
     ]
   }
 }

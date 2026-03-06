@@ -12,7 +12,6 @@ import com.barq.app.nostr.NostrSigner
 import com.barq.app.nostr.Nip18
 import com.barq.app.nostr.Nip09
 import com.barq.app.nostr.Nip57
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayPool
 import com.barq.app.repo.ContactRepository
 import com.barq.app.repo.DmRepository
@@ -37,7 +36,6 @@ import kotlinx.coroutines.launch
  */
 class SocialActionManager(
     private val relayPool: RelayPool,
-    private val outboxRouter: OutboxRouter,
     private val eventRepo: EventRepository,
     private val contactRepo: ContactRepository,
     private val muteRepo: MuteRepository,
@@ -124,11 +122,12 @@ class SocialActionManager(
         val s = getSigner() ?: return
         scope.launch {
             try {
-                val hint = outboxRouter.getRelayHint(event.pubkey)
+                val hint = "" // TODO: new relay model — derive relay hint from target's NIP-65 write relays
                 val tags = Nip18.buildRepostTags(event, hint)
                 val repostEvent = s.signEvent(kind = 6, content = event.toJson(), tags = tags)
                 val msg = ClientMessage.event(repostEvent)
-                outboxRouter.publishToInbox(msg, event.pubkey)
+                // TODO: new relay model — send EVENT to own NIP-65 write relays only
+                relayPool.sendToWriteRelays(msg)
                 eventRepo.markUserRepost(event.id)
                 eventRepo.addEvent(repostEvent)
             } catch (_: Exception) {}
@@ -168,7 +167,8 @@ class SocialActionManager(
                     }
                     val reactionEvent = s.signEvent(kind = 7, content = emoji, tags = tags)
                     val msg = ClientMessage.event(reactionEvent)
-                    outboxRouter.publishToInbox(msg, event.pubkey)
+                    // TODO: new relay model — send EVENT to own NIP-65 write relays only
+                    relayPool.sendToWriteRelays(msg)
                     eventRepo.addEvent(reactionEvent)
                 }
             } catch (_: Exception) {}

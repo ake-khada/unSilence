@@ -6,7 +6,6 @@ import com.barq.app.nostr.ClientMessage
 import com.barq.app.nostr.Filter
 import com.barq.app.nostr.Nip10
 import com.barq.app.nostr.NostrEvent
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayPool
 import com.barq.app.relay.SubscriptionManager
 import com.barq.app.repo.EventRepository
@@ -64,7 +63,6 @@ class ThreadViewModel : ViewModel() {
         eventId: String,
         eventRepo: EventRepository,
         relayPool: RelayPool,
-        outboxRouter: OutboxRouter,
         subManager: SubscriptionManager,
         metadataFetcher: MetadataFetcher,
         muteRepo: MuteRepository? = null,
@@ -177,9 +175,8 @@ class ThreadViewModel : ViewModel() {
             val rootEvent = _rootEvent.value
             val repliesFilter = Filter(kinds = listOf(1), eTags = listOf(rootId))
             if (rootEvent != null) {
-                outboxRouter.subscribeToUserReadRelays(
-                    "thread-replies", rootEvent.pubkey, repliesFilter
-                )
+                // TODO: new relay model — send REQ to root author's NIP-65 read relays via ephemeral connections
+                relayPool.sendToAll(ClientMessage.req("thread-replies", repliesFilter))
             } else {
                 // Root still not found — query all relays as fallback
                 relayPool.sendToAll(
