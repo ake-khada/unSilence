@@ -4,7 +4,6 @@ import com.barq.app.nostr.ClientMessage
 import com.barq.app.nostr.Filter
 import com.barq.app.nostr.Nip19
 import com.barq.app.nostr.NostrUriData
-import com.barq.app.relay.OutboxRouter
 import com.barq.app.relay.RelayPool
 import com.barq.app.relay.SubscriptionManager
 import kotlinx.coroutines.CoroutineScope
@@ -19,7 +18,6 @@ import kotlin.coroutines.CoroutineContext
  */
 class MetadataFetcher(
     private val relayPool: RelayPool,
-    private val outboxRouter: OutboxRouter,
     private val subManager: SubscriptionManager,
     private val profileRepo: ProfileRepository,
     private val eventRepo: EventRepository,
@@ -291,7 +289,9 @@ class MetadataFetcher(
 
         val maxAttempt = pubkeys.maxOf { profileAttempts[it] ?: 1 }
         if (maxAttempt <= 1) {
-            outboxRouter.requestProfiles(subId, pubkeys)
+            // TODO: new relay model — send kind:0 REQ to indexer relays only
+            val filter = Filter(kinds = listOf(0), authors = pubkeys, limit = pubkeys.size)
+            relayPool.sendToTopRelays(ClientMessage.req(subId, filter), maxRelays = 10)
         } else {
             // Retry: send to top 10 relays instead of all — most profiles are on major relays
             val filter = Filter(kinds = listOf(0), authors = pubkeys, limit = pubkeys.size)

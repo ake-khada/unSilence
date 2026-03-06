@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
@@ -235,6 +236,7 @@ fun FeedScreen(
                 showRelayPicker = false
             },
             onCreateRelaySet = { name -> viewModel.createRelaySet(name) },
+            onDeleteRelaySet = { relaySet -> viewModel.removeRelaySet(relaySet.dTag) },
             onProbe = { domain -> viewModel.probeRelay(domain) },
             onDismiss = { showRelayPicker = false }
         )
@@ -730,6 +732,7 @@ private fun RelayPickerDialog(
     onSelect: (String) -> Unit,
     onSelectRelaySet: (RelaySet) -> Unit,
     onCreateRelaySet: (String) -> Unit,
+    onDeleteRelaySet: (RelaySet) -> Unit,
     onProbe: suspend (String) -> String?,
     onDismiss: () -> Unit
 ) {
@@ -906,29 +909,42 @@ private fun RelayPickerDialog(
                     }
                     for (relaySet in relaySets) {
                         item(key = "set-${relaySet.dTag}") {
-                            Surface(
-                                onClick = { expandedSetDTag = if (expandedSetDTag == relaySet.dTag) null else relaySet.dTag },
-                                shape = RoundedCornerShape(8.dp),
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                Surface(
+                                    onClick = { expandedSetDTag = if (expandedSetDTag == relaySet.dTag) null else relaySet.dTag },
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f)
                                 ) {
-                                    Text(
-                                        relaySet.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Text(
-                                        "${relaySet.relays.size} relays",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            relaySet.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            "${relaySet.relays.size} relays",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Icon(
+                                            Icons.Filled.ArrowDropDown,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { onDeleteRelaySet(relaySet) }) {
                                     Icon(
-                                        Icons.Filled.ArrowDropDown,
-                                        contentDescription = null,
+                                        Icons.Default.Delete,
+                                        contentDescription = "Delete relay set",
+                                        tint = MaterialTheme.colorScheme.error,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
