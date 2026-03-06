@@ -18,6 +18,7 @@ import com.barq.app.repo.ListRepository
 import com.barq.app.repo.MetadataFetcher
 import com.barq.app.repo.NotificationRepository
 import com.barq.app.repo.ProfileRepository
+import com.barq.app.repo.RelayListRepository
 import com.barq.app.nostr.Nip57
 import com.barq.app.nostr.RelaySet
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +45,7 @@ class FeedSubscriptionManager(
     private val notifRepo: NotificationRepository,
     private val extendedNetworkRepo: ExtendedNetworkRepository,
     private val keyRepo: KeyRepository,
+    private val relayListRepo: RelayListRepository,
     private val healthTracker: RelayHealthTracker,
     private val relayScoreBoard: RelayScoreBoard,
     private val profileRepo: ProfileRepository,
@@ -107,6 +109,37 @@ class FeedSubscriptionManager(
     /** User's NIP-65 read relays from keyRepo, used as the follows/list feed relay set. */
     private fun getFollowFeedRelays(): Set<String> =
         keyRepo.getRelays().filter { it.read }.map { it.url }.toSet()
+
+    /**
+     * Groups [authors] by their primary NIP-65 write relay.
+     * Returns top [maxRelays] (relay → authorSubset) pairs sorted by author count descending,
+     * plus a fallback list of authors with no known write relay (or assigned beyond top relays).
+     */
+    private fun buildOutboxRouting(
+        authors: List<String>,
+        maxRelays: Int = 10
+    ): Pair<List<Pair<String, List<String>>>, List<String>> {
+        val relayToAuthors = mutableMapOf<String, MutableList<String>>()
+        val fallback = mutableListOf<String>()
+
+        for (pubkey in authors) {
+            val writeRelays = relayListRepo.getWriteRelays(pubkey)
+            if (writeRelays.isNullOrEmpty()) {
+                fallback.add(pubkey)
+            } else {
+                relayToAuthors.getOrPut(writeRelays.first()) { mutableListOf() }.add(pubkey)
+            }
+        }
+
+        val top = relayToAuthors.entries
+            .sortedByDescending { it.value.size }
+            .take(maxRelays)
+            .map { it.key to it.value.toList() }
+
+        val coveredByTop = top.flatMap { it.second }.toSet()
+        val overflow = authors.filter { it !in coveredByTop && it !in fallback }
+        return top to (fallback + overflow)
+    }
 
     /** Blocked + bad relay URLs combined for outbox routing exclusion. */
     private fun getExcludedRelayUrls(): Set<String> =
@@ -245,11 +278,22 @@ class FeedSubscriptionManager(
                 }
                 Log.d("RLC", "[FeedSub] resubscribeFeed: ${allAuthors.size} authors, ${indexerRelays.size} indexers, ${excludedUrls.size} excluded")
                 val notesFilter = Filter(kinds = listOf(1, 6), since = sinceTimestamp)
-                val msg = ClientMessage.req(feedSubId, notesFilter.copy(authors = allAuthors))
-                if (relayPool.isProxyModeActive()) {
-                    relayPool.sendToProxyRelays(msg)
+                val missing = relayListRepo.getMissingPubkeys(allAuthors)
+                val coverageRatio = 1.0 - missing.size.toDouble() / allAuthors.size
+                Log.d("RLC", "[FeedSub] resubscribeFeed: outbox coverage=${(coverageRatio * 100).toInt()}% (${allAuthors.size - missing.size}/${allAuthors.size} known)")
+                if (coverageRatio < 0.5) {
+                    val msg = ClientMessage.req(feedSubId, notesFilter.copy(authors = allAuthors))
+                    relayPool.sendToIndexerRelays(msg)
                 } else {
-                    relayPool.sendToReadRelays(msg)
+                    val (topRelays, fallbackAuthors) = buildOutboxRouting(allAuthors)
+                    for ((relayUrl, subset) in topRelays) {
+                        val msg = ClientMessage.req(feedSubId, notesFilter.copy(authors = subset))
+                        relayPool.sendToRelayOrEphemeral(relayUrl, msg)
+                    }
+                    if (fallbackAuthors.isNotEmpty()) {
+                        val msg = ClientMessage.req(feedSubId, notesFilter.copy(authors = fallbackAuthors))
+                        relayPool.sendToIndexerRelays(msg)
+                    }
                 }
                 setOf(feedSubId)
             }
@@ -319,11 +363,21 @@ class FeedSubscriptionManager(
                 }
                 if (allAuthors.isEmpty()) { isLoadingMore = false; return }
                 val templateFilter = Filter(kinds = listOf(1, 6), until = oldest - 1, limit = 50)
-                val msg = ClientMessage.req("loadmore", templateFilter.copy(authors = allAuthors))
-                if (relayPool.isProxyModeActive()) {
-                    relayPool.sendToProxyRelays(msg)
+                val missing = relayListRepo.getMissingPubkeys(allAuthors)
+                val coverageRatio = 1.0 - missing.size.toDouble() / allAuthors.size
+                if (coverageRatio < 0.5) {
+                    val msg = ClientMessage.req("loadmore", templateFilter.copy(authors = allAuthors))
+                    relayPool.sendToIndexerRelays(msg)
                 } else {
-                    relayPool.sendToReadRelays(msg)
+                    val (topRelays, fallbackAuthors) = buildOutboxRouting(allAuthors)
+                    for ((relayUrl, subset) in topRelays) {
+                        val msg = ClientMessage.req("loadmore", templateFilter.copy(authors = subset))
+                        relayPool.sendToRelayOrEphemeral(relayUrl, msg)
+                    }
+                    if (fallbackAuthors.isNotEmpty()) {
+                        val msg = ClientMessage.req("loadmore", templateFilter.copy(authors = fallbackAuthors))
+                        relayPool.sendToIndexerRelays(msg)
+                    }
                 }
             }
             FeedType.RELAY -> {
