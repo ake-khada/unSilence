@@ -70,6 +70,8 @@ import com.barq.app.ui.screen.ExistingUserOnboardingScreen
 import com.barq.app.ui.screen.LoadingScreen
 import com.barq.app.ui.screen.ListsHubScreen
 import com.barq.app.ui.screen.OnboardingScreen
+import com.barq.app.ui.screen.OnboardingRelayScreen
+import com.barq.app.relay.RelayConfig
 import com.barq.app.ui.component.AddNoteToListDialog
 import com.barq.app.ui.screen.RelayDetailScreen
 import com.barq.app.ui.screen.SettingsScreen
@@ -122,6 +124,7 @@ object Routes {
     const val LOADING = "loading"
     const val ONBOARDING_PROFILE = "onboarding/profile"
     const val ONBOARDING_SUGGESTIONS = "onboarding/suggestions"
+    const val ONBOARDING_RELAYS = "onboarding/relays"
     const val RELAY_DETAIL = "relay_detail/{relayUrl}"
     const val CUSTOM_EMOJIS = "custom_emojis"
     const val HASHTAG_FEED = "hashtag/{tag}"
@@ -313,7 +316,7 @@ fun BarqNavHost() {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    val nonAppRoutes = setOf(Routes.AUTH, Routes.LOADING, Routes.ONBOARDING_PROFILE, Routes.EXISTING_USER_ONBOARDING)
+    val nonAppRoutes = setOf(Routes.AUTH, Routes.LOADING, Routes.ONBOARDING_PROFILE, Routes.ONBOARDING_RELAYS, Routes.EXISTING_USER_ONBOARDING)
     val hideBottomBarRoutes = nonAppRoutes
     val showBottomBar by remember(currentRoute) {
         derivedStateOf { currentRoute != null && currentRoute !in hideBottomBarRoutes }
@@ -1197,19 +1200,36 @@ fun BarqNavHost() {
                 viewModel = onboardingViewModel,
                 onContinue = {
                     if (onboardingViewModel.finishProfile(feedViewModel.relayPool, signer = activeSigner)) {
-                        authViewModel.keyRepo.markOnboardingComplete()
-                        feedViewModel.reloadForNewAccount()
-                        relayViewModel.reload()
-                        blossomServersViewModel.reload()
-                        composeViewModel.reloadBlossomRepo()
-                        feedViewModel.initRelays()
-                        walletViewModel.refreshState()
-                        navController.navigate(Routes.LOADING) {
-                            popUpTo(0) { inclusive = true }
+                        navController.navigate(Routes.ONBOARDING_RELAYS) {
+                            popUpTo(Routes.ONBOARDING_PROFILE) { inclusive = true }
                         }
                     }
                 },
                 signer = activeSigner
+            )
+        }
+
+        composable(Routes.ONBOARDING_RELAYS) {
+            OnboardingRelayScreen(
+                onContinue = { indexerRelays, searchRelays ->
+                    authViewModel.keyRepo.saveRelays(
+                        indexerRelays.map { RelayConfig(it, read = true, write = false) }
+                    )
+                    authViewModel.keyRepo.saveSearchRelays(searchRelays)
+                    feedViewModel.relayPool.updateRelays(
+                        indexerRelays.map { RelayConfig(it, read = true, write = false) }
+                    )
+                    authViewModel.keyRepo.markOnboardingComplete()
+                    feedViewModel.reloadForNewAccount()
+                    relayViewModel.reload()
+                    blossomServersViewModel.reload()
+                    composeViewModel.reloadBlossomRepo()
+                    feedViewModel.initRelays()
+                    walletViewModel.refreshState()
+                    navController.navigate(Routes.LOADING) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
             )
         }
 
