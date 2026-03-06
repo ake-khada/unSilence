@@ -624,8 +624,16 @@ class StartupCoordinator(
             Log.d("StartupCoord", "fetchRelayListsForFollows: follow list empty")
             return false
         }
-        // TODO: new relay model — request kind:10002 (+ kind:0 if includeProfiles) from indexer relays
-        val sent = false
+        val kinds = if (includeProfiles) listOf(0, 10002) else listOf(10002)
+        val filters = authors.chunked(500).map { chunk ->
+            Filter(kinds = kinds, authors = chunk)
+        }
+        val msg = if (filters.size == 1) ClientMessage.req("relay-lists", filters[0])
+                  else ClientMessage.req("relay-lists", filters)
+        for (url in RelayPool.INDEXER_RELAY_URLS) {
+            relayPool.sendToRelayOrEphemeral(url, msg)
+        }
+        val sent = true
         Log.d("StartupCoord", "fetchRelayListsForFollows: ${authors.size} follows, includeProfiles=$includeProfiles, subscription sent=$sent")
         return sent
     }
