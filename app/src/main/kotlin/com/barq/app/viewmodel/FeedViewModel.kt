@@ -176,7 +176,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     // -- Manager classes --
     val feedSub: FeedSubscriptionManager = FeedSubscriptionManager(
         relayPool, subManager, eventRepo, contactRepo, listRepo, notifRepo,
-        extendedNetworkRepo, keyRepo, healthTracker, relayScoreBoard, profileRepo,
+        extendedNetworkRepo, keyRepo, relayListRepo, healthTracker, relayScoreBoard, profileRepo,
         metadataFetcher, viewModelScope, processingDispatcher, pubkeyHex
     )
 
