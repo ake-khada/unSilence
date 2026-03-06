@@ -53,6 +53,7 @@ import com.barq.app.ui.component.RelayIcon
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -90,7 +91,81 @@ fun RelayDetailScreen(
         consoleEntries.filter { it.relayUrl == relayUrl }.takeLast(50).reversed()
     }
 
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    var showSetPicker by remember { mutableStateOf(false) }
+    var newSetName by remember { mutableStateOf("") }
+
+    if (showSetPicker && onAddToRelaySet != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showSetPicker = false },
+            containerColor = Color(0xFF0A0A0A),
+            title = { Text("Add to Relay Set") },
+            text = {
+                Column {
+                    if (relaySets.isNotEmpty()) {
+                        for (set in relaySets) {
+                            val contains = relayUrl in set.relays
+                            Surface(
+                                onClick = {
+                                    onAddToRelaySet(set.dTag)
+                                    showSetPicker = false
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        set.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (contains) {
+                                        Text(
+                                            "\u2713",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                        )
+                    }
+                    androidx.compose.material3.OutlinedTextField(
+                        value = newSetName,
+                        onValueChange = { newSetName = it },
+                        placeholder = { Text("New set name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        trailingIcon = {
+                            if (newSetName.isNotBlank()) {
+                                IconButton(onClick = {
+                                    onCreateRelaySet?.invoke(newSetName.trim())
+                                    newSetName = ""
+                                    showSetPicker = false
+                                }) {
+                                    Text("Create", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showSetPicker = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
                 title = {
@@ -105,6 +180,24 @@ fun RelayDetailScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    if (onToggleFavorite != null) {
+                        IconButton(onClick = onToggleFavorite) {
+                            Text(
+                                if (isFavorite) "\u2605" else "\u2606",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (isFavorite) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (onAddToRelaySet != null) {
+                        TextButton(onClick = { showSetPicker = true }) {
+                            Text("+Set", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                },
+                scrollBehavior = scrollBehavior,
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
@@ -125,13 +218,8 @@ fun RelayDetailScreen(
                     domain = domain,
                     isBad = isBad,
                     operatorProfile = operatorProfile,
-                    isFavorite = isFavorite,
-                    relaySets = relaySets,
                     onOperatorClick = onOperatorClick,
-                    onClearBad = { healthTracker.clearBadRelay(relayUrl) },
-                    onToggleFavorite = onToggleFavorite,
-                    onAddToRelaySet = onAddToRelaySet,
-                    onCreateRelaySet = onCreateRelaySet
+                    onClearBad = { healthTracker.clearBadRelay(relayUrl) }
                 )
             }
 
@@ -200,13 +288,8 @@ private fun RelayHeader(
     domain: String,
     isBad: Boolean,
     operatorProfile: ProfileData?,
-    isFavorite: Boolean = false,
-    relaySets: List<RelaySet> = emptyList(),
     onOperatorClick: ((String) -> Unit)?,
-    onClearBad: () -> Unit,
-    onToggleFavorite: (() -> Unit)? = null,
-    onAddToRelaySet: ((String) -> Unit)? = null,
-    onCreateRelaySet: ((String) -> Unit)? = null
+    onClearBad: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -274,131 +357,6 @@ private fun RelayHeader(
             }
             if (info != null && info.isOpenPublicRelay()) {
                 StatusBadge("Open", Color(0xFF81C784))
-            }
-        }
-
-        // Action buttons: Favorite + Add to Set
-        if (onToggleFavorite != null || onAddToRelaySet != null) {
-            Spacer(Modifier.height(12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (onToggleFavorite != null) {
-                    Surface(
-                        onClick = onToggleFavorite,
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (isFavorite) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                               else MaterialTheme.colorScheme.surfaceVariant
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                if (isFavorite) "\u2605" else "\u2606",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = if (isFavorite) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                if (isFavorite) "Favorited" else "Favorite",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isFavorite) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-                if (onAddToRelaySet != null) {
-                    var showSetPicker by remember { mutableStateOf(false) }
-                    var newSetName by remember { mutableStateOf("") }
-
-                    Surface(
-                        onClick = { showSetPicker = true },
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant
-                    ) {
-                        Text(
-                            "Add to Set",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                        )
-                    }
-
-                    if (showSetPicker) {
-                        androidx.compose.material3.AlertDialog(
-                            onDismissRequest = { showSetPicker = false },
-                            containerColor = Color(0xFF0A0A0A),
-                            title = { Text("Add to Relay Set") },
-                            text = {
-                                Column {
-                                    if (relaySets.isNotEmpty()) {
-                                        for (set in relaySets) {
-                                            val contains = relayUrl in set.relays
-                                            Surface(
-                                                onClick = {
-                                                    onAddToRelaySet(set.dTag)
-                                                    showSetPicker = false
-                                                },
-                                                shape = RoundedCornerShape(8.dp),
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text(
-                                                        set.name,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                    if (contains) {
-                                                        Text(
-                                                            "\u2713",
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            color = MaterialTheme.colorScheme.primary
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        HorizontalDivider(
-                                            modifier = Modifier.padding(vertical = 8.dp),
-                                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                                        )
-                                    }
-                                    // Create new set
-                                    androidx.compose.material3.OutlinedTextField(
-                                        value = newSetName,
-                                        onValueChange = { newSetName = it },
-                                        placeholder = { Text("New set name") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth(),
-                                        trailingIcon = {
-                                            if (newSetName.isNotBlank()) {
-                                                IconButton(onClick = {
-                                                    onCreateRelaySet?.invoke(newSetName.trim())
-                                                    newSetName = ""
-                                                    showSetPicker = false
-                                                }) {
-                                                    Text("Create", style = MaterialTheme.typography.labelSmall)
-                                                }
-                                            }
-                                        }
-                                    )
-                                }
-                            },
-                            confirmButton = {},
-                            dismissButton = {
-                                TextButton(onClick = { showSetPicker = false }) { Text("Cancel") }
-                            }
-                        )
-                    }
-                }
             }
         }
 
