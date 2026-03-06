@@ -139,26 +139,17 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
         // Close any prior subs (e.g. re-subscribe after relay list discovery)
         closeAllSubs(relayPool)
 
-        // TODO: new relay model — query indexer relays for kind:0+kind:10002, then open ephemeral to user's write relays
-
-        // Request fresh profile, posts, follow list, and relay list
+        // Step 1: query indexer relays for kind:0 + kind:10002.
+        // When kind:10002 arrives the event handler below opens ephemeral connections
+        // to the user's actual write relays and re-fetches posts/follows/pins from there.
         val profileFilter = Filter(kinds = listOf(0), authors = listOf(pubkey), limit = 1)
         val postsFilter = Filter(kinds = listOf(1, 6), authors = listOf(pubkey), limit = 50)
         val followFilter = Filter(kinds = listOf(3), authors = listOf(pubkey), limit = 1)
         val relayFilter = Filter(kinds = listOf(10002), authors = listOf(pubkey), limit = 1)
         val pinFilter = Filter(kinds = listOf(10001), authors = listOf(pubkey), limit = 1)
 
-        relayPool.sendToAll(ClientMessage.req("userprofile", profileFilter))
-        relayPool.sendToAll(ClientMessage.req("userposts", postsFilter))
-        relayPool.sendToAll(ClientMessage.req("userfollows", followFilter))
-        relayPool.sendToAll(ClientMessage.req("userrelays", relayFilter))
-        relayPool.sendToAll(ClientMessage.req("userpins", pinFilter))
-        // Also query top scored relays as safety net
-        for (url in topRelayUrls) {
-            relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userposts", postsFilter))
-            relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userprofile", profileFilter))
-            relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userfollows", followFilter))
-        }
+        relayPool.sendToIndexerRelays(ClientMessage.req("userprofile", profileFilter))
+        relayPool.sendToIndexerRelays(ClientMessage.req("userrelays", relayFilter))
         loadedPubkey = pubkey
 
         // After posts EOSE, subscribe for engagement data
@@ -292,8 +283,33 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
                             if (event.created_at <= latestRelayListTimestamp) return@collect
                             latestRelayListTimestamp = event.created_at
                             _relayList.value = Nip65.parseRelayList(event)
-                            // TODO: new relay model — open ephemeral connections to user's NIP-65 write relays,
-                            //       re-subscribe userposts/userprofile/userfollows there, close after EOSE
+                            // Step 2: open ephemeral connections to up to 3 of the user's write relays
+                            // and re-fetch content REQs from there; close ephemerals after EOSE.
+                            val writeUrls = _relayList.value
+                                .filter { it.write }
+                                .map { it.url }
+                                .take(3)
+                            if (writeUrls.isNotEmpty()) {
+                                viewModelScope.launch {
+                                    // Close stale indexer-sourced subs before re-subscribing on write relays
+                                    relayPool.closeOnAllRelays("userposts")
+                                    relayPool.closeOnAllRelays("userprofile")
+                                    relayPool.closeOnAllRelays("userfollows")
+                                    relayPool.closeOnAllRelays("userpins")
+                                    for (url in writeUrls) {
+                                        relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userposts", postsFilter))
+                                        relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userprofile", profileFilter))
+                                        relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userfollows", followFilter))
+                                        relayPool.sendToRelayOrEphemeral(url, ClientMessage.req("userpins", pinFilter))
+                                    }
+                                    // Wait for posts EOSE then close ephemerals that are not persistent relays
+                                    subManagerRef?.awaitEoseWithTimeout("userposts", timeoutMs = 10_000)
+                                    val persistentUrls = relayPool.getRelayUrls().toSet()
+                                    for (url in writeUrls) {
+                                        if (url !in persistentUrls) relayPool.disconnectRelay(url)
+                                    }
+                                }
+                            }
                         }
                     }
                 } else if (event.kind == 0) {
@@ -312,7 +328,6 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
         val eventIds = (_rootNotes.value.map { it.id } + _replies.value.map { it.id }).distinct()
         if (eventIds.isEmpty()) return
 
-        // TODO: new relay model — send engagement REQ to user's NIP-65 write relays via ephemeral connections
         eventIds.chunked(50).forEachIndexed { index, batch ->
             val subId = if (index == 0) "user-engage" else "user-engage-$index"
             activeEngagementSubIds.add(subId)
@@ -322,21 +337,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
                 Filter(kinds = listOf(9735), eTags = batch),
                 Filter(kinds = listOf(1), eTags = batch)
             )
-            relayPool.sendToReadRelays(ClientMessage.req(subId, filters))
-        }
-        // Also query top scored relays for engagement
-        eventIds.chunked(50).forEachIndexed { index, batch ->
-            val subId = "user-engage-top-$index"
-            activeEngagementSubIds.add(subId)
-            val filters = listOf(
-                Filter(kinds = listOf(7), eTags = batch),
-                Filter(kinds = listOf(6), eTags = batch),
-                Filter(kinds = listOf(9735), eTags = batch),
-                Filter(kinds = listOf(1), eTags = batch)
-            )
-            for (url in topRelayUrls) {
-                relayPool.sendToRelayOrEphemeral(url, ClientMessage.req(subId, filters))
-            }
+            relayPool.sendToIndexerRelays(ClientMessage.req(subId, filters))
         }
     }
 
@@ -374,11 +375,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
         val pool = relayPoolRef ?: run { isLoadingMoreNotes = false; return }
         val filter = Filter(kinds = listOf(1, 6), authors = listOf(targetPubkey), until = oldestNoteTimestamp - 1, limit = 50)
 
-        // TODO: new relay model — send REQ to user's NIP-65 write relays via ephemeral connections
-        pool.sendToAll(ClientMessage.req("userposts-more", filter))
-        for (url in topRelayUrls) {
-            pool.sendToRelayOrEphemeral(url, ClientMessage.req("userposts-more", filter))
-        }
+        pool.sendToIndexerRelays(ClientMessage.req("userposts-more", filter))
 
         viewModelScope.launch {
             withTimeoutOrNull(10_000) {
@@ -397,11 +394,7 @@ class UserProfileViewModel(app: Application) : AndroidViewModel(app) {
         val pool = relayPoolRef ?: run { isLoadingMoreReplies = false; return }
         val filter = Filter(kinds = listOf(1), authors = listOf(targetPubkey), until = oldestReplyTimestamp - 1, limit = 50)
 
-        // TODO: new relay model — send REQ to user's NIP-65 write relays via ephemeral connections
-        pool.sendToAll(ClientMessage.req("userreplies-more", filter))
-        for (url in topRelayUrls) {
-            pool.sendToRelayOrEphemeral(url, ClientMessage.req("userreplies-more", filter))
-        }
+        pool.sendToIndexerRelays(ClientMessage.req("userreplies-more", filter))
 
         viewModelScope.launch {
             withTimeoutOrNull(10_000) {
