@@ -729,7 +729,8 @@ fun BarqNavHost() {
                 listedIds = searchListedIds,
                 onAddToList = { eventId -> addToListEventId = eventId },
                 onDeleteEvent = { eventId, kind -> feedViewModel.deleteEvent(eventId, kind) },
-                translationRepo = feedViewModel.translationRepo
+                translationRepo = feedViewModel.translationRepo,
+                onNavigateToRelaySettings = { navController.navigate(Routes.RELAYS) }
             )
         }
 

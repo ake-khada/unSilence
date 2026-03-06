@@ -545,6 +545,12 @@ class RelayPool {
         }
     }
 
+    fun sendToSearchRelays(urls: List<String>, message: String) {
+        for (url in urls) {
+            sendToRelayOrEphemeral(url, message)
+        }
+    }
+
     fun sendToProxyRelays(message: String) {
         for (relay in relays) {
             if (relay.config.url in proxyRelayUrls && relay.isConnected) {
