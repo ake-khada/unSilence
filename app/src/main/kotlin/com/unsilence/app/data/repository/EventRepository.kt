@@ -2,6 +2,7 @@ package com.unsilence.app.data.repository
 
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.domain.model.FeedFilter
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
@@ -24,6 +25,10 @@ class EventRepository @Inject constructor(
 
     fun threadFlow(eventId: String): Flow<List<FeedRow>> =
         eventDao.threadFlow(eventId)
+
+    /** Optimistic insert for locally-authored events. */
+    suspend fun insertEvent(entity: EventEntity) =
+        eventDao.insertOrIgnore(entity)
 
     suspend fun pruneExpired() =
         eventDao.pruneExpired(System.currentTimeMillis() / 1000L)

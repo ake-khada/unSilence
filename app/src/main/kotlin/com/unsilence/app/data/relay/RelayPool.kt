@@ -94,6 +94,21 @@ class RelayPool @Inject constructor(
         connections.values.firstOrNull()?.send(req)
     }
 
+    /**
+     * Broadcast a signed event to all currently connected relays.
+     *
+     * [eventJson] must be the raw JSON object string for the event
+     * (not the full ["EVENT", ...] array — this method wraps it).
+     */
+    fun publish(eventJson: String) {
+        val cmd = buildJsonArray {
+            add(JsonPrimitive("EVENT"))
+            add(NostrJson.parseToJsonElement(eventJson))
+        }.toString()
+        connections.values.forEach { it.send(cmd) }
+        Log.d(TAG, "Published event to ${connections.size} relay(s)")
+    }
+
     fun disconnectAll() {
         connections.values.forEach { it.close() }
         connections.clear()
