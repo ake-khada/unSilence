@@ -7,7 +7,10 @@ import com.unsilence.app.ui.navigation.AppNavigation
 @Composable
 fun RootScreen(viewModel: RootViewModel = hiltViewModel()) {
     if (viewModel.isLoggedIn) {
-        AppNavigation()
+        AppNavigation(
+            keyManager = viewModel.keyManager,
+            onLogout   = viewModel::logout,
+        )
     } else {
         OnboardingScreen(
             keyManager = viewModel.keyManager,
