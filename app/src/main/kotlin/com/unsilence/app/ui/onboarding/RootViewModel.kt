@@ -19,4 +19,9 @@ class RootViewModel @Inject constructor(
     fun onOnboardingComplete() {
         isLoggedIn = true
     }
+
+    fun logout() {
+        keyManager.clear()
+        isLoggedIn = false
+    }
 }
