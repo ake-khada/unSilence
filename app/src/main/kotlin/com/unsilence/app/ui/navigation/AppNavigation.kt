@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalNavigationDrawer
@@ -41,6 +44,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.ui.feed.FeedType
+import com.unsilence.app.ui.feed.FeedViewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -79,9 +86,15 @@ private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutS
 
 @Composable
 fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
-    var selectedTab  by rememberSaveable { mutableIntStateOf(0) }
-    var barsVisible  by remember { mutableStateOf(true) }
-    var showCompose  by remember { mutableStateOf(false) }
+    var selectedTab        by rememberSaveable { mutableIntStateOf(0) }
+    var barsVisible        by remember { mutableStateOf(true) }
+    var showCompose        by remember { mutableStateOf(false) }
+    var showFeedDropdown   by remember { mutableStateOf(false) }
+    var scrollToTopTrigger by remember { mutableIntStateOf(0) }
+
+    // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
+    val feedViewModel: FeedViewModel = hiltViewModel()
+    val feedType by feedViewModel.feedType.collectAsStateWithLifecycle()
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
@@ -145,7 +158,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                     .padding(top = contentTopPadding, bottom = contentBottomPadding),
             ) {
                 when (selectedTab) {
-                    0    -> FeedScreen()
+                    0    -> FeedScreen(scrollToTopTrigger = scrollToTopTrigger)
                     3    -> ProfileScreen()
                     else -> PlaceholderScreen()
                 }
@@ -181,16 +194,31 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(20.dp),
                         verticalAlignment     = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text     = "Global ▾",
-                            color    = Cyan,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .widthIn(max = 120.dp)
-                                .clickable { /* Sprint 4: open feed selector */ },
-                        )
+                        Box {
+                            Text(
+                                text     = "${feedViewModel.feedTypeLabel} ▾",
+                                color    = Cyan,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .widthIn(max = 120.dp)
+                                    .clickable { showFeedDropdown = true },
+                            )
+                            DropdownMenu(
+                                expanded         = showFeedDropdown,
+                                onDismissRequest = { showFeedDropdown = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text    = { Text("Global",    color = if (feedType == FeedType.GLOBAL)    Cyan else Color.White, fontSize = 14.sp) },
+                                    onClick = { feedViewModel.setFeedType(FeedType.GLOBAL);    showFeedDropdown = false },
+                                )
+                                DropdownMenuItem(
+                                    text    = { Text("Following", color = if (feedType == FeedType.FOLLOWING) Cyan else Color.White, fontSize = 14.sp) },
+                                    onClick = { feedViewModel.setFeedType(FeedType.FOLLOWING); showFeedDropdown = false },
+                                )
+                            }
+                        }
                         Icon(
                             imageVector        = Icons.Filled.Tune,
                             contentDescription = "Filter",
@@ -223,13 +251,26 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                 verticalAlignment     = Alignment.CenterVertically,
             ) {
                 TABS.forEachIndexed { index, tab ->
-                    IconButton(onClick = { selectedTab = index }) {
-                        Icon(
-                            imageVector        = tab.icon,
-                            contentDescription = tab.contentDescription,
-                            tint               = if (index == selectedTab) Cyan else NavUnselected,
-                            modifier           = Modifier.size(Sizing.navIcon),
-                        )
+                    IconButton(onClick = {
+                        if (index == 0 && selectedTab == 0) scrollToTopTrigger++
+                        selectedTab = index
+                    }) {
+                        Box {
+                            Icon(
+                                imageVector        = tab.icon,
+                                contentDescription = tab.contentDescription,
+                                tint               = if (index == selectedTab) Cyan else NavUnselected,
+                                modifier           = Modifier.size(Sizing.navIcon),
+                            )
+                            if (index == 0 && feedViewModel.newPostsAvailable) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .align(Alignment.TopEnd)
+                                        .background(Cyan, CircleShape),
+                                )
+                            }
+                        }
                     }
                 }
             }

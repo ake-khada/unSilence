@@ -25,6 +25,9 @@ import kotlinx.serialization.json.longOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
+// Type alias for external kind handlers registered by other components (e.g. OutboxRouter).
+private typealias KindHandler = suspend (obj: JsonObject, relayUrl: String) -> Unit
+
 private const val TAG = "EventProcessor"
 
 /**
@@ -42,6 +45,18 @@ class EventProcessor @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
+
+    /**
+     * External kind handlers — registered by other components (OutboxRouter, etc.).
+     * Called after built-in processing for every event matching the registered kind.
+     * Thread-safe: guarded by synchronized block on the map itself.
+     */
+    private val kindHandlers = mutableMapOf<Int, MutableList<KindHandler>>()
+
+    @Synchronized
+    fun addKindHandler(kind: Int, handler: KindHandler) {
+        kindHandlers.getOrPut(kind) { mutableListOf() }.add(handler)
+    }
 
     fun process(raw: String, relayUrl: String) {
         scope.launch {
@@ -80,6 +95,10 @@ class EventProcessor @Inject constructor(
                 id, pubkey, kind, content, createdAt, tagsJson, sig, tags, relayUrl
             )
         }
+
+        // Dispatch to any externally-registered handlers (e.g. OutboxRouter for kind 3 / 10002).
+        val handlers = synchronized(kindHandlers) { kindHandlers[kind]?.toList() }
+        handlers?.forEach { it(obj, relayUrl) }
     }
 
     // ── Kind 0 ───────────────────────────────────────────────────────────────

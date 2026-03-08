@@ -83,6 +83,44 @@ interface EventDao {
         minReactions: Int,
     ): Flow<List<FeedRow>>
 
+    /**
+     * Following feed: top-level kind 1/6/20/21 events from followed pubkeys only.
+     * Uses an INNER JOIN on the follows table — no relay URL filter (events may have
+     * arrived from any relay) and no minReactions threshold (see everything from follows).
+     */
+    @Query("""
+        SELECT
+            e.id,
+            e.pubkey,
+            e.kind,
+            e.content,
+            e.created_at,
+            e.tags,
+            e.relay_url,
+            e.reply_to_id,
+            e.root_id,
+            e.has_content_warning,
+            e.content_warning_reason,
+            e.cached_at,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count
+        FROM events e
+        INNER JOIN follows     f   ON f.pubkey          = e.pubkey
+        LEFT JOIN  users       u   ON u.pubkey           = e.pubkey
+        LEFT JOIN  reactions   r   ON r.target_event_id  = e.id
+        LEFT JOIN  events      rep ON rep.reply_to_id    = e.id
+        WHERE e.kind        IN (1, 6, 20, 21)
+          AND e.reply_to_id IS NULL
+          AND e.root_id     IS NULL
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT 300
+    """)
+    fun followingFeedFlow(): Flow<List<FeedRow>>
+
     /** Top-level posts by a single author, newest-first. Used by the profile screen. */
     @Query("""
         SELECT

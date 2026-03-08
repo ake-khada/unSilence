@@ -22,7 +22,12 @@ class RelaySetRepository @Inject constructor(
 ) {
     val allSetsFlow: Flow<List<RelaySetEntity>> = relaySetDao.allSetsFlow()
 
-    /** Seeds the built-in Global relay set on first launch. Idempotent via IGNORE. */
+    /**
+     * Seeds the built-in Global relay set.
+     * INSERT OR IGNORE creates the row on first launch.
+     * The follow-up UPDATE forces filter_json to the current default on every launch,
+     * so changes to FeedFilter.globalDefault take effect on existing installs too.
+     */
     suspend fun seedDefaults() {
         relaySetDao.insertIfAbsent(
             RelaySetEntity(
@@ -34,6 +39,8 @@ class RelaySetRepository @Inject constructor(
                 filterJson = Json.encodeToString(FeedFilter.globalDefault),
             )
         )
+        // Always sync the filter to the current compiled default (picks up minReactions changes).
+        relaySetDao.updateFilterJson("global", Json.encodeToString(FeedFilter.globalDefault))
     }
 
     suspend fun defaultSet(): RelaySetEntity? = relaySetDao.defaultSet()
