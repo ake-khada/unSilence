@@ -26,6 +26,9 @@ class EventRepository @Inject constructor(
     fun threadFlow(eventId: String): Flow<List<FeedRow>> =
         eventDao.threadFlow(eventId)
 
+    fun userPostsFlow(pubkey: String): Flow<List<FeedRow>> =
+        eventDao.userPostsFlow(pubkey)
+
     /** Optimistic insert for locally-authored events. */
     suspend fun insertEvent(entity: EventEntity) =
         eventDao.insertOrIgnore(entity)

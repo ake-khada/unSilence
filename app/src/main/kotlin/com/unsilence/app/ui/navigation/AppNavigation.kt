@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
+import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -145,6 +146,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
             ) {
                 when (selectedTab) {
                     0    -> FeedScreen()
+                    3    -> ProfileScreen()
                     else -> PlaceholderScreen()
                 }
             }
