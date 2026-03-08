@@ -3,23 +3,25 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt.android)
 }
 
 android {
-    namespace = "com.barq.app"
+    namespace  = "com.unsilence.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.barq.app"
-        minSdk = 26
-        targetSdk = 35
-        versionCode = 14
-        versionName = "0.3.6"
+        applicationId = "com.unsilence.app"
+        minSdk        = 26
+        targetSdk     = 35
+        versionCode   = 1
+        versionName   = "0.1.0"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
+            isMinifyEnabled   = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -34,46 +36,59 @@ android {
         jvmTarget = "17"
     }
 
-    packaging {
-        jniLibs.useLegacyPackaging = true
-    }
-
     buildFeatures {
         compose = true
     }
 }
 
 dependencies {
+    // Compose
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
     implementation(libs.compose.icons.extended)
+
+    // Activity / Navigation / Lifecycle
     implementation(libs.activity.compose)
     implementation(libs.navigation.compose)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
+
+    // Networking
     implementation(libs.okhttp)
+
+    // Serialization / Coroutines
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.secp256k1.kmp)
-    implementation(libs.secp256k1.kmp.jni.android)
+
+    // Hilt (DI)
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    implementation(libs.hilt.navigation.compose)
+
+    // Room (local cache — UI reads only from Room)
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
+
+    // Coil (image loading, GIF, blurhash)
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
-    implementation(libs.coil.video)
-    implementation(libs.security.crypto)
-    implementation(libs.bouncycastle)
+
+    // Media (ExoPlayer — kind 21 tap-to-play only in v1)
     implementation(libs.media3.exoplayer)
-    implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
-    implementation(libs.biometric)
+
+    // Other
+    implementation(libs.security.crypto)    // NWC key storage (Android Keystore)
     implementation(libs.splashscreen)
-    implementation(libs.profileinstaller)
-    implementation(libs.zxing.core)
-    implementation(libs.kmp.tor.runtime)
-    implementation(libs.kmp.tor.resource.exec)
-    implementation(libs.mlkit.translate)
-    implementation(libs.mlkit.language.id)
-    implementation(libs.kotlinx.coroutines.play.services)
+    implementation(libs.zxing.core)         // QR scanner for NWC setup (Sprint 4)
+
+    // Nostr protocol (event parsing, signing, NIP implementations)
+    implementation(libs.quartz.android)
+
+    // Pubkey-derived identicons (Maven Central)
+    implementation(libs.identikon.android)
 }
