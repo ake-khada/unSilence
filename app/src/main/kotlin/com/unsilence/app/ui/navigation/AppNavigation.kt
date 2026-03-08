@@ -234,10 +234,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
 
             // ── Compose overlay ───────────────────────────────────────────────
             if (showCompose) {
-                ComposeScreen(
-                    keyManager = keyManager,
-                    onDismiss  = { showCompose = false },
-                )
+                ComposeScreen(onDismiss = { showCompose = false })
             }
         }
     }
