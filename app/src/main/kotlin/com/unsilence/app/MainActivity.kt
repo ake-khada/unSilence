@@ -5,7 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dagger.hilt.android.AndroidEntryPoint
-import com.unsilence.app.ui.navigation.AppNavigation
+import com.unsilence.app.ui.onboarding.RootScreen
 import com.unsilence.app.ui.theme.UnsilenceTheme
 
 @AndroidEntryPoint
@@ -16,7 +16,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             UnsilenceTheme {
-                AppNavigation()
+                RootScreen()
             }
         }
     }

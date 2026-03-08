@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(./gradlew :app:assembleDebug 2>&1)",
-      "Bash(java -version)"
+      "Bash(java -version)",
+      "Bash(jar tf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar | grep -i \"key\\\\|crypto\\\\|signer\\\\|account\" | grep \"\\\\.kt$\" | head -30)",
+      "Bash(jar tf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar | grep -i \"keypair\\\\|privkey\\\\|pubkey\\\\|secp\\\\|keygen\\\\|bech32\\\\|nsec\\\\|npub\" | grep \"\\\\.kt$\" | head -20)",
+      "Bash(jar xf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar commonMain/com/vitorpamplona/quartz/nip01Core/crypto/KeyPair.kt -C /tmp/quartz_src)",
+      "Read(//tmp/quartz_src/commonMain/com/vitorpamplona/quartz/nip01Core/crypto/**)",
+      "Read(//tmp/**)",
+      "Bash(jar xf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar commonMain/com/vitorpamplona/quartz/nip01Core/crypto/KeyPair.kt)",
+      "Bash(cd /tmp && jar xf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar commonMain/com/vitorpamplona/quartz/nip01Core/core/HexKey.kt && cat commonMain/com/vitorpamplona/quartz/nip01Core/core/HexKey.kt)",
+      "Bash(cd /tmp && jar xf /home/aivii/.gradle/caches/modules-2/files-2.1/com.vitorpamplona.quartz/quartz-android/1.05.1/b700f280283dd18fe9fda041c11944e3af74fda4/quartz-android-sources.jar commonMain/com/vitorpamplona/quartz/nip19Bech32/Nip19Parser.kt && head -80 commonMain/com/vitorpamplona/quartz/nip19Bech32/Nip19Parser.kt)"
     ]
   }
 }
