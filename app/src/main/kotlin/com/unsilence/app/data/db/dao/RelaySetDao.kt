@@ -24,4 +24,7 @@ interface RelaySetDao {
 
     @Query("UPDATE relay_sets SET is_default = (id = :id)")
     suspend fun setDefault(id: String)
+
+    @Query("UPDATE relay_sets SET filter_json = :filterJson WHERE id = :id")
+    suspend fun updateFilterJson(id: String, filterJson: String)
 }
