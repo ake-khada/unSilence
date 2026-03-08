@@ -26,6 +26,9 @@ class EventRepository @Inject constructor(
     fun threadFlow(eventId: String): Flow<List<FeedRow>> =
         eventDao.threadFlow(eventId)
 
+    fun followingFeedFlow(): Flow<List<FeedRow>> =
+        eventDao.followingFeedFlow()
+
     fun userPostsFlow(pubkey: String): Flow<List<FeedRow>> =
         eventDao.userPostsFlow(pubkey)
 

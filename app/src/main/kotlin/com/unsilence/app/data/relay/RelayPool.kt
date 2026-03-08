@@ -79,6 +79,89 @@ class RelayPool @Inject constructor(
         }
     }
 
+    /**
+     * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
+     * The response will flow through EventProcessor → OutboxRouter's registered handler.
+     */
+    fun fetchFollowList(pubkeyHex: String) {
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("kind3-${System.currentTimeMillis()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+        connections.values.forEach { it.send(req) }
+        Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${connections.size} relay(s)")
+    }
+
+    /**
+     * Send a one-time REQ for kind 10002 (relay list metadata) for [pubkeys].
+     * Results flow through EventProcessor → OutboxRouter's registered handler.
+     */
+    fun fetchRelayLists(pubkeys: List<String>) {
+        if (pubkeys.isEmpty()) return
+        // Chunk to keep individual filters under 500 authors
+        pubkeys.chunked(500).forEach { chunk ->
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive("kind10002-${System.currentTimeMillis()}"))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(10002)) })
+                    put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
+                })
+            }.toString()
+            connections.values.forEach { it.send(req) }
+        }
+        Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s)")
+    }
+
+    /**
+     * Open (or reuse) a connection to [relayUrl] and subscribe to kind 1/6/20/21 events
+     * filtered to [authorPubkeys] only — used by the outbox routing for the Following feed.
+     *
+     * If the relay is already connected (e.g. it's also a global relay), we just send
+     * an additional subscription; the existing listenForEvents coroutine picks it up.
+     */
+    fun connectForAuthors(relayUrl: String, authorPubkeys: List<String>) {
+        if (authorPubkeys.isEmpty()) return
+        val req = buildAuthorsReq(relayUrl, authorPubkeys)
+        val existing = connections[relayUrl]
+        if (existing != null) {
+            existing.send(req)
+            Log.d(TAG, "Added authors subscription on existing $relayUrl (${authorPubkeys.size} authors)")
+            return
+        }
+        val conn = RelayConnection(relayUrl, okHttpClient)
+        connections[relayUrl] = conn
+        conn.connect()
+        scope.launch {
+            conn.send(req)
+            listenForEvents(conn)
+        }
+        Log.d(TAG, "Connected for authors: $relayUrl (${authorPubkeys.size} authors)")
+    }
+
+    private fun buildAuthorsReq(relayUrl: String, authorPubkeys: List<String>): String =
+        buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("follows-${relayUrl.hashCode()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
+                })
+                put("authors", buildJsonArray {
+                    authorPubkeys.forEach { add(JsonPrimitive(it)) }
+                })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+
     /** Subscribe to kind 0 profiles for a batch of pubkeys. */
     fun fetchProfiles(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return

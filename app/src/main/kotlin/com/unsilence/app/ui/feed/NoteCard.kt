@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.defaultMinSize
@@ -26,6 +27,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -92,22 +98,38 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
             )
         }
 
-        // ── Full-width text content ────────────────────────────────────────────
+        // ── Full-width text content (collapse if > 300 chars) ─────────────────
         if (textContent.isNotBlank()) {
+            val isLong = textContent.length > 300
+            var expanded by remember { mutableStateOf(false) }
+
             Text(
                 text       = textContent,
                 color      = MaterialTheme.colorScheme.onSurface,
                 fontSize   = 15.sp,
                 lineHeight = 22.sp,
+                maxLines   = if (isLong && !expanded) 8 else Int.MAX_VALUE,
+                overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier   = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.small),
+                    .padding(bottom = if (isLong) 2.dp else Spacing.small),
             )
+            if (isLong) {
+                Text(
+                    text     = if (expanded) "Show less" else "Show more",
+                    color    = Cyan,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .padding(horizontal = Spacing.medium)
+                        .padding(bottom = Spacing.small)
+                        .clickable { expanded = !expanded },
+                )
+            }
         }
 
-        // ── Full-width inline images ───────────────────────────────────────────
-        imageUrls.forEach { url ->
+        // ── First inline image only; overflow count shown as muted label ───────
+        imageUrls.firstOrNull()?.let { url ->
             AsyncImage(
                 model              = url,
                 contentDescription = null,
@@ -115,9 +137,19 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
                 modifier           = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.small)
+                    .padding(bottom = if (imageUrls.size > 1) 2.dp else Spacing.small)
                     .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                     .background(MediaPlaceholder),
+            )
+        }
+        if (imageUrls.size > 1) {
+            Text(
+                text     = "+${imageUrls.size - 1} more",
+                color    = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
             )
         }
 

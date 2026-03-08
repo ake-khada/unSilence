@@ -11,7 +11,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -24,9 +26,16 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
 @Composable
-fun FeedScreen(viewModel: FeedViewModel = hiltViewModel()) {
+fun FeedScreen(
+    scrollToTopTrigger: Int = 0,
+    viewModel: FeedViewModel = hiltViewModel(),
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+
+    LaunchedEffect(scrollToTopTrigger) {
+        if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
+    }
 
     Box(
         modifier = Modifier
@@ -65,6 +74,14 @@ fun FeedScreen(viewModel: FeedViewModel = hiltViewModel()) {
                     ) { row ->
                         NoteCard(row = row)
                     }
+                }
+
+                // Clear the new-posts dot whenever the list is at the top.
+                LaunchedEffect(Unit) {
+                    snapshotFlow { listState.firstVisibleItemIndex }
+                        .collect { index ->
+                            if (index == 0) viewModel.markSeen()
+                        }
                 }
             }
         }

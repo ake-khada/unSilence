@@ -35,7 +35,7 @@ data class FeedFilter(
         minReplies    != 0
 
     companion object {
-        /** Global feed ships with 3 min-reactions to suppress spam. */
-        val globalDefault = FeedFilter(minReactions = 3)
+        /** Global feed ships with 1 min-reaction to suppress bots while keeping content visible. */
+        val globalDefault = FeedFilter(minReactions = 1)
     }
 }
