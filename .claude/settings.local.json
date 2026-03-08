@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew :app:assembleDebug 2>&1)",
+      "Bash(java -version)"
+    ]
+  }
+}

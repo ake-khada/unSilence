@@ -61,106 +61,100 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
     val textContent = IMAGE_URL_REGEX.replace(row.content, "").trim()
 
     Column(modifier = modifier.fillMaxWidth()) {
+
+        // ── Header row: avatar + name + timestamp ─────────────────────────────
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            verticalAlignment = Alignment.Top,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // ── Avatar ────────────────────────────────────────────────────────
             AvatarImage(
                 pubkey   = row.pubkey,
                 picture  = row.authorPicture,
                 modifier = Modifier.size(Sizing.avatar),
             )
-
             Spacer(Modifier.width(Spacing.small))
+            Text(
+                text       = row.displayName ?: "${row.pubkey.take(8)}…",
+                color      = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+                fontSize   = 14.sp,
+                maxLines   = 1,
+                overflow   = TextOverflow.Ellipsis,
+                modifier   = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(Spacing.micro))
+            Text(
+                text     = relativeTime(row.createdAt),
+                color    = TextSecondary,
+                fontSize = 12.sp,
+            )
+        }
 
-            // ── Content column ───────────────────────────────────────────────
-            Column(modifier = Modifier.weight(1f)) {
-                // Name + timestamp
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text       = row.displayName ?: "${row.pubkey.take(8)}…",
-                        color      = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize   = 14.sp,
-                        maxLines   = 1,
-                        overflow   = TextOverflow.Ellipsis,
-                        modifier   = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(Spacing.micro))
-                    Text(
-                        text     = relativeTime(row.createdAt),
-                        color    = TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
+        // ── Full-width text content ────────────────────────────────────────────
+        if (textContent.isNotBlank()) {
+            Text(
+                text       = textContent,
+                color      = MaterialTheme.colorScheme.onSurface,
+                fontSize   = 15.sp,
+                lineHeight = 22.sp,
+                modifier   = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            )
+        }
 
-                // Note text content (image URLs stripped)
-                if (textContent.isNotBlank()) {
-                    Text(
-                        text       = textContent,
-                        color      = MaterialTheme.colorScheme.onSurface,
-                        fontSize   = 15.sp,
-                        lineHeight = 22.sp,
-                        modifier   = Modifier.padding(top = Spacing.micro),
-                    )
-                }
+        // ── Full-width inline images ───────────────────────────────────────────
+        imageUrls.forEach { url ->
+            AsyncImage(
+                model              = url,
+                contentDescription = null,
+                contentScale       = ContentScale.FillWidth,
+                modifier           = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small)
+                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                    .background(MediaPlaceholder),
+            )
+        }
 
-                // ── Inline images ─────────────────────────────────────────────
-                imageUrls.forEach { url ->
-                    AsyncImage(
-                        model              = url,
-                        contentDescription = null,
-                        contentScale       = ContentScale.FillWidth,
-                        modifier           = Modifier
-                            .fillMaxWidth()
-                            .padding(top = Spacing.small)
-                            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                            .background(MediaPlaceholder),
-                    )
-                }
-
-                // ── Action bar ────────────────────────────────────────────────
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = Spacing.small),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
-                    verticalAlignment     = Alignment.CenterVertically,
-                ) {
-                    ActionButton(
-                        icon               = Icons.AutoMirrored.Filled.Chat,
-                        count              = row.replyCount,
-                        contentDescription = "Replies",
-                    )
-                    ActionButton(
-                        icon               = Icons.Filled.Repeat,
-                        count              = 0,
-                        contentDescription = "Reposts",
-                    )
-                    ActionButton(
-                        icon               = Icons.Filled.Favorite,
-                        count              = row.reactionCount,
-                        contentDescription = "Reactions",
-                    )
-                    ActionButton(
-                        icon               = Icons.Filled.ElectricBolt,
-                        count              = 0,
-                        contentDescription = "Zaps",
-                    )
-                    ActionButton(
-                        icon               = Icons.Filled.Share,
-                        count              = 0,
-                        contentDescription = "Share",
-                    )
-                }
-            }
+        // ── Full-width action bar ──────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.medium)
+                .padding(bottom = Spacing.small),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment     = Alignment.CenterVertically,
+        ) {
+            ActionButton(
+                icon               = Icons.AutoMirrored.Filled.Chat,
+                count              = row.replyCount,
+                contentDescription = "Replies",
+            )
+            ActionButton(
+                icon               = Icons.Filled.Repeat,
+                count              = 0,
+                contentDescription = "Reposts",
+            )
+            ActionButton(
+                icon               = Icons.Filled.Favorite,
+                count              = row.reactionCount,
+                contentDescription = "Reactions",
+            )
+            ActionButton(
+                icon               = Icons.Filled.ElectricBolt,
+                count              = 0,
+                contentDescription = "Zaps",
+            )
+            ActionButton(
+                icon               = Icons.Filled.Share,
+                count              = 0,
+                contentDescription = "Share",
+            )
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
