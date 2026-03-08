@@ -2,9 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <queries>
+        <!-- NIP-55 Amber signer -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="nostrsigner" />
@@ -12,15 +12,16 @@
     </queries>
 
     <application
-        android:name=".BarqApp"
+        android:name=".UnsilenceApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Barq"
+        android:label="unSilence"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:largeHeap="true"
-        android:theme="@style/Theme.Barq.Splash">
+        android:theme="@style/Theme.UnSilence.Splash">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -31,5 +32,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
     </application>
 </manifest>
