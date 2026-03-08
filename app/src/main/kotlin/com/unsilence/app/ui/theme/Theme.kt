@@ -18,7 +18,7 @@ object Spacing {
 
 object Sizing {
     val avatar           = 32.dp
-    val actionIcon       = 20.dp
+    val actionIcon       = 16.dp
     val topBarHeight     = 52.dp
     val bottomNavHeight  = 52.dp
     val mediaCornerRadius = 8.dp
