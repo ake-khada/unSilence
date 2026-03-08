@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -77,8 +78,9 @@ private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutS
 
 @Composable
 fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var barsVisible by remember { mutableStateOf(true) }
+    var selectedTab  by rememberSaveable { mutableIntStateOf(0) }
+    var barsVisible  by remember { mutableStateOf(true) }
+    var showCompose  by remember { mutableStateOf(false) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
@@ -197,7 +199,9 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                             imageVector        = Icons.Filled.Edit,
                             contentDescription = "New post",
                             tint               = Cyan,
-                            modifier           = Modifier.size(Sizing.navIcon),
+                            modifier           = Modifier
+                                .size(Sizing.navIcon)
+                                .clickable { showCompose = true },
                         )
                     }
                 }
@@ -226,6 +230,14 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                         )
                     }
                 }
+            }
+
+            // ── Compose overlay ───────────────────────────────────────────────
+            if (showCompose) {
+                ComposeScreen(
+                    keyManager = keyManager,
+                    onDismiss  = { showCompose = false },
+                )
             }
         }
     }
