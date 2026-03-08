@@ -28,9 +28,12 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -51,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -72,33 +76,35 @@ private val TABS = listOf(
 private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutSlowInEasing)
 
 @Composable
-fun AppNavigation() {
+fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible by remember { mutableStateOf(true) }
+
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
     val topBarOffset by animateDpAsState(
-        targetValue  = if (barsVisible) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
+        targetValue   = if (barsVisible) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
         animationSpec = animSpec,
-        label        = "topBarOffset",
+        label         = "topBarOffset",
     )
     val bottomBarOffset by animateDpAsState(
-        targetValue  = if (barsVisible) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
+        targetValue   = if (barsVisible) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
         animationSpec = animSpec,
-        label        = "bottomBarOffset",
+        label         = "bottomBarOffset",
     )
     val contentTopPadding by animateDpAsState(
-        targetValue  = if (barsVisible) Sizing.topBarHeight + statusBarHeight else 0.dp,
+        targetValue   = if (barsVisible) Sizing.topBarHeight + statusBarHeight else 0.dp,
         animationSpec = animSpec,
-        label        = "contentTopPadding",
+        label         = "contentTopPadding",
     )
     val contentBottomPadding by animateDpAsState(
-        targetValue  = if (barsVisible) Sizing.bottomNavHeight + navBarHeight else 0.dp,
+        targetValue   = if (barsVisible) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
-        label        = "contentBottomPadding",
+        label         = "contentBottomPadding",
     )
 
     val nestedScrollConnection = remember {
@@ -113,102 +119,112 @@ fun AppNavigation() {
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Black)
-            .nestedScroll(nestedScrollConnection),
+    ModalNavigationDrawer(
+        drawerState   = drawerState,
+        drawerContent = {
+            AppDrawer(
+                keyManager = keyManager,
+                onLogout   = onLogout,
+            )
+        },
     ) {
-
-        // ── Content — fills full screen, padded so it sits between bars at rest ──
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = contentTopPadding, bottom = contentBottomPadding),
-        ) {
-            when (selectedTab) {
-                0    -> FeedScreen()
-                else -> PlaceholderScreen()
-            }
-        }
-
-        // ── Top bar overlay ───────────────────────────────────────────────────
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .offset(y = topBarOffset)
-                .fillMaxWidth()
                 .background(Black)
-                .statusBarsPadding()
-                .height(Sizing.topBarHeight),
-            contentAlignment = Alignment.Center,
+                .nestedScroll(nestedScrollConnection),
         ) {
-            Row(
+
+            // ── Content ───────────────────────────────────────────────────────
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Spacing.medium),
-                verticalAlignment = Alignment.CenterVertically,
+                    .fillMaxSize()
+                    .padding(top = contentTopPadding, bottom = contentBottomPadding),
             ) {
-                Text(
-                    text       = "unSilence",
-                    color      = Color.White,
-                    fontSize   = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-
-                Spacer(Modifier.weight(1f))
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalAlignment     = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text     = "Global ▾",
-                        color    = Cyan,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .widthIn(max = 120.dp)
-                            .clickable { /* Sprint 4: open feed selector */ },
-                    )
-                    Icon(
-                        imageVector        = Icons.Filled.Tune,
-                        contentDescription = "Filter",
-                        tint               = NavUnselected,
-                        modifier           = Modifier.size(Sizing.navIcon),
-                    )
-                    Icon(
-                        imageVector        = Icons.Filled.Edit,
-                        contentDescription = "New post",
-                        tint               = Cyan,
-                        modifier           = Modifier.size(Sizing.navIcon),
-                    )
+                when (selectedTab) {
+                    0    -> FeedScreen()
+                    else -> PlaceholderScreen()
                 }
             }
-        }
 
-        // ── Bottom nav overlay ────────────────────────────────────────────────
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .offset(y = bottomBarOffset)
-                .fillMaxWidth()
-                .background(Black)
-                .navigationBarsPadding()
-                .height(Sizing.bottomNavHeight)
-                .padding(horizontal = Spacing.medium),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment     = Alignment.CenterVertically,
-        ) {
-            TABS.forEachIndexed { index, tab ->
-                IconButton(onClick = { selectedTab = index }) {
-                    Icon(
-                        imageVector        = tab.icon,
-                        contentDescription = tab.contentDescription,
-                        tint               = if (index == selectedTab) Cyan else NavUnselected,
-                        modifier           = Modifier.size(Sizing.navIcon),
+            // ── Top bar overlay ───────────────────────────────────────────────
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .offset(y = topBarOffset)
+                    .fillMaxWidth()
+                    .background(Black)
+                    .statusBarsPadding()
+                    .height(Sizing.topBarHeight),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text       = "unSilence",
+                        color      = Color.White,
+                        fontSize   = 16.sp,
+                        fontWeight = FontWeight.Bold,
                     )
+
+                    Spacer(Modifier.weight(1f))
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        verticalAlignment     = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text     = "Global ▾",
+                            color    = Cyan,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 120.dp)
+                                .clickable { /* Sprint 4: open feed selector */ },
+                        )
+                        Icon(
+                            imageVector        = Icons.Filled.Tune,
+                            contentDescription = "Filter",
+                            tint               = NavUnselected,
+                            modifier           = Modifier.size(Sizing.navIcon),
+                        )
+                        Icon(
+                            imageVector        = Icons.Filled.Edit,
+                            contentDescription = "New post",
+                            tint               = Cyan,
+                            modifier           = Modifier.size(Sizing.navIcon),
+                        )
+                    }
+                }
+            }
+
+            // ── Bottom nav overlay ────────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .offset(y = bottomBarOffset)
+                    .fillMaxWidth()
+                    .background(Black)
+                    .navigationBarsPadding()
+                    .height(Sizing.bottomNavHeight)
+                    .padding(horizontal = Spacing.medium),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment     = Alignment.CenterVertically,
+            ) {
+                TABS.forEachIndexed { index, tab ->
+                    IconButton(onClick = { selectedTab = index }) {
+                        Icon(
+                            imageVector        = tab.icon,
+                            contentDescription = tab.contentDescription,
+                            tint               = if (index == selectedTab) Cyan else NavUnselected,
+                            modifier           = Modifier.size(Sizing.navIcon),
+                        )
+                    }
                 }
             }
         }
