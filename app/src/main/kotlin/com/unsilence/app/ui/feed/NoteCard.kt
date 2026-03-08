@@ -1,9 +1,11 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,9 +47,19 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 private val ActionTint = Color(0xFF555555)
+private val MediaPlaceholder = Color(0xFF1A1A1A)
+
+// Matches URLs ending in image extensions, or from known Nostr image hosts.
+private val IMAGE_URL_REGEX = Regex(
+    """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+""",
+    RegexOption.IGNORE_CASE,
+)
 
 @Composable
 fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
+    val imageUrls = IMAGE_URL_REGEX.findAll(row.content).map { it.value }.toList()
+    val textContent = IMAGE_URL_REGEX.replace(row.content, "").trim()
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -82,20 +95,34 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
                     )
                     Spacer(Modifier.width(Spacing.micro))
                     Text(
-                        text  = relativeTime(row.createdAt),
-                        color = TextSecondary,
+                        text     = relativeTime(row.createdAt),
+                        color    = TextSecondary,
                         fontSize = 12.sp,
                     )
                 }
 
-                // Note text content
-                if (row.content.isNotBlank()) {
+                // Note text content (image URLs stripped)
+                if (textContent.isNotBlank()) {
                     Text(
-                        text       = row.content,
+                        text       = textContent,
                         color      = MaterialTheme.colorScheme.onSurface,
                         fontSize   = 15.sp,
                         lineHeight = 22.sp,
                         modifier   = Modifier.padding(top = Spacing.micro),
+                    )
+                }
+
+                // ── Inline images ─────────────────────────────────────────────
+                imageUrls.forEach { url ->
+                    AsyncImage(
+                        model              = url,
+                        contentDescription = null,
+                        contentScale       = ContentScale.FillWidth,
+                        modifier           = Modifier
+                            .fillMaxWidth()
+                            .padding(top = Spacing.small)
+                            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                            .background(MediaPlaceholder),
                     )
                 }
 
