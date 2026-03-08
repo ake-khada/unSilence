@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -48,20 +49,19 @@ class RelayPool @Inject constructor(
     }
 
     private suspend fun subscribeAfterConnect(conn: RelayConnection) {
-        // Wait briefly for the socket to open, then send subscription requests.
-        // A real implementation would wait for the onOpen callback; here we use
-        // the first message slot or a short delay. OkHttp delivers onOpen before
-        // any onMessage, so the socket is ready once we start iterating.
-
         // Feed subscription: kinds 1 (notes), 6 (reposts), 7 (reactions), 20 (pictures), 21 (video)
         val feedReq = buildJsonArray {
-            add("REQ")
-            add("feed-${conn.url.hashCode()}")
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("feed-${conn.url.hashCode()}"))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
-                    add(1); add(6); add(7); add(20); add(21)
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
                 })
-                put("limit", 500)
+                put("limit", JsonPrimitive(500))
             })
         }.toString()
 
@@ -83,11 +83,11 @@ class RelayPool @Inject constructor(
     fun fetchProfiles(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
         val req = buildJsonArray {
-            add("REQ")
-            add("profiles-${System.currentTimeMillis()}")
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("profiles-${System.currentTimeMillis()}"))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(0) })
-                put("authors", buildJsonArray { pubkeys.forEach { add(it) } })
+                put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
 
