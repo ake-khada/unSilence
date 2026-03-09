@@ -19,17 +19,17 @@ It is Jumble's relay-centric philosophy + native Android + lightning-fast zaps.
 
 ---
 
-## WHAT WE LEARNED FROM BARQ (DO NOT REPEAT)
+## HARD LESSONS (DO NOT REPEAT)
 
-1. **Never fork a full client.** Barq forked Wisp and spent weeks ripping out relay guts (`OutboxRouter`, `RelayScoreBoard`, `RelayProber`, `SocialGraphViewModel`). The hybrid never worked — old routing fought new routing. Start fresh, use libraries.
+1. **Never fork a full client.** Forking an existing Nostr client and ripping out its relay guts (`OutboxRouter`, `RelayScoreBoard`, `RelayProber`, `SocialGraphViewModel`) doesn't work — old routing fights new routing. Start fresh, use libraries.
 
-2. **Fundamentals before features.** Barq had a 9-item roadmap before the follow feed worked. Posts were missing (no NIP-65 outbox), search was broken, relays were storming. A feed that loads fast IS the product.
+2. **Fundamentals before features.** Don't build a 9-item roadmap before the follow feed works. Posts missing (no NIP-65 outbox), search broken, relays storming — a feed that loads fast IS the product.
 
-3. **Cache is priority #1, not #9.** Without Room SQLite, every screen transition re-fetches from relays. This is why Barq felt slow. The architecture is: `Relay → Room → Flow → Compose`. The UI never waits on the network.
+3. **Cache is priority #1, not #9.** Without Room SQLite, every screen transition re-fetches from relays. The architecture is: `Relay → Room → Flow → Compose`. The UI never waits on the network.
 
-4. **One identity.** Barq tried to be Jumble (relay feeds) + Damus (video autoplay) + Amethyst (everything). Pick one thing, do it perfectly.
+4. **One identity.** Don't try to be Jumble (relay feeds) + Damus (video autoplay) + Amethyst (everything). Pick one thing, do it perfectly.
 
-5. **Kind 22 portrait video is a v1.1 feature.** ExoPlayer instance pooling, visibility-based autoplay, ANR from `onGloballyPositioned` — all confirmed problems from Barq. Don't touch this in v1.
+5. **Kind 22 portrait video is a v1.1 feature.** ExoPlayer instance pooling, visibility-based autoplay, ANR from `onGloballyPositioned` — confirmed problems. Don't touch this in v1.
 
 ---
 
@@ -518,7 +518,7 @@ fun hasCW(tags: List<List<String>>): Pair<Boolean, String?> {
 
 ## POST COUNTDOWN PREVIEW
 
-Inspired by Wisp. After hitting "Post", the note doesn't publish immediately. Instead:
+After hitting "Post", the note doesn't publish immediately. Instead:
 
 ### Flow
 
@@ -723,7 +723,7 @@ The follow feed is the most important feed in the app alongside relay feeds. Get
 
 ### The Outbox Model (NIP-65)
 
-You don't just connect to "some relays" and hope your follows' posts show up. That's the naive approach and it's why Barq had missing posts. The correct flow:
+You don't just connect to "some relays" and hope your follows' posts show up. That's the naive approach and it leads to missing posts. The correct flow:
 
 ```
 1. Fetch user's kind 3 (contact list)
