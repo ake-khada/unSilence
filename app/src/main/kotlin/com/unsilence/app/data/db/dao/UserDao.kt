@@ -13,6 +13,10 @@ interface UserDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(user: UserEntity)
 
+    /** Batch upsert for the event pipeline. Room wraps the list insert in a single transaction. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertBatch(users: List<UserEntity>)
+
     @Query("SELECT * FROM users WHERE pubkey = :pubkey")
     suspend fun getUser(pubkey: String): UserEntity?
 
