@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.entity.RelaySetEntity
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
@@ -17,14 +18,20 @@ import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-enum class FeedType { GLOBAL, FOLLOWING }
+sealed class FeedType {
+    data object Global    : FeedType()
+    data object Following : FeedType()
+    data class  RelaySet(val id: String, val name: String) : FeedType()
+}
 
 data class FeedUiState(
     val events: List<FeedRow> = emptyList(),
@@ -44,8 +51,12 @@ class FeedViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(FeedUiState())
     val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
 
-    private val _feedType = MutableStateFlow(FeedType.GLOBAL)
+    private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
+
+    /** All relay sets (built-in + user) for the dropdown. */
+    val userSetsFlow: StateFlow<List<RelaySetEntity>> = relaySetRepository.allSetsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
      * True when the top-of-feed item has a newer created_at than the previous emission.
@@ -63,9 +74,10 @@ class FeedViewModel @Inject constructor(
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
 
-    val feedTypeLabel: String get() = when (_feedType.value) {
-        FeedType.GLOBAL    -> "Global"
-        FeedType.FOLLOWING -> "Following"
+    val feedTypeLabel: String get() = when (val t = _feedType.value) {
+        is FeedType.Global    -> "Global"
+        is FeedType.Following -> "Following"
+        is FeedType.RelaySet  -> t.name
     }
 
     fun setFeedType(type: FeedType) { _feedType.value = type }
@@ -77,15 +89,14 @@ class FeedViewModel @Inject constructor(
      * When Room does emit new older events the oldest timestamp shifts, which
      * naturally allows the next scroll trigger to fire a fresh fetch.
      */
+    // Relay URLs currently used by the active feed — kept in sync with flatMapLatest.
+    private var currentRelayUrls: List<String> = emptyList()
+
     fun loadMore() {
         val oldest = _uiState.value.events.lastOrNull()?.createdAt ?: return
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
-        viewModelScope.launch {
-            val set  = relaySetRepository.defaultSet() ?: return@launch
-            val urls = relaySetRepository.decodeUrls(set)
-            relayPool.fetchOlderEvents(urls, oldest)
-        }
+        relayPool.fetchOlderEvents(currentRelayUrls, oldest)
     }
 
     init {
@@ -106,10 +117,22 @@ class FeedViewModel @Inject constructor(
                     lastOldestTimestamp = 0L
                     _uiState.value = _uiState.value.copy(loading = true)
                     when (type) {
-                        FeedType.GLOBAL    -> eventRepository.feedFlow(urls, filter)
-                        FeedType.FOLLOWING -> {
+                        is FeedType.Global    -> {
+                            currentRelayUrls = urls
+                            eventRepository.feedFlow(urls, filter)
+                        }
+                        is FeedType.Following -> {
+                            currentRelayUrls = emptyList()
                             outboxRouter.start()
                             eventRepository.followingFeedFlow()
+                        }
+                        is FeedType.RelaySet  -> {
+                            val setEntity = relaySetRepository.getById(type.id)
+                            val setUrls   = setEntity?.let { relaySetRepository.decodeUrls(it) } ?: urls
+                            val setFilter = setEntity?.let { relaySetRepository.decodeFilter(it) } ?: filter
+                            currentRelayUrls = setUrls
+                            relayPool.connect(setUrls)
+                            eventRepository.feedFlow(setUrls, setFilter)
                         }
                     }
                 }
