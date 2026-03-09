@@ -17,6 +17,9 @@ class UserRepository @Inject constructor(
     /** Returns the cached lightning address (lud16) for [pubkey], or null if not yet loaded. */
     suspend fun getUserLud16(pubkey: String): String? = userDao.getUser(pubkey)?.lud16
 
+    /** NIP-50 profile search — re-emits as search results arrive from the relay. */
+    fun searchUsers(query: String): Flow<List<UserEntity>> = userDao.searchUsers(query)
+
     /**
      * Requests profiles for pubkeys not yet cached.
      * The fetched kind 0 events will arrive via EventProcessor → Room.

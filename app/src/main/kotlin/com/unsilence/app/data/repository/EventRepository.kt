@@ -59,6 +59,10 @@ class EventRepository @Inject constructor(
     fun zappedEventIds(pubkey: String): Flow<List<String>> =
         eventDao.zappedEventIds(pubkey)
 
+    /** NIP-50 content search — re-emits as search results arrive from the relay. */
+    fun searchNotes(query: String): Flow<List<FeedRow>> =
+        eventDao.searchNotes(query)
+
     suspend fun pruneExpired() =
         eventDao.pruneExpired(System.currentTimeMillis() / 1000L)
 }

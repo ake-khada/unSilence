@@ -181,7 +181,7 @@ class RelayPool @Inject constructor(
         connections.values.forEach { it.send(req) }
 
         // Also query dedicated profile-indexer relays
-        val indexers = listOf("wss://purplepag.es", "wss://user.kindpag.es")
+        val indexers = listOf("wss://purplepag.es", "wss://user.kindpag.es", "wss://indexer.coracle.social")
         for (url in indexers) {
             val existing = connections[url]
             if (existing != null) {
@@ -197,6 +197,58 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Connected to profile indexer: $url")
             }
         }
+    }
+
+    /**
+     * NIP-50 search: connect to [searchRelayUrls] (if not already) and send a REQ with the
+     * "search" field. Results arrive via EventProcessor → Room as with any other subscription.
+     *
+     * Two filters are sent:
+     *  - kind 0 (profiles) — drives the People tab
+     *  - kind 1 (notes)    — drives the Notes tab
+     */
+    fun searchNotes(searchRelayUrls: List<String>, query: String) {
+        if (query.isBlank()) return
+        val ts = System.currentTimeMillis()
+
+        val profileReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("search-profiles-$ts"))
+            add(buildJsonObject {
+                put("kinds",  buildJsonArray { add(JsonPrimitive(0)) })
+                put("search", JsonPrimitive(query))
+                put("limit",  JsonPrimitive(20))
+            })
+        }.toString()
+
+        val notesReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("search-notes-$ts"))
+            add(buildJsonObject {
+                put("kinds",  buildJsonArray { add(JsonPrimitive(1)) })
+                put("search", JsonPrimitive(query))
+                put("limit",  JsonPrimitive(30))
+            })
+        }.toString()
+
+        for (url in searchRelayUrls) {
+            val existing = connections[url]
+            if (existing != null) {
+                existing.send(profileReq)
+                existing.send(notesReq)
+            } else {
+                val conn = RelayConnection(url, okHttpClient)
+                connections[url] = conn
+                conn.connect()
+                scope.launch {
+                    conn.send(profileReq)
+                    conn.send(notesReq)
+                    listenForEvents(conn)
+                }
+                Log.d(TAG, "Connected to search relay: $url")
+            }
+        }
+        Log.d(TAG, "Sent NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s)")
     }
 
     /**
