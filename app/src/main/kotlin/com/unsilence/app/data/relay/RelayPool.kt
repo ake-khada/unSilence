@@ -74,12 +74,71 @@ class RelayPool @Inject constructor(
     private suspend fun listenForEvents(conn: RelayConnection) {
         try {
             conn.messages.consumeEach { raw ->
+                // Fix 3: intercept EOSE before EventProcessor so we can send CLOSE
+                // for one-shot subscriptions. EventProcessor's process() would already
+                // early-return for non-EVENT strings, but we need the relay URL here.
+                if (raw.startsWith("[\"EOSE\"")) {
+                    handleEose(conn, raw)
+                    return@consumeEach
+                }
                 processor.process(raw, conn.url)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
         }
     }
+
+    /**
+     * Fix 3: Subscription lifecycle — CLOSE after EOSE for one-shot subscriptions.
+     *
+     * One-shot subs (profiles, threads, search, notifications, kind 3/10002) are
+     * identified by their subscription ID prefix. Once EOSE arrives the relay has
+     * finished its historical query; we close immediately to free relay resources
+     * and stop the stream of duplicate events from that relay for that query.
+     *
+     * Persistent subs (feed-, follows-) stay open to receive live events.
+     */
+    private fun handleEose(conn: RelayConnection, raw: String) {
+        val subId = extractEoseSubId(raw) ?: return
+        if (isOneShotSubscription(subId)) {
+            conn.send("""["CLOSE","$subId"]""")
+            Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
+        }
+    }
+
+    /**
+     * Extract the subscription ID from an EOSE message without JSON parsing.
+     * Format: ["EOSE","subscription-id"] (compact) or ["EOSE", "subscription-id"] (spaced).
+     */
+    private fun extractEoseSubId(raw: String): String? {
+        // Find the "EOSE" token, then locate the next quoted string — that's the sub-id.
+        val eoseEnd = raw.indexOf("\"EOSE\"")
+        if (eoseEnd < 0) return null
+        // Skip past "EOSE", then find the opening quote of the sub-id
+        val quoteOpen = raw.indexOf('"', eoseEnd + 6)
+        if (quoteOpen < 0) return null
+        val subStart = quoteOpen + 1
+        val quoteClose = raw.indexOf('"', subStart)
+        if (quoteClose < 0) return null
+        return raw.substring(subStart, quoteClose)
+    }
+
+    /**
+     * Subscription IDs are prefixed to encode their lifecycle type.
+     *
+     *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, search-, older-,
+     *                                thread-event-, thread-replies-, notifs-
+     *  PERSISTENT (keep open):       feed-, follows-
+     */
+    private fun isOneShotSubscription(subId: String): Boolean =
+        subId.startsWith("kind3-")          ||
+        subId.startsWith("kind10002-")      ||
+        subId.startsWith("profiles-")       ||
+        subId.startsWith("search-")         ||
+        subId.startsWith("older-")          ||
+        subId.startsWith("thread-event-")   ||
+        subId.startsWith("thread-replies-") ||
+        subId.startsWith("notifs-")
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
