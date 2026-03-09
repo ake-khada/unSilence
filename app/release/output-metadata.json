@@ -4,7 +4,7 @@
     "type": "APK",
     "kind": "Directory"
   },
-  "applicationId": "com.barq.app",
+  "applicationId": "com.unsilence.app",
   "variantName": "release",
   "elements": [
     {
