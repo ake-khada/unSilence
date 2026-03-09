@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -187,15 +188,37 @@ fun NoteCard(
                 modifier = Modifier.size(Sizing.avatar),
             )
             Spacer(Modifier.width(Spacing.small))
-            Text(
-                text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
-                color      = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-                fontSize   = 14.sp,
-                maxLines   = 1,
-                overflow   = TextOverflow.Ellipsis,
-                modifier   = Modifier.weight(1f),
-            )
+            Row(
+                modifier          = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
+                    color      = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize   = 14.sp,
+                    maxLines   = 1,
+                    overflow   = TextOverflow.Ellipsis,
+                    modifier   = Modifier.weight(1f, fill = false),
+                )
+                if (boostedJson == null && !row.authorNip05.isNullOrBlank()) {
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector        = Icons.Filled.Verified,
+                        contentDescription = "NIP-05 verified",
+                        tint               = Cyan,
+                        modifier           = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        text     = nip05Domain(row.authorNip05),
+                        color    = TextSecondary,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Spacer(Modifier.width(Spacing.micro))
             Text(
                 text     = relativeTime(effectiveCreatedAt),
@@ -577,6 +600,9 @@ private fun LinkChip(url: String) {
 private val FeedRow.displayName: String?
     get() = authorDisplayName?.takeIf { it.isNotBlank() }
          ?: authorName?.takeIf { it.isNotBlank() }
+
+/** "user@domain.com" → "domain.com"; identity-free "_@domain.com" → "domain.com". */
+private fun nip05Domain(nip05: String): String = nip05.substringAfter("@", nip05)
 
 private fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L

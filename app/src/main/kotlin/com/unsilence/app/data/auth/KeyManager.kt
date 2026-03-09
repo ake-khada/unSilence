@@ -12,8 +12,11 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val PREFS_FILE   = "unsilence_keys"
-private const val KEY_PRIV_HEX = "priv_hex"
+private const val PREFS_FILE      = "unsilence_keys"
+private const val KEY_PRIV_HEX    = "priv_hex"
+private const val KEY_PUB_HEX     = "pub_hex"
+private const val KEY_SIGNER_TYPE = "signer_type"
+private const val SIGNER_AMBER    = "AMBER"
 
 @Singleton
 class KeyManager @Inject constructor(
@@ -32,14 +35,19 @@ class KeyManager @Inject constructor(
         )
     }
 
-    /** Returns true if a private key is stored. */
-    fun hasKey(): Boolean = prefs.contains(KEY_PRIV_HEX)
+    /** True when logged in via Amber (pubkey only — no private key stored). */
+    val isAmberMode: Boolean
+        get() = prefs.getString(KEY_SIGNER_TYPE, null) == SIGNER_AMBER
 
-    /** Returns the stored private key as a 64-char lowercase hex string, or null. */
+    /** Returns true if the user is logged in (either internal key or Amber). */
+    fun hasKey(): Boolean = prefs.contains(KEY_PRIV_HEX) || prefs.contains(KEY_PUB_HEX)
+
+    /** Returns the stored private key as a 64-char lowercase hex string, or null. Null in Amber mode. */
     fun getPrivateKeyHex(): String? = prefs.getString(KEY_PRIV_HEX, null)
 
-    /** Derives and returns the public key hex from the stored private key, or null. */
+    /** Returns the public key hex: derived from privkey for internal mode, or stored directly for Amber. */
     fun getPublicKeyHex(): String? {
+        if (isAmberMode) return prefs.getString(KEY_PUB_HEX, null)
         val privHex = getPrivateKeyHex() ?: return null
         return KeyPair(privKey = privHex.hexToByteArray()).pubKey.toHexKey()
     }
@@ -85,8 +93,23 @@ class KeyManager @Inject constructor(
         return true
     }
 
-    /** Removes the stored private key (logout). */
+    /**
+     * Saves the public key returned by Amber and marks signer mode as AMBER.
+     * No private key is stored.
+     */
+    fun saveAmberLogin(pubkeyHex: String) {
+        prefs.edit()
+            .putString(KEY_PUB_HEX, pubkeyHex.lowercase())
+            .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
+            .apply()
+    }
+
+    /** Removes all stored credentials (logout). */
     fun clear() {
-        prefs.edit().remove(KEY_PRIV_HEX).apply()
+        prefs.edit()
+            .remove(KEY_PRIV_HEX)
+            .remove(KEY_PUB_HEX)
+            .remove(KEY_SIGNER_TYPE)
+            .apply()
     }
 }
