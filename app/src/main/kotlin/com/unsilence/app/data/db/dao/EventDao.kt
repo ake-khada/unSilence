@@ -27,6 +27,7 @@ data class FeedRow(
     @ColumnInfo(name = "author_name")           val authorName: String?,
     @ColumnInfo(name = "author_display_name")   val authorDisplayName: String?,
     @ColumnInfo(name = "author_picture")        val authorPicture: String?,
+    @ColumnInfo(name = "author_nip05")          val authorNip05: String?,
     // ── Engagement ─────────────────────────────────────────
     @ColumnInfo(name = "reaction_count")        val reactionCount: Int,
     @ColumnInfo(name = "reply_count")           val replyCount: Int,
@@ -64,6 +65,7 @@ interface EventDao {
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
             COUNT(DISTINCT rp.id)       AS repost_count,
@@ -109,6 +111,7 @@ interface EventDao {
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
             COUNT(DISTINCT rp.id)       AS repost_count,
@@ -147,6 +150,7 @@ interface EventDao {
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
             COUNT(DISTINCT rp.id)       AS repost_count,
@@ -172,6 +176,7 @@ interface EventDao {
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
+            u.nip05 AS author_nip05,
             COUNT(DISTINCT r.event_id) AS reaction_count,
             COUNT(DISTINCT rep.id)     AS reply_count,
             COUNT(DISTINCT rp.id)      AS repost_count,
@@ -224,6 +229,7 @@ interface EventDao {
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
+            u.nip05 AS author_nip05,
             0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
         FROM events e
         LEFT JOIN users u ON u.pubkey = e.pubkey

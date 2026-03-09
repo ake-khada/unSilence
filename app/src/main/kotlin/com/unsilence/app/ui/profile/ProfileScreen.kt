@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -170,6 +172,28 @@ fun ProfileScreen(
                             },
                     )
                     Spacer(Modifier.height(Spacing.small))
+                }
+
+                // NIP-05 badge
+                val nip05 = user?.nip05?.takeIf { it.isNotBlank() }
+                if (nip05 != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier          = Modifier.padding(bottom = Spacing.small),
+                    ) {
+                        Icon(
+                            imageVector        = Icons.Filled.Verified,
+                            contentDescription = "NIP-05 verified",
+                            tint               = Cyan,
+                            modifier           = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text     = nip05,
+                            color    = TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
                 }
 
                 // Bio / about
