@@ -114,6 +114,7 @@ fun NoteCard(
     row: FeedRow,
     modifier: Modifier = Modifier,
     onNoteClick: (String) -> Unit = {},
+    onAuthorClick: (pubkey: String) -> Unit = {},
     onReact: () -> Unit = {},
     onRepost: () -> Unit = {},
     onQuote: (String) -> Unit = {},
@@ -182,41 +183,50 @@ fun NoteCard(
                 .padding(horizontal = Spacing.medium, vertical = Spacing.small),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AvatarImage(
-                pubkey   = effectivePubkey,
-                picture  = if (boostedJson == null) row.authorPicture else null,
-                modifier = Modifier.size(Sizing.avatar),
-            )
-            Spacer(Modifier.width(Spacing.small))
+            // Avatar + name are one clickable zone → opens author's profile.
+            // Timestamp sits outside so it doesn't trigger profile navigation.
             Row(
-                modifier          = Modifier.weight(1f),
+                modifier          = Modifier
+                    .weight(1f)
+                    .clickable { onAuthorClick(effectivePubkey) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
-                    color      = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize   = 14.sp,
-                    maxLines   = 1,
-                    overflow   = TextOverflow.Ellipsis,
-                    modifier   = Modifier.weight(1f, fill = false),
+                AvatarImage(
+                    pubkey   = effectivePubkey,
+                    picture  = if (boostedJson == null) row.authorPicture else null,
+                    modifier = Modifier.size(Sizing.avatar),
                 )
-                if (boostedJson == null && !row.authorNip05.isNullOrBlank()) {
-                    Spacer(Modifier.width(4.dp))
-                    Icon(
-                        imageVector        = Icons.Filled.Verified,
-                        contentDescription = "NIP-05 verified",
-                        tint               = Cyan,
-                        modifier           = Modifier.size(14.dp),
-                    )
-                    Spacer(Modifier.width(3.dp))
+                Spacer(Modifier.width(Spacing.small))
+                Row(
+                    modifier          = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        text     = nip05Domain(row.authorNip05),
-                        color    = TextSecondary,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
+                        color      = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize   = 14.sp,
+                        maxLines   = 1,
+                        overflow   = TextOverflow.Ellipsis,
+                        modifier   = Modifier.weight(1f, fill = false),
                     )
+                    if (boostedJson == null && !row.authorNip05.isNullOrBlank()) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector        = Icons.Filled.Verified,
+                            contentDescription = "NIP-05 verified",
+                            tint               = Cyan,
+                            modifier           = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            text     = nip05Domain(row.authorNip05),
+                            color    = TextSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.width(Spacing.micro))
