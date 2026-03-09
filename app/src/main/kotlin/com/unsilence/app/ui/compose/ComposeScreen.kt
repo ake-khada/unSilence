@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -47,10 +49,12 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun ComposeScreen(
     onDismiss: () -> Unit,
+    initialText: String = "",
     viewModel: ComposeViewModel = hiltViewModel(),
 ) {
     val pubkeyHex    = viewModel.pubkeyHex
-    var text         by remember { mutableStateOf("") }
+    // Cursor at position 0 so the user types above a pre-filled quote link.
+    var textValue    by remember { mutableStateOf(TextFieldValue(initialText, TextRange(0))) }
     val focusRequester = remember { FocusRequester() }
 
     // Auto-dismiss once the note is published
@@ -91,8 +95,8 @@ fun ComposeScreen(
                 Spacer(Modifier.weight(1f))
 
                 Button(
-                    onClick  = { viewModel.publishNote(text.trim()) },
-                    enabled  = text.isNotBlank(),
+                    onClick  = { viewModel.publishNote(textValue.text.trim()) },
+                    enabled  = textValue.text.isNotBlank(),
                     shape    = RoundedCornerShape(24.dp),
                     colors   = ButtonDefaults.buttonColors(
                         containerColor         = Cyan,
@@ -132,8 +136,8 @@ fun ComposeScreen(
                 Spacer(Modifier.width(Spacing.small))
 
                 BasicTextField(
-                    value         = text,
-                    onValueChange = { text = it },
+                    value         = textValue,
+                    onValueChange = { textValue = it },
                     modifier      = Modifier
                         .weight(1f)
                         .focusRequester(focusRequester),
@@ -143,7 +147,7 @@ fun ComposeScreen(
                     ),
                     cursorBrush   = SolidColor(Cyan),
                     decorationBox = { inner ->
-                        if (text.isEmpty()) {
+                        if (textValue.text.isEmpty()) {
                             Text(
                                 text     = "What's on your mind?",
                                 color    = TextSecondary,

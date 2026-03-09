@@ -48,6 +48,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -59,14 +60,18 @@ import com.unsilence.app.ui.theme.TextSecondary
 fun ThreadScreen(
     eventId: String,
     onDismiss: () -> Unit,
+    onQuote: (String) -> Unit = {},
     viewModel: ThreadViewModel = hiltViewModel(),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
     LaunchedEffect(viewModel.published) {
         if (viewModel.published) onDismiss()
     }
 
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val state       by viewModel.uiState.collectAsStateWithLifecycle()
+    val reactedIds  by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
+    val repostedIds by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     var replyText by remember { mutableStateOf("") }
 
     Box(
@@ -116,8 +121,13 @@ fun ThreadScreen(
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
                                 NoteCard(
-                                    row      = note,
-                                    modifier = Modifier.drawBehind {
+                                    row         = note,
+                                    hasReacted  = note.id in reactedIds,
+                                    hasReposted = note.id in repostedIds,
+                                    onReact     = { actionsViewModel.react(note.id, note.pubkey) },
+                                    onRepost    = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                    onQuote     = onQuote,
+                                    modifier    = Modifier.drawBehind {
                                         drawRect(
                                             color = Cyan,
                                             size  = Size(2.dp.toPx(), size.height),
@@ -140,7 +150,14 @@ fun ThreadScreen(
                                 )
                             }
                             items(state.replies, key = { it.id }) { reply ->
-                                NoteCard(row = reply)
+                                NoteCard(
+                                    row         = reply,
+                                    hasReacted  = reply.id in reactedIds,
+                                    hasReposted = reply.id in repostedIds,
+                                    onReact     = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                    onRepost    = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                    onQuote     = onQuote,
+                                )
                             }
                         }
                     }
