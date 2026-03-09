@@ -13,6 +13,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,6 +23,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Spacing
@@ -39,6 +43,8 @@ fun FeedScreen(
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val listState = rememberLazyListState()
+
+    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
@@ -79,19 +85,26 @@ fun FeedScreen(
                         items = state.events,
                         key   = { it.id },
                     ) { row ->
-                        NoteCard(
-                            row             = row,
-                            onNoteClick     = onNoteClick,
-                            hasReacted      = row.id in reactedIds,
-                            hasReposted     = row.id in repostedIds,
-                            hasZapped       = row.id in zappedIds,
-                            isNwcConfigured = isNwcConfigured,
-                            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                            onQuote         = onQuote,
-                            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                        )
+                        if (row.kind == 30023) {
+                            ArticleCard(
+                                row     = row,
+                                onClick = { articleRow = row },
+                            )
+                        } else {
+                            NoteCard(
+                                row             = row,
+                                onNoteClick     = onNoteClick,
+                                hasReacted      = row.id in reactedIds,
+                                hasReposted     = row.id in repostedIds,
+                                hasZapped       = row.id in zappedIds,
+                                isNwcConfigured = isNwcConfigured,
+                                onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+                                onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                                onQuote         = onQuote,
+                                onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                                onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                            )
+                        }
                     }
                 }
 
@@ -119,5 +132,9 @@ fun FeedScreen(
                 }
             }
         }
+    }
+
+    articleRow?.let { row ->
+        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
     }
 }

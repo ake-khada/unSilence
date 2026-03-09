@@ -20,17 +20,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,10 +44,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -52,6 +61,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.graphics.lerp
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
@@ -80,6 +92,21 @@ private val IMAGE_URL_REGEX = Regex(
     RegexOption.IGNORE_CASE,
 )
 
+// Matches direct video URLs (.mp4 etc.) and known video platforms.
+private val VIDEO_URL_REGEX = Regex(
+    """https?://\S+\.(?:mp4|mov|webm|m3u8)(?:\?\S*)?|https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|streamable\.com/\S+)""",
+    RegexOption.IGNORE_CASE,
+)
+
+// Matches any remaining http/https URL (applied after stripping image + video URLs).
+private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+
+private fun isDirectVideoUrl(url: String): Boolean =
+    url.contains(".mp4", ignoreCase = true) ||
+    url.contains(".mov", ignoreCase = true) ||
+    url.contains(".webm", ignoreCase = true) ||
+    url.contains(".m3u8", ignoreCase = true)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NoteCard(
@@ -99,6 +126,9 @@ fun NoteCard(
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
+    var showVideoPlayer   by remember { mutableStateOf<String?>(null) }
+
+    val uriHandler = LocalUriHandler.current
 
     // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
     val boostedJson = if (row.kind == 6 && row.content.isNotBlank()) {
@@ -109,8 +139,13 @@ fun NoteCard(
     val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
     val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
 
-    val imageUrls   = IMAGE_URL_REGEX.findAll(effectiveContent).map { it.value }.toList()
-    val textContent = IMAGE_URL_REGEX.replace(effectiveContent, "").trim()
+    // Strip media URLs in layers so each regex only acts on its own subset.
+    val imageUrls    = IMAGE_URL_REGEX.findAll(effectiveContent).map { it.value }.toList()
+    val afterImages  = IMAGE_URL_REGEX.replace(effectiveContent, "")
+    val videoUrls    = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
+    val afterVideos  = VIDEO_URL_REGEX.replace(afterImages, "")
+    val linkUrls     = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
+    val textContent  = LINK_URL_REGEX.replace(afterVideos, "").trim()
 
     Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
@@ -227,6 +262,32 @@ fun NoteCard(
             )
         }
 
+        // ── First video URL: thumbnail with play button ────────────────────────
+        videoUrls.firstOrNull()?.let { url ->
+            VideoThumbnailCard(
+                url    = url,
+                onPlay = {
+                    if (isDirectVideoUrl(url)) {
+                        showVideoPlayer = url
+                    } else {
+                        runCatching { uriHandler.openUri(url) }
+                    }
+                },
+                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
+        }
+
+        // ── Link chips for non-media URLs ──────────────────────────────────────
+        if (linkUrls.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            ) {
+                linkUrls.forEach { url -> LinkChip(url = url) }
+            }
+        }
+
         // ── Full-width action bar ──────────────────────────────────────────────
         Row(
             modifier = Modifier
@@ -309,6 +370,10 @@ fun NoteCard(
             },
             onDismiss = { showZapPicker = false },
         )
+    }
+
+    showVideoPlayer?.let { url ->
+        VideoPlayerScreen(url = url, onDismiss = { showVideoPlayer = null })
     }
 }
 
@@ -421,6 +486,89 @@ private fun ZapButton(
                 fontSize = 12.sp,
             )
         }
+    }
+}
+
+/** Tap-to-play placeholder shown for detected video URLs. */
+@Composable
+private fun VideoThumbnailCard(url: String, onPlay: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier          = modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(Color(0xFF1A1A1A))
+            .clickable { onPlay() },
+        contentAlignment  = Alignment.Center,
+    ) {
+        Icon(
+            imageVector        = Icons.Filled.PlayArrow,
+            contentDescription = "Play video",
+            tint               = Color.White.copy(alpha = 0.85f),
+            modifier           = Modifier.size(52.dp),
+        )
+    }
+}
+
+/** Full-screen ExoPlayer dialog. Released when dismissed. */
+@Composable
+private fun VideoPlayerScreen(url: String, onDismiss: () -> Unit) {
+    val context   = LocalContext.current
+    val exoPlayer = remember {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(url))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties       = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                factory  = { ctx -> PlayerView(ctx).apply { player = exoPlayer } },
+                modifier = Modifier.fillMaxSize(),
+            )
+            IconButton(
+                onClick  = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp),
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint               = Color.White,
+                )
+            }
+        }
+    }
+}
+
+/** Clickable URL chip shown for non-media links in note content. */
+@Composable
+private fun LinkChip(url: String) {
+    val uriHandler = LocalUriHandler.current
+    val domain     = remember(url) {
+        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
+    }
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { runCatching { uriHandler.openUri(url) } }
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text     = domain,
+            color    = Cyan,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
