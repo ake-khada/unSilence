@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.navigation
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -99,6 +100,8 @@ fun AppNavigation(onLogout: () -> Unit) {
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
 
+    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
+
     // Single lambda passed to every NoteCard-hosting screen.
     // Opening a user profile does NOT open the own-profile tab — it opens the overlay.
     val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
@@ -112,26 +115,27 @@ fun AppNavigation(onLogout: () -> Unit) {
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
-    // Profile tab (index 3) owns its full screen — both bars permanently hidden.
-    val barsShown = barsVisible && selectedTab != 3
+    // Profile tab (index 3) has its own top bar — hide the app top bar but keep bottom nav.
+    val topBarShown    = barsVisible && selectedTab != 3
+    val bottomBarShown = barsVisible
 
     val topBarOffset by animateDpAsState(
-        targetValue   = if (barsShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
+        targetValue   = if (topBarShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
         animationSpec = animSpec,
         label         = "topBarOffset",
     )
     val bottomBarOffset by animateDpAsState(
-        targetValue   = if (barsShown) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
+        targetValue   = if (bottomBarShown) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
         animationSpec = animSpec,
         label         = "bottomBarOffset",
     )
     val contentTopPadding by animateDpAsState(
-        targetValue   = if (barsShown) Sizing.topBarHeight + statusBarHeight else 0.dp,
+        targetValue   = if (topBarShown) Sizing.topBarHeight + statusBarHeight else 0.dp,
         animationSpec = animSpec,
         label         = "contentTopPadding",
     )
     val contentBottomPadding by animateDpAsState(
-        targetValue   = if (barsShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
+        targetValue   = if (bottomBarShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
         label         = "contentBottomPadding",
     )
@@ -176,7 +180,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                     2    -> NotificationsScreen(
                         onNoteClick = { eventId -> threadEventId = eventId },
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onAuthorClick = onAuthorClick)
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onAuthorClick = onAuthorClick)
                     else -> PlaceholderScreen()
                 }
             }

@@ -611,6 +611,9 @@ private val FeedRow.displayName: String?
     get() = authorDisplayName?.takeIf { it.isNotBlank() }
          ?: authorName?.takeIf { it.isNotBlank() }
 
+internal val FeedRow.engagementId: String
+    get() = if (kind == 6 && rootId != null) rootId!! else id
+
 /** "user@domain.com" → "domain.com"; identity-free "_@domain.com" → "domain.com". */
 private fun nip05Domain(nip05: String): String = nip05.substringAfter("@", nip05)
 

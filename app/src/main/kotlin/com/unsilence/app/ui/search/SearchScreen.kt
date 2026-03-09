@@ -48,6 +48,7 @@ import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -188,9 +189,9 @@ fun SearchScreen(
                                     row             = row,
                                     onNoteClick     = onNoteClick,
                                     onAuthorClick   = onAuthorClick,
-                                    hasReacted      = row.id in reactedIds,
-                                    hasReposted     = row.id in repostedIds,
-                                    hasZapped       = row.id in zappedIds,
+                                    hasReacted      = row.engagementId in reactedIds,
+                                    hasReposted     = row.engagementId in repostedIds,
+                                    hasZapped       = row.engagementId in zappedIds,
                                     isNwcConfigured = isNwcConfigured,
                                     onReact         = { actionsViewModel.react(row.id, row.pubkey) },
                                     onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },

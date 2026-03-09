@@ -51,6 +51,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -128,9 +129,9 @@ fun ThreadScreen(
                                 NoteCard(
                                     row             = note,
                                     onAuthorClick   = onAuthorClick,
-                                    hasReacted      = note.id in reactedIds,
-                                    hasReposted     = note.id in repostedIds,
-                                    hasZapped       = note.id in zappedIds,
+                                    hasReacted      = note.engagementId in reactedIds,
+                                    hasReposted     = note.engagementId in repostedIds,
+                                    hasZapped       = note.engagementId in zappedIds,
                                     isNwcConfigured = isNwcConfigured,
                                     onReact         = { actionsViewModel.react(note.id, note.pubkey) },
                                     onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
@@ -163,9 +164,9 @@ fun ThreadScreen(
                                 NoteCard(
                                     row             = reply,
                                     onAuthorClick   = onAuthorClick,
-                                    hasReacted      = reply.id in reactedIds,
-                                    hasReposted     = reply.id in repostedIds,
-                                    hasZapped       = reply.id in zappedIds,
+                                    hasReacted      = reply.engagementId in reactedIds,
+                                    hasReposted     = reply.engagementId in repostedIds,
+                                    hasZapped       = reply.engagementId in zappedIds,
                                     isNwcConfigured = isNwcConfigured,
                                     onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
                                     onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },

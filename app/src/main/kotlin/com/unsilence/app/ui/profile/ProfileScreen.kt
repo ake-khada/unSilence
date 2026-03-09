@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.HorizontalDivider
@@ -50,6 +51,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -62,6 +64,7 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 @Composable
 fun ProfileScreen(
     onLogout: () -> Unit = {},
+    onBack: () -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: ProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -267,9 +270,9 @@ fun ProfileScreen(
                     NoteCard(
                         row             = row,
                         onAuthorClick   = onAuthorClick,
-                        hasReacted      = row.id in reactedIds,
-                        hasReposted     = row.id in repostedIds,
-                        hasZapped       = row.id in zappedIds,
+                        hasReacted      = row.engagementId in reactedIds,
+                        hasReposted     = row.engagementId in repostedIds,
+                        hasZapped       = row.engagementId in zappedIds,
                         isNwcConfigured = isNwcConfigured,
                         onReact         = { actionsViewModel.react(row.id, row.pubkey) },
                         onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
@@ -283,31 +286,45 @@ fun ProfileScreen(
         }
 
         // ── Own top bar overlay ───────────────────────────────────────────────
-        Row(
+        Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .fillMaxWidth()
                 .background(Black)
-                .statusBarsPadding()
-                .height(Sizing.topBarHeight)
-                .padding(horizontal = Spacing.small),
-            verticalAlignment     = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .statusBarsPadding(),
         ) {
-            TextButton(onClick = { showEditProfile = true }) {
-                Text(
-                    text     = "Edit Profile",
-                    color    = Cyan,
-                    fontSize = 14.sp,
-                )
-            }
-            IconButton(onClick = { showSettings = true }) {
-                Icon(
-                    imageVector        = Icons.Filled.Settings,
-                    contentDescription = "Settings",
-                    tint               = Color.White,
-                    modifier           = Modifier.size(22.dp),
-                )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(Sizing.topBarHeight)
+                    .padding(horizontal = Spacing.small),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint               = Color.White,
+                        )
+                    }
+                    TextButton(onClick = { showEditProfile = true }) {
+                        Text(
+                            text     = "Edit Profile",
+                            color    = Cyan,
+                            fontSize = 14.sp,
+                        )
+                    }
+                }
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(
+                        imageVector        = Icons.Filled.Settings,
+                        contentDescription = "Settings",
+                        tint               = Color.White,
+                        modifier           = Modifier.size(22.dp),
+                    )
+                }
             }
         }
     }
