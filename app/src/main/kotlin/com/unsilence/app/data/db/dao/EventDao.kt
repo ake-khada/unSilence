@@ -120,7 +120,7 @@ interface EventDao {
         LEFT JOIN  events      rep ON rep.reply_to_id    = e.id
         LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
         LEFT JOIN  events      z   ON z.root_id          = e.id AND z.kind  = 9735
-        WHERE e.kind        IN (1, 6, 20, 21)
+        WHERE e.kind        IN (1, 6, 20, 21, 30023)
           AND e.reply_to_id IS NULL
           AND e.root_id     IS NULL
         GROUP BY e.id
