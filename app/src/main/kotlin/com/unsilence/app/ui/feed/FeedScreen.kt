@@ -36,6 +36,8 @@ fun FeedScreen(
     val state         by viewModel.uiState.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
+    val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val isNwcConfigured = actionsViewModel.isNwcConfigured
     val listState = rememberLazyListState()
 
     LaunchedEffect(scrollToTopTrigger) {
@@ -78,13 +80,17 @@ fun FeedScreen(
                         key   = { it.id },
                     ) { row ->
                         NoteCard(
-                            row         = row,
-                            onNoteClick = onNoteClick,
-                            hasReacted  = row.id in reactedIds,
-                            hasReposted = row.id in repostedIds,
-                            onReact     = { actionsViewModel.react(row.id, row.pubkey) },
-                            onRepost    = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                            onQuote     = onQuote,
+                            row             = row,
+                            onNoteClick     = onNoteClick,
+                            hasReacted      = row.id in reactedIds,
+                            hasReposted     = row.id in repostedIds,
+                            hasZapped       = row.id in zappedIds,
+                            isNwcConfigured = isNwcConfigured,
+                            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+                            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                            onQuote         = onQuote,
+                            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                         )
                     }
                 }

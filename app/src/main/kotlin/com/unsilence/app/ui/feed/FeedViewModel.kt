@@ -6,8 +6,11 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -122,7 +125,15 @@ class FeedViewModel @Inject constructor(
 
                     _uiState.value = FeedUiState(events = rows, loading = false)
 
-                    userRepository.fetchMissingProfiles(rows.map { it.pubkey }.distinct())
+                    val pubkeys = rows.flatMap { row ->
+                        val embedded = if (row.kind == 6 && row.content.isNotBlank()) {
+                            runCatching {
+                                NostrJson.parseToJsonElement(row.content).jsonObject["pubkey"]?.jsonPrimitive?.content
+                            }.getOrNull()
+                        } else null
+                        listOfNotNull(row.pubkey, embedded)
+                    }.distinct()
+                    userRepository.fetchMissingProfiles(pubkeys)
                 }
         }
     }

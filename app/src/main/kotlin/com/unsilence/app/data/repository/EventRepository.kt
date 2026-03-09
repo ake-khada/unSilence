@@ -55,6 +55,10 @@ class EventRepository @Inject constructor(
     fun repostedEventIds(pubkey: String): Flow<List<String>> =
         eventDao.repostedEventIds(pubkey)
 
+    /** All event IDs the given pubkey has zapped. Room-backed reactive flow. */
+    fun zappedEventIds(pubkey: String): Flow<List<String>> =
+        eventDao.zappedEventIds(pubkey)
+
     suspend fun pruneExpired() =
         eventDao.pruneExpired(System.currentTimeMillis() / 1000L)
 }

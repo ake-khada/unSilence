@@ -14,6 +14,9 @@ class UserRepository @Inject constructor(
 ) {
     fun userFlow(pubkey: String): Flow<UserEntity?> = userDao.userFlow(pubkey)
 
+    /** Returns the cached lightning address (lud16) for [pubkey], or null if not yet loaded. */
+    suspend fun getUserLud16(pubkey: String): String? = userDao.getUser(pubkey)?.lud16
+
     /**
      * Requests profiles for pubkeys not yet cached.
      * The fetched kind 0 events will arrive via EventProcessor → Room.
