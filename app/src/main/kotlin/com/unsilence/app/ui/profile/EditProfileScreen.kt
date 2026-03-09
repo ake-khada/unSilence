@@ -62,6 +62,7 @@ fun EditProfileScreen(
     var displayName  by remember { mutableStateOf("") }
     var about        by remember { mutableStateOf("") }
     var picture      by remember { mutableStateOf("") }
+    var bannerUrl    by remember { mutableStateOf("") }
     var nip05        by remember { mutableStateOf("") }
     var lud16        by remember { mutableStateOf("") }
     var website      by remember { mutableStateOf("") }
@@ -72,6 +73,7 @@ fun EditProfileScreen(
             displayName = user?.displayName ?: ""
             about       = user?.about       ?: ""
             picture     = user?.picture     ?: ""
+            bannerUrl   = user?.banner      ?: ""
             nip05       = user?.nip05       ?: ""
             lud16       = user?.lud16       ?: ""
             initialized = true
@@ -84,6 +86,7 @@ fun EditProfileScreen(
         displayName.trim() != (user?.displayName ?: "") ||
         about.trim()       != (user?.about       ?: "") ||
         picture.trim()     != (user?.picture     ?: "") ||
+        bannerUrl.trim()   != (user?.banner      ?: "") ||
         nip05.trim()       != (user?.nip05       ?: "") ||
         lud16.trim()       != (user?.lud16       ?: "") ||
         website.isNotBlank()
@@ -118,6 +121,7 @@ fun EditProfileScreen(
                                 displayName = displayName,
                                 about       = about,
                                 picture     = picture,
+                                banner      = bannerUrl,
                                 nip05       = nip05,
                                 lud16       = lud16,
                                 website     = website,
@@ -203,6 +207,12 @@ fun EditProfileScreen(
                 Spacer(Modifier.height(Spacing.large))
 
                 // ── Text fields ────────────────────────────────────────────────
+                ProfileField(
+                    label    = "Banner URL",
+                    value    = bannerUrl,
+                    onChange = { bannerUrl = it },
+                    hint     = "https://…",
+                )
                 ProfileField(
                     label    = "Display Name",
                     value    = displayName,
