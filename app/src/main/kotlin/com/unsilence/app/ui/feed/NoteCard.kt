@@ -71,11 +71,15 @@ private val IMAGE_URL_REGEX = Regex(
 )
 
 @Composable
-fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
+fun NoteCard(
+    row: FeedRow,
+    modifier: Modifier = Modifier,
+    onNoteClick: (String) -> Unit = {},
+) {
     val imageUrls = IMAGE_URL_REGEX.findAll(row.content).map { it.value }.toList()
     val textContent = IMAGE_URL_REGEX.replace(row.content, "").trim()
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
         // ── Header row: avatar + name + timestamp ─────────────────────────────
         Row(
