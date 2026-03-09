@@ -1,6 +1,8 @@
 package com.unsilence.app.ui.onboarding
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -32,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -48,6 +51,19 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
     var showImportField by remember { mutableStateOf(false) }
     var importText      by remember { mutableStateOf("") }
     var importError     by remember { mutableStateOf<String?>(null) }
+
+    // ── Amber login launcher ──────────────────────────────────────────────────
+    val amberLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val pubkey = AmberSigner.parseLoginResult(result.data)
+        if (pubkey != null) {
+            keyManager.saveAmberLogin(pubkey)
+            onComplete()
+        } else {
+            Toast.makeText(context, "Amber sign-in failed or was cancelled", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -146,7 +162,11 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         // ── Sign in with Amber ────────────────────────────────────────────────
         OutlinedButton(
             onClick = {
-                Toast.makeText(context, "Amber sign-in coming soon", Toast.LENGTH_SHORT).show()
+                if (!AmberSigner.isInstalled(context)) {
+                    Toast.makeText(context, "Amber app not installed", Toast.LENGTH_SHORT).show()
+                } else {
+                    amberLauncher.launch(AmberSigner.createLoginIntent())
+                }
             },
             shape    = ButtonShape,
             border   = CyanBorder,
