@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,9 +62,11 @@ fun ThreadScreen(
     eventId: String,
     onDismiss: () -> Unit,
     onQuote: (String) -> Unit = {},
+    onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: ThreadViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
+    BackHandler(onBack = onDismiss)
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
     LaunchedEffect(viewModel.published) {
         if (viewModel.published) onDismiss()
@@ -124,6 +127,7 @@ fun ThreadScreen(
                             item(key = note.id) {
                                 NoteCard(
                                     row             = note,
+                                    onAuthorClick   = onAuthorClick,
                                     hasReacted      = note.id in reactedIds,
                                     hasReposted     = note.id in repostedIds,
                                     hasZapped       = note.id in zappedIds,
@@ -158,6 +162,7 @@ fun ThreadScreen(
                             items(state.replies, key = { it.id }) { reply ->
                                 NoteCard(
                                     row             = reply,
+                                    onAuthorClick   = onAuthorClick,
                                     hasReacted      = reply.id in reactedIds,
                                     hasReposted     = reply.id in repostedIds,
                                     hasZapped       = reply.id in zappedIds,

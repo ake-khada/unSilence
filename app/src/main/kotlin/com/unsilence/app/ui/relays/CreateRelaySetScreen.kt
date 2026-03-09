@@ -24,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -48,6 +49,7 @@ fun CreateRelaySetScreen(
     onDismiss: () -> Unit,
     viewModel: CreateRelaySetViewModel = hiltViewModel(),
 ) {
+    BackHandler(onBack = onDismiss)
     var name by remember { mutableStateOf("") }
     val relayUrls = remember { mutableStateListOf<String>() }
     var newRelayUrl by remember { mutableStateOf("") }

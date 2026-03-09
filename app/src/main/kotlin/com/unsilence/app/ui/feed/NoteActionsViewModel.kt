@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -46,8 +49,13 @@ class NoteActionsViewModel @Inject constructor(
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
-    /** True if a nostr+walletconnect:// URI has been saved. */
-    val isNwcConfigured: Boolean get() = nwcManager.isConfigured
+    /**
+     * True if a nostr+walletconnect:// URI has been saved.
+     * mutableStateOf so the UI recomposes immediately after the user connects their wallet —
+     * no restart needed for the zap button to become active.
+     */
+    var isNwcConfigured by mutableStateOf(nwcManager.isConfigured)
+        private set
 
     /**
      * Set of event IDs the current user has reacted to.
@@ -161,7 +169,11 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     /** Parse and persist a nostr+walletconnect:// URI. Returns true on success. */
-    fun saveNwcUri(uri: String): Boolean = nwcManager.save(uri)
+    fun saveNwcUri(uri: String): Boolean {
+        val saved = nwcManager.save(uri)
+        if (saved) isNwcConfigured = true   // triggers recomposition; zap button activates immediately
+        return saved
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -33,6 +33,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
     onNoteClick: (String) -> Unit = {},
+    onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -94,6 +95,7 @@ fun FeedScreen(
                             NoteCard(
                                 row             = row,
                                 onNoteClick     = onNoteClick,
+                                onAuthorClick   = onAuthorClick,
                                 hasReacted      = row.id in reactedIds,
                                 hasReposted     = row.id in repostedIds,
                                 hasZapped       = row.id in zappedIds,

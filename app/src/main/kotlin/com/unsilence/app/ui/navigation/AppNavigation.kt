@@ -67,6 +67,7 @@ import com.unsilence.app.ui.thread.ThreadScreen
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.profile.ProfileScreen
+import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -95,7 +96,12 @@ fun AppNavigation(onLogout: () -> Unit) {
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var threadEventId        by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
+    var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
+
+    // Single lambda passed to every NoteCard-hosting screen.
+    // Opening a user profile does NOT open the own-profile tab — it opens the overlay.
+    val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
 
     // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
     val feedViewModel: FeedViewModel = hiltViewModel()
@@ -159,16 +165,18 @@ fun AppNavigation(onLogout: () -> Unit) {
                     0    -> FeedScreen(
                         scrollToTopTrigger = scrollToTopTrigger,
                         onNoteClick        = { eventId -> threadEventId = eventId },
+                        onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                     )
                     1    -> SearchScreen(
-                        onNoteClick = { eventId -> threadEventId = eventId },
-                        onQuote     = { noteId  -> quoteNoteId   = noteId  },
+                        onNoteClick   = { eventId -> threadEventId = eventId },
+                        onAuthorClick = onAuthorClick,
+                        onQuote       = { noteId  -> quoteNoteId   = noteId  },
                     )
                     2    -> NotificationsScreen(
                         onNoteClick = { eventId -> threadEventId = eventId },
                     )
-                    3    -> ProfileScreen(onLogout = onLogout)
+                    3    -> ProfileScreen(onLogout = onLogout, onAuthorClick = onAuthorClick)
                     else -> PlaceholderScreen()
                 }
             }
@@ -308,9 +316,19 @@ fun AppNavigation(onLogout: () -> Unit) {
             // ── Thread overlay ────────────────────────────────────────────────
             threadEventId?.let { eventId ->
                 ThreadScreen(
-                    eventId   = eventId,
-                    onDismiss = { threadEventId = null },
-                    onQuote   = { noteId -> quoteNoteId = noteId },
+                    eventId       = eventId,
+                    onDismiss     = { threadEventId = null },
+                    onQuote       = { noteId -> quoteNoteId = noteId },
+                    onAuthorClick = onAuthorClick,
+                )
+            }
+
+            // ── User profile overlay ──────────────────────────────────────────
+            userProfilePubkey?.let { pubkey ->
+                UserProfileScreen(
+                    pubkey        = pubkey,
+                    onDismiss     = { userProfilePubkey = null },
+                    onAuthorClick = onAuthorClick,
                 )
             }
 
