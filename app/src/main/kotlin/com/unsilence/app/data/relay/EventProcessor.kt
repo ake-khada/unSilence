@@ -91,7 +91,7 @@ class EventProcessor @Inject constructor(
         when (kind) {
             0    -> processMetadata(pubkey, content)
             7    -> processReaction(id, pubkey, createdAt, content, tags)
-            1, 6, 20, 21 -> processContent(
+            1, 6, 9734, 9735, 20, 21 -> processContent(
                 id, pubkey, kind, content, createdAt, tagsJson, sig, tags, relayUrl
             )
         }

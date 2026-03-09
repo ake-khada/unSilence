@@ -8,6 +8,8 @@ import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
+import com.unsilence.app.data.wallet.NwcManager
+import com.unsilence.app.data.wallet.ZapRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
@@ -38,9 +40,14 @@ class NoteActionsViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
+    private val nwcManager: NwcManager,
+    private val zapRepository: ZapRepository,
 ) : ViewModel() {
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
+
+    /** True if a nostr+walletconnect:// URI has been saved. */
+    val isNwcConfigured: Boolean get() = nwcManager.isConfigured
 
     /**
      * Set of event IDs the current user has reacted to.
@@ -60,6 +67,17 @@ class NoteActionsViewModel @Inject constructor(
     val repostedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
             eventRepository.repostedEventIds(pk)
+                .map { it.toHashSet() }
+                .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+        } ?: MutableStateFlow(emptySet())
+
+    /**
+     * Set of event IDs the current user has zapped (from stored kind 9734 events).
+     * Room re-emits on every events table write.
+     */
+    val zappedEventIds: StateFlow<Set<String>> =
+        pubkeyHex?.let { pk ->
+            eventRepository.zappedEventIds(pk)
                 .map { it.toHashSet() }
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
         } ?: MutableStateFlow(emptySet())
@@ -135,6 +153,15 @@ class NoteActionsViewModel @Inject constructor(
             )
         }
     }
+
+    fun zap(eventId: String, eventPubkey: String, relayUrl: String, amountSats: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
+        }
+    }
+
+    /** Parse and persist a nostr+walletconnect:// URI. Returns true on success. */
+    fun saveNwcUri(uri: String): Boolean = nwcManager.save(uri)
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
