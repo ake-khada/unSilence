@@ -1,7 +1,9 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.defaultMinSize
@@ -53,12 +55,17 @@ import androidx.compose.ui.graphics.lerp
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.ui.common.IdentIcon
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.ZapAmber
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,6 +80,7 @@ private val IMAGE_URL_REGEX = Regex(
     RegexOption.IGNORE_CASE,
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NoteCard(
     row: FeedRow,
@@ -81,14 +89,55 @@ fun NoteCard(
     onReact: () -> Unit = {},
     onRepost: () -> Unit = {},
     onQuote: (String) -> Unit = {},
+    onZap: (amountSats: Long) -> Unit = {},
+    onSaveNwcUri: (String) -> Unit = {},
     hasReacted: Boolean = false,
     hasReposted: Boolean = false,
+    hasZapped: Boolean = false,
+    isNwcConfigured: Boolean = false,
 ) {
-    var showRepostMenu by remember { mutableStateOf(false) }
-    val imageUrls = IMAGE_URL_REGEX.findAll(row.content).map { it.value }.toList()
-    val textContent = IMAGE_URL_REGEX.replace(row.content, "").trim()
+    var showRepostMenu    by remember { mutableStateOf(false) }
+    var showConnectWallet by remember { mutableStateOf(false) }
+    var showZapPicker     by remember { mutableStateOf(false) }
+
+    // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
+    val boostedJson = if (row.kind == 6 && row.content.isNotBlank()) {
+        runCatching { NostrJson.parseToJsonElement(row.content).jsonObject }.getOrNull()
+    } else null
+
+    val effectivePubkey    = boostedJson?.get("pubkey")?.jsonPrimitive?.content ?: row.pubkey
+    val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
+    val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
+
+    val imageUrls   = IMAGE_URL_REGEX.findAll(effectiveContent).map { it.value }.toList()
+    val textContent = IMAGE_URL_REGEX.replace(effectiveContent, "").trim()
 
     Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
+
+        // ── Boost header (kind 6 only) ─────────────────────────────────────────
+        if (row.kind == 6) {
+            val reposterLabel = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
+            Row(
+                modifier          = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium)
+                    .padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Repeat,
+                    contentDescription = null,
+                    tint               = TextSecondary,
+                    modifier           = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text     = "$reposterLabel boosted",
+                    color    = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+        }
 
         // ── Header row: avatar + name + timestamp ─────────────────────────────
         Row(
@@ -98,13 +147,13 @@ fun NoteCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AvatarImage(
-                pubkey   = row.pubkey,
-                picture  = row.authorPicture,
+                pubkey   = effectivePubkey,
+                picture  = if (boostedJson == null) row.authorPicture else null,
                 modifier = Modifier.size(Sizing.avatar),
             )
             Spacer(Modifier.width(Spacing.small))
             Text(
-                text       = row.displayName ?: "${row.pubkey.take(8)}…",
+                text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
                 color      = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
                 fontSize   = 14.sp,
@@ -114,7 +163,7 @@ fun NoteCard(
             )
             Spacer(Modifier.width(Spacing.micro))
             Text(
-                text     = relativeTime(row.createdAt),
+                text     = relativeTime(effectiveCreatedAt),
                 color    = TextSecondary,
                 fontSize = 12.sp,
             )
@@ -222,10 +271,15 @@ fun NoteCard(
                 highlighted        = hasReacted,
                 onClick            = onReact,
             )
-            ActionButton(
-                icon               = Icons.Filled.ElectricBolt,
-                count              = 0,
-                contentDescription = "Zaps",
+            ZapButton(
+                count         = row.zapCount,
+                hasZapped     = hasZapped,
+                onTap         = {
+                    if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                },
+                onLongPress   = {
+                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                },
             )
             ActionButton(
                 icon               = Icons.Filled.Share,
@@ -235,6 +289,26 @@ fun NoteCard(
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
+    }
+
+    if (showConnectWallet) {
+        ConnectWalletDialog(
+            onConnect = { uri ->
+                onSaveNwcUri(uri)
+                showConnectWallet = false
+            },
+            onDismiss = { showConnectWallet = false },
+        )
+    }
+
+    if (showZapPicker) {
+        ZapAmountDialog(
+            onZap = { amount ->
+                onZap(amount)
+                showZapPicker = false
+            },
+            onDismiss = { showZapPicker = false },
+        )
     }
 }
 
@@ -300,6 +374,42 @@ private fun ActionButton(
         Icon(
             imageVector        = icon,
             contentDescription = contentDescription,
+            tint               = tint,
+            modifier           = Modifier.size(Sizing.actionIcon),
+        )
+        if (count > 0) {
+            Spacer(Modifier.width(Spacing.micro))
+            Text(
+                text     = formatCount(count),
+                color    = tint,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+/** Zap button: Amber when zapped, supports single tap and long-press. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ZapButton(
+    count: Int,
+    hasZapped: Boolean,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val tint = if (hasZapped) ZapAmber else ActionTint
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier          = Modifier
+            .defaultMinSize(minWidth = 48.dp)
+            .combinedClickable(
+                onClick     = onTap,
+                onLongClick = onLongPress,
+            ),
+    ) {
+        Icon(
+            imageVector        = Icons.Filled.ElectricBolt,
+            contentDescription = "Zap",
             tint               = tint,
             modifier           = Modifier.size(Sizing.actionIcon),
         )

@@ -49,7 +49,7 @@ class RelayPool @Inject constructor(
     }
 
     private suspend fun subscribeAfterConnect(conn: RelayConnection) {
-        // Feed subscription: kinds 1 (notes), 6 (reposts), 7 (reactions), 20 (pictures), 21 (video)
+        // Feed subscription: kinds 1 (notes), 6 (reposts), 7 (reactions), 9735 (zap receipts), 20, 21
         val feedReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("feed-${conn.url.hashCode()}"))
@@ -58,6 +58,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(1))
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(7))
+                    add(JsonPrimitive(9735))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
                 })

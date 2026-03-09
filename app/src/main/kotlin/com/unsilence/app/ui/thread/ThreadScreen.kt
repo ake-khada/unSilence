@@ -69,9 +69,11 @@ fun ThreadScreen(
         if (viewModel.published) onDismiss()
     }
 
-    val state       by viewModel.uiState.collectAsStateWithLifecycle()
-    val reactedIds  by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
-    val repostedIds by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
+    val state           by viewModel.uiState.collectAsStateWithLifecycle()
+    val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
+    val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
+    val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val isNwcConfigured = actionsViewModel.isNwcConfigured
     var replyText by remember { mutableStateOf("") }
 
     Box(
@@ -121,13 +123,17 @@ fun ThreadScreen(
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
                                 NoteCard(
-                                    row         = note,
-                                    hasReacted  = note.id in reactedIds,
-                                    hasReposted = note.id in repostedIds,
-                                    onReact     = { actionsViewModel.react(note.id, note.pubkey) },
-                                    onRepost    = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                    onQuote     = onQuote,
-                                    modifier    = Modifier.drawBehind {
+                                    row             = note,
+                                    hasReacted      = note.id in reactedIds,
+                                    hasReposted     = note.id in repostedIds,
+                                    hasZapped       = note.id in zappedIds,
+                                    isNwcConfigured = isNwcConfigured,
+                                    onReact         = { actionsViewModel.react(note.id, note.pubkey) },
+                                    onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                    onQuote         = onQuote,
+                                    onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                    onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                    modifier        = Modifier.drawBehind {
                                         drawRect(
                                             color = Cyan,
                                             size  = Size(2.dp.toPx(), size.height),
@@ -151,12 +157,16 @@ fun ThreadScreen(
                             }
                             items(state.replies, key = { it.id }) { reply ->
                                 NoteCard(
-                                    row         = reply,
-                                    hasReacted  = reply.id in reactedIds,
-                                    hasReposted = reply.id in repostedIds,
-                                    onReact     = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                    onRepost    = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                    onQuote     = onQuote,
+                                    row             = reply,
+                                    hasReacted      = reply.id in reactedIds,
+                                    hasReposted     = reply.id in repostedIds,
+                                    hasZapped       = reply.id in zappedIds,
+                                    isNwcConfigured = isNwcConfigured,
+                                    onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                    onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                    onQuote         = onQuote,
+                                    onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+                                    onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                                 )
                             }
                         }

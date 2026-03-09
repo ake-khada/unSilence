@@ -31,6 +31,7 @@ data class FeedRow(
     @ColumnInfo(name = "reaction_count")        val reactionCount: Int,
     @ColumnInfo(name = "reply_count")           val replyCount: Int,
     @ColumnInfo(name = "repost_count")          val repostCount: Int,
+    @ColumnInfo(name = "zap_count")             val zapCount: Int,
 )
 
 @Dao
@@ -65,12 +66,14 @@ interface EventDao {
             u.picture         AS author_picture,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
         LEFT JOIN events    rep ON rep.reply_to_id   = e.id
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.relay_url IN (:relayUrls)
           AND e.kind      IN (:kinds)
           AND e.reply_to_id IS NULL
@@ -108,13 +111,15 @@ interface EventDao {
             u.picture         AS author_picture,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
         FROM events e
         INNER JOIN follows     f   ON f.pubkey          = e.pubkey
         LEFT JOIN  users       u   ON u.pubkey           = e.pubkey
         LEFT JOIN  reactions   r   ON r.target_event_id  = e.id
         LEFT JOIN  events      rep ON rep.reply_to_id    = e.id
         LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
+        LEFT JOIN  events      z   ON z.root_id          = e.id AND z.kind  = 9735
         WHERE e.kind        IN (1, 6, 20, 21)
           AND e.reply_to_id IS NULL
           AND e.root_id     IS NULL
@@ -144,12 +149,14 @@ interface EventDao {
             u.picture         AS author_picture,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
             COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
         LEFT JOIN events    rep ON rep.reply_to_id   = e.id
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.pubkey = :pubkey
           AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL)
                OR e.kind = 6)
@@ -167,12 +174,14 @@ interface EventDao {
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             COUNT(DISTINCT r.event_id) AS reaction_count,
             COUNT(DISTINCT rep.id)     AS reply_count,
-            COUNT(DISTINCT rp.id)      AS repost_count
+            COUNT(DISTINCT rp.id)      AS repost_count,
+            COUNT(DISTINCT z.id)       AS zap_count
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
         LEFT JOIN events    rep ON rep.reply_to_id   = e.id
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.id = :eventId OR e.reply_to_id = :eventId OR e.root_id = :eventId
         GROUP BY e.id
         ORDER BY e.created_at ASC
@@ -196,6 +205,14 @@ interface EventDao {
      */
     @Query("SELECT root_id FROM events WHERE kind = 6 AND pubkey = :pubkey AND root_id IS NOT NULL")
     fun repostedEventIds(pubkey: String): Flow<List<String>>
+
+    /**
+     * All event IDs that [pubkey] has zapped (kind 9734 zap requests, root_id = zapped event).
+     * Zap requests are stored with root_id = zapped event ID (positional NIP-10 e-tag parse).
+     * Room re-emits whenever the events table changes.
+     */
+    @Query("SELECT root_id FROM events WHERE kind = 9734 AND pubkey = :pubkey AND root_id IS NOT NULL")
+    fun zappedEventIds(pubkey: String): Flow<List<String>>
 
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int
