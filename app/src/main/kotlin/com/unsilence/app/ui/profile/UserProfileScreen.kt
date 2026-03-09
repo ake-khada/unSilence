@@ -30,9 +30,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,6 +48,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -96,8 +94,8 @@ fun UserProfileScreen(
             modifier            = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Space for top bar
-            item { Spacer(Modifier.height(Sizing.topBarHeight + 8.dp)) }
+            // Space for top bar (statusBar + topBarHeight)
+            item { Spacer(Modifier.statusBarsPadding().height(Sizing.topBarHeight + 8.dp)) }
 
             // ── Profile header ────────────────────────────────────────────────
             item {
@@ -257,9 +255,9 @@ fun UserProfileScreen(
                     NoteCard(
                         row             = row,
                         onAuthorClick   = onAuthorClick,
-                        hasReacted      = row.id in reactedIds,
-                        hasReposted     = row.id in repostedIds,
-                        hasZapped       = row.id in zappedIds,
+                        hasReacted      = row.engagementId in reactedIds,
+                        hasReposted     = row.engagementId in repostedIds,
+                        hasZapped       = row.engagementId in zappedIds,
                         isNwcConfigured = isNwcConfigured,
                         onReact         = { actionsViewModel.react(row.id, row.pubkey) },
                         onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
@@ -273,30 +271,35 @@ fun UserProfileScreen(
         }
 
         // ── Top bar overlay ───────────────────────────────────────────────────
-        Row(
+        Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .fillMaxWidth()
                 .background(Black)
-                .statusBarsPadding()
-                .height(Sizing.topBarHeight)
-                .padding(horizontal = Spacing.small),
-            verticalAlignment     = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Start,
+                .statusBarsPadding(),
         ) {
-            IconButton(onClick = onDismiss) {
-                Icon(
-                    imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint               = Color.White,
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(Sizing.topBarHeight)
+                    .padding(horizontal = Spacing.small),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Start,
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint               = Color.White,
+                    )
+                }
+                Text(
+                    text       = "Profile",
+                    color      = Color.White,
+                    fontSize   = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
-            Text(
-                text       = "Profile",
-                color      = Color.White,
-                fontSize   = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
         }
     }
 }
