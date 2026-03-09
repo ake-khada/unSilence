@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
+import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.thread.ThreadScreen
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -167,6 +168,10 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                         scrollToTopTrigger = scrollToTopTrigger,
                         onNoteClick        = { eventId -> threadEventId = eventId },
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                    )
+                    1    -> SearchScreen(
+                        onNoteClick = { eventId -> threadEventId = eventId },
+                        onQuote     = { noteId  -> quoteNoteId   = noteId  },
                     )
                     3    -> ProfileScreen()
                     else -> PlaceholderScreen()
