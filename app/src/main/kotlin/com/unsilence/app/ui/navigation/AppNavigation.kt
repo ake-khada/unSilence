@@ -29,14 +29,11 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,7 +58,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.notifications.NotificationsScreen
@@ -91,7 +87,7 @@ private val TABS = listOf(
 private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutSlowInEasing)
 
 @Composable
-fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
+fun AppNavigation(onLogout: () -> Unit) {
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
     var showCompose          by remember { mutableStateOf(false) }
@@ -105,8 +101,6 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
     val feedViewModel: FeedViewModel = hiltViewModel()
     val feedType  by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets  by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
-
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
@@ -148,21 +142,12 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState   = drawerState,
-        drawerContent = {
-            AppDrawer(
-                keyManager = keyManager,
-                onLogout   = onLogout,
-            )
-        },
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Black)
+            .nestedScroll(nestedScrollConnection),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Black)
-                .nestedScroll(nestedScrollConnection),
-        ) {
 
             // ── Content ───────────────────────────────────────────────────────
             Box(
@@ -183,7 +168,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                     2    -> NotificationsScreen(
                         onNoteClick = { eventId -> threadEventId = eventId },
                     )
-                    3    -> ProfileScreen()
+                    3    -> ProfileScreen(onLogout = onLogout)
                     else -> PlaceholderScreen()
                 }
             }
@@ -338,7 +323,6 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                 )
             }
         }
-    }
 }
 
 @Composable

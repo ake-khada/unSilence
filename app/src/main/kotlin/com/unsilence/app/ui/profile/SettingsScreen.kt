@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
@@ -40,7 +42,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 
 @Composable
-fun SettingsScreen(onDismiss: () -> Unit) {
+fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -80,13 +82,34 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             Spacer(Modifier.height(Spacing.small))
 
             // ── Menu items ─────────────────────────────────────────────────────
-            SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {})
-            SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {})
-            SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {})
-            SettingsItem(icon = Icons.Filled.Security,     label = "Safety",       onClick = {})
-            SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {})
-            SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {})
-            SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {})
+            Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {})
+                SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {})
+                SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {})
+                SettingsItem(icon = Icons.Filled.Security,     label = "Safety",       onClick = {})
+                SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {})
+                SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {})
+                SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {})
+
+                Spacer(Modifier.height(Spacing.large))
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+                // ── Logout ────────────────────────────────────────────────────
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .clickable { onLogout() }
+                        .padding(horizontal = Spacing.medium),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text     = "Logout",
+                        color    = Color(0xFFCF6679),
+                        fontSize = 16.sp,
+                    )
+                }
+            }
         }
     }
 }
