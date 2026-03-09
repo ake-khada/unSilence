@@ -65,6 +65,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.notifications.NotificationsScreen
+import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.thread.ThreadScreen
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -91,17 +92,19 @@ private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutS
 
 @Composable
 fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
-    var selectedTab        by rememberSaveable { mutableIntStateOf(0) }
-    var barsVisible        by remember { mutableStateOf(true) }
-    var showCompose        by remember { mutableStateOf(false) }
-    var showFeedDropdown   by remember { mutableStateOf(false) }
-    var threadEventId      by remember { mutableStateOf<String?>(null) }
-    var quoteNoteId        by remember { mutableStateOf<String?>(null) }
-    var scrollToTopTrigger by remember { mutableIntStateOf(0) }
+    var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
+    var barsVisible          by remember { mutableStateOf(true) }
+    var showCompose          by remember { mutableStateOf(false) }
+    var showFeedDropdown     by remember { mutableStateOf(false) }
+    var showCreateRelaySet   by remember { mutableStateOf(false) }
+    var threadEventId        by remember { mutableStateOf<String?>(null) }
+    var quoteNoteId          by remember { mutableStateOf<String?>(null) }
+    var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
 
     // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
     val feedViewModel: FeedViewModel = hiltViewModel()
-    val feedType by feedViewModel.feedType.collectAsStateWithLifecycle()
+    val feedType  by feedViewModel.feedType.collectAsStateWithLifecycle()
+    val userSets  by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
@@ -228,12 +231,23 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                                 onDismissRequest = { showFeedDropdown = false },
                             ) {
                                 DropdownMenuItem(
-                                    text    = { Text("Global",    color = if (feedType == FeedType.GLOBAL)    Cyan else Color.White, fontSize = 14.sp) },
-                                    onClick = { feedViewModel.setFeedType(FeedType.GLOBAL);    showFeedDropdown = false },
+                                    text    = { Text("Global",    color = if (feedType is FeedType.Global)    Cyan else Color.White, fontSize = 14.sp) },
+                                    onClick = { feedViewModel.setFeedType(FeedType.Global);    showFeedDropdown = false },
                                 )
                                 DropdownMenuItem(
-                                    text    = { Text("Following", color = if (feedType == FeedType.FOLLOWING) Cyan else Color.White, fontSize = 14.sp) },
-                                    onClick = { feedViewModel.setFeedType(FeedType.FOLLOWING); showFeedDropdown = false },
+                                    text    = { Text("Following", color = if (feedType is FeedType.Following) Cyan else Color.White, fontSize = 14.sp) },
+                                    onClick = { feedViewModel.setFeedType(FeedType.Following); showFeedDropdown = false },
+                                )
+                                userSets.filter { !it.isBuiltIn }.forEach { set ->
+                                    val isActive = feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).id == set.id
+                                    DropdownMenuItem(
+                                        text    = { Text(set.name, color = if (isActive) Cyan else Color.White, fontSize = 14.sp) },
+                                        onClick = { feedViewModel.setFeedType(FeedType.RelaySet(set.id, set.name)); showFeedDropdown = false },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text    = { Text("+ Add Relay Set", color = Cyan, fontSize = 14.sp) },
+                                    onClick = { showFeedDropdown = false; showCreateRelaySet = true },
                                 )
                             }
                         }
@@ -291,6 +305,11 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                         }
                     }
                 }
+            }
+
+            // ── Create relay set overlay ──────────────────────────────────────
+            if (showCreateRelaySet) {
+                CreateRelaySetScreen(onDismiss = { showCreateRelaySet = false })
             }
 
             // ── Compose overlay ───────────────────────────────────────────────

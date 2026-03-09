@@ -13,6 +13,14 @@ interface RelaySetDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIfAbsent(relaySet: RelaySetEntity)
 
+    /** Insert or replace a relay set (used for user-created sets). */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(relaySet: RelaySetEntity)
+
+    /** Delete a user-created set. Built-in sets are protected by the WHERE clause. */
+    @Query("DELETE FROM relay_sets WHERE id = :id AND is_built_in = 0")
+    suspend fun deleteUserSet(id: String)
+
     @Query("SELECT * FROM relay_sets ORDER BY is_default DESC, name ASC")
     fun allSetsFlow(): Flow<List<RelaySetEntity>>
 
