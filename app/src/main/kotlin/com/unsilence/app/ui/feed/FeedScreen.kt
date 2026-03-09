@@ -76,11 +76,26 @@ fun FeedScreen(
                     }
                 }
 
-                // Clear the new-posts dot whenever the list is at the top.
+                // Auto-scroll: keyed on hasNewTopPost so it re-fires the moment a new
+                // top post arrives. snapshotFlow on firstVisibleItemIndex can't work here
+                // because LazyColumn preserves scroll position on prepend — the index
+                // shifts from 0 to 1 when an item inserts above, so "index == 0" never
+                // fires. Keying LaunchedEffect on the flag itself sidesteps that entirely.
+                LaunchedEffect(viewModel.hasNewTopPost) {
+                    if (viewModel.hasNewTopPost && listState.firstVisibleItemIndex <= 2) {
+                        listState.scrollToItem(0)
+                        viewModel.clearNewTopPost()
+                    }
+                }
+
+                // Pagination: separate observer so it's not tangled with scroll-to-top.
                 LaunchedEffect(Unit) {
                     snapshotFlow { listState.firstVisibleItemIndex }
                         .collect { index ->
-                            if (index == 0) viewModel.markSeen()
+                            val total = listState.layoutInfo.totalItemsCount
+                            if (total > 0 && index > total * 0.5) {
+                                viewModel.loadMore()
+                            }
                         }
                 }
             }
