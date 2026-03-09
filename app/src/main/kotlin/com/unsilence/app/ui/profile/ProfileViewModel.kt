@@ -69,6 +69,7 @@ class ProfileViewModel @Inject constructor(
         displayName: String,
         about: String,
         picture: String,
+        banner: String,
         nip05: String,
         lud16: String,
         website: String,
@@ -85,6 +86,7 @@ class ProfileViewModel @Inject constructor(
                 if (displayName.isNotBlank()) put("display_name", displayName.trim())
                 if (about.isNotBlank())       put("about",        about.trim())
                 if (picture.isNotBlank())     put("picture",      picture.trim())
+                if (banner.isNotBlank())      put("banner",       banner.trim())
                 if (nip05.isNotBlank())       put("nip05",        nip05.trim())
                 if (lud16.isNotBlank())       put("lud16",        lud16.trim())
                 if (website.isNotBlank())     put("website",      website.trim())
