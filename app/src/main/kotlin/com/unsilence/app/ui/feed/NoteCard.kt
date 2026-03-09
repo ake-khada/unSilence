@@ -22,6 +22,8 @@ import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +54,7 @@ import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -75,7 +78,13 @@ fun NoteCard(
     row: FeedRow,
     modifier: Modifier = Modifier,
     onNoteClick: (String) -> Unit = {},
+    onReact: () -> Unit = {},
+    onRepost: () -> Unit = {},
+    onQuote: (String) -> Unit = {},
+    hasReacted: Boolean = false,
+    hasReposted: Boolean = false,
 ) {
+    var showRepostMenu by remember { mutableStateOf(false) }
     val imageUrls = IMAGE_URL_REGEX.findAll(row.content).map { it.value }.toList()
     val textContent = IMAGE_URL_REGEX.replace(row.content, "").trim()
 
@@ -183,15 +192,35 @@ fun NoteCard(
                 count              = row.replyCount,
                 contentDescription = "Replies",
             )
-            ActionButton(
-                icon               = Icons.Filled.Repeat,
-                count              = 0,
-                contentDescription = "Reposts",
-            )
+            Box {
+                ActionButton(
+                    icon               = Icons.Filled.Repeat,
+                    count              = row.repostCount,
+                    contentDescription = "Reposts",
+                    highlighted        = hasReposted,
+                    onClick            = { showRepostMenu = true },
+                )
+                DropdownMenu(
+                    expanded         = showRepostMenu,
+                    onDismissRequest = { showRepostMenu = false },
+                    modifier         = Modifier.background(Black),
+                ) {
+                    DropdownMenuItem(
+                        text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
+                        onClick = { onRepost(); showRepostMenu = false },
+                    )
+                    DropdownMenuItem(
+                        text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
+                        onClick = { onQuote(row.id); showRepostMenu = false },
+                    )
+                }
+            }
             ActionButton(
                 icon               = Icons.Filled.Favorite,
                 count              = row.reactionCount,
                 contentDescription = "Reactions",
+                highlighted        = hasReacted,
+                onClick            = onReact,
             )
             ActionButton(
                 icon               = Icons.Filled.ElectricBolt,
@@ -249,31 +278,36 @@ private fun AvatarImage(pubkey: String, picture: String?, modifier: Modifier = M
     }
 }
 
-/**
- * Single action bar button: vector icon (16dp) + optional count (12sp).
- * All icons and counts use a uniform muted tint — no activation state yet (Sprint 3).
- */
+/** Single action bar button: vector icon + optional count. Turns Cyan when [highlighted]. */
 @Composable
 private fun ActionButton(
     icon: ImageVector,
     count: Int,
     contentDescription: String,
+    highlighted: Boolean = false,
+    onClick: (() -> Unit)? = null,
 ) {
+    val tint = if (highlighted) Cyan else ActionTint
+    val rowModifier = if (onClick != null)
+        Modifier.defaultMinSize(minWidth = 48.dp).clickable(onClick = onClick)
+    else
+        Modifier.defaultMinSize(minWidth = 48.dp)
+
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier          = Modifier.defaultMinSize(minWidth = 48.dp),
+        modifier          = rowModifier,
     ) {
         Icon(
             imageVector        = icon,
             contentDescription = contentDescription,
-            tint               = ActionTint,
+            tint               = tint,
             modifier           = Modifier.size(Sizing.actionIcon),
         )
         if (count > 0) {
             Spacer(Modifier.width(Spacing.micro))
             Text(
                 text     = formatCount(count),
-                color    = ActionTint,
+                color    = tint,
                 fontSize = 12.sp,
             )
         }

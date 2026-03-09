@@ -65,6 +65,8 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.thread.ThreadScreen
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -92,6 +94,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
     var showCompose        by remember { mutableStateOf(false) }
     var showFeedDropdown   by remember { mutableStateOf(false) }
     var threadEventId      by remember { mutableStateOf<String?>(null) }
+    var quoteNoteId        by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger by remember { mutableIntStateOf(0) }
 
     // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
@@ -163,6 +166,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                     0    -> FeedScreen(
                         scrollToTopTrigger = scrollToTopTrigger,
                         onNoteClick        = { eventId -> threadEventId = eventId },
+                        onQuote            = { noteId  -> quoteNoteId   = noteId  },
                     )
                     3    -> ProfileScreen()
                     else -> PlaceholderScreen()
@@ -290,6 +294,16 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                 ThreadScreen(
                     eventId   = eventId,
                     onDismiss = { threadEventId = null },
+                    onQuote   = { noteId -> quoteNoteId = noteId },
+                )
+            }
+
+            // ── Quote-compose overlay ─────────────────────────────────────────
+            quoteNoteId?.let { noteId ->
+                val nevent = NEvent.create(noteId, null, null, null as NormalizedRelayUrl?)
+                ComposeScreen(
+                    initialText = "\n\nnostr:$nevent",
+                    onDismiss   = { quoteNoteId = null },
                 )
             }
         }
