@@ -12,6 +12,7 @@ data class FeedFilter(
     val showKind6: Boolean = true,
     val showKind20: Boolean = true,
     val showKind21: Boolean = true,
+    val showKind30023: Boolean = true,
     val minReactions: Int = 0,
     val minZapAmount: Long = 0,
     val minReplies: Int = 0,
@@ -19,17 +20,18 @@ data class FeedFilter(
 ) {
     /** Kinds enabled by this filter. */
     val enabledKinds: List<Int> get() = buildList {
-        if (showKind1)  add(1)
-        if (showKind6)  add(6)
-        if (showKind20) add(20)
-        if (showKind21) add(21)
+        if (showKind1)     add(1)
+        if (showKind6)     add(6)
+        if (showKind20)    add(20)
+        if (showKind21)    add(21)
+        if (showKind30023) add(30023)
     }
 
     /** True when any field differs from the per-relay-set defaults (used for the filter dot). */
     val isNonDefault: Boolean get() =
         contentType   != ContentType.NOTES_ONLY ||
         hideSensitive != false ||
-        !showKind1    || !showKind6 || !showKind20 || !showKind21 ||
+        !showKind1    || !showKind6 || !showKind20 || !showKind21 || !showKind30023 ||
         minReactions  != 0 ||
         minZapAmount  != 0L ||
         minReplies    != 0
