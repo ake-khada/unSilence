@@ -112,23 +112,26 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
+    // Profile tab (index 3) owns its full screen — both bars permanently hidden.
+    val barsShown = barsVisible && selectedTab != 3
+
     val topBarOffset by animateDpAsState(
-        targetValue   = if (barsVisible) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
+        targetValue   = if (barsShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
         animationSpec = animSpec,
         label         = "topBarOffset",
     )
     val bottomBarOffset by animateDpAsState(
-        targetValue   = if (barsVisible) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
+        targetValue   = if (barsShown) 0.dp else (Sizing.bottomNavHeight + navBarHeight + 8.dp),
         animationSpec = animSpec,
         label         = "bottomBarOffset",
     )
     val contentTopPadding by animateDpAsState(
-        targetValue   = if (barsVisible) Sizing.topBarHeight + statusBarHeight else 0.dp,
+        targetValue   = if (barsShown) Sizing.topBarHeight + statusBarHeight else 0.dp,
         animationSpec = animSpec,
         label         = "contentTopPadding",
     )
     val contentBottomPadding by animateDpAsState(
-        targetValue   = if (barsVisible) Sizing.bottomNavHeight + navBarHeight else 0.dp,
+        targetValue   = if (barsShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
         label         = "contentBottomPadding",
     )
