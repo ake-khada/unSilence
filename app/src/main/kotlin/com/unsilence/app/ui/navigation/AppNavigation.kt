@@ -262,7 +262,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                                 tint               = if (index == selectedTab) Cyan else NavUnselected,
                                 modifier           = Modifier.size(Sizing.navIcon),
                             )
-                            if (index == 0 && feedViewModel.newPostsAvailable) {
+                            if (index == 0 && feedViewModel.hasNewTopPost) {
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)

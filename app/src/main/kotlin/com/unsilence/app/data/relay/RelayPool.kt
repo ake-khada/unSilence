@@ -162,7 +162,9 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-    /** Subscribe to kind 0 profiles for a batch of pubkeys. */
+    /** Subscribe to kind 0 profiles for a batch of pubkeys.
+     *  Sends to all current connections AND to dedicated profile-indexer relays
+     *  (purplepag.es, user.kindpag.es) which specialise in kind 0 metadata. */
     fun fetchProfiles(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
         val req = buildJsonArray {
@@ -174,7 +176,53 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        connections.values.firstOrNull()?.send(req)
+        // Send to every already-connected relay
+        connections.values.forEach { it.send(req) }
+
+        // Also query dedicated profile-indexer relays
+        val indexers = listOf("wss://purplepag.es", "wss://user.kindpag.es")
+        for (url in indexers) {
+            val existing = connections[url]
+            if (existing != null) {
+                existing.send(req)
+            } else {
+                val conn = RelayConnection(url, okHttpClient)
+                connections[url] = conn
+                conn.connect()
+                scope.launch {
+                    conn.send(req)
+                    listenForEvents(conn)
+                }
+                Log.d(TAG, "Connected to profile indexer: $url")
+            }
+        }
+    }
+
+    /**
+     * Fetch events older than [untilTimestamp] (Unix seconds) from the specified [relayUrls].
+     * Used by pagination: caller sets `until` = oldest event's createdAt in the current list.
+     */
+    fun fetchOlderEvents(relayUrls: List<String>, untilTimestamp: Long) {
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("older-${System.currentTimeMillis()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
+                })
+                put("until", JsonPrimitive(untilTimestamp))
+                put("limit", JsonPrimitive(50))
+            })
+        }.toString()
+
+        for (url in relayUrls) {
+            connections[url]?.send(req)
+        }
+        Log.d(TAG, "Fetching older events until $untilTimestamp from ${relayUrls.size} relay(s)")
     }
 
     /**

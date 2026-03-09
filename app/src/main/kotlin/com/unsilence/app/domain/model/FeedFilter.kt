@@ -35,7 +35,7 @@ data class FeedFilter(
         minReplies    != 0
 
     companion object {
-        /** Global feed ships with 1 min-reaction to suppress bots while keeping content visible. */
-        val globalDefault = FeedFilter(minReactions = 1)
+        /** No reaction filter — show everything. WoT spam filtering (NIP-85) will replace this. */
+        val globalDefault = FeedFilter(minReactions = 0)
     }
 }

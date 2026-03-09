@@ -16,8 +16,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -38,80 +38,91 @@ class FeedViewModel @Inject constructor(
     private val outboxRouter: OutboxRouter,
 ) : ViewModel() {
 
-    private val _uiState   = MutableStateFlow(FeedUiState())
+    private val _uiState = MutableStateFlow(FeedUiState())
     val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
 
-    private val _feedType  = MutableStateFlow(FeedType.GLOBAL)
+    private val _feedType = MutableStateFlow(FeedType.GLOBAL)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
-    /** True when new posts arrived while the user was scrolled away from the top. */
-    var newPostsAvailable by mutableStateOf(false)
+    /**
+     * True when the top-of-feed item has a newer created_at than the previous emission.
+     * Used to drive the new-posts dot and to trigger a snap-to-top when the user
+     * is already at index 0. Cleared by FeedScreen via clearNewTopPost().
+     */
+    var hasNewTopPost by mutableStateOf(false)
         private set
 
-    /** Called by FeedScreen whenever the list is at position 0. */
-    fun markSeen() {
-        newPostsAvailable = false
-    }
+    fun clearNewTopPost() { hasNewTopPost = false }
 
-    // Tracks the event count from the last emission; reset on feed type switch.
-    private var lastEventCount = 0
+    // created_at of the first item in the last emission; 0 until the first load.
+    private var newestTimestamp = 0L
 
-    /** Label shown in the top bar dropdown (e.g. "Global ▾"). */
+    // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
+    private var lastOldestTimestamp = 0L
+
     val feedTypeLabel: String get() = when (_feedType.value) {
         FeedType.GLOBAL    -> "Global"
         FeedType.FOLLOWING -> "Following"
     }
 
-    fun setFeedType(type: FeedType) {
-        _feedType.value = type
+    fun setFeedType(type: FeedType) { _feedType.value = type }
+
+    /**
+     * Fetch events older than the current oldest item (pagination).
+     * No-op if the oldest timestamp hasn't changed since the last fetch — avoids
+     * hammering a relay that returned nothing or whose results haven't landed yet.
+     * When Room does emit new older events the oldest timestamp shifts, which
+     * naturally allows the next scroll trigger to fire a fresh fetch.
+     */
+    fun loadMore() {
+        val oldest = _uiState.value.events.lastOrNull()?.createdAt ?: return
+        if (oldest == lastOldestTimestamp) return
+        lastOldestTimestamp = oldest
+        viewModelScope.launch {
+            val set  = relaySetRepository.defaultSet() ?: return@launch
+            val urls = relaySetRepository.decodeUrls(set)
+            relayPool.fetchOlderEvents(urls, oldest)
+        }
     }
 
     init {
         viewModelScope.launch {
-            // 1. Seed built-in relay sets (idempotent)
             relaySetRepository.seedDefaults()
 
-            // 2. Load the default relay set and its filter
             val set    = relaySetRepository.defaultSet() ?: return@launch
             val urls   = relaySetRepository.decodeUrls(set)
             val filter = relaySetRepository.decodeFilter(set)
 
-            // 3. Connect to global relays (relay → Room via EventProcessor)
             relayPool.connect(urls)
 
-            // 4. React to feed type switches using flatMapLatest —
-            //    cancels the previous Room Flow collection on every switch.
             _feedType
                 .flatMapLatest { type ->
-                    // Reset counters and loading state on every feed switch.
-                    lastEventCount = 0
-                    newPostsAvailable = false
+                    // Reset all state on feed switch so the new feed starts clean.
+                    newestTimestamp     = 0L
+                    hasNewTopPost       = false
+                    lastOldestTimestamp = 0L
                     _uiState.value = _uiState.value.copy(loading = true)
                     when (type) {
                         FeedType.GLOBAL    -> eventRepository.feedFlow(urls, filter)
                         FeedType.FOLLOWING -> {
-                            // Kick off outbox routing (idempotent — does nothing if already started)
                             outboxRouter.start()
                             eventRepository.followingFeedFlow()
                         }
                     }
                 }
                 .collectLatest { rows ->
-                    val isInitialLoad = lastEventCount == 0
-                    val grew = rows.size > lastEventCount
-                    lastEventCount = rows.size
+                    val incomingNewest = rows.firstOrNull()?.createdAt ?: 0L
+
+                    // Only flag a new top post after the initial load; the initial
+                    // populate is not a "new post arrived" event.
+                    if (newestTimestamp > 0 && incomingNewest > newestTimestamp) {
+                        hasNewTopPost = true
+                    }
+                    newestTimestamp = incomingNewest
 
                     _uiState.value = FeedUiState(events = rows, loading = false)
 
-                    // Only flag new content after the initial load so the dot doesn't
-                    // appear the moment the feed first populates.
-                    if (!isInitialLoad && grew) {
-                        newPostsAvailable = true
-                    }
-
-                    // Fetch profiles for any pubkeys not yet cached in Room
-                    val pubkeys = rows.map { it.pubkey }.distinct()
-                    userRepository.fetchMissingProfiles(pubkeys)
+                    userRepository.fetchMissingProfiles(rows.map { it.pubkey }.distinct())
                 }
         }
     }
