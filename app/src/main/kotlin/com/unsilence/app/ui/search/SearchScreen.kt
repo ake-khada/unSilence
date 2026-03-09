@@ -59,6 +59,7 @@ private val TAB_LABELS = listOf("People", "Notes")
 @Composable
 fun SearchScreen(
     onNoteClick: (String) -> Unit = {},
+    onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: SearchViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -162,7 +163,7 @@ fun SearchScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.peopleResults, key = { it.pubkey }) { user ->
-                                ProfileCard(user = user, onClick = {})
+                                ProfileCard(user = user, onClick = { onAuthorClick(user.pubkey) })
                                 HorizontalDivider(
                                     color     = MaterialTheme.colorScheme.surfaceVariant,
                                     thickness = 0.5.dp,
@@ -186,6 +187,7 @@ fun SearchScreen(
                                 NoteCard(
                                     row             = row,
                                     onNoteClick     = onNoteClick,
+                                    onAuthorClick   = onAuthorClick,
                                     hasReacted      = row.id in reactedIds,
                                     hasReposted     = row.id in repostedIds,
                                     hasZapped       = row.id in zappedIds,
