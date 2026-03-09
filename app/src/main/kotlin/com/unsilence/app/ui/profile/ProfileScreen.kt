@@ -13,12 +13,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,25 +48,30 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
 private val BANNER_HEIGHT       = 150.dp
-// 85dp — φ⁴ position on the golden ratio scale, same as bar heights
 private val PROFILE_AVATAR_SIZE = 85.dp
 
 @Composable
 fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
-    val user   by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
-    val posts  by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    val clipboard = LocalClipboardManager.current
+    val user      by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
+    val posts     by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val clipboard  = LocalClipboardManager.current
+
+    var showEditProfile by remember { mutableStateOf(false) }
+    var showSettings    by remember { mutableStateOf(false) }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
-        ?: viewModel.pubkeyHex?.take(8)?.let { "$it…" }
+        ?: viewModel.pubkeyHex?.let { "${it.take(6)}…${it.takeLast(4)}" }
 
+    // first6…last4 of npub per design spec
     val npubShort = viewModel.npub?.let {
-        "${it.take(8)}…${it.takeLast(8)}"
+        "${it.take(6)}…${it.takeLast(4)}"
     }
 
     Box(
@@ -63,23 +79,26 @@ fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
             .fillMaxSize()
             .background(Black),
     ) {
+        // ── Scrollable content ────────────────────────────────────────────────
         LazyColumn(
             modifier            = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Space for our own top bar overlay
+            item {
+                Spacer(Modifier.height(Sizing.topBarHeight + 8.dp))
+            }
 
-            // ── Header ──────────────────────────────────────────────────────
+            // ── Profile header ───────────────────────────────────────────────
             item {
                 // Banner + avatar overlap composite.
-                // Total height = banner (150dp) + half avatar (42.5dp) so the avatar
-                // straddles the banner's bottom edge with equal overlap on each side.
                 Box(
-                    modifier            = Modifier
+                    modifier         = Modifier
                         .fillMaxWidth()
                         .height(BANNER_HEIGHT + PROFILE_AVATAR_SIZE / 2),
-                    contentAlignment    = Alignment.BottomCenter,
+                    contentAlignment = Alignment.BottomCenter,
                 ) {
-                    // Banner — fills the top 150dp of the Box
+                    // Banner
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -103,15 +122,13 @@ fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
                         }
                     }
 
-                    // Avatar — centered at the banner's bottom edge
+                    // Avatar overlapping banner bottom
                     ProfileAvatar(
                         pubkeyHex  = viewModel.pubkeyHex,
                         pictureUrl = user?.picture,
                         modifier   = Modifier
                             .size(PROFILE_AVATAR_SIZE)
                             .clip(CircleShape)
-                            // 2dp Black ring so the avatar reads against both
-                            // the banner image and the content below
                             .border(2.dp, Black, CircleShape),
                     )
                 }
@@ -196,6 +213,7 @@ fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
                         .padding(horizontal = Spacing.medium)
                         .padding(bottom = Spacing.small),
                 )
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             }
 
             // ── Post list ────────────────────────────────────────────────────
@@ -211,25 +229,58 @@ fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
                     )
                 }
             } else {
-                items(
-                    items = posts,
-                    key   = { it.id },
-                ) { row ->
+                items(items = posts, key = { it.id }) { row ->
                     NoteCard(row = row)
                 }
             }
 
             item { Spacer(Modifier.height(Spacing.xl)) }
         }
+
+        // ── Own top bar overlay ───────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .background(Black)
+                .statusBarsPadding()
+                .height(Sizing.topBarHeight)
+                .padding(horizontal = Spacing.small),
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            TextButton(onClick = { showEditProfile = true }) {
+                Text(
+                    text     = "Edit Profile",
+                    color    = Cyan,
+                    fontSize = 14.sp,
+                )
+            }
+            IconButton(onClick = { showSettings = true }) {
+                Icon(
+                    imageVector        = Icons.Filled.Settings,
+                    contentDescription = "Settings",
+                    tint               = Color.White,
+                    modifier           = Modifier.size(22.dp),
+                )
+            }
+        }
+    }
+
+    // ── Overlays ──────────────────────────────────────────────────────────────
+    if (showSettings) {
+        SettingsScreen(onDismiss = { showSettings = false })
+    }
+    if (showEditProfile) {
+        EditProfileScreen(
+            viewModel = viewModel,
+            onDismiss = { showEditProfile = false },
+        )
     }
 }
 
 // ── Private sub-composables ───────────────────────────────────────────────────
 
-/**
- * Circular avatar: IdentIcon as background fallback,
- * AsyncImage overlay when a picture URL is available — same pattern as NoteCard.
- */
 @Composable
 private fun ProfileAvatar(
     pubkeyHex: String?,
@@ -238,10 +289,7 @@ private fun ProfileAvatar(
 ) {
     Box(modifier = modifier) {
         if (pubkeyHex != null) {
-            IdentIcon(
-                pubkey   = pubkeyHex,
-                modifier = Modifier.fillMaxSize(),
-            )
+            IdentIcon(pubkey = pubkeyHex, modifier = Modifier.fillMaxSize())
         } else {
             Box(modifier = Modifier.fillMaxSize().background(Color(0xFF333333)))
         }
@@ -260,9 +308,9 @@ private fun ProfileAvatar(
 private fun StatLabel(label: String, value: Int?) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text      = if (value != null) formatStatCount(value) else "—",
-            color     = Color.White,
-            fontSize  = 13.sp,
+            text       = if (value != null) formatStatCount(value) else "—",
+            color      = Color.White,
+            fontSize   = 13.sp,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.size(4.dp))
