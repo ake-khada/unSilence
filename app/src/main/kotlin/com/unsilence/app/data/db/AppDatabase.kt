@@ -4,6 +4,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelaySetDao
@@ -34,4 +35,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun reactionDao(): ReactionDao
     abstract fun followDao(): FollowDao
     abstract fun relayListDao(): RelayListDao
+    abstract fun notificationsDao(): NotificationsDao
 }

@@ -327,6 +327,30 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "Fetching thread for $eventId from ${relayUrls.size} relay(s)")
     }
 
+    /**
+     * Request notification events for [userPubkey] from all currently connected relays.
+     * Sends a #p-tagged filter for kinds 1 (replies/mentions), 6 (reposts), 7 (reactions),
+     * and 9735 (zap receipts). Results flow through EventProcessor → Room → NotificationsDao.
+     */
+    fun fetchNotifications(userPubkey: String) {
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("notifs-${System.currentTimeMillis()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(9735))
+                })
+                put("#p",    buildJsonArray { add(JsonPrimitive(userPubkey)) })
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+        connections.values.forEach { it.send(req) }
+        Log.d(TAG, "Fetching notifications for $userPubkey from ${connections.size} relay(s)")
+    }
+
     fun disconnectAll() {
         connections.values.forEach { it.close() }
         connections.clear()
