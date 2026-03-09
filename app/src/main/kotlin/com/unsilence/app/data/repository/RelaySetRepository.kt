@@ -6,6 +6,7 @@ import com.unsilence.app.domain.model.FeedFilter
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,6 +47,21 @@ class RelaySetRepository @Inject constructor(
     suspend fun defaultSet(): RelaySetEntity? = relaySetDao.defaultSet()
 
     suspend fun getById(id: String): RelaySetEntity? = relaySetDao.getById(id)
+
+    /** Creates a new user-defined relay set and persists it. */
+    suspend fun createUserSet(name: String, relayUrls: List<String>) {
+        val entity = RelaySetEntity(
+            id        = UUID.randomUUID().toString(),
+            name      = name,
+            relayUrls = Json.encodeToString(relayUrls),
+            isDefault = false,
+            isBuiltIn = false,
+        )
+        relaySetDao.upsert(entity)
+    }
+
+    /** Deletes a user-created relay set. Built-in sets are protected by the DAO. */
+    suspend fun deleteUserSet(id: String) = relaySetDao.deleteUserSet(id)
 
     /** Decodes the relay URL list from JSON. */
     fun decodeUrls(entity: RelaySetEntity): List<String> =
