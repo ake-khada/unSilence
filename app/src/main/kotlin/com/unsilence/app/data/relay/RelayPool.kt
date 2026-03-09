@@ -240,6 +240,40 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "Published event to ${connections.size} relay(s)")
     }
 
+    /**
+     * Fetch a thread: the event itself (by ID) and all direct replies (#e tag filter).
+     * Two REQs are sent so both arrive even if the relay processes them separately.
+     */
+    fun fetchThread(relayUrls: List<String>, eventId: String) {
+        val ts = System.currentTimeMillis()
+
+        val eventReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("thread-event-$ts"))
+            add(buildJsonObject {
+                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+            })
+        }.toString()
+
+        val repliesReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("thread-replies-$ts"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        for (url in relayUrls) {
+            connections[url]?.let { conn ->
+                conn.send(eventReq)
+                conn.send(repliesReq)
+            }
+        }
+        Log.d(TAG, "Fetching thread for $eventId from ${relayUrls.size} relay(s)")
+    }
+
     fun disconnectAll() {
         connections.values.forEach { it.close() }
         connections.clear()

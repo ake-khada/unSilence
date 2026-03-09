@@ -28,6 +28,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
+    onNoteClick: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -72,7 +73,7 @@ fun FeedScreen(
                         items = state.events,
                         key   = { it.id },
                     ) { row ->
-                        NoteCard(row = row)
+                        NoteCard(row = row, onNoteClick = onNoteClick)
                     }
                 }
 
