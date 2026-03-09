@@ -8,8 +8,7 @@ import com.unsilence.app.ui.navigation.AppNavigation
 fun RootScreen(viewModel: RootViewModel = hiltViewModel()) {
     if (viewModel.isLoggedIn) {
         AppNavigation(
-            keyManager = viewModel.keyManager,
-            onLogout   = viewModel::logout,
+            onLogout = viewModel::logout,
         )
     } else {
         OnboardingScreen(

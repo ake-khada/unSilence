@@ -57,7 +57,10 @@ private val BANNER_HEIGHT       = 150.dp
 private val PROFILE_AVATAR_SIZE = 85.dp
 
 @Composable
-fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
+fun ProfileScreen(
+    onLogout: () -> Unit = {},
+    viewModel: ProfileViewModel = hiltViewModel(),
+) {
     val user      by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts     by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val clipboard  = LocalClipboardManager.current
@@ -269,7 +272,10 @@ fun ProfileScreen(viewModel: ProfileViewModel = hiltViewModel()) {
 
     // ── Overlays ──────────────────────────────────────────────────────────────
     if (showSettings) {
-        SettingsScreen(onDismiss = { showSettings = false })
+        SettingsScreen(
+            onDismiss = { showSettings = false },
+            onLogout  = onLogout,
+        )
     }
     if (showEditProfile) {
         EditProfileScreen(
