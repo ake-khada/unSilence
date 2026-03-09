@@ -30,6 +30,7 @@ data class FeedRow(
     // ── Engagement ─────────────────────────────────────────
     @ColumnInfo(name = "reaction_count")        val reactionCount: Int,
     @ColumnInfo(name = "reply_count")           val replyCount: Int,
+    @ColumnInfo(name = "repost_count")          val repostCount: Int,
 )
 
 @Dao
@@ -40,7 +41,7 @@ interface EventDao {
 
     /**
      * Feed query: events from [relayUrls], filtered by kind, content type (notes only by default),
-     * with reaction/reply counts, ordered newest-first.
+     * with reaction/reply/repost counts, ordered newest-first.
      *
      * NOTES_ONLY = reply_to_id IS NULL AND root_id IS NULL.
      * Engagement filter applied via HAVING.
@@ -62,12 +63,14 @@ interface EventDao {
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
-            COUNT(DISTINCT r.event_id)              AS reaction_count,
-            COUNT(DISTINCT rep.id)                  AS reply_count
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey        = e.pubkey
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id  = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
         WHERE e.relay_url IN (:relayUrls)
           AND e.kind      IN (:kinds)
           AND e.reply_to_id IS NULL
@@ -85,8 +88,6 @@ interface EventDao {
 
     /**
      * Following feed: top-level kind 1/6/20/21 events from followed pubkeys only.
-     * Uses an INNER JOIN on the follows table — no relay URL filter (events may have
-     * arrived from any relay) and no minReactions threshold (see everything from follows).
      */
     @Query("""
         SELECT
@@ -106,12 +107,14 @@ interface EventDao {
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count
         FROM events e
         INNER JOIN follows     f   ON f.pubkey          = e.pubkey
         LEFT JOIN  users       u   ON u.pubkey           = e.pubkey
         LEFT JOIN  reactions   r   ON r.target_event_id  = e.id
         LEFT JOIN  events      rep ON rep.reply_to_id    = e.id
+        LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
         WHERE e.kind        IN (1, 6, 20, 21)
           AND e.reply_to_id IS NULL
           AND e.root_id     IS NULL
@@ -140,15 +143,16 @@ interface EventDao {
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey         = e.pubkey
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
         LEFT JOIN events    rep ON rep.reply_to_id   = e.id
-        WHERE e.pubkey        = :pubkey
-          AND e.kind          = 1
-          AND e.reply_to_id  IS NULL
-          AND e.root_id      IS NULL
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
+        WHERE e.pubkey = :pubkey
+          AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL)
+               OR e.kind = 6)
         GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT 100
@@ -162,16 +166,36 @@ interface EventDao {
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             COUNT(DISTINCT r.event_id) AS reaction_count,
-            COUNT(DISTINCT rep.id)     AS reply_count
+            COUNT(DISTINCT rep.id)     AS reply_count,
+            COUNT(DISTINCT rp.id)      AS repost_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey        = e.pubkey
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id  = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
         WHERE e.id = :eventId OR e.reply_to_id = :eventId OR e.root_id = :eventId
         GROUP BY e.id
         ORDER BY e.created_at ASC
     """)
     fun threadFlow(eventId: String): Flow<List<FeedRow>>
+
+    /** Fetch a single event by ID (used to reconstruct JSON for reposts). */
+    @Query("SELECT * FROM events WHERE id = :id LIMIT 1")
+    suspend fun getEventById(id: String): EventEntity?
+
+    /**
+     * All event IDs that [pubkey] has reacted to.
+     * Room re-emits whenever the reactions table changes — drives the heart Cyan state.
+     */
+    @Query("SELECT target_event_id FROM reactions WHERE pubkey = :pubkey")
+    fun reactedEventIds(pubkey: String): Flow<List<String>>
+
+    /**
+     * All event IDs that [pubkey] has reposted (kind 6 events with root_id = original).
+     * Room re-emits whenever the events table changes.
+     */
+    @Query("SELECT root_id FROM events WHERE kind = 6 AND pubkey = :pubkey AND root_id IS NOT NULL")
+    fun repostedEventIds(pubkey: String): Flow<List<String>>
 
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int

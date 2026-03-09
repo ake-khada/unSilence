@@ -29,9 +29,13 @@ import com.unsilence.app.ui.theme.TextSecondary
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
     onNoteClick: (String) -> Unit = {},
+    onQuote: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val state         by viewModel.uiState.collectAsStateWithLifecycle()
+    val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
+    val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     LaunchedEffect(scrollToTopTrigger) {
@@ -73,7 +77,15 @@ fun FeedScreen(
                         items = state.events,
                         key   = { it.id },
                     ) { row ->
-                        NoteCard(row = row, onNoteClick = onNoteClick)
+                        NoteCard(
+                            row         = row,
+                            onNoteClick = onNoteClick,
+                            hasReacted  = row.id in reactedIds,
+                            hasReposted = row.id in repostedIds,
+                            onReact     = { actionsViewModel.react(row.id, row.pubkey) },
+                            onRepost    = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                            onQuote     = onQuote,
+                        )
                     }
                 }
 
