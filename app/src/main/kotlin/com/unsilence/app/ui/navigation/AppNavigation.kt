@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
+import com.unsilence.app.ui.thread.ThreadScreen
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -90,6 +91,7 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
     var barsVisible        by remember { mutableStateOf(true) }
     var showCompose        by remember { mutableStateOf(false) }
     var showFeedDropdown   by remember { mutableStateOf(false) }
+    var threadEventId      by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger by remember { mutableIntStateOf(0) }
 
     // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
@@ -158,7 +160,10 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
                     .padding(top = contentTopPadding, bottom = contentBottomPadding),
             ) {
                 when (selectedTab) {
-                    0    -> FeedScreen(scrollToTopTrigger = scrollToTopTrigger)
+                    0    -> FeedScreen(
+                        scrollToTopTrigger = scrollToTopTrigger,
+                        onNoteClick        = { eventId -> threadEventId = eventId },
+                    )
                     3    -> ProfileScreen()
                     else -> PlaceholderScreen()
                 }
@@ -278,6 +283,14 @@ fun AppNavigation(keyManager: KeyManager, onLogout: () -> Unit) {
             // ── Compose overlay ───────────────────────────────────────────────
             if (showCompose) {
                 ComposeScreen(onDismiss = { showCompose = false })
+            }
+
+            // ── Thread overlay ────────────────────────────────────────────────
+            threadEventId?.let { eventId ->
+                ThreadScreen(
+                    eventId   = eventId,
+                    onDismiss = { threadEventId = null },
+                )
             }
         }
     }
