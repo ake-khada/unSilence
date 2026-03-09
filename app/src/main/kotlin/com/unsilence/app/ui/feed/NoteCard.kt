@@ -40,7 +40,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.graphics.lerp
 import coil3.compose.AsyncImage
+import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.Cyan
@@ -130,16 +139,19 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
 
         // ── First inline image only; overflow count shown as muted label ───────
         imageUrls.firstOrNull()?.let { url ->
-            AsyncImage(
+            SubcomposeAsyncImage(
                 model              = url,
                 contentDescription = null,
                 contentScale       = ContentScale.FillWidth,
+                loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
                 modifier           = Modifier
                     .fillMaxWidth()
+                    // Reserve space before the image loads — prevents cards below from
+                    // jumping up when text renders before the image arrives.
+                    .defaultMinSize(minHeight = 200.dp)
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (imageUrls.size > 1) 2.dp else Spacing.small)
-                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                    .background(MediaPlaceholder),
+                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
             )
         }
         if (imageUrls.size > 1) {
@@ -194,6 +206,25 @@ fun NoteCard(row: FeedRow, modifier: Modifier = Modifier) {
 }
 
 // ── Sub-composables ────────────────────────────────────────────────────────────
+
+/** Animated gradient placeholder shown while an image is loading. */
+@Composable
+private fun ShimmerBox(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val progress by transition.animateFloat(
+        initialValue  = 0f,
+        targetValue   = 1f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(durationMillis = 800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "shimmer-progress",
+    )
+    Box(modifier = modifier
+        .height(200.dp)
+        .background(lerp(Color(0xFF1A1A1A), Color(0xFF2A2A2A), progress))
+    )
+}
 
 /**
  * IdentIcon always renders as the background/fallback.
