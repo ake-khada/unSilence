@@ -6,6 +6,7 @@ import com.unsilence.app.data.db.AppDatabase
 import com.unsilence.app.data.db.MIGRATION_1_2
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelaySetDao
@@ -34,4 +35,5 @@ object DatabaseModule {
     @Provides fun provideReactionDao(db: AppDatabase): ReactionDao = db.reactionDao()
     @Provides fun provideFollowDao(db: AppDatabase): FollowDao = db.followDao()
     @Provides fun provideRelayListDao(db: AppDatabase): RelayListDao = db.relayListDao()
+    @Provides fun provideNotificationsDao(db: AppDatabase): NotificationsDao = db.notificationsDao()
 }
