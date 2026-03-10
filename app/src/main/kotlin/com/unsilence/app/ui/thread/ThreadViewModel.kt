@@ -64,7 +64,7 @@ class ThreadViewModel @Inject constructor(
                 .collect { rows ->
                     val focusedId = eventIdFlow.value ?: return@collect
                     val focused = rows.firstOrNull { it.id == focusedId }
-                    val replies = rows.filter { it.id != focusedId }
+                    val replies = rows.filter { it.id != focusedId && it.kind == 1 }
                     _uiState.value = ThreadUiState(
                         focusedNote = focused,
                         replies     = replies,
