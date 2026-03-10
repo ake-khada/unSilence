@@ -6,7 +6,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 /**
  * Room schema migrations.
  *
- * v1 → v2: Add follows and relay_list_metadata tables (Sprint 9 / NIP-65 outbox routing).
+ * v1 → v2: Add follows and relay_list_metadata tables (NIP-65 outbox routing).
  *           No existing table is modified — pure additions, so zero data loss.
  */
 val MIGRATION_1_2 = object : Migration(1, 2) {

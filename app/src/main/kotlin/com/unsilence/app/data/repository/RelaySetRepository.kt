@@ -15,12 +15,16 @@ val GLOBAL_RELAY_URLS = listOf(
     "wss://nos.lol",
     "wss://nostr.mom",
     "wss://relay.nostr.net",
+    "wss://relay.ditto.pub",
+    "wss://relay.primal.net",
 )
 
 @Singleton
 class RelaySetRepository @Inject constructor(
     private val relaySetDao: RelaySetDao,
 ) {
+    private val lenientJson = Json { ignoreUnknownKeys = true }
+
     val allSetsFlow: Flow<List<RelaySetEntity>> = relaySetDao.allSetsFlow()
 
     /**
@@ -40,7 +44,7 @@ class RelaySetRepository @Inject constructor(
                 filterJson = Json.encodeToString(FeedFilter.globalDefault),
             )
         )
-        // Always sync the filter to the current compiled default (picks up minReactions changes).
+        // Always sync the filter to the current compiled default.
         relaySetDao.updateFilterJson("global", Json.encodeToString(FeedFilter.globalDefault))
     }
 
@@ -67,7 +71,7 @@ class RelaySetRepository @Inject constructor(
     fun decodeUrls(entity: RelaySetEntity): List<String> =
         Json.decodeFromString(entity.relayUrls)
 
-    /** Decodes the FeedFilter stored on this relay set. */
+    /** Decodes the FeedFilter stored on this relay set (lenient — survives field removals). */
     fun decodeFilter(entity: RelaySetEntity): FeedFilter =
-        entity.filterJson?.let { Json.decodeFromString(it) } ?: FeedFilter()
+        entity.filterJson?.let { runCatching { lenientJson.decodeFromString<FeedFilter>(it) }.getOrNull() } ?: FeedFilter()
 }

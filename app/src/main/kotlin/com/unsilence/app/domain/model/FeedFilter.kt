@@ -2,21 +2,18 @@ package com.unsilence.app.domain.model
 
 import kotlinx.serialization.Serializable
 
-enum class ContentType { ALL, NOTES_ONLY, REPLIES_ONLY }
-
 @Serializable
 data class FeedFilter(
-    val contentType: ContentType = ContentType.NOTES_ONLY,
-    val hideSensitive: Boolean = false,
     val showKind1: Boolean = true,
     val showKind6: Boolean = true,
     val showKind20: Boolean = true,
     val showKind21: Boolean = true,
     val showKind30023: Boolean = true,
-    val minReactions: Int = 0,
-    val minZapAmount: Long = 0,
-    val minReplies: Int = 0,
-    val relaySetId: String? = null,
+    val sinceHours: Int? = null,
+    val requireReposts: Boolean = false,
+    val requireReactions: Boolean = false,
+    val requireReplies: Boolean = false,
+    val requireZaps: Boolean = false,
 ) {
     /** Kinds enabled by this filter. */
     val enabledKinds: List<Int> get() = buildList {
@@ -27,17 +24,13 @@ data class FeedFilter(
         if (showKind30023) add(30023)
     }
 
-    /** True when any field differs from the per-relay-set defaults (used for the filter dot). */
+    /** True when any field differs from the defaults (used for the filter dot). */
     val isNonDefault: Boolean get() =
-        contentType   != ContentType.NOTES_ONLY ||
-        hideSensitive != false ||
-        !showKind1    || !showKind6 || !showKind20 || !showKind21 || !showKind30023 ||
-        minReactions  != 0 ||
-        minZapAmount  != 0L ||
-        minReplies    != 0
+        sinceHours != null ||
+        requireReposts || requireReactions || requireReplies || requireZaps ||
+        !showKind1 || !showKind6 || !showKind20 || !showKind21 || !showKind30023
 
     companion object {
-        /** No reaction filter — show everything. WoT spam filtering (NIP-85) will replace this. */
-        val globalDefault = FeedFilter(minReactions = 0)
+        val globalDefault = FeedFilter()
     }
 }
