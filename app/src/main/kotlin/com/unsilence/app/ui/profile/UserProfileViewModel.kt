@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -24,6 +25,7 @@ import javax.inject.Inject
 class UserProfileViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val eventRepository: EventRepository,
+    private val relayPool: RelayPool,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -49,6 +51,7 @@ class UserProfileViewModel @Inject constructor(
         _pubkeyHex.value = pubkey
         viewModelScope.launch {
             userRepository.fetchMissingProfiles(listOf(pubkey))
+            relayPool.fetchUserPosts(pubkey)
         }
     }
 }

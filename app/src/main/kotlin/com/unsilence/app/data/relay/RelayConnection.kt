@@ -28,6 +28,10 @@ class RelayConnection(
     private var ws: WebSocket? = null
     private val connected = AtomicBoolean(false)
 
+    /** True while the WebSocket handshake has completed and onClosed/onFailure has not fired. */
+    var isConnected: Boolean = false
+        private set
+
     fun connect() {
         if (connected.getAndSet(true)) return
         val request = Request.Builder().url(url).build()
@@ -46,6 +50,7 @@ class RelayConnection(
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            isConnected = true
             Log.d(TAG, "Connected: $url")
         }
 
@@ -55,12 +60,14 @@ class RelayConnection(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.w(TAG, "Failure on $url: ${t.message}")
+            isConnected = false
             connected.set(false)
             _messages.close()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "Closed $url: $code $reason")
+            isConnected = false
             connected.set(false)
             _messages.close()
         }
