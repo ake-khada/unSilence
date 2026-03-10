@@ -169,7 +169,7 @@ fun NoteCard(
 
     val videoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
 
-    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
+    Column(modifier = modifier.fillMaxWidth()) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
         if (row.kind == 6) {
@@ -271,6 +271,7 @@ fun NoteCard(
                 overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier   = Modifier
                     .fillMaxWidth()
+                    .clickable { onNoteClick(row.id) }
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (isLong) 2.dp else Spacing.small),
             )
@@ -296,6 +297,7 @@ fun NoteCard(
                 loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
                 modifier           = Modifier
                     .fillMaxWidth()
+                    .clickable { onNoteClick(row.id) }
                     // Reserve space before the image loads — prevents cards below from
                     // jumping up when text renders before the image arrives.
                     .defaultMinSize(minHeight = 200.dp)

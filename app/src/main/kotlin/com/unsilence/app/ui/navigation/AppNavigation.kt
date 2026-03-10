@@ -284,7 +284,10 @@ fun AppNavigation(onLogout: () -> Unit) {
             ) {
                 TABS.forEachIndexed { index, tab ->
                     IconButton(onClick = {
-                        if (index == 0 && selectedTab == 0) scrollToTopTrigger++
+                        if (index == 0 && selectedTab == 0) {
+                            scrollToTopTrigger++
+                            feedViewModel.clearNewTopPost()
+                        }
                         selectedTab = index
                     }) {
                         Box {
