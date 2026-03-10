@@ -11,21 +11,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 
 /**
- * Pubkey-derived identicon.
- *
- * The `identikon-android` library (io.github.thibseisel.identikon:identikon-android:1.0.0)
- * is declared as a dependency and ready to use. Once you've confirmed the Compose API
- * (e.g. `Identikon.fromBytes()` + `DrawScope.drawIdentikon()`), replace the Canvas
- * implementation below with the library call.
- *
- * Current fallback — Compose Canvas implementation:
+ * Pubkey-derived identicon — Compose Canvas implementation.
  * - Hue:     first byte of pubkey hex → 0–360°
  * - Pattern: 5×5 symmetric grid (mirrored left↔right) derived from pubkey bytes
  *
  * Each pubkey produces a unique color AND unique pattern, making
  * users visually distinguishable even in dense notification stacks.
- *
- * TODO: swap body for identikon library call once API is confirmed.
  */
 @Composable
 fun IdentIcon(

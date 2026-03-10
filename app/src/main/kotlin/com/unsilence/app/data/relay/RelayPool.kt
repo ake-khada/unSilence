@@ -39,8 +39,8 @@ class RelayPool @Inject constructor(
             if (connections.containsKey(url)) continue
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
-            conn.connect()
             scope.launch {
+                conn.connect()
                 subscribeAfterConnect(conn)
                 listenForEvents(conn)
             }

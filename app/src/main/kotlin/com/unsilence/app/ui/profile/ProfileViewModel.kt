@@ -47,7 +47,6 @@ class ProfileViewModel @Inject constructor(
     val postsFlow: Flow<List<FeedRow>> =
         if (pubkeyHex != null) eventRepository.userPostsFlow(pubkeyHex) else emptyFlow()
 
-    // Following / followers counts are Sprint 5 (NIP-65 outbox + NIP-45 COUNT).
     val following: Int? = null
     val followers: Int? = null
 
