@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
@@ -62,10 +64,12 @@ fun CreateRelaySetScreen(
         Column(modifier = Modifier.fillMaxSize()) {
 
             // ── Top bar ───────────────────────────────────────────────────────
+            Box(modifier = Modifier.fillMaxWidth().statusBarsPadding()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                    .height(Sizing.topBarHeight)
+                    .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onDismiss) {
@@ -95,6 +99,7 @@ fun CreateRelaySetScreen(
                     )
                 }
             }
+            } // end statusBarsPadding Box
 
             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
