@@ -46,11 +46,11 @@ interface EventDao {
     suspend fun insertOrIgnoreBatch(events: List<EventEntity>)
 
     /**
-     * Feed query: events from [relayUrls], filtered by kind, content type (notes only by default),
+     * Feed query: events from [relayUrls], filtered by kind and time window,
      * with reaction/reply/repost counts, ordered newest-first.
      *
-     * NOTES_ONLY = reply_to_id IS NULL AND root_id IS NULL.
-     * Engagement filter applied via HAVING.
+     * Top-level posts only: reply_to_id IS NULL AND root_id IS NULL.
+     * Engagement filters applied via HAVING — each is opt-in (0 = skip check, 1 = require ≥ 1).
      */
     @Query("""
         SELECT
@@ -84,15 +84,24 @@ interface EventDao {
           AND e.kind      IN (:kinds)
           AND e.reply_to_id IS NULL
           AND e.root_id     IS NULL
+          AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
         GROUP BY e.id
-        HAVING COUNT(DISTINCT r.event_id) >= :minReactions
+        HAVING ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
+            OR (:requireReposts   = 1 AND COUNT(DISTINCT rp.id)      >= 1)
+            OR (:requireReactions = 1 AND COUNT(DISTINCT r.event_id) >= 1)
+            OR (:requireReplies   = 1 AND COUNT(DISTINCT rep.id)     >= 1)
+            OR (:requireZaps      = 1 AND COUNT(DISTINCT z.id)       >= 1))
         ORDER BY e.created_at DESC
         LIMIT 300
     """)
     fun feedFlow(
         relayUrls: List<String>,
         kinds: List<Int>,
-        minReactions: Int,
+        sinceTimestamp: Long,
+        requireReposts: Int,
+        requireReactions: Int,
+        requireReplies: Int,
+        requireZaps: Int,
     ): Flow<List<FeedRow>>
 
     /**

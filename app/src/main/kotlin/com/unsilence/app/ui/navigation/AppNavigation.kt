@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
+import com.unsilence.app.ui.feed.FilterScreen
 import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.search.SearchScreen
@@ -94,6 +95,7 @@ fun AppNavigation(onLogout: () -> Unit) {
     var barsVisible          by remember { mutableStateOf(true) }
     var showCompose          by remember { mutableStateOf(false) }
     var showFeedDropdown     by remember { mutableStateOf(false) }
+    var showFilter           by remember { mutableStateOf(false) }
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var threadEventId        by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
@@ -108,8 +110,9 @@ fun AppNavigation(onLogout: () -> Unit) {
 
     // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
     val feedViewModel: FeedViewModel = hiltViewModel()
-    val feedType  by feedViewModel.feedType.collectAsStateWithLifecycle()
-    val userSets  by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
+    val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
+    val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
+    val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
 
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
@@ -254,8 +257,10 @@ fun AppNavigation(onLogout: () -> Unit) {
                         Icon(
                             imageVector        = Icons.Filled.Tune,
                             contentDescription = "Filter",
-                            tint               = NavUnselected,
-                            modifier           = Modifier.size(Sizing.navIcon),
+                            tint               = if (currentFilter.isNonDefault) Cyan else NavUnselected,
+                            modifier           = Modifier
+                                .size(Sizing.navIcon)
+                                .clickable { showFilter = true },
                         )
                         Icon(
                             imageVector        = Icons.Filled.Edit,
@@ -308,6 +313,15 @@ fun AppNavigation(onLogout: () -> Unit) {
                         }
                     }
                 }
+            }
+
+            // ── Filter overlay ────────────────────────────────────────────────
+            if (showFilter) {
+                FilterScreen(
+                    currentFilter = currentFilter,
+                    onApply       = { filter -> feedViewModel.updateFilter(filter) },
+                    onDismiss     = { showFilter = false },
+                )
             }
 
             // ── Create relay set overlay ──────────────────────────────────────

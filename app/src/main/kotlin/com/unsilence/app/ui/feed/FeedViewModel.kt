@@ -15,15 +15,19 @@ import kotlinx.serialization.json.jsonPrimitive
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.domain.model.FeedFilter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -57,6 +61,11 @@ class FeedViewModel @Inject constructor(
     /** All relay sets (built-in + user) for the dropdown. */
     val userSetsFlow: StateFlow<List<RelaySetEntity>> = relaySetRepository.allSetsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _filter = MutableStateFlow(FeedFilter())
+    val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
+
+    fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
     /**
      * True when the top-of-feed item has a newer created_at than the previous emission.
@@ -103,19 +112,22 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch {
             relaySetRepository.seedDefaults()
 
-            val set    = relaySetRepository.defaultSet() ?: return@launch
-            val urls   = relaySetRepository.decodeUrls(set)
-            val filter = relaySetRepository.decodeFilter(set)
+            val set  = relaySetRepository.defaultSet() ?: return@launch
+            val urls = relaySetRepository.decodeUrls(set)
 
             relayPool.connect(urls)
 
-            _feedType
-                .flatMapLatest { type ->
+            combine(_feedType, _filter) { type, filter -> type to filter }
+                .flatMapLatest { (type, filter) ->
                     // Reset all state on feed switch so the new feed starts clean.
                     newestTimestamp     = 0L
                     hasNewTopPost       = false
                     lastOldestTimestamp = 0L
                     _uiState.value = _uiState.value.copy(loading = true)
+                    viewModelScope.launch {
+                        delay(3_000)
+                        if (_uiState.value.loading) _uiState.update { it.copy(loading = false) }
+                    }
                     when (type) {
                         is FeedType.Global    -> {
                             currentRelayUrls = urls
@@ -129,10 +141,9 @@ class FeedViewModel @Inject constructor(
                         is FeedType.RelaySet  -> {
                             val setEntity = relaySetRepository.getById(type.id)
                             val setUrls   = setEntity?.let { relaySetRepository.decodeUrls(it) } ?: urls
-                            val setFilter = setEntity?.let { relaySetRepository.decodeFilter(it) } ?: filter
                             currentRelayUrls = setUrls
                             relayPool.connect(setUrls)
-                            eventRepository.feedFlow(setUrls, setFilter)
+                            eventRepository.feedFlow(setUrls, filter)
                         }
                     }
                 }

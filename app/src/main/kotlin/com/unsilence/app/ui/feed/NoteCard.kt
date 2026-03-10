@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
@@ -70,6 +72,10 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.ui.common.IdentIcon
+import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -102,6 +108,23 @@ private val VIDEO_URL_REGEX = Regex(
 
 // Matches any remaining http/https URL (applied after stripping image + video URLs).
 private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+
+// Matches nostr: URIs (bech32-encoded entities).
+private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
+
+private sealed class NostrRef {
+    data class EventRef(val eventId: String) : NostrRef()
+    data class ProfileRef(val pubkeyHex: String) : NostrRef()
+}
+
+private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
+    when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
+        is NEvent -> NostrRef.EventRef(entity.hex)
+        is NNote  -> NostrRef.EventRef(entity.hex)
+        is NPub   -> NostrRef.ProfileRef(entity.hex)
+        else      -> null
+    }
+}.getOrNull()
 
 private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".mp4", ignoreCase = true) ||
@@ -142,13 +165,19 @@ fun NoteCard(
     val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
     val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
 
+    // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
+    val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
+        .mapNotNull { decodeNostrRef(it.value) }
+        .toList()
+    val contentNoNostr = NOSTR_URI_REGEX.replace(effectiveContent, "").trim()
+
     // Strip media URLs in layers so each regex only acts on its own subset.
-    val imageUrls    = IMAGE_URL_REGEX.findAll(effectiveContent).map { it.value }.toList()
-    val afterImages  = IMAGE_URL_REGEX.replace(effectiveContent, "")
+    val imageUrls      = IMAGE_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
+    val afterImages    = IMAGE_URL_REGEX.replace(contentNoNostr, "")
     val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
-    val afterVideos  = VIDEO_URL_REGEX.replace(afterImages, "")
-    val linkUrls     = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
-    val textContent  = LINK_URL_REGEX.replace(afterVideos, "").trim()
+    val afterVideos    = VIDEO_URL_REGEX.replace(afterImages, "")
+    val linkUrls       = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
+    val textContent    = LINK_URL_REGEX.replace(afterVideos, "").trim()
 
     // Parse imeta tags for video content (NIP-92).
     // Each imeta tag is ["imeta", "key value", ...]; we look for m=video/* + url.
@@ -169,7 +198,7 @@ fun NoteCard(
 
     val videoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
         if (row.kind == 6) {
@@ -271,7 +300,6 @@ fun NoteCard(
                 overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier   = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(row.id) }
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (isLong) 2.dp else Spacing.small),
             )
@@ -297,7 +325,6 @@ fun NoteCard(
                 loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
                 modifier           = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(row.id) }
                     // Reserve space before the image loads — prevents cards below from
                     // jumping up when text renders before the image arrives.
                     .defaultMinSize(minHeight = 200.dp)
@@ -340,6 +367,32 @@ fun NoteCard(
                     .padding(bottom = Spacing.small),
             ) {
                 linkUrls.forEach { url -> LinkChip(url = url) }
+            }
+        }
+
+        // ── NIP-19 embedded quotes ─────────────────────────────────────────────
+        nostrRefs.filterIsInstance<NostrRef.EventRef>().forEach { ref ->
+            EmbeddedQuoteCard(
+                eventId     = ref.eventId,
+                onNoteClick = onNoteClick,
+                modifier    = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            )
+        }
+
+        // ── NIP-19 mention chips ───────────────────────────────────────────────
+        val profileRefs = nostrRefs.filterIsInstance<NostrRef.ProfileRef>()
+        if (profileRefs.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                profileRefs.forEach { ref ->
+                    MentionChip(pubkeyHex = ref.pubkeyHex, onAuthorClick = onAuthorClick)
+                }
             }
         }
 
@@ -600,6 +653,61 @@ private fun VideoPlayerScreen(url: String, onDismiss: () -> Unit) {
                 )
             }
         }
+    }
+}
+
+/** Tappable inline card for a quoted nostr event. Opens the thread on tap. */
+@Composable
+private fun EmbeddedQuoteCard(
+    eventId: String,
+    onNoteClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF111111))
+            .border(1.dp, Color(0xFF333333), RoundedCornerShape(8.dp))
+            .clickable { onNoteClick(eventId) }
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector        = Icons.Filled.FormatQuote,
+                contentDescription = null,
+                tint               = TextSecondary,
+                modifier           = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text     = "Quoted post",
+                color    = TextSecondary,
+                fontSize = 13.sp,
+            )
+        }
+    }
+}
+
+/** Inline mention chip for a nostr pubkey. Tapping opens the user's profile. */
+@Composable
+private fun MentionChip(
+    pubkeyHex: String,
+    onAuthorClick: (String) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color(0xFF1A1A1A))
+            .border(1.dp, Color(0xFF333333), RoundedCornerShape(20.dp))
+            .clickable { onAuthorClick(pubkeyHex) }
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text     = "@${pubkeyHex.take(8)}…",
+            color    = Cyan,
+            fontSize = 12.sp,
+        )
     }
 }
 
