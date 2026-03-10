@@ -138,7 +138,7 @@ class RelayPool @Inject constructor(
         subId.startsWith("older-")          ||
         subId.startsWith("thread-event-")   ||
         subId.startsWith("thread-replies-") ||
-        subId.startsWith("notifs-")
+        subId.startsWith("user-posts-")
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
@@ -410,6 +410,50 @@ class RelayPool @Inject constructor(
         }.toString()
         connections.values.forEach { it.send(req) }
         Log.d(TAG, "Fetching notifications for $userPubkey from ${connections.size} relay(s)")
+    }
+
+    /**
+     * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
+     * One-shot subscription — CLOSE is sent after EOSE.
+     */
+    fun fetchUserPosts(pubkey: String) {
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("user-posts-${System.currentTimeMillis()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
+                    add(JsonPrimitive(30023))
+                })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("limit", JsonPrimitive(50))
+            })
+        }.toString()
+        connections.values.forEach { it.send(req) }
+        Log.d(TAG, "Fetching user posts for $pubkey from ${connections.size} relay(s)")
+    }
+
+    /**
+     * Reconnect any relay that has dropped its WebSocket.
+     * Called when the app returns to the foreground.
+     */
+    fun reconnectAll() {
+        val dropped = connections.entries.filter { !it.value.isConnected }.map { it.key }
+        for (url in dropped) {
+            connections.remove(url)
+            val conn = RelayConnection(url, okHttpClient)
+            connections[url] = conn
+            conn.connect()
+            scope.launch {
+                subscribeAfterConnect(conn)
+                listenForEvents(conn)
+            }
+            Log.d(TAG, "Reconnected $url")
+        }
+        if (dropped.isNotEmpty()) Log.d(TAG, "Reconnected ${dropped.size} relay(s)")
     }
 
     fun disconnectAll() {

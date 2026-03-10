@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -79,16 +80,25 @@ class NoteActionsViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
         } ?: MutableStateFlow(emptySet())
 
+    /** Optimistic zap state: event IDs zapped in this session before Room confirms. */
+    private val _optimisticZaps = MutableStateFlow(emptySet<String>())
+
     /**
-     * Set of event IDs the current user has zapped (from stored kind 9734 events).
-     * Room re-emits on every events table write.
+     * Set of event IDs the current user has zapped.
+     * Combines Room-backed storage with in-session optimistic updates so the
+     * zap icon turns amber immediately after tapping, without waiting for the
+     * NWC round-trip.
      */
     val zappedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
-            eventRepository.zappedEventIds(pk)
-                .map { it.toHashSet() }
+            combine(
+                eventRepository.zappedEventIds(pk).map { it.toHashSet() },
+                _optimisticZaps,
+            ) { fromRoom, optimistic -> fromRoom + optimistic }
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
-        } ?: MutableStateFlow(emptySet())
+        } ?: _optimisticZaps
+            .map { it.toSet() }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     // ── Public actions ────────────────────────────────────────────────────────
 
@@ -163,6 +173,8 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     fun zap(eventId: String, eventPubkey: String, relayUrl: String, amountSats: Long) {
+        // Optimistic update: icon turns amber immediately, before NWC confirms.
+        _optimisticZaps.value = _optimisticZaps.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
             zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
         }

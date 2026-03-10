@@ -70,6 +70,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.ui.common.IdentIcon
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -144,10 +145,29 @@ fun NoteCard(
     // Strip media URLs in layers so each regex only acts on its own subset.
     val imageUrls    = IMAGE_URL_REGEX.findAll(effectiveContent).map { it.value }.toList()
     val afterImages  = IMAGE_URL_REGEX.replace(effectiveContent, "")
-    val videoUrls    = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
+    val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
     val afterVideos  = VIDEO_URL_REGEX.replace(afterImages, "")
     val linkUrls     = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
     val textContent  = LINK_URL_REGEX.replace(afterVideos, "").trim()
+
+    // Parse imeta tags for video content (NIP-92).
+    // Each imeta tag is ["imeta", "key value", ...]; we look for m=video/* + url.
+    val imetaVideoUrls: List<String> = runCatching {
+        NostrJson.parseToJsonElement(row.tags).jsonArray
+            .filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "imeta" }
+            .mapNotNull { tag ->
+                val kvMap = tag.jsonArray.drop(1).associate { entry ->
+                    val s = entry.jsonPrimitive.content
+                    val space = s.indexOf(' ')
+                    if (space < 0) s to "" else s.substring(0, space) to s.substring(space + 1)
+                }
+                val mime = kvMap["m"] ?: return@mapNotNull null
+                if (!mime.startsWith("video/")) return@mapNotNull null
+                kvMap["url"]
+            }
+    }.getOrElse { emptyList() }
+
+    val videoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
 
     Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
