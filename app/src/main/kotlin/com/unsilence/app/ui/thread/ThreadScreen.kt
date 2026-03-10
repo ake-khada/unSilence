@@ -38,8 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -123,7 +121,7 @@ fun ThreadScreen(
 
                 else -> {
                     LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        // Focused note with cyan left border
+                        // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
                                 NoteCard(
@@ -138,12 +136,6 @@ fun ThreadScreen(
                                     onQuote         = onQuote,
                                     onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
                                     onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                    modifier        = Modifier.drawBehind {
-                                        drawRect(
-                                            color = Cyan,
-                                            size  = Size(2.dp.toPx(), size.height),
-                                        )
-                                    },
                                 )
                             }
                         }
