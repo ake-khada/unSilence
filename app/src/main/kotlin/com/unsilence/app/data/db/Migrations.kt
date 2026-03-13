@@ -11,7 +11,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v2 → v3: Replace single-column indexes on events with composite indexes to fix
  *           feedFlow query performance ("Long db operation" x27 per session).
  *           Also adds index on reactions(target_event_id) if not already present.
+ * v3 → v4: Add (root_id, created_at) index for thread queries.
  */
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_events_root_id_created_at` ON `events` (`root_id`, `created_at`)")
+    }
+}
+
 val MIGRATION_2_3 = object : Migration(2, 3) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // Drop old single-column indexes replaced by composite ones below.

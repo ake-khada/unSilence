@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
@@ -96,9 +97,32 @@ class EventProcessor @Inject constructor(
 
     private val kindHandlers = mutableMapOf<Int, MutableList<KindHandler>>()
 
+    private var drainerJob: Job? = null
+
     init {
-        scope.launch { drainHot() }
-        scope.launch { drainCold() }
+        start()
+    }
+
+    /** Launch drainer coroutines under a child Job so they can be cancelled independently. */
+    fun start() {
+        if (drainerJob?.isActive == true) return
+        drainerJob = Job(scope.coroutineContext[Job])
+        val drainerScope = CoroutineScope(scope.coroutineContext + drainerJob!!)
+        drainerScope.launch { drainHot() }
+        drainerScope.launch { drainCold() }
+        Log.d(TAG, "Drainers started")
+    }
+
+    /** Cancel drainer coroutines and clear in-memory state. Called on logout. */
+    fun stop() {
+        drainerJob?.cancel()
+        drainerJob = null
+        seenIds.clear()
+        synchronized(kindHandlers) { kindHandlers.clear() }
+        // Drain and discard any buffered events
+        while (hotChannel.tryReceive().isSuccess) { /* discard */ }
+        while (coldChannel.tryReceive().isSuccess) { /* discard */ }
+        Log.d(TAG, "Stopped and cleared state")
     }
 
     @Synchronized

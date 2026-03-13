@@ -5,16 +5,34 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "RelayPool"
+
+/**
+ * Tracks a persistent subscription for replay after reconnection.
+ * [lastEventTime] is Unix seconds — updated when events arrive for this sub.
+ */
+data class PersistentSub(
+    val subId: String,
+    val reqJson: String,
+    val lastEventTime: Long = 0L,
+)
 
 /**
  * Manages multiple relay WebSocket connections for the global feed.
@@ -28,7 +46,44 @@ class RelayPool @Inject constructor(
     private val processor: EventProcessor,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val connections = mutableMapOf<String, RelayConnection>()
+    private val connections = ConcurrentHashMap<String, RelayConnection>()
+    private val persistentSubs = ConcurrentHashMap<String, PersistentSub>()
+    private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
+
+    private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
+    val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
+
+    /** Register a subscription as persistent so it's replayed after reconnect. */
+    private fun registerPersistentSub(subId: String, reqJson: String) {
+        persistentSubs[subId] = PersistentSub(subId = subId, reqJson = reqJson)
+    }
+
+    /**
+     * Extract the subscription ID from an EVENT message without JSON parsing.
+     * Format: ["EVENT","subscription-id",{...}]
+     */
+    private fun extractEventSubId(raw: String): String? {
+        val eventEnd = raw.indexOf("\"EVENT\"")
+        if (eventEnd < 0) return null
+        val quoteOpen = raw.indexOf('"', eventEnd + 7)
+        if (quoteOpen < 0) return null
+        val subStart = quoteOpen + 1
+        val quoteClose = raw.indexOf('"', subStart)
+        if (quoteClose < 0) return null
+        return raw.substring(subStart, quoteClose)
+    }
+
+    private fun updateConnectionStates() {
+        _connectionStates.value = connections.mapValues { it.value.state.value }
+    }
+
+    /** Cancel all persistent subscriptions and clear tracking. Called on logout. */
+    fun clearPersistentSubs() {
+        for ((subId, _) in persistentSubs) {
+            connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
+        }
+        persistentSubs.clear()
+    }
 
     /**
      * Open connections to [relayUrls] and subscribe to feed events.
@@ -50,9 +105,10 @@ class RelayPool @Inject constructor(
 
     private suspend fun subscribeAfterConnect(conn: RelayConnection) {
         // Feed subscription: kinds 1 (notes), 6 (reposts), 7 (reactions), 9735 (zap receipts), 20, 21, 30023 (articles)
+        val subId = "feed-${conn.url.hashCode()}"
         val feedReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("feed-${conn.url.hashCode()}"))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
@@ -67,6 +123,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
+        registerPersistentSub(subId, feedReq)
         conn.send(feedReq)
         Log.d(TAG, "Subscribed to ${conn.url}")
     }
@@ -80,6 +137,13 @@ class RelayPool @Inject constructor(
                 if (raw.startsWith("[\"EOSE\"")) {
                     handleEose(conn, raw)
                     return@consumeEach
+                }
+                // Update lastEventTime for persistent sub tracking
+                val subId = extractEventSubId(raw)
+                if (subId != null) {
+                    persistentSubs.computeIfPresent(subId) { _, sub ->
+                        sub.copy(lastEventTime = System.currentTimeMillis() / 1000L)
+                    }
                 }
                 processor.process(raw, conn.url)
             }
@@ -127,8 +191,8 @@ class RelayPool @Inject constructor(
      * Subscription IDs are prefixed to encode their lifecycle type.
      *
      *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, search-, older-,
-     *                                thread-event-, thread-replies-, notifs-
-     *  PERSISTENT (keep open):       feed-, follows-
+     *                                thread-event-, thread-replies-, user-posts-
+     *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
     private fun isOneShotSubscription(subId: String): Boolean =
         subId.startsWith("kind3-")          ||
@@ -189,6 +253,8 @@ class RelayPool @Inject constructor(
     fun connectForAuthors(relayUrl: String, authorPubkeys: List<String>) {
         if (authorPubkeys.isEmpty()) return
         val req = buildAuthorsReq(relayUrl, authorPubkeys)
+        val subId = "follows-${relayUrl.hashCode()}"
+        registerPersistentSub(subId, req)
         val existing = connections[relayUrl]
         if (existing != null) {
             existing.send(req)
@@ -394,9 +460,12 @@ class RelayPool @Inject constructor(
      * and 9735 (zap receipts). Results flow through EventProcessor → Room → NotificationsDao.
      */
     fun fetchNotifications(userPubkey: String) {
+        // Remove any previous notifs persistent sub before registering a new one
+        persistentSubs.keys.removeIf { it.startsWith("notifs-") }
+        val subId = "notifs-${System.currentTimeMillis()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("notifs-${System.currentTimeMillis()}"))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
@@ -408,6 +477,7 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(100))
             })
         }.toString()
+        registerPersistentSub(subId, req)
         connections.values.forEach { it.send(req) }
         Log.d(TAG, "Fetching notifications for $userPubkey from ${connections.size} relay(s)")
     }
@@ -439,21 +509,107 @@ class RelayPool @Inject constructor(
     /**
      * Reconnect any relay that has dropped its WebSocket.
      * Called when the app returns to the foreground.
+     * Creates new RelayConnection instances (Channel can't be reused after close).
      */
     fun reconnectAll() {
-        val dropped = connections.entries.filter { !it.value.isConnected }.map { it.key }
+        val dropped = connections.entries
+            .filter { it.value.state.value == RelayState.DISCONNECTED ||
+                      it.value.state.value == RelayState.FAILED }
+            .map { it.key }
         for (url in dropped) {
-            connections.remove(url)
-            val conn = RelayConnection(url, okHttpClient)
-            connections[url] = conn
-            conn.connect()
-            scope.launch {
-                subscribeAfterConnect(conn)
-                listenForEvents(conn)
-            }
-            Log.d(TAG, "Reconnected $url")
+            reconnectWithBackoff(url)
         }
-        if (dropped.isNotEmpty()) Log.d(TAG, "Reconnected ${dropped.size} relay(s)")
+        if (dropped.isNotEmpty()) Log.d(TAG, "Reconnecting ${dropped.size} relay(s)")
+    }
+
+    /**
+     * Reconnect a single relay with exponential backoff.
+     * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
+     */
+    private fun reconnectWithBackoff(url: String, attempt: Int = 0) {
+        val guard = reconnecting.getOrPut(url) { AtomicBoolean(false) }
+        if (!guard.compareAndSet(false, true)) return
+
+        scope.launch {
+            try {
+                if (attempt > 0) {
+                    val delayMs = minOf(1000L * (1L shl minOf(attempt - 1, 4)), 30_000L)
+                    Log.d(TAG, "Backoff $url: attempt $attempt, delay ${delayMs}ms")
+                    delay(delayMs)
+                }
+
+                connections[url]?.close()
+                val conn = RelayConnection(url, okHttpClient)
+                connections[url] = conn
+                conn.connect()
+
+                // Wait briefly for connection to establish
+                var waited = 0
+                while (conn.state.value == RelayState.CONNECTING && waited < 5000) {
+                    delay(100)
+                    waited += 100
+                }
+
+                if (conn.state.value == RelayState.CONNECTED) {
+                    guard.set(false)
+                    updateConnectionStates()
+                    replayPersistentSubs(conn)
+                    scope.launch { listenForEvents(conn) }
+                    Log.d(TAG, "Reconnected $url")
+                } else {
+                    guard.set(false)
+                    if (attempt < 8) {
+                        reconnectWithBackoff(url, attempt + 1)
+                    } else {
+                        Log.w(TAG, "Giving up reconnection to $url after $attempt attempts")
+                    }
+                }
+            } catch (e: Exception) {
+                guard.set(false)
+                Log.w(TAG, "Reconnect failed for $url: ${e.message}")
+                if (attempt < 8) {
+                    reconnectWithBackoff(url, attempt + 1)
+                }
+            }
+        }
+    }
+
+    /**
+     * Replay all persistent subscriptions on a reconnected relay.
+     * Updates the `since` filter to avoid re-fetching old events.
+     */
+    private fun replayPersistentSubs(conn: RelayConnection) {
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        for ((_, sub) in persistentSubs) {
+            val since = if (sub.lastEventTime > 0) {
+                maxOf(sub.lastEventTime - 30, 0)
+            } else {
+                nowSeconds - 300
+            }
+            val updatedReq = injectSince(sub.reqJson, since)
+            conn.send(updatedReq)
+            Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (since=$since)")
+        }
+    }
+
+    /**
+     * Inject a "since" field into a REQ JSON filter object.
+     */
+    private fun injectSince(reqJson: String, since: Long): String {
+        val arr = NostrJson.parseToJsonElement(reqJson).jsonArray
+        return buildJsonArray {
+            add(arr[0]) // "REQ"
+            add(arr[1]) // sub-id
+            for (i in 2 until arr.size) {
+                val filter = arr[i].jsonObject
+                add(buildJsonObject {
+                    for ((key, value) in filter) {
+                        put(key, value)
+                    }
+                    put("since", JsonPrimitive(since))
+                })
+            }
+        }.toString()
     }
 
     fun disconnectAll() {

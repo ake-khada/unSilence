@@ -12,6 +12,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -48,6 +49,7 @@ class OutboxRouter @Inject constructor(
 ) {
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val started = AtomicBoolean(false)
+    private var routingJob: Job? = null
 
     /**
      * Idempotent entry point. Called when the user switches to the Following feed.
@@ -58,6 +60,9 @@ class OutboxRouter @Inject constructor(
     }
 
     private fun launchRouting() {
+        routingJob = Job(scope.coroutineContext[Job])
+        val routingScope = CoroutineScope(scope.coroutineContext + routingJob!!)
+
         val userPubkeyHex = keyManager.getPublicKeyHex() ?: run {
             Log.w(TAG, "No pubkey — not logged in, skipping outbox routing")
             return
@@ -79,7 +84,7 @@ class OutboxRouter @Inject constructor(
         relayPool.fetchFollowList(userPubkeyHex)
 
         // ── Step 2: when follows appear in Room, request their kind 10002 ────
-        scope.launch {
+        routingScope.launch {
             followDao.followsFlow()
                 .filter { it.isNotEmpty() }
                 .first()          // one-shot: take the first non-empty emission
@@ -91,13 +96,21 @@ class OutboxRouter @Inject constructor(
         }
 
         // ── Step 3: when relay lists arrive, route to write relays ───────────
-        scope.launch {
+        routingScope.launch {
             relayListDao.allFlow()
                 .filter { it.isNotEmpty() }
                 .collectLatest { relayLists ->
                     routeToWriteRelays(relayLists)
                 }
         }
+    }
+
+    /** Cancel routing coroutines. Called on logout. */
+    fun stop() {
+        routingJob?.cancel()
+        routingJob = null
+        started.set(false)
+        Log.d(TAG, "Stopped")
     }
 
     // ── Kind 3: NIP-02 follow list ───────────────────────────────────────────
