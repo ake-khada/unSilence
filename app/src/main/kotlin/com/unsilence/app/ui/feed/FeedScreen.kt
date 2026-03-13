@@ -69,6 +69,11 @@ fun FeedScreen(
     }
     DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
 
+    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
+    var isMuted by remember { mutableStateOf(true) }
+    var showFullscreenVideo by remember { mutableStateOf(false) }
+    var preFullscreenMuted by remember { mutableStateOf(true) }
+
     // Pause playback when app goes to background, resume when foregrounded
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -82,11 +87,6 @@ fun FeedScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-
-    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
-    var isMuted by remember { mutableStateOf(true) }
-    var showFullscreenVideo by remember { mutableStateOf(false) }
-    var preFullscreenMuted by remember { mutableStateOf(true) }
 
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
