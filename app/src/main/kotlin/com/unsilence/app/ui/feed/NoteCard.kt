@@ -697,7 +697,6 @@ fun FullScreenVideoDialog(
                     PlayerView(ctx).apply {
                         player = exoPlayer
                         useController = true
-                        setShowVolumeButton(false)
                     }
                 },
                 update = { view -> view.player = exoPlayer },
