@@ -257,6 +257,17 @@ interface EventDao {
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int
 
+    /** Delete the [limit] oldest events by created_at. Used by FIFO pruning. */
+    @Query("""
+        DELETE FROM events
+        WHERE id IN (
+            SELECT id FROM events
+            ORDER BY created_at ASC
+            LIMIT :limit
+        )
+    """)
+    suspend fun deleteOldest(limit: Int)
+
     /** Prune expired events (NIP-40). Called periodically. */
     @Query("""
         DELETE FROM events

@@ -3,6 +3,9 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -11,6 +14,8 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "RelayConnection"
+
+enum class RelayState { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
 
 /**
  * Single WebSocket connection to one Nostr relay.
@@ -25,15 +30,18 @@ class RelayConnection(
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
     val messages: ReceiveChannel<String> get() = _messages
 
+    private val _state = MutableStateFlow(RelayState.DISCONNECTED)
+    val state: StateFlow<RelayState> get() = _state.asStateFlow()
+
     private var ws: WebSocket? = null
     private val connected = AtomicBoolean(false)
 
     /** True while the WebSocket handshake has completed and onClosed/onFailure has not fired. */
-    var isConnected: Boolean = false
-        private set
+    val isConnected: Boolean get() = _state.value == RelayState.CONNECTED
 
     fun connect() {
         if (connected.getAndSet(true)) return
+        _state.value = RelayState.CONNECTING
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, Listener())
         Log.d(TAG, "Connecting to $url")
@@ -42,6 +50,7 @@ class RelayConnection(
     fun send(text: String): Boolean = ws?.send(text) == true
 
     fun close() {
+        _state.value = RelayState.DISCONNECTED
         connected.set(false)
         ws?.close(1000, "Client shutdown")
         _messages.close()
@@ -50,7 +59,7 @@ class RelayConnection(
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            isConnected = true
+            _state.value = RelayState.CONNECTED
             Log.d(TAG, "Connected: $url")
         }
 
@@ -60,14 +69,14 @@ class RelayConnection(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.w(TAG, "Failure on $url: ${t.message}")
-            isConnected = false
+            _state.value = RelayState.FAILED
             connected.set(false)
             _messages.close()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "Closed $url: $code $reason")
-            isConnected = false
+            _state.value = RelayState.DISCONNECTED
             connected.set(false)
             _messages.close()
         }
