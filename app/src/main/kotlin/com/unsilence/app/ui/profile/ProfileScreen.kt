@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
@@ -267,17 +269,24 @@ fun ProfileScreen(
                 }
             } else {
                 items(items = posts, key = { it.id }) { row ->
+                    // Resolve original author profile for kind-6 reposts
+                    val originalAuthorProfile = if (row.kind == 6) {
+                        extractRepostAuthorPubkey(row.content, row.tags)
+                            ?.let { viewModel.profileFlow(it).collectAsState().value }
+                    } else null
+
                     NoteCard(
-                        row             = row,
-                        onAuthorClick   = onAuthorClick,
-                        hasReacted      = row.engagementId in reactedIds,
-                        hasReposted     = row.engagementId in repostedIds,
-                        hasZapped       = row.engagementId in zappedIds,
-                        isNwcConfigured = isNwcConfigured,
-                        onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                        onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                        onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                        row                    = row,
+                        originalAuthorProfile  = originalAuthorProfile,
+                        onAuthorClick          = onAuthorClick,
+                        hasReacted             = row.engagementId in reactedIds,
+                        hasReposted            = row.engagementId in repostedIds,
+                        hasZapped              = row.engagementId in zappedIds,
+                        isNwcConfigured        = isNwcConfigured,
+                        onReact                = { actionsViewModel.react(row.id, row.pubkey) },
+                        onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                        onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                        onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
                     )
                 }
             }

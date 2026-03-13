@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -29,7 +30,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
@@ -54,6 +60,7 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 private val BANNER_HEIGHT       = 150.dp
 private val PROFILE_AVATAR_SIZE = 85.dp
@@ -78,6 +85,28 @@ fun UserProfileScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
 
+    val listState = rememberLazyListState()
+
+    // Trigger loadMore() when scrolled near bottom
+    val shouldLoadMore = remember {
+        derivedStateOf {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val totalItems = listState.layoutInfo.totalItemsCount
+            totalItems > 0 && lastVisible >= totalItems - 5
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        snapshotFlow { shouldLoadMore.value }
+            .distinctUntilChanged()
+            .collect { shouldLoad ->
+                if (shouldLoad && posts.isNotEmpty()) {
+                    val oldest = posts.last().createdAt
+                    viewModel.loadMore(oldest)
+                }
+            }
+    }
+
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
         ?: pubkeyHex?.let { "${it.take(6)}…${it.takeLast(4)}" }
@@ -91,6 +120,7 @@ fun UserProfileScreen(
     ) {
         // ── Scrollable content ────────────────────────────────────────────────
         LazyColumn(
+            state               = listState,
             modifier            = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -252,17 +282,24 @@ fun UserProfileScreen(
                 }
             } else {
                 items(items = posts, key = { it.id }) { row ->
+                    // Resolve original author profile for kind-6 reposts
+                    val originalAuthorProfile = if (row.kind == 6) {
+                        extractRepostAuthorPubkey(row.content, row.tags)
+                            ?.let { viewModel.profileFlow(it).collectAsState().value }
+                    } else null
+
                     NoteCard(
-                        row             = row,
-                        onAuthorClick   = onAuthorClick,
-                        hasReacted      = row.engagementId in reactedIds,
-                        hasReposted     = row.engagementId in repostedIds,
-                        hasZapped       = row.engagementId in zappedIds,
-                        isNwcConfigured = isNwcConfigured,
-                        onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                        onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                        onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                        row                    = row,
+                        originalAuthorProfile  = originalAuthorProfile,
+                        onAuthorClick          = onAuthorClick,
+                        hasReacted             = row.engagementId in reactedIds,
+                        hasReposted            = row.engagementId in repostedIds,
+                        hasZapped              = row.engagementId in zappedIds,
+                        isNwcConfigured        = isNwcConfigured,
+                        onReact                = { actionsViewModel.react(row.id, row.pubkey) },
+                        onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                        onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                        onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
                     )
                 }
             }

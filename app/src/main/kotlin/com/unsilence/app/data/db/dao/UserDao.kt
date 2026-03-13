@@ -26,6 +26,10 @@ interface UserDao {
     @Query("SELECT pubkey FROM users")
     suspend fun allPubkeys(): List<String>
 
+    /** Pubkeys with profiles older than [olderThan] epoch seconds. */
+    @Query("SELECT pubkey FROM users WHERE updated_at < :olderThan")
+    suspend fun stalePubkeys(olderThan: Long): List<String>
+
     /**
      * Full-text-style search across name, display_name, and about fields.
      * Re-emits whenever the users table changes (i.e. as search results arrive from the relay).
