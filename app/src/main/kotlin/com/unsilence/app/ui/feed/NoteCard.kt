@@ -681,6 +681,7 @@ private fun VideoThumbnailCard(
 }
 
 /** Full-screen video dialog reusing the shared ExoPlayer. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun FullScreenVideoDialog(
     exoPlayer: ExoPlayer,

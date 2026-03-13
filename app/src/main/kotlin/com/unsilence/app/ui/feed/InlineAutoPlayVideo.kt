@@ -30,6 +30,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.unsilence.app.ui.theme.Sizing
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun InlineAutoPlayVideo(
     exoPlayer: ExoPlayer,
