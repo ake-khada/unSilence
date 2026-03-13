@@ -62,7 +62,9 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.lerp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -72,6 +74,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
@@ -128,6 +131,13 @@ private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     }
 }.getOrNull()
 
+private data class MediaExtraction(
+    val imageUrls: List<String>,
+    val videoUrls: List<String>,
+    val linkUrls: List<String>,
+    val textContent: String,
+)
+
 private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".mp4", ignoreCase = true) ||
     url.contains(".mov", ignoreCase = true) ||
@@ -176,32 +186,30 @@ fun NoteCard(
         .toList()
     val contentNoNostr = NOSTR_URI_REGEX.replace(effectiveContent, "").trim()
 
-    // Strip media URLs in layers so each regex only acts on its own subset.
-    val imageUrls      = IMAGE_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
-    val afterImages    = IMAGE_URL_REGEX.replace(contentNoNostr, "")
-    val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
-    val afterVideos    = VIDEO_URL_REGEX.replace(afterImages, "")
-    val linkUrls       = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
-    val textContent    = LINK_URL_REGEX.replace(afterVideos, "").trim()
+    // ── Media extraction: regex from content + imeta from tags ────────────────
+    // Wrapped in remember to avoid re-parsing JSON on every recomposition.
+    val imetaMedia = remember(row.tags) { ImetaParser.parse(row.tags) }
+    val mediaExtraction = remember(row.id, contentNoNostr) {
+        val regexImageUrls = IMAGE_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
+        val imetaImageUrls = imetaMedia.filter { it.mimeType?.startsWith("image/") == true }.map { it.url }
 
-    // Parse imeta tags for video content (NIP-92).
-    // Each imeta tag is ["imeta", "key value", ...]; we look for m=video/* + url.
-    val imetaVideoUrls: List<String> = runCatching {
-        NostrJson.parseToJsonElement(row.tags).jsonArray
-            .filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "imeta" }
-            .mapNotNull { tag ->
-                val kvMap = tag.jsonArray.drop(1).associate { entry ->
-                    val s = entry.jsonPrimitive.content
-                    val space = s.indexOf(' ')
-                    if (space < 0) s to "" else s.substring(0, space) to s.substring(space + 1)
-                }
-                val mime = kvMap["m"] ?: return@mapNotNull null
-                if (!mime.startsWith("video/")) return@mapNotNull null
-                kvMap["url"]
-            }
-    }.getOrElse { emptyList() }
+        val afterImages    = IMAGE_URL_REGEX.replace(contentNoNostr, "")
+        val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
+        val imetaVideoUrls = imetaMedia.filter { it.mimeType?.startsWith("video/") == true }.map { it.url }
 
-    val videoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
+        val afterVideos    = VIDEO_URL_REGEX.replace(afterImages, "")
+
+        MediaExtraction(
+            imageUrls   = (regexImageUrls + imetaImageUrls).distinct(),
+            videoUrls   = (regexVideoUrls + imetaVideoUrls).distinct(),
+            linkUrls    = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList(),
+            textContent = LINK_URL_REGEX.replace(afterVideos, "").trim(),
+        )
+    }
+    val imageUrls   = mediaExtraction.imageUrls
+    val videoUrls   = mediaExtraction.videoUrls
+    val linkUrls    = mediaExtraction.linkUrls
+    val textContent = mediaExtraction.textContent
 
     Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
@@ -336,9 +344,11 @@ fun NoteCard(
                 loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
                 modifier           = Modifier
                     .fillMaxWidth()
-                    // Reserve space before the image loads — prevents cards below from
-                    // jumping up when text renders before the image arrives.
-                    .defaultMinSize(minHeight = 200.dp)
+                    .then(
+                        imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
+                            ?.let { Modifier.aspectRatio(it.width!!.toFloat() / it.height!!, matchHeightConstraintsFirst = false) }
+                            ?: Modifier.defaultMinSize(minHeight = 200.dp)
+                    )
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (imageUrls.size > 1) 2.dp else Spacing.small)
                     .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
@@ -357,16 +367,20 @@ fun NoteCard(
 
         // ── First video URL: thumbnail with play button ────────────────────────
         videoUrls.firstOrNull()?.let { url ->
+            val videoMeta = imetaMedia.firstOrNull {
+                it.url == url && it.width != null && it.height != null
+            }
             VideoThumbnailCard(
-                url    = url,
-                onPlay = {
+                url         = url,
+                onPlay      = {
                     if (isDirectVideoUrl(url)) {
                         showVideoPlayer = url
                     } else {
                         runCatching { uriHandler.openUri(url) }
                     }
                 },
-                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                aspectRatio = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
+                modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
             )
         }
 
@@ -610,11 +624,22 @@ private fun ZapButton(
 
 /** Tap-to-play placeholder shown for detected video URLs. */
 @Composable
-private fun VideoThumbnailCard(url: String, onPlay: () -> Unit, modifier: Modifier = Modifier) {
+private fun VideoThumbnailCard(
+    url: String,
+    onPlay: () -> Unit,
+    modifier: Modifier = Modifier,
+    aspectRatio: Float? = null,
+) {
     Box(
         modifier          = modifier
             .fillMaxWidth()
-            .height(180.dp)
+            .then(
+                if (aspectRatio != null && aspectRatio > 0f)
+                    Modifier.aspectRatio(aspectRatio, matchHeightConstraintsFirst = false)
+                        .defaultMinSize(minHeight = 120.dp)
+                        .heightIn(max = 300.dp)
+                else Modifier.height(180.dp)
+            )
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .background(Color(0xFF1A1A1A))
             .clickable { onPlay() },
