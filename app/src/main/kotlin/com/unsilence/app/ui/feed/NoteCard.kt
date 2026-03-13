@@ -199,10 +199,14 @@ fun NoteCard(
 
         val afterVideos    = VIDEO_URL_REGEX.replace(afterImages, "")
 
+        val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
+
         MediaExtraction(
-            imageUrls   = (regexImageUrls + imetaImageUrls).distinct(),
-            videoUrls   = (regexVideoUrls + imetaVideoUrls).distinct(),
-            linkUrls    = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList(),
+            imageUrls   = (regexImageUrls + imetaImageUrls).distinct()
+                              .filter { it !in allVideoUrls },
+            videoUrls   = allVideoUrls,
+            linkUrls    = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
+                              .filter { it !in allVideoUrls },
             textContent = LINK_URL_REGEX.replace(afterVideos, "").trim(),
         )
     }
