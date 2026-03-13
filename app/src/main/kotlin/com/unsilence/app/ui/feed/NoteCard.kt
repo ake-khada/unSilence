@@ -106,7 +106,7 @@ private val IMAGE_URL_REGEX = Regex(
 )
 
 // Matches direct video URLs (.mp4 etc.) and known video platforms.
-private val VIDEO_URL_REGEX = Regex(
+internal val VIDEO_URL_REGEX = Regex(
     """https?://\S+\.(?:mp4|mov|webm|m3u8)(?:\?\S*)?|https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|streamable\.com/\S+)""",
     RegexOption.IGNORE_CASE,
 )
@@ -161,6 +161,11 @@ fun NoteCard(
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
     originalAuthorProfile: UserEntity? = null,
+    exoPlayer: ExoPlayer? = null,
+    isActiveVideo: Boolean = false,
+    isMuted: Boolean = true,
+    onToggleMute: () -> Unit = {},
+    onOpenFullscreen: () -> Unit = {},
 ) {
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
