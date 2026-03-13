@@ -86,6 +86,10 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
 
+    // Markdown rendering (NIP-23 long-form articles)
+    implementation(libs.markdown.renderer.m3)
+    implementation(libs.markdown.renderer.coil3)
+
     // Media (ExoPlayer — kind 21 tap-to-play only in v1)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)

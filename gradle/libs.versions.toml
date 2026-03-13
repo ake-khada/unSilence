@@ -19,6 +19,7 @@ hilt-navigation   = "1.2.0"
 room              = "2.7.1"
 quartz            = "1.05.1"
 identikon         = "1.0.0"
+markdown-renderer  = "0.39.2"
 
 [libraries]
 # Compose
@@ -70,6 +71,10 @@ quartz-android               = { group = "com.vitorpamplona.quartz",    name = "
 
 # Pubkey-derived identicons (Maven Central)
 identikon-android            = { group = "io.github.thibseisel.identikon", name = "identikon-android",            version.ref = "identikon" }
+
+# Markdown rendering (NIP-23 articles)
+markdown-renderer-m3            = { group = "com.mikepenz",               name = "multiplatform-markdown-renderer-m3",    version.ref = "markdown-renderer" }
+markdown-renderer-coil3         = { group = "com.mikepenz",               name = "multiplatform-markdown-renderer-coil3", version.ref = "markdown-renderer" }
 
 [plugins]
 android-application         = { id = "com.android.application",           version.ref = "agp" }
