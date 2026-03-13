@@ -1,8 +1,5 @@
-/app/build
-app/build/
 /app/release
 app/release/
-/build
 /captures
 commonMain/
 .cxx
@@ -15,3 +12,5 @@ commonMain/
 /local.properties
 local.properties
 node_modules/
+/build
+/app/build
