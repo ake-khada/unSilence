@@ -25,23 +25,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
+import com.mikepenz.markdown.coil3.Coil3ImageTransformerImpl
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -120,13 +124,25 @@ fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
 
                 Spacer(Modifier.height(Spacing.medium))
 
-                // ── Body content (simple markdown: ## headers, **bold**) ────────
-                Text(
-                    text       = parseMarkdown(row.content),
-                    color      = MaterialTheme.colorScheme.onSurface,
-                    fontSize   = 15.sp,
-                    lineHeight = 24.sp,
-                    modifier   = Modifier
+                // ── Body content (full markdown via multiplatform-markdown-renderer) ──
+                Markdown(
+                    content          = row.content,
+                    imageTransformer = Coil3ImageTransformerImpl,
+                    colors           = markdownColor(
+                        text                 = Color.White,
+                        codeBackground       = Color(0xFF1A1A1A),
+                        inlineCodeBackground = Color(0xFF1A1A1A),
+                        dividerColor         = MaterialTheme.colorScheme.surfaceVariant,
+                    ),
+                    typography       = markdownTypography(
+                        h1        = MaterialTheme.typography.headlineLarge.copy(color = Color.White),
+                        h2        = MaterialTheme.typography.headlineMedium.copy(color = Color.White),
+                        h3        = MaterialTheme.typography.headlineSmall.copy(color = Color.White),
+                        paragraph = MaterialTheme.typography.bodyLarge.copy(color = Color.White, lineHeight = 24.sp),
+                        code      = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace),
+                        textLink  = TextLinkStyles(style = SpanStyle(color = Cyan)),
+                    ),
+                    modifier         = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.medium)
                         .padding(bottom = Spacing.xl),
@@ -144,31 +160,3 @@ private fun articleTagValue(tagsJson: String, key: String): String? = runCatchin
         ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
         ?.takeIf { it.isNotBlank() }
 }.getOrNull()
-
-/**
- * Minimal markdown → AnnotatedString renderer.
- *  - Lines starting with "## " → bold 18sp (header)
- *  - **text** spans → bold (any nesting level)
- */
-private fun parseMarkdown(text: String): AnnotatedString = buildAnnotatedString {
-    val lines = text.split("\n")
-    lines.forEachIndexed { lineIdx, rawLine ->
-        if (rawLine.startsWith("## ")) {
-            // Whole header line: bold 18sp; strip any ** markers inside it
-            withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontSize = 18.sp)) {
-                append(rawLine.removePrefix("## ").replace("**", ""))
-            }
-        } else {
-            // Split on ** delimiters; odd-indexed segments are bold
-            val parts = rawLine.split("**")
-            parts.forEachIndexed { partIdx, part ->
-                if (partIdx % 2 == 1) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(part) }
-                } else {
-                    append(part)
-                }
-            }
-        }
-        if (lineIdx < lines.lastIndex) append("\n")
-    }
-}
