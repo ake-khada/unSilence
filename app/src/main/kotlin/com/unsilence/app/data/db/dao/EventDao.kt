@@ -179,9 +179,9 @@ interface EventDao {
                OR e.kind = 6)
         GROUP BY e.id
         ORDER BY e.created_at DESC
-        LIMIT 100
+        LIMIT :limit
     """)
-    fun userPostsFlow(pubkey: String): Flow<List<FeedRow>>
+    fun userPostsFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
 
     /** All events for thread view (includes replies). */
     @Query("""

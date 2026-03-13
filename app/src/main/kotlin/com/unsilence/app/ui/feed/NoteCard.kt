@@ -70,7 +70,9 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -148,6 +150,7 @@ fun NoteCard(
     hasReposted: Boolean = false,
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
+    originalAuthorProfile: UserEntity? = null,
 ) {
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
@@ -161,7 +164,9 @@ fun NoteCard(
         runCatching { NostrJson.parseToJsonElement(row.content).jsonObject }.getOrNull()
     } else null
 
-    val effectivePubkey    = boostedJson?.get("pubkey")?.jsonPrimitive?.content ?: row.pubkey
+    val effectivePubkey = boostedJson?.get("pubkey")?.jsonPrimitive?.content
+        ?: if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) ?: row.pubkey
+        else row.pubkey
     val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
     val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
 
@@ -242,7 +247,7 @@ fun NoteCard(
             ) {
                 AvatarImage(
                     pubkey   = effectivePubkey,
-                    picture  = if (boostedJson == null) row.authorPicture else null,
+                    picture  = if (boostedJson == null) row.authorPicture else originalAuthorProfile?.picture,
                     modifier = Modifier.size(Sizing.avatar),
                 )
                 Spacer(Modifier.width(Spacing.small))
@@ -251,7 +256,13 @@ fun NoteCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text       = if (boostedJson != null) "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}" else (row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"),
+                        text       = if (boostedJson != null) {
+                            originalAuthorProfile?.displayName?.takeIf { it.isNotBlank() }
+                                ?: originalAuthorProfile?.name?.takeIf { it.isNotBlank() }
+                                ?: "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"
+                        } else {
+                            row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
+                        },
                         color      = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.SemiBold,
                         fontSize   = 14.sp,

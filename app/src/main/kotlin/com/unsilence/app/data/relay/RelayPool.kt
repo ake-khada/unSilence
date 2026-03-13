@@ -92,6 +92,10 @@ class RelayPool @Inject constructor(
     fun connect(relayUrls: List<String>) {
         for (url in relayUrls) {
             if (connections.containsKey(url)) continue
+            if (connections.size >= 25) {
+                Log.d(TAG, "Connection cap (25) reached — skipping $url")
+                continue
+            }
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
             scope.launch {
@@ -504,6 +508,32 @@ class RelayPool @Inject constructor(
         }.toString()
         connections.values.forEach { it.send(req) }
         Log.d(TAG, "Fetching user posts for $pubkey from ${connections.size} relay(s)")
+    }
+
+    /**
+     * Pagination for user profile view.
+     * Fetches posts by [pubkey] older than [untilTimestamp].
+     * One-shot subscription — closes on EOSE (prefix "older-" matches isOneShotSubscription).
+     */
+    fun fetchOlderPosts(pubkey: String, untilTimestamp: Long) {
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("older-user-${System.currentTimeMillis()}"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
+                    add(JsonPrimitive(30023))
+                })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("until", JsonPrimitive(untilTimestamp))
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+        connections.values.forEach { it.send(req) }
+        Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp from ${connections.size} relay(s)")
     }
 
     /**

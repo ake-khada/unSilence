@@ -7,11 +7,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.RelaySetEntity
-import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -29,6 +27,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import com.unsilence.app.data.db.entity.UserEntity
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 sealed class FeedType {
@@ -83,6 +83,21 @@ class FeedViewModel @Inject constructor(
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
 
+    // ── Profile lookup for repost original authors ──────────────────────
+    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
+    private val fetchedProfilePubkeys = mutableSetOf<String>()
+
+    /**
+     * Returns a cached StateFlow for the given pubkey's profile.
+     * Used by LazyColumn items to resolve original author info on kind-6 reposts.
+     * WhileSubscribed(5000) keeps the flow alive briefly when items scroll off-screen.
+     */
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        profileCache.getOrPut(pubkey) {
+            userRepository.userFlow(pubkey)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
+
     val feedTypeLabel: String get() = when (val t = _feedType.value) {
         is FeedType.Global    -> "Global"
         is FeedType.Following -> "Following"
@@ -123,6 +138,7 @@ class FeedViewModel @Inject constructor(
                     newestTimestamp     = 0L
                     hasNewTopPost       = false
                     lastOldestTimestamp = 0L
+                    fetchedProfilePubkeys.clear()
                     _uiState.value = _uiState.value.copy(loading = true)
                     viewModelScope.launch {
                         delay(3_000)
@@ -160,14 +176,16 @@ class FeedViewModel @Inject constructor(
                     _uiState.value = FeedUiState(events = rows, loading = false)
 
                     val pubkeys = rows.flatMap { row ->
-                        val embedded = if (row.kind == 6 && row.content.isNotBlank()) {
-                            runCatching {
-                                NostrJson.parseToJsonElement(row.content).jsonObject["pubkey"]?.jsonPrimitive?.content
-                            }.getOrNull()
+                        val embedded = if (row.kind == 6) {
+                            extractRepostAuthorPubkey(row.content, row.tags)
                         } else null
                         listOfNotNull(row.pubkey, embedded)
                     }.distinct()
-                    userRepository.fetchMissingProfiles(pubkeys)
+                    val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
+                    if (newPubkeys.isNotEmpty()) {
+                        fetchedProfilePubkeys.addAll(newPubkeys)
+                        userRepository.fetchMissingProfiles(newPubkeys)
+                    }
                 }
         }
     }
