@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Spacing
@@ -86,6 +88,12 @@ fun FeedScreen(
                         items = state.events,
                         key   = { it.id },
                     ) { row ->
+                        // Resolve original author profile for kind-6 reposts
+                        val originalAuthorProfile = if (row.kind == 6) {
+                            extractRepostAuthorPubkey(row.content, row.tags)
+                                ?.let { viewModel.profileFlow(it).collectAsState().value }
+                        } else null
+
                         if (row.kind == 30023) {
                             ArticleCard(
                                 row     = row,
@@ -93,18 +101,19 @@ fun FeedScreen(
                             )
                         } else {
                             NoteCard(
-                                row             = row,
-                                onNoteClick     = onNoteClick,
-                                onAuthorClick   = onAuthorClick,
-                                hasReacted      = row.engagementId in reactedIds,
-                                hasReposted     = row.engagementId in repostedIds,
-                                hasZapped       = row.engagementId in zappedIds,
-                                isNwcConfigured = isNwcConfigured,
-                                onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                                onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                onQuote         = onQuote,
-                                onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                row                    = row,
+                                onNoteClick            = onNoteClick,
+                                onAuthorClick          = onAuthorClick,
+                                hasReacted             = row.engagementId in reactedIds,
+                                hasReposted            = row.engagementId in repostedIds,
+                                hasZapped              = row.engagementId in zappedIds,
+                                isNwcConfigured        = isNwcConfigured,
+                                originalAuthorProfile  = originalAuthorProfile,
+                                onReact                = { actionsViewModel.react(row.id, row.pubkey) },
+                                onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                                onQuote                = onQuote,
+                                onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                                onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
                             )
                         }
                     }

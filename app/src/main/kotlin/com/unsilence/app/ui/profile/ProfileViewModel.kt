@@ -17,8 +17,13 @@ import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -46,6 +51,15 @@ class ProfileViewModel @Inject constructor(
     /** Live top-level posts by this user, newest-first. */
     val postsFlow: Flow<List<FeedRow>> =
         if (pubkeyHex != null) eventRepository.userPostsFlow(pubkeyHex) else emptyFlow()
+
+    // ── Profile lookup for repost original authors ──────────────────────
+    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
+
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        profileCache.getOrPut(pubkey) {
+            userRepository.userFlow(pubkey)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
 
     val following: Int? = null
     val followers: Int? = null

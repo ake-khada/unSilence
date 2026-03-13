@@ -19,4 +19,8 @@ interface RelayListDao {
 
     @Query("SELECT * FROM relay_list_metadata")
     suspend fun getAll(): List<RelayListEntity>
+
+    /** Single relay list lookup by pubkey. Returns null if not cached. */
+    @Query("SELECT * FROM relay_list_metadata WHERE pubkey = :pubkey")
+    suspend fun getByPubkey(pubkey: String): RelayListEntity?
 }
