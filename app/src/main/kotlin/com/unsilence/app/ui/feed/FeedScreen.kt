@@ -32,9 +32,13 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.relay.ImetaParser
+import kotlin.math.abs
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
@@ -64,6 +68,20 @@ fun FeedScreen(
         }
     }
     DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+
+    // Pause playback when app goes to background, resume when foregrounded
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP  -> exoPlayer.playWhenReady = false
+                Lifecycle.Event.ON_START -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
     var isMuted by remember { mutableStateOf(true) }
@@ -185,12 +203,13 @@ fun FeedScreen(
                 // Keep a stable reference that the long-lived LaunchedEffect can read
                 // without restarting when the set changes (e.g. after pagination).
                 val noteIdsWithVideoState = rememberUpdatedState(noteIdsWithVideo)
+                val showFullscreenVideoState = rememberUpdatedState(showFullscreenVideo)
 
                 // Active video detection: find video note closest to viewport center
                 LaunchedEffect(Unit) {
                     snapshotFlow { listState.layoutInfo }
                         .map { layoutInfo ->
-                            if (showFullscreenVideo) return@map activeVideoNoteId
+                            if (showFullscreenVideoState.value) return@map activeVideoNoteId
                             val currentIds = noteIdsWithVideoState.value
                             val viewportCenter = (layoutInfo.viewportStartOffset +
                                 layoutInfo.viewportEndOffset) / 2
@@ -198,7 +217,7 @@ fun FeedScreen(
                                 .filter { (it.key as? String) in currentIds }
                                 .minByOrNull {
                                     val itemCenter = it.offset + it.size / 2
-                                    kotlin.math.abs(itemCenter - viewportCenter)
+                                    abs(itemCenter - viewportCenter)
                                 }
                                 ?.key as? String
                         }
