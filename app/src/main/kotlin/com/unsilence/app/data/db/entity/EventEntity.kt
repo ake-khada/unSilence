@@ -8,11 +8,12 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "events",
     indices = [
-        Index(value = ["relay_url", "kind", "created_at"]),
-        Index(value = ["reply_to_id", "kind"]),
-        Index(value = ["root_id", "kind"]),
-        Index(value = ["pubkey", "kind", "created_at"]),
-        Index(value = ["created_at"]),
+        Index("relay_url", "kind", "created_at"),
+        Index("reply_to_id", "kind"),
+        Index("root_id", "kind"),
+        Index("root_id", "created_at"),
+        Index("pubkey", "kind", "created_at"),
+        Index("created_at"),
     ],
 )
 data class EventEntity(

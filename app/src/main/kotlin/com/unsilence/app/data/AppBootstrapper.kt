@@ -3,6 +3,9 @@ package com.unsilence.app.data
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.db.AppDatabase
+import com.unsilence.app.data.db.DatabaseMaintenanceJob
+import com.unsilence.app.data.relay.EventProcessor
+import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.GLOBAL_RELAY_URLS
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +22,9 @@ class AppBootstrapper @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val appDatabase: AppDatabase,
+    private val eventProcessor: EventProcessor,
+    private val outboxRouter: OutboxRouter,
+    private val maintenanceJob: DatabaseMaintenanceJob,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -27,21 +33,48 @@ class AppBootstrapper @Inject constructor(
      * Called after any login path: nsec import, key generation, or Amber.
      */
     fun bootstrap(pubkeyHex: String) {
+        eventProcessor.start()
         relayPool.connect(GLOBAL_RELAY_URLS)
         relayPool.fetchProfiles(listOf(pubkeyHex))
         relayPool.fetchFollowList(pubkeyHex)
         relayPool.fetchRelayLists(listOf(pubkeyHex))
+        // OutboxRouter.start() is idempotent — safe to call here so it re-registers
+        // kind handlers after a teardown/re-login cycle. Also called from FollowingFeedViewModel.
+        outboxRouter.start()
+        maintenanceJob.start()
         Log.d(TAG, "Bootstrapped for $pubkeyHex")
     }
 
     /**
-     * Disconnect all relays, wipe the local DB, and clear stored credentials.
-     * Called on logout.
+     * Full teardown on logout. Order matters:
+     * 1. Cancel persistent subs (send CLOSE messages while connections are still alive)
+     * 2. Disconnect all WebSockets
+     * 3. Clear all Room tables
+     * 4. Clear KeyManager (EncryptedSharedPreferences)
+     * 5. Cancel child scopes (OutboxRouter, EventProcessor)
+     * 6. Reset in-memory state (seenIds, connection map)
      */
     fun teardown() {
+        // 1. Cancel persistent subscriptions
+        relayPool.clearPersistentSubs()
+
+        // 2. Disconnect all WebSockets
         relayPool.disconnectAll()
-        keyManager.clear()
+
+        // 3. Clear all Room tables
         scope.launch { appDatabase.clearAllTables() }
+
+        // 4. Clear credentials
+        keyManager.clear()
+
+        // 5. Cancel child scopes (NOT this scope — it must survive for next login)
+        outboxRouter.stop()
+        eventProcessor.stop()
+        maintenanceJob.stop()
+
+        // 6. In-memory state already cleared by eventProcessor.stop() (seenIds)
+        // and relayPool.disconnectAll() (connections map)
+
         Log.d(TAG, "Teardown complete")
     }
 }
