@@ -682,6 +682,44 @@ private fun VideoThumbnailCard(
     }
 }
 
+/** Full-screen video dialog reusing the shared ExoPlayer. */
+@Composable
+fun FullScreenVideoDialog(
+    exoPlayer: ExoPlayer,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties       = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = true
+                        setShowVolumeButton(false)
+                    }
+                },
+                update = { view -> view.player = exoPlayer },
+                modifier = Modifier.fillMaxSize(),
+            )
+            IconButton(
+                onClick  = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp),
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint               = Color.White,
+                )
+            }
+        }
+    }
+}
+
 /** Tappable inline card for a quoted nostr event. Opens the thread on tap. */
 @Composable
 private fun EmbeddedQuoteCard(
