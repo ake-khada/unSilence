@@ -170,8 +170,6 @@ fun NoteCard(
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
-    var showVideoPlayer   by remember { mutableStateOf<String?>(null) }
-
     val uriHandler = LocalUriHandler.current
 
     // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
@@ -379,18 +377,33 @@ fun NoteCard(
             val videoMeta = imetaMedia.firstOrNull {
                 it.url == url && it.width != null && it.height != null
             }
-            VideoThumbnailCard(
-                url         = url,
-                onPlay      = {
-                    if (isDirectVideoUrl(url)) {
-                        showVideoPlayer = url
-                    } else {
-                        runCatching { uriHandler.openUri(url) }
-                    }
-                },
-                aspectRatio = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
-                modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            )
+            val posterUrl = imetaMedia.firstOrNull { it.url == url }?.thumb
+
+            if (isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
+                InlineAutoPlayVideo(
+                    exoPlayer       = exoPlayer,
+                    videoUrl        = url,
+                    aspectRatio     = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
+                    isMuted         = isMuted,
+                    onToggleMute    = onToggleMute,
+                    onOpenFullscreen = onOpenFullscreen,
+                    modifier        = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                )
+            } else {
+                VideoThumbnailCard(
+                    url         = url,
+                    onPlay      = {
+                        if (isDirectVideoUrl(url)) {
+                            onOpenFullscreen()
+                        } else {
+                            runCatching { uriHandler.openUri(url) }
+                        }
+                    },
+                    aspectRatio = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
+                    posterUrl   = posterUrl,
+                    modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                )
+            }
         }
 
         // ── Link chips for non-media URLs ──────────────────────────────────────
@@ -514,9 +527,6 @@ fun NoteCard(
         )
     }
 
-    showVideoPlayer?.let { url ->
-        VideoPlayerScreen(url = url, onDismiss = { showVideoPlayer = null })
-    }
 }
 
 // ── Sub-composables ────────────────────────────────────────────────────────────
@@ -638,6 +648,7 @@ private fun VideoThumbnailCard(
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
     aspectRatio: Float? = null,
+    posterUrl: String? = null,
 ) {
     Box(
         modifier          = modifier
@@ -654,50 +665,20 @@ private fun VideoThumbnailCard(
             .clickable { onPlay() },
         contentAlignment  = Alignment.Center,
     ) {
+        if (!posterUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = posterUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
         Icon(
             imageVector        = Icons.Filled.PlayArrow,
             contentDescription = "Play video",
             tint               = Color.White.copy(alpha = 0.85f),
             modifier           = Modifier.size(52.dp),
         )
-    }
-}
-
-/** Full-screen ExoPlayer dialog. Released when dismissed. */
-@Composable
-private fun VideoPlayerScreen(url: String, onDismiss: () -> Unit) {
-    val context   = LocalContext.current
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(url))
-            prepare()
-            playWhenReady = true
-        }
-    }
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties       = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(
-                factory  = { ctx -> PlayerView(ctx).apply { player = exoPlayer } },
-                modifier = Modifier.fillMaxSize(),
-            )
-            IconButton(
-                onClick  = onDismiss,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(8.dp),
-            ) {
-                Icon(
-                    imageVector        = Icons.Filled.Close,
-                    contentDescription = "Close",
-                    tint               = Color.White,
-                )
-            }
-        }
     }
 }
 
