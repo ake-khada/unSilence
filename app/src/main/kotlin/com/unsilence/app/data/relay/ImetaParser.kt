@@ -8,6 +8,7 @@ data class ImetaMedia(
     val mimeType: String?,
     val width: Int?,
     val height: Int?,
+    val thumb: String?,
 )
 
 object ImetaParser {
@@ -34,6 +35,7 @@ object ImetaParser {
                     mimeType = kvMap["m"],
                     width = w,
                     height = h,
+                    thumb = kvMap["thumb"],
                 )
             }
     }.getOrElse { emptyList() }
