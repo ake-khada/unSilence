@@ -30,6 +30,13 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalContext
+import androidx.media3.exoplayer.ExoPlayer
+import com.unsilence.app.data.relay.ImetaParser
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun FeedScreen(
@@ -48,6 +55,20 @@ fun FeedScreen(
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+
+    // ── Video autoplay state ─────────────────────────────────────────────────
+    val context = LocalContext.current
+    val exoPlayer = remember {
+        ExoPlayer.Builder(context).build().apply {
+            repeatMode = ExoPlayer.REPEAT_MODE_ALL
+        }
+    }
+    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+
+    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
+    var isMuted by remember { mutableStateOf(true) }
+    var showFullscreenVideo by remember { mutableStateOf(false) }
+    var preFullscreenMuted by remember { mutableStateOf(true) }
 
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
@@ -80,6 +101,15 @@ fun FeedScreen(
             }
 
             else -> {
+                // Precompute which notes have video for scroll detection
+                val noteIdsWithVideo = remember(state.events) {
+                    state.events.filter { row ->
+                        row.kind != 30023 &&
+                        (ImetaParser.videos(row.tags).isNotEmpty() ||
+                            VIDEO_URL_REGEX.containsMatchIn(row.content))
+                    }.map { it.id }.toSet()
+                }
+
                 LazyColumn(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
@@ -114,6 +144,16 @@ fun FeedScreen(
                                 onQuote                = onQuote,
                                 onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
                                 onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                exoPlayer              = exoPlayer,
+                                isActiveVideo          = row.id == activeVideoNoteId,
+                                isMuted                = isMuted,
+                                onToggleMute           = { isMuted = !isMuted },
+                                onOpenFullscreen       = {
+                                    activeVideoNoteId = row.id
+                                    preFullscreenMuted = isMuted
+                                    isMuted = false
+                                    showFullscreenVideo = true
+                                },
                             )
                         }
                     }
@@ -141,11 +181,52 @@ fun FeedScreen(
                             }
                         }
                 }
+
+                // Keep a stable reference that the long-lived LaunchedEffect can read
+                // without restarting when the set changes (e.g. after pagination).
+                val noteIdsWithVideoState = rememberUpdatedState(noteIdsWithVideo)
+
+                // Active video detection: find video note closest to viewport center
+                LaunchedEffect(Unit) {
+                    snapshotFlow { listState.layoutInfo }
+                        .map { layoutInfo ->
+                            if (showFullscreenVideo) return@map activeVideoNoteId
+                            val currentIds = noteIdsWithVideoState.value
+                            val viewportCenter = (layoutInfo.viewportStartOffset +
+                                layoutInfo.viewportEndOffset) / 2
+                            layoutInfo.visibleItemsInfo
+                                .filter { (it.key as? String) in currentIds }
+                                .minByOrNull {
+                                    val itemCenter = it.offset + it.size / 2
+                                    kotlin.math.abs(itemCenter - viewportCenter)
+                                }
+                                ?.key as? String
+                        }
+                        .distinctUntilChanged()
+                        .collect { newActiveId ->
+                            if (activeVideoNoteId != newActiveId) {
+                                activeVideoNoteId = newActiveId
+                                if (newActiveId == null) {
+                                    exoPlayer.playWhenReady = false
+                                }
+                            }
+                        }
+                }
             }
         }
     }
 
     articleRow?.let { row ->
         ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
+    }
+
+    if (showFullscreenVideo) {
+        FullScreenVideoDialog(
+            exoPlayer = exoPlayer,
+            onDismiss = {
+                showFullscreenVideo = false
+                isMuted = preFullscreenMuted
+            },
+        )
     }
 }
