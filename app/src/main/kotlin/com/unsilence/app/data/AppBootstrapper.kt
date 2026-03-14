@@ -5,6 +5,8 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.AppDatabase
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
+import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
@@ -12,11 +14,22 @@ import com.unsilence.app.data.repository.GLOBAL_RELAY_URLS
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
+
+/** Indexer relays that specialise in kind 0/3/10002 metadata. */
+private val INDEXER_RELAY_URLS = listOf(
+    "wss://purplepag.es",
+    "wss://user.kindpag.es",
+    "wss://indexer.coracle.social",
+)
 
 @Singleton
 class AppBootstrapper @Inject constructor(
@@ -27,24 +40,56 @@ class AppBootstrapper @Inject constructor(
     private val outboxRouter: OutboxRouter,
     private val maintenanceJob: DatabaseMaintenanceJob,
     private val signingManager: SigningManager,
+    private val followDao: FollowDao,
+    private val userDao: UserDao,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * Connect to default relays and fire the initial Nostr requests for the logged-in user.
-     * Called after any login path: nsec import, key generation, or Amber.
+     * Sequential bootstrap for the logged-in user.
+     *
+     * Each step completes (or times out) before the next starts:
+     * 1. Connect to indexer relays → wait for at least one connection
+     * 2. Fetch kind-3 (contact list) → wait for follows to appear in Room
+     * 3. Fetch kind-0 (own profile) → wait for profile to appear in Room
+     * 4. Fetch kind-10002 (relay list) → fire and let OutboxRouter handle reactively
+     * 5. Connect to global relays → opens persistent feed subscriptions
      */
-    fun bootstrap(pubkeyHex: String) {
+    suspend fun bootstrap(pubkeyHex: String) {
         eventProcessor.start()
-        // OutboxRouter registers kind-3/kind-10002 handlers with EventProcessor
-        // and sends fetchFollowList. Must happen BEFORE relay connections open
-        // so no early events are missed.
+        // Register kind-3/kind-10002 handlers before any relay events can arrive
         outboxRouter.start()
-        relayPool.connect(GLOBAL_RELAY_URLS)
+
+        // ── Step 1: Connect to indexer relays ───────────────────────────────
+        val ready = relayPool.connectAndAwait(INDEXER_RELAY_URLS, timeoutMs = 5_000)
+        Log.d(TAG, "Step 1: $ready indexer relay(s) connected")
+
+        // ── Step 2: Fetch kind-3, wait for follows ──────────────────────────
+        relayPool.fetchFollowList(pubkeyHex)
+        val follows = withTimeoutOrNull(10_000L) {
+            followDao.followsFlow().filter { it.isNotEmpty() }.first()
+        }
+        Log.d(TAG, "Step 2: ${follows?.size ?: 0} follows loaded")
+
+        // ── Step 3: Fetch kind-0 (own profile), wait ────────────────────────
         relayPool.fetchProfiles(listOf(pubkeyHex))
+        val profile = withTimeoutOrNull(10_000L) {
+            userDao.userFlow(pubkeyHex).filterNotNull().first()
+        }
+        Log.d(TAG, "Step 3: profile ${if (profile != null) "loaded" else "timeout"}")
+
+        // ── Step 4: Fetch kind-10002 (relay list) ───────────────────────────
+        // OutboxRouter reactively observes relayListDao and connects to write
+        // relays when kind-10002 data arrives. No need to block here.
         relayPool.fetchRelayLists(listOf(pubkeyHex))
+        Log.d(TAG, "Step 4: kind-10002 requested")
+
+        // ── Step 5: Connect to global relays (feed subscriptions) ───────────
+        relayPool.connect(GLOBAL_RELAY_URLS)
+        Log.d(TAG, "Step 5: global relays connecting")
+
         maintenanceJob.start()
-        Log.d(TAG, "Bootstrapped for $pubkeyHex")
+        Log.d(TAG, "Bootstrap complete for $pubkeyHex")
     }
 
     /**

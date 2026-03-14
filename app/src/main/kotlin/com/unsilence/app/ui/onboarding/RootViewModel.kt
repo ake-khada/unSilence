@@ -4,9 +4,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.AppBootstrapper
 import com.unsilence.app.data.auth.KeyManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
@@ -21,7 +23,7 @@ class RootViewModel @Inject constructor(
     fun onOnboardingComplete() {
         isLoggedIn = true
         val pubkey = keyManager.getPublicKeyHex() ?: return
-        bootstrapper.bootstrap(pubkey)
+        viewModelScope.launch { bootstrapper.bootstrap(pubkey) }
     }
 
     fun logout() {
