@@ -25,7 +25,7 @@ import com.unsilence.app.data.db.entity.UserEntity
         FollowEntity::class,
         RelayListEntity::class,
     ],
-    version = 4,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

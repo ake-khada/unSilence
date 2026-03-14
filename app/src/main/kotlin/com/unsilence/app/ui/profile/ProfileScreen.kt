@@ -22,10 +22,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +52,7 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -72,7 +71,10 @@ fun ProfileScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
-    val posts           by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
+    val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
+    val followerCount   by viewModel.followerCount.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -232,34 +234,34 @@ fun ProfileScreen(
                         .padding(horizontal = Spacing.medium),
                     horizontalArrangement = Arrangement.Center,
                 ) {
-                    StatLabel(label = "Following", value = viewModel.following)
+                    StatLabel(label = "Following", value = "$followingCount")
                     Spacer(Modifier.size(20.dp))
-                    StatLabel(label = "Followers", value = viewModel.followers)
+                    StatLabel(
+                        label = "Followers",
+                        value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+                    )
                 }
 
                 Spacer(Modifier.height(Spacing.large))
             }
 
-            // ── Posts section header ─────────────────────────────────────────
+            // ── Profile tabs ──────────────────────────────────────────────────
             item {
-                Text(
-                    text       = "Posts",
-                    color      = Color.White,
-                    fontSize   = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier   = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium)
-                        .padding(bottom = Spacing.small),
+                ProfileTabRow(
+                    selectedTab   = selectedTab,
+                    onTabSelected = { viewModel.selectedTab.value = it },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             }
 
             // ── Post list ────────────────────────────────────────────────────
             if (posts.isEmpty()) {
                 item {
                     Text(
-                        text     = "No posts yet",
+                        text     = when (selectedTab) {
+                            ProfileTab.NOTES    -> "No notes yet"
+                            ProfileTab.REPLIES  -> "No replies yet"
+                            ProfileTab.LONGFORM -> "No articles yet"
+                        },
                         color    = TextSecondary,
                         fontSize = 14.sp,
                         modifier = Modifier
@@ -379,10 +381,10 @@ private fun ProfileAvatar(
 }
 
 @Composable
-private fun StatLabel(label: String, value: Int?) {
+private fun StatLabel(label: String, value: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text       = if (value != null) formatStatCount(value) else "—",
+            text       = value,
             color      = Color.White,
             fontSize   = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -394,10 +396,4 @@ private fun StatLabel(label: String, value: Int?) {
             fontSize = 13.sp,
         )
     }
-}
-
-private fun formatStatCount(n: Int): String = when {
-    n < 1_000  -> "$n"
-    n < 10_000 -> "%.1fk".format(n / 1_000f)
-    else        -> "${n / 1_000}k"
 }

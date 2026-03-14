@@ -61,4 +61,8 @@ data class EventEntity(
 
     @ColumnInfo(name = "cached_at")
     val cachedAt: Long,
+
+    /** Aggregated zap amount in sats from kind-9735 receipts */
+    @ColumnInfo(name = "zap_total_sats")
+    val zapTotalSats: Long = 0,
 )

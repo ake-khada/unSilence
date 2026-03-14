@@ -23,10 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,7 +76,8 @@ fun UserProfileScreen(
 
     val pubkeyHex       by viewModel.pubkeyHex.collectAsStateWithLifecycle()
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
-    val posts           by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -253,26 +252,23 @@ fun UserProfileScreen(
                 Spacer(Modifier.height(Spacing.large))
             }
 
-            // ── Posts section header ──────────────────────────────────────────
+            // ── Profile tabs ──────────────────────────────────────────────────
             item {
-                Text(
-                    text       = "Posts",
-                    color      = Color.White,
-                    fontSize   = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier   = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium)
-                        .padding(bottom = Spacing.small),
+                ProfileTabRow(
+                    selectedTab   = selectedTab,
+                    onTabSelected = { viewModel.selectedTab.value = it },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             }
 
             // ── Post list ─────────────────────────────────────────────────────
             if (posts.isEmpty()) {
                 item {
                     Text(
-                        text     = "No posts yet",
+                        text     = when (selectedTab) {
+                            ProfileTab.NOTES    -> "No notes yet"
+                            ProfileTab.REPLIES  -> "No replies yet"
+                            ProfileTab.LONGFORM -> "No articles yet"
+                        },
                         color    = TextSecondary,
                         fontSize = 14.sp,
                         modifier = Modifier

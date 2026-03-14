@@ -40,4 +40,8 @@ abstract class FollowDao {
 
     @Query("SELECT COUNT(*) FROM follows")
     abstract suspend fun count(): Int
+
+    /** Reactive follow count — re-emits on every follow list change. */
+    @Query("SELECT COUNT(*) FROM follows")
+    abstract fun countFlow(): Flow<Int>
 }

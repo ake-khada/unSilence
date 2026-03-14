@@ -21,6 +21,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import com.vitorpamplona.quartz.lightning.LnInvoiceUtil
+import java.math.BigDecimal
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -353,6 +355,43 @@ class EventProcessor @Inject constructor(
         }
     }
 
+    // ── Zap sats extraction ─────────────────────────────────────────────
+
+    /** Extract a tag value from a JSON-serialized tags array: [["key","value"],...] */
+    private fun tagValue(tagsJson: String, key: String): String? = runCatching {
+        NostrJson.parseToJsonElement(tagsJson).jsonArray
+            .firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == key }
+            ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+    }.getOrNull()
+
+    /**
+     * Extract sats from a kind-9735 zap receipt's tags.
+     * Primary: parse bolt11 invoice via Quartz's LnInvoiceUtil.
+     * Fallback: read "amount" tag from embedded zap request (millisats).
+     */
+    private fun extractZapSats(tagsJson: String): Long {
+        // Primary: parse bolt11 tag via Quartz's LnInvoiceUtil
+        val bolt11 = tagValue(tagsJson, "bolt11")
+        if (bolt11 != null) {
+            try {
+                val sats = LnInvoiceUtil.getAmountInSats(bolt11)
+                if (sats > BigDecimal.ZERO) return sats.toLong()
+            } catch (_: Exception) { }
+        }
+
+        // Fallback: read "amount" tag from embedded zap request (millisats)
+        val descriptionJson = tagValue(tagsJson, "description") ?: return 0L
+        return try {
+            val zapRequest = NostrJson.parseToJsonElement(descriptionJson).jsonObject
+            val tags = zapRequest["tags"]?.jsonArray
+            val amountTag = tags?.firstOrNull { tag ->
+                tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "amount"
+            }
+            val msats = amountTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()
+            (msats ?: 0L) / 1_000L
+        } catch (_: Exception) { 0L }
+    }
+
     /**
      * Fix 5 — Write coalescing: deduplicate within the batch by primary key so
      * that one event arriving from N relays produces exactly one INSERT.
@@ -376,6 +415,16 @@ class EventProcessor @Inject constructor(
         if (events.isNotEmpty())    eventDao.insertOrIgnoreBatch(events.values.toList())
         if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
         if (reactions.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactions.values.toList())
+
+        // Aggregate zap sats for kind-9735 receipts
+        for (entity in events.values) {
+            if (entity.kind == 9735 && entity.rootId != null) {
+                val sats = extractZapSats(entity.tags)
+                if (sats > 0) {
+                    eventDao.addZapSats(entity.rootId, sats)
+                }
+            }
+        }
     }
 
     // ── NIP-10: threading ─────────────────────────────────────────────────────

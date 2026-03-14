@@ -486,7 +486,7 @@ fun NoteCard(
                 onClick            = onReact,
             )
             ZapButton(
-                count         = row.zapCount,
+                sats          = row.zapTotalSats,
                 hasZapped     = hasZapped,
                 onTap         = {
                     if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
@@ -603,16 +603,16 @@ private fun ActionButton(
     }
 }
 
-/** Zap button: Amber when zapped, supports single tap and long-press. */
+/** Zap button: Amber when sats > 0 or user has zapped, supports single tap and long-press. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ZapButton(
-    count: Int,
+    sats: Long,
     hasZapped: Boolean,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
-    val tint = if (hasZapped) ZapAmber else ActionTint
+    val tint = if (sats > 0 || hasZapped) ZapAmber else ActionTint
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier          = Modifier
@@ -628,10 +628,10 @@ private fun ZapButton(
             tint               = tint,
             modifier           = Modifier.size(Sizing.actionIcon),
         )
-        if (count > 0) {
+        if (sats > 0) {
             Spacer(Modifier.width(Spacing.micro))
             Text(
-                text     = formatCount(count),
+                text     = sats.toCompactSats(),
                 color    = tint,
                 fontSize = 12.sp,
             )
@@ -824,4 +824,17 @@ private fun formatCount(n: Int): String = when {
     n < 1_000  -> "$n"
     n < 10_000 -> "%.1fk".format(n / 1_000f)
     else        -> "${n / 1_000}k"
+}
+
+/** Format sats compactly: 21000 → "21k", 1500000 → "1.5M" */
+internal fun Long.toCompactSats(): String = when {
+    this >= 1_000_000 -> {
+        val s = "%.1fM".format(this / 1_000_000.0)
+        if (s.endsWith(".0M")) s.dropLast(3) + "M" else s
+    }
+    this >= 1_000 -> {
+        val s = "%.1fk".format(this / 1_000.0)
+        if (s.endsWith(".0k")) s.dropLast(3) + "k" else s
+    }
+    else -> this.toString()
 }
