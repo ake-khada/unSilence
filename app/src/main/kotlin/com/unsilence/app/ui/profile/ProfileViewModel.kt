@@ -3,6 +3,7 @@ package com.unsilence.app.ui.profile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.RelayPool
@@ -11,8 +12,6 @@ import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +32,7 @@ import javax.inject.Inject
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
     private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
     private val userRepository: UserRepository,
     private val eventRepository: EventRepository,
     private val relayPool: RelayPool,
@@ -89,11 +89,6 @@ class ProfileViewModel @Inject constructor(
         onDone: () -> Unit,
     ) {
         viewModelScope.launch(Dispatchers.IO) {
-            val privKeyHex   = keyManager.getPrivateKeyHex() ?: return@launch
-            val privKeyBytes = privKeyHex.hexToByteArray()
-            val keyPair      = KeyPair(privKey = privKeyBytes)
-            val signer       = NostrSignerInternal(keyPair)
-
             val contentJson = buildJsonObject {
                 if (name.isNotBlank())        put("name",         name.trim())
                 if (displayName.isNotBlank()) put("display_name", displayName.trim())
@@ -112,7 +107,7 @@ class ProfileViewModel @Inject constructor(
                 content   = contentJson,
             )
 
-            val signed = runCatching { signer.sign(template) }.getOrNull() ?: return@launch
+            val signed = signingManager.sign(template) ?: return@launch
             relayPool.publish(toEventJson(signed))
 
             // EventProcessor will update Room when the relay echoes the event back.
