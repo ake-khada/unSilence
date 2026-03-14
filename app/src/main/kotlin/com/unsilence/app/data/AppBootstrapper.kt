@@ -2,6 +2,7 @@ package com.unsilence.app.data
 
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.AppDatabase
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.relay.EventProcessor
@@ -25,6 +26,7 @@ class AppBootstrapper @Inject constructor(
     private val eventProcessor: EventProcessor,
     private val outboxRouter: OutboxRouter,
     private val maintenanceJob: DatabaseMaintenanceJob,
+    private val signingManager: SigningManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -64,8 +66,9 @@ class AppBootstrapper @Inject constructor(
         // 3. Clear all Room tables
         scope.launch { appDatabase.clearAllTables() }
 
-        // 4. Clear credentials
+        // 4. Clear credentials and cached signer
         keyManager.clear()
+        signingManager.clear()
 
         // 5. Cancel child scopes (NOT this scope — it must survive for next login)
         outboxRouter.stop()
