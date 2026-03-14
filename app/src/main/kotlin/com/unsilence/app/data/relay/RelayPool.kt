@@ -122,6 +122,11 @@ class RelayPool @Inject constructor(
                 listenForEvents(conn)
             }
         }
+        // Clear pending one-shots after all relays have had time to connect and drain
+        scope.launch {
+            delay(10_000)
+            pendingOneShots.clear()
+        }
         Log.d(TAG, "Pool has ${connections.size} connections")
     }
 
@@ -148,12 +153,11 @@ class RelayPool @Inject constructor(
         registerPersistentSub(subId, feedReq)
         conn.send(feedReq)
 
-        // Drain any one-shot requests that were queued before this connection was ready.
-        // poll() consumes items so the queue doesn't grow unboundedly across the session.
-        var pending = pendingOneShots.poll()
-        while (pending != null) {
-            conn.send(pending)
-            pending = pendingOneShots.poll()
+        // Send any one-shot requests that were queued before this connection was ready.
+        // Iterate without consuming — every relay gets the same bootstrap requests.
+        // Queue is cleared by a delayed cleanup launched from connect().
+        for (req in pendingOneShots) {
+            conn.send(req)
         }
 
         Log.d(TAG, "Subscribed to ${conn.url}")
