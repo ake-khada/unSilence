@@ -113,7 +113,7 @@ class ProfileViewModel @Inject constructor(
                 }
 
                 val count = relayPool.sendCount(
-                    relayUrl = "wss://purplepag.es",
+                    relayUrl = "wss://antiprimal.net",
                     filter = buildJsonObject {
                         put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
                         put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })

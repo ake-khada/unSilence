@@ -84,8 +84,7 @@ interface EventDao {
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.relay_url IN (:relayUrls)
           AND e.kind      IN (:kinds)
-          AND e.reply_to_id IS NULL
-          AND e.root_id     IS NULL
+          AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
         GROUP BY e.id
         HAVING ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
@@ -140,9 +139,8 @@ interface EventDao {
         LEFT JOIN  events      rep ON rep.reply_to_id    = e.id AND rep.kind = 1
         LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
         LEFT JOIN  events      z   ON z.root_id          = e.id AND z.kind  = 9735
-        WHERE e.kind        IN (1, 6, 20, 21, 30023)
-          AND e.reply_to_id IS NULL
-          AND e.root_id     IS NULL
+        WHERE e.kind IN (1, 6, 20, 21, 30023)
+          AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
         GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
@@ -188,7 +186,7 @@ interface EventDao {
     """)
     fun userPostsFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
 
-    /** Notes tab: kind 1 top-level posts only (no replies, no reposts). */
+    /** Notes tab: kind 1 top-level posts + kind 6 reposts. */
     @Query("""
         SELECT
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
@@ -209,8 +207,8 @@ interface EventDao {
         LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
-        WHERE e.pubkey = :pubkey AND e.kind = 1
-          AND e.reply_to_id IS NULL AND e.root_id IS NULL
+        WHERE e.pubkey = :pubkey
+          AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
         GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
