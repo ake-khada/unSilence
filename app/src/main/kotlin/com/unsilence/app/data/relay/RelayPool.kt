@@ -402,6 +402,11 @@ class RelayPool @Inject constructor(
                 conn.connect()
                 scope.launch {
                     conn.send(req)
+                    // Drain bootstrap one-shots (kind-3, kind-10002) so indexer
+                    // relays like purplepag.es also receive them
+                    for (pending in pendingOneShots) {
+                        conn.send(pending)
+                    }
                     listenForEvents(conn)
                 }
                 Log.d(TAG, "Connected to profile indexer: $url")
