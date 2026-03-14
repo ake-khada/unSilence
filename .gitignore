@@ -14,3 +14,5 @@ local.properties
 node_modules/
 /build
 /app/build
+unsilence-sprint*.md
+unsilence-stabilization-sprint.md
