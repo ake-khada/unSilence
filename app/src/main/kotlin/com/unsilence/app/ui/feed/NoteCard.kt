@@ -105,7 +105,7 @@ private val IMAGE_URL_REGEX = Regex(
 
 // Matches direct video URLs (.mp4 etc.) and known video platforms.
 internal val VIDEO_URL_REGEX = Regex(
-    """https?://\S+\.(?:mp4|mov|webm|m3u8)(?:\?\S*)?|https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|streamable\.com/\S+)""",
+    """https?://\S+\.(?:mp4|mov|webm|m3u8|m4v|avi)(?:\?\S*)?|https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|streamable\.com/\S+)""",
     RegexOption.IGNORE_CASE,
 )
 
@@ -140,7 +140,9 @@ private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".mp4", ignoreCase = true) ||
     url.contains(".mov", ignoreCase = true) ||
     url.contains(".webm", ignoreCase = true) ||
-    url.contains(".m3u8", ignoreCase = true)
+    url.contains(".m3u8", ignoreCase = true) ||
+    url.contains(".m4v", ignoreCase = true) ||
+    url.contains(".avi", ignoreCase = true)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -191,24 +193,26 @@ fun NoteCard(
     // Wrapped in remember to avoid re-parsing JSON on every recomposition.
     val imetaMedia = remember(row.tags) { ImetaParser.parse(row.tags) }
     val mediaExtraction = remember(row.id, contentNoNostr) {
-        val regexImageUrls = IMAGE_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
-        val imetaImageUrls = imetaMedia.filter { it.mimeType?.startsWith("image/") == true }.map { it.url }
-
-        val afterImages    = IMAGE_URL_REGEX.replace(contentNoNostr, "")
-        val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.toList()
+        // Extract videos FIRST so video URLs from image-host domains (e.g.
+        // blossom.primal.net/video.mp4) are not misrouted to Coil.
+        val regexVideoUrls = VIDEO_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
         val imetaVideoUrls = imetaMedia.filter { it.mimeType?.startsWith("video/") == true }.map { it.url }
+        val allVideoUrls   = (regexVideoUrls + imetaVideoUrls).distinct()
 
-        val afterVideos    = VIDEO_URL_REGEX.replace(afterImages, "")
+        val afterVideos    = VIDEO_URL_REGEX.replace(contentNoNostr, "")
+        val regexImageUrls = IMAGE_URL_REGEX.findAll(afterVideos).map { it.value }.toList()
+        val imetaImageUrls = imetaMedia.filter { it.mimeType?.startsWith("image/") == true }.map { it.url }
+        val allImageUrls   = (regexImageUrls + imetaImageUrls).distinct()
+                                 .filter { it !in allVideoUrls }
 
-        val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinct()
+        val afterImages    = IMAGE_URL_REGEX.replace(afterVideos, "")
 
         MediaExtraction(
-            imageUrls   = (regexImageUrls + imetaImageUrls).distinct()
-                              .filter { it !in allVideoUrls },
+            imageUrls   = allImageUrls,
             videoUrls   = allVideoUrls,
-            linkUrls    = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(3).toList()
-                              .filter { it !in allVideoUrls },
-            textContent = LINK_URL_REGEX.replace(afterVideos, "").trim(),
+            linkUrls    = LINK_URL_REGEX.findAll(afterImages).map { it.value }.distinct().take(3).toList()
+                              .filter { it !in allVideoUrls && it !in allImageUrls },
+            textContent = LINK_URL_REGEX.replace(afterImages, "").trim(),
         )
     }
     val imageUrls   = mediaExtraction.imageUrls
@@ -233,6 +237,12 @@ fun NoteCard(
                     contentDescription = null,
                     tint               = TextSecondary,
                     modifier           = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                AvatarImage(
+                    pubkey   = row.pubkey,
+                    picture  = row.authorPicture,
+                    modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(

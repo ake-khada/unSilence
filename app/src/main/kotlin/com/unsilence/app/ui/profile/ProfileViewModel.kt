@@ -95,10 +95,12 @@ class ProfileViewModel @Inject constructor(
     private val fetchedProfilePubkeys = mutableSetOf<String>()
 
     init {
-        viewModelScope.launch {
-            if (pubkeyHex != null) {
+        if (pubkeyHex != null) {
+            viewModelScope.launch {
                 userRepository.fetchMissingProfiles(listOf(pubkeyHex))
             }
+            // Actively request this user's posts from connected relays
+            relayPool.fetchUserPosts(pubkeyHex)
         }
         // Fetch follower count via NIP-45
         if (pubkeyHex != null) {
