@@ -36,13 +36,13 @@ class AppBootstrapper @Inject constructor(
      */
     fun bootstrap(pubkeyHex: String) {
         eventProcessor.start()
+        // OutboxRouter registers kind-3/kind-10002 handlers with EventProcessor
+        // and sends fetchFollowList. Must happen BEFORE relay connections open
+        // so no early events are missed.
+        outboxRouter.start()
         relayPool.connect(GLOBAL_RELAY_URLS)
         relayPool.fetchProfiles(listOf(pubkeyHex))
-        relayPool.fetchFollowList(pubkeyHex)
         relayPool.fetchRelayLists(listOf(pubkeyHex))
-        // OutboxRouter.start() is idempotent — safe to call here so it re-registers
-        // kind handlers after a teardown/re-login cycle. Also called from FollowingFeedViewModel.
-        outboxRouter.start()
         maintenanceJob.start()
         Log.d(TAG, "Bootstrapped for $pubkeyHex")
     }

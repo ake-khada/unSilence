@@ -24,6 +24,7 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -58,6 +59,14 @@ class RelayPool @Inject constructor(
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
 
+    /**
+     * One-shot REQ strings queued before WebSocket connections are ready.
+     * Drained by [subscribeAfterConnect] on each newly-connected relay, so
+     * bootstrap requests (kind-0, kind-3, kind-10002) are sent reliably even
+     * though [connect] launches WebSocket handshakes asynchronously.
+     */
+    private val pendingOneShots = ConcurrentLinkedQueue<String>()
+
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
 
@@ -91,6 +100,7 @@ class RelayPool @Inject constructor(
             connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
         }
         persistentSubs.clear()
+        pendingOneShots.clear()
     }
 
     /**
@@ -137,6 +147,15 @@ class RelayPool @Inject constructor(
 
         registerPersistentSub(subId, feedReq)
         conn.send(feedReq)
+
+        // Drain any one-shot requests that were queued before this connection was ready.
+        // poll() consumes items so the queue doesn't grow unboundedly across the session.
+        var pending = pendingOneShots.poll()
+        while (pending != null) {
+            conn.send(pending)
+            pending = pendingOneShots.poll()
+        }
+
         Log.d(TAG, "Subscribed to ${conn.url}")
     }
 
@@ -269,13 +288,14 @@ class RelayPool @Inject constructor(
     fun fetchFollowList(pubkeyHex: String) {
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("kind3-${System.currentTimeMillis()}"))
+            add(JsonPrimitive("kind3-${System.nanoTime()}"))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
                 put("limit", JsonPrimitive(1))
             })
         }.toString()
+        pendingOneShots.add(req)
         connections.values.forEach { it.send(req) }
         Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${connections.size} relay(s)")
     }
@@ -290,12 +310,13 @@ class RelayPool @Inject constructor(
         pubkeys.chunked(500).forEach { chunk ->
             val req = buildJsonArray {
                 add(JsonPrimitive("REQ"))
-                add(JsonPrimitive("kind10002-${System.currentTimeMillis()}"))
+                add(JsonPrimitive("kind10002-${System.nanoTime()}"))
                 add(buildJsonObject {
                     put("kinds", buildJsonArray { add(JsonPrimitive(10002)) })
                     put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
                 })
             }.toString()
+            pendingOneShots.add(req)
             connections.values.forEach { it.send(req) }
         }
         Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s)")
@@ -354,14 +375,15 @@ class RelayPool @Inject constructor(
         if (pubkeys.isEmpty()) return
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("profiles-${System.currentTimeMillis()}"))
+            add(JsonPrimitive("profiles-${System.nanoTime()}"))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
                 put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
 
-        // Send to every already-connected relay
+        // Send to every already-connected relay (and queue for connections still opening)
+        pendingOneShots.add(req)
         connections.values.forEach { it.send(req) }
 
         // Also query dedicated profile-indexer relays
