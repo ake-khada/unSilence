@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.entity.RelaySetEntity
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
@@ -50,6 +51,7 @@ class FeedViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,
+    private val followDao: FollowDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -128,6 +130,9 @@ class FeedViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
+            val hasFollows = followDao.count() > 0
+            if (hasFollows) _feedType.value = FeedType.Following
+
             relaySetRepository.seedDefaults()
 
             val set  = relaySetRepository.defaultSet() ?: return@launch
