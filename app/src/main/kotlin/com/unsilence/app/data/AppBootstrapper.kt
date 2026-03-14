@@ -29,6 +29,7 @@ private val INDEXER_RELAY_URLS = listOf(
     "wss://purplepag.es",
     "wss://user.kindpag.es",
     "wss://indexer.coracle.social",
+    "wss://antiprimal.net",
 )
 
 @Singleton

@@ -4,10 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -59,14 +56,9 @@ fun InlineAutoPlayVideo(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .then(
-                if (aspectRatio != null && aspectRatio > 0f)
-                    Modifier
-                        .aspectRatio(aspectRatio, matchHeightConstraintsFirst = false)
-                        .defaultMinSize(minHeight = 120.dp)
-                        .heightIn(max = 300.dp)
-                else
-                    Modifier.height(200.dp)
+            .aspectRatio(
+                ratio = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f,
+                matchHeightConstraintsFirst = false,
             )
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .clickable { onOpenFullscreen() },
