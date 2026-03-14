@@ -92,7 +92,7 @@ interface EventDao {
             OR (:requireReplies   = 1 AND COUNT(DISTINCT rep.id)     >= 1)
             OR (:requireZaps      = 1 AND COUNT(DISTINCT z.id)       >= 1))
         ORDER BY e.created_at DESC
-        LIMIT 300
+        LIMIT :limit
     """)
     fun feedFlow(
         relayUrls: List<String>,
@@ -102,6 +102,7 @@ interface EventDao {
         requireReactions: Int,
         requireReplies: Int,
         requireZaps: Int,
+        limit: Int = 300,
     ): Flow<List<FeedRow>>
 
     /**
@@ -141,9 +142,9 @@ interface EventDao {
           AND e.root_id     IS NULL
         GROUP BY e.id
         ORDER BY e.created_at DESC
-        LIMIT 300
+        LIMIT :limit
     """)
-    fun followingFeedFlow(): Flow<List<FeedRow>>
+    fun followingFeedFlow(limit: Int = 300): Flow<List<FeedRow>>
 
     /** Top-level posts by a single author, newest-first. Used by the profile screen. */
     @Query("""
