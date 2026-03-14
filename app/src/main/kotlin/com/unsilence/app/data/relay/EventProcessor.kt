@@ -213,6 +213,9 @@ class EventProcessor @Inject constructor(
         }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.longOrNull
         if (expiration != null && expiration < nowSeconds) return
 
+        // Skip machine-generated spam (e.g. xitchat broadcast JSON)
+        if (kind == 1 && content.startsWith("xitchat-broadcast-v1-")) return
+
         // Build the entity and route to the appropriate priority lane
         val processed: ProcessedEvent? = when (kind) {
             0 -> buildUserEvent(pubkey, content)
