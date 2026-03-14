@@ -7,6 +7,7 @@ import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import com.vitorpamplona.quartz.nip19Bech32.entities.NSec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -97,9 +98,16 @@ class KeyManager @Inject constructor(
      * Saves the public key returned by Amber and marks signer mode as AMBER.
      * No private key is stored.
      */
-    fun saveAmberLogin(pubkeyHex: String) {
+    fun saveAmberLogin(pubkey: String) {
+        // Amber may return npub1… (bech32) or raw hex — normalise to hex
+        val hex = if (pubkey.startsWith("npub1", ignoreCase = true)) {
+            (Nip19Parser.uriToRoute(pubkey)?.entity as? NPub)?.hex
+                ?: error("Invalid npub from Amber: $pubkey")
+        } else {
+            pubkey
+        }
         prefs.edit()
-            .putString(KEY_PUB_HEX, pubkeyHex.lowercase())
+            .putString(KEY_PUB_HEX, hex.lowercase())
             .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
             .apply()
     }
