@@ -65,6 +65,8 @@ class FeedViewModel @Inject constructor(
     private val _filter = MutableStateFlow(FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
 
+    private val _displayLimit = MutableStateFlow(200)
+
     fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
     /**
@@ -120,6 +122,7 @@ class FeedViewModel @Inject constructor(
         val oldest = _uiState.value.events.lastOrNull()?.createdAt ?: return
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
+        _displayLimit.value += 200
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
     }
 
@@ -138,6 +141,7 @@ class FeedViewModel @Inject constructor(
                     newestTimestamp     = 0L
                     hasNewTopPost       = false
                     lastOldestTimestamp = 0L
+                    _displayLimit.value = 200
                     fetchedProfilePubkeys.clear()
                     _uiState.value = _uiState.value.copy(loading = true)
                     viewModelScope.launch {
@@ -147,19 +151,25 @@ class FeedViewModel @Inject constructor(
                     when (type) {
                         is FeedType.Global    -> {
                             currentRelayUrls = urls
-                            eventRepository.feedFlow(urls, filter)
+                            _displayLimit.flatMapLatest { limit ->
+                                eventRepository.feedFlow(urls, filter, limit)
+                            }
                         }
                         is FeedType.Following -> {
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
-                            eventRepository.followingFeedFlow()
+                            _displayLimit.flatMapLatest { limit ->
+                                eventRepository.followingFeedFlow(limit)
+                            }
                         }
                         is FeedType.RelaySet  -> {
                             val setEntity = relaySetRepository.getById(type.id)
                             val setUrls   = setEntity?.let { relaySetRepository.decodeUrls(it) } ?: urls
                             currentRelayUrls = setUrls
                             relayPool.connect(setUrls)
-                            eventRepository.feedFlow(setUrls, filter)
+                            _displayLimit.flatMapLatest { limit ->
+                                eventRepository.feedFlow(setUrls, filter, limit)
+                            }
                         }
                     }
                 }
