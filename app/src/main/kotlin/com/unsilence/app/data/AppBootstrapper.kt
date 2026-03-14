@@ -71,8 +71,14 @@ class AppBootstrapper @Inject constructor(
         }
         Log.d(TAG, "Step 2: ${follows?.size ?: 0} follows loaded")
 
-        // ── Step 3: Fetch kind-0 (own profile), wait ────────────────────────
-        relayPool.fetchProfiles(listOf(pubkeyHex))
+        // ── Step 2b: Fetch profiles for all followed pubkeys ──────────────
+        // Preloads display names and avatars so the feed shows names, not hex.
+        // Includes own pubkey. No need to block — Room flows update reactively.
+        val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
+        relayPool.fetchProfiles(followPubkeys.distinct())
+        Log.d(TAG, "Step 2b: requested ${followPubkeys.size} profiles")
+
+        // ── Step 3: Wait for own profile to arrive ────────────────────────
         val profile = withTimeoutOrNull(10_000L) {
             userDao.userFlow(pubkeyHex).filterNotNull().first()
         }
