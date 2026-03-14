@@ -19,7 +19,7 @@ class EventRepository @Inject constructor(
      * Live feed from Room — UI subscribes to this.
      * Automatically re-emits whenever new events or reactions are inserted.
      */
-    fun feedFlow(relayUrls: List<String>, filter: FeedFilter): Flow<List<FeedRow>> {
+    fun feedFlow(relayUrls: List<String>, filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> {
         val sinceTimestamp = filter.sinceHours?.let {
             System.currentTimeMillis() / 1000L - it * 3600L
         } ?: 0L
@@ -31,14 +31,15 @@ class EventRepository @Inject constructor(
             requireReactions = if (filter.requireReactions) 1 else 0,
             requireReplies   = if (filter.requireReplies)   1 else 0,
             requireZaps      = if (filter.requireZaps)      1 else 0,
+            limit            = limit,
         )
     }
 
     fun threadFlow(eventId: String): Flow<List<FeedRow>> =
         eventDao.threadFlow(eventId)
 
-    fun followingFeedFlow(): Flow<List<FeedRow>> =
-        eventDao.followingFeedFlow()
+    fun followingFeedFlow(limit: Int = 300): Flow<List<FeedRow>> =
+        eventDao.followingFeedFlow(limit)
 
     fun userPostsFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
         eventDao.userPostsFlow(pubkey, limit)
