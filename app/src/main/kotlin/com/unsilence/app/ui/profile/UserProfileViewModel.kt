@@ -60,6 +60,20 @@ class UserProfileViewModel @Inject constructor(
         combine(_pubkeyHex.filterNotNull(), _displayLimit) { pk, limit -> pk to limit }
             .flatMapLatest { (pk, limit) -> eventRepository.userPostsFlow(pk, limit) }
 
+    // ── Profile tabs ──────────────────────────────────────────────────
+    val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val tabPostsFlow: Flow<List<FeedRow>> =
+        combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab -> pk to tab }
+            .flatMapLatest { (pk, tab) ->
+                when (tab) {
+                    ProfileTab.NOTES    -> eventRepository.userNotesFlow(pk)
+                    ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pk)
+                    ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pk)
+                }
+            }
+
     // ── Pagination state ───────────────────────────────────────────────
     private var oldestTimestamp = Long.MAX_VALUE
     private var fetching = false
@@ -99,6 +113,7 @@ class UserProfileViewModel @Inject constructor(
         if (_pubkeyHex.value == pubkey) return
         _pubkeyHex.value = pubkey
         // Reset pagination + deduplication state for new profile
+        selectedTab.value = ProfileTab.NOTES
         _displayLimit.value = 200
         oldestTimestamp = Long.MAX_VALUE
         fetching = false

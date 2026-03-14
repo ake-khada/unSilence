@@ -44,6 +44,15 @@ class EventRepository @Inject constructor(
     fun userPostsFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
         eventDao.userPostsFlow(pubkey, limit)
 
+    fun userNotesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userNotesFlow(pubkey, limit)
+
+    fun userRepliesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userRepliesFlow(pubkey, limit)
+
+    fun userLongformFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userLongformFlow(pubkey, limit)
+
     /** Optimistic insert for locally-authored events. */
     suspend fun insertEvent(entity: EventEntity) =
         eventDao.insertOrIgnore(entity)
