@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.relay.NostrJson
@@ -14,9 +15,6 @@ import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip18Reposts.RepostEvent
 import com.vitorpamplona.quartz.nip25Reactions.ReactionEvent
@@ -42,6 +40,7 @@ import javax.inject.Inject
 @HiltViewModel
 class NoteActionsViewModel @Inject constructor(
     private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
     private val nwcManager: NwcManager,
@@ -104,7 +103,6 @@ class NoteActionsViewModel @Inject constructor(
 
     fun react(eventId: String, eventPubkey: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val signer    = buildSigner() ?: return@launch
             val nowSeconds = System.currentTimeMillis() / 1000L
 
             val template = EventTemplate<ReactionEvent>(
@@ -116,7 +114,7 @@ class NoteActionsViewModel @Inject constructor(
                 ),
                 content   = "+",
             )
-            val signed = runCatching { signer.sign(template) }.getOrNull() ?: return@launch
+            val signed = signingManager.sign(template) ?: return@launch
 
             relayPool.publish(toEventJson(signed))
 
@@ -135,7 +133,6 @@ class NoteActionsViewModel @Inject constructor(
 
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val signer     = buildSigner() ?: return@launch
             val nowSeconds  = System.currentTimeMillis() / 1000L
             val original   = eventRepository.getEventById(eventId) ?: return@launch
             val originalJson = entityToJson(original)
@@ -150,7 +147,7 @@ class NoteActionsViewModel @Inject constructor(
                 ),
                 content   = originalJson,
             )
-            val signed = runCatching { signer.sign(template) }.getOrNull() ?: return@launch
+            val signed = signingManager.sign(template) ?: return@launch
 
             relayPool.publish(toEventJson(signed))
 
@@ -188,12 +185,6 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private fun buildSigner(): NostrSignerInternal? {
-        val privKeyHex   = keyManager.getPrivateKeyHex() ?: return null
-        val privKeyBytes = privKeyHex.hexToByteArray()
-        return NostrSignerInternal(KeyPair(privKey = privKeyBytes))
-    }
 
     private fun toEventJson(event: Event): String = buildJsonObject {
         put("id",         event.id)

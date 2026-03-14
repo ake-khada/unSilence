@@ -6,15 +6,13 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +42,7 @@ class ThreadViewModel @Inject constructor(
     private val relaySetRepository: RelaySetRepository,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ThreadUiState())
@@ -87,10 +86,6 @@ class ThreadViewModel @Inject constructor(
 
     fun publishReply(content: String, rootId: String, replyToId: String, replyToPubkey: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val privKeyHex   = keyManager.getPrivateKeyHex() ?: return@launch
-            val privKeyBytes = privKeyHex.hexToByteArray()
-            val keyPair      = KeyPair(privKey = privKeyBytes)
-            val signer       = NostrSignerInternal(keyPair)
             val nowSeconds   = System.currentTimeMillis() / 1000L
 
             val template = TextNoteEvent.build(note = content, createdAt = nowSeconds) {
@@ -98,7 +93,7 @@ class ThreadViewModel @Inject constructor(
                 add(arrayOf("e", replyToId, "", "reply"))
                 add(arrayOf("p", replyToPubkey))
             }
-            val signed = runCatching { signer.sign(template) }.getOrNull() ?: return@launch
+            val signed = signingManager.sign(template) ?: return@launch
 
             relayPool.publish(toEventJson(signed))
 

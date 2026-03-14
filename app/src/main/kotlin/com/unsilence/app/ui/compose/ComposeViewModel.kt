@@ -6,13 +6,11 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +24,7 @@ import javax.inject.Inject
 @HiltViewModel
 class ComposeViewModel @Inject constructor(
     private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
 ) : ViewModel() {
@@ -39,13 +38,8 @@ class ComposeViewModel @Inject constructor(
 
     fun publishNote(content: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val privKeyHex  = keyManager.getPrivateKeyHex() ?: return@launch
-            val privKeyBytes = privKeyHex.hexToByteArray()
-            val keyPair     = KeyPair(privKey = privKeyBytes)
-            val signer      = NostrSignerInternal(keyPair)
-            val template    = TextNoteEvent.build(note = content)
-
-            val signed = runCatching { signer.sign(template) }.getOrNull() ?: return@launch
+            val template = TextNoteEvent.build(note = content)
+            val signed   = signingManager.sign(template) ?: return@launch
 
             // Publish wire command to all connected relays
             relayPool.publish(toEventJson(signed))

@@ -1,15 +1,12 @@
 package com.unsilence.app.data.wallet
 
 import android.util.Log
-import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -35,7 +32,7 @@ private const val TAG = "ZapRepository"
 class ZapRepository @Inject constructor(
     private val nwcManager: NwcManager,
     private val userRepository: UserRepository,
-    private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
     private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
@@ -70,9 +67,6 @@ class ZapRepository @Inject constructor(
             ?: return Result.failure(Exception("LNURL response has no callback"))
 
         // ── 3. Build kind-9734 zap request event ─────────────────────────────
-        val signer = buildSigner()
-            ?: return Result.failure(IllegalStateException("No signing key"))
-
         val msats      = amountSats * 1000L
         val nowSeconds = System.currentTimeMillis() / 1000L
 
@@ -87,8 +81,8 @@ class ZapRepository @Inject constructor(
             ),
             content = "",
         )
-        val zapRequest = runCatching { signer.sign(template) }
-            .getOrElse { e -> return Result.failure(e) }
+        val zapRequest = signingManager.sign(template)
+            ?: return Result.failure(IllegalStateException("Signing failed or timed out"))
 
         // Publish the zap request to the relay so the recipient's wallet can see it
         relayPool.publish(toEventJson(zapRequest))
@@ -135,11 +129,6 @@ class ZapRepository @Inject constructor(
             val obj      = NostrJson.parseToJsonElement(body).jsonObject
             obj["pr"]?.jsonPrimitive?.content
         }.getOrNull()
-
-    private fun buildSigner(): NostrSignerInternal? {
-        val privKeyHex = keyManager.getPrivateKeyHex() ?: return null
-        return NostrSignerInternal(KeyPair(privKey = privKeyHex.hexToByteArray()))
-    }
 
     private fun toEventJson(event: Event) = buildJsonObject {
         put("id",         event.id)
