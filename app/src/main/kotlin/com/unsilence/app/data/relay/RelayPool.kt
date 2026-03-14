@@ -24,7 +24,6 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -59,14 +58,6 @@ class RelayPool @Inject constructor(
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
 
-    /**
-     * One-shot REQ strings queued before WebSocket connections are ready.
-     * Drained by [subscribeAfterConnect] on each newly-connected relay, so
-     * bootstrap requests (kind-0, kind-3, kind-10002) are sent reliably even
-     * though [connect] launches WebSocket handshakes asynchronously.
-     */
-    private val pendingOneShots = ConcurrentLinkedQueue<String>()
-
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
 
@@ -100,7 +91,37 @@ class RelayPool @Inject constructor(
             connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
         }
         persistentSubs.clear()
-        pendingOneShots.clear()
+    }
+
+    /**
+     * Connect to [relayUrls], start listening for events, and suspend until at least
+     * one connection is ready OR [timeoutMs] elapses. Does NOT send any subscriptions —
+     * the caller sends requests after this returns.
+     */
+    suspend fun connectAndAwait(relayUrls: List<String>, timeoutMs: Long = 5_000): Int {
+        val newConns = mutableListOf<RelayConnection>()
+        for (url in relayUrls) {
+            if (connections.containsKey(url)) continue
+            val conn = RelayConnection(url, okHttpClient)
+            connections[url] = conn
+            conn.connect()
+            scope.launch { listenForEvents(conn) }
+            newConns.add(conn)
+        }
+        if (newConns.isEmpty()) return connections.values.count { it.isConnected }
+        // Poll until at least one connection is ready
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val ready = newConns.count { it.isConnected }
+            if (ready > 0) {
+                Log.d(TAG, "connectAndAwait: $ready/${newConns.size} relay(s) ready")
+                return ready
+            }
+            delay(50)
+        }
+        val ready = newConns.count { it.isConnected }
+        Log.w(TAG, "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready")
+        return ready
     }
 
     /**
@@ -121,11 +142,6 @@ class RelayPool @Inject constructor(
                 subscribeAfterConnect(conn)
                 listenForEvents(conn)
             }
-        }
-        // Clear pending one-shots after all relays have had time to connect and drain
-        scope.launch {
-            delay(10_000)
-            pendingOneShots.clear()
         }
         Log.d(TAG, "Pool has ${connections.size} connections")
     }
@@ -152,14 +168,6 @@ class RelayPool @Inject constructor(
 
         registerPersistentSub(subId, feedReq)
         conn.send(feedReq)
-
-        // Send any one-shot requests that were queued before this connection was ready.
-        // Iterate without consuming — every relay gets the same bootstrap requests.
-        // Queue is cleared by a delayed cleanup launched from connect().
-        for (req in pendingOneShots) {
-            conn.send(req)
-        }
-
         Log.d(TAG, "Subscribed to ${conn.url}")
     }
 
@@ -299,7 +307,6 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(1))
             })
         }.toString()
-        pendingOneShots.add(req)
         connections.values.forEach { it.send(req) }
         Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${connections.size} relay(s)")
     }
@@ -320,7 +327,6 @@ class RelayPool @Inject constructor(
                     put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
                 })
             }.toString()
-            pendingOneShots.add(req)
             connections.values.forEach { it.send(req) }
         }
         Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s)")
@@ -372,9 +378,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-    /** Subscribe to kind 0 profiles for a batch of pubkeys.
-     *  Sends to all current connections AND to dedicated profile-indexer relays
-     *  (purplepag.es, user.kindpag.es) which specialise in kind 0 metadata. */
+    /** Send a kind 0 profile request for [pubkeys] to all connected relays. */
     fun fetchProfiles(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
         val req = buildJsonArray {
@@ -385,33 +389,8 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-
-        // Send to every already-connected relay (and queue for connections still opening)
-        pendingOneShots.add(req)
         connections.values.forEach { it.send(req) }
-
-        // Also query dedicated profile-indexer relays
-        val indexers = listOf("wss://purplepag.es", "wss://user.kindpag.es", "wss://indexer.coracle.social")
-        for (url in indexers) {
-            val existing = connections[url]
-            if (existing != null) {
-                existing.send(req)
-            } else {
-                val conn = RelayConnection(url, okHttpClient)
-                connections[url] = conn
-                conn.connect()
-                scope.launch {
-                    conn.send(req)
-                    // Drain bootstrap one-shots (kind-3, kind-10002) so indexer
-                    // relays like purplepag.es also receive them
-                    for (pending in pendingOneShots) {
-                        conn.send(pending)
-                    }
-                    listenForEvents(conn)
-                }
-                Log.d(TAG, "Connected to profile indexer: $url")
-            }
-        }
+        Log.d(TAG, "Fetching profiles for ${pubkeys.size} pubkey(s) from ${connections.size} relay(s)")
     }
 
     /**
