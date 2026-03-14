@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
@@ -63,7 +64,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.lerp
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -342,18 +342,31 @@ fun NoteCard(
 
         // ── First inline image only; overflow count shown as muted label ───────
         imageUrls.firstOrNull()?.let { url ->
+            val imgAspect = imetaMedia
+                .firstOrNull { it.url == url && it.width != null && it.height != null }
+                ?.let { it.width!!.toFloat() / it.height!! }
+                ?: 4f / 3f  // default aspect ratio when imeta unavailable
             SubcomposeAsyncImage(
                 model              = url,
                 contentDescription = null,
                 contentScale       = ContentScale.FillWidth,
                 loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
+                error              = {
+                    Box(
+                        modifier         = Modifier.fillMaxSize().background(Color(0xFF1A1A1A)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector        = Icons.Filled.BrokenImage,
+                            contentDescription = "Image failed to load",
+                            tint               = TextSecondary,
+                            modifier           = Modifier.size(32.dp),
+                        )
+                    }
+                },
                 modifier           = Modifier
                     .fillMaxWidth()
-                    .then(
-                        imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
-                            ?.let { Modifier.aspectRatio(it.width!!.toFloat() / it.height!!, matchHeightConstraintsFirst = false) }
-                            ?: Modifier.defaultMinSize(minHeight = 200.dp)
-                    )
+                    .aspectRatio(imgAspect, matchHeightConstraintsFirst = false)
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (imageUrls.size > 1) 2.dp else Spacing.small)
                     .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
@@ -651,12 +664,9 @@ private fun VideoThumbnailCard(
     Box(
         modifier          = modifier
             .fillMaxWidth()
-            .then(
-                if (aspectRatio != null && aspectRatio > 0f)
-                    Modifier.aspectRatio(aspectRatio, matchHeightConstraintsFirst = false)
-                        .defaultMinSize(minHeight = 120.dp)
-                        .heightIn(max = 300.dp)
-                else Modifier.height(180.dp)
+            .aspectRatio(
+                ratio = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f,
+                matchHeightConstraintsFirst = false,
             )
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .background(Color(0xFF1A1A1A))
