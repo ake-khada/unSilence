@@ -26,6 +26,15 @@ interface UserDao {
     @Query("SELECT pubkey FROM users")
     suspend fun allPubkeys(): List<String>
 
+    @Query("SELECT follower_count FROM users WHERE pubkey = :pubkey")
+    suspend fun getFollowerCount(pubkey: String): Long?
+
+    @Query("SELECT follower_count_updated_at FROM users WHERE pubkey = :pubkey")
+    suspend fun getFollowerCountUpdatedAt(pubkey: String): Long?
+
+    @Query("UPDATE users SET follower_count = :count, follower_count_updated_at = :updatedAt WHERE pubkey = :pubkey")
+    suspend fun updateFollowerCount(pubkey: String, count: Long, updatedAt: Long)
+
     /** Pubkeys with profiles older than [olderThan] epoch seconds. */
     @Query("SELECT pubkey FROM users WHERE updated_at < :olderThan")
     suspend fun stalePubkeys(olderThan: Long): List<String>

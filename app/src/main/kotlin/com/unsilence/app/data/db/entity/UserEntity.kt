@@ -33,4 +33,10 @@ data class UserEntity(
 
     @ColumnInfo(name = "updated_at")
     val updatedAt: Long,
+
+    @ColumnInfo(name = "follower_count")
+    val followerCount: Long? = null,
+
+    @ColumnInfo(name = "follower_count_updated_at")
+    val followerCountUpdatedAt: Long? = null,
 )

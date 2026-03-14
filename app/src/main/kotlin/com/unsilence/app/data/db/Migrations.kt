@@ -12,7 +12,22 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *           feedFlow query performance ("Long db operation" x27 per session).
  *           Also adds index on reactions(target_event_id) if not already present.
  * v3 → v4: Add (root_id, created_at) index for thread queries.
+ * v4 → v5: Add zap_total_sats column to events for displaying total zap amount.
+ * v5 → v6: Add follower_count and follower_count_updated_at columns to users for NIP-45 cache.
  */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE users ADD COLUMN follower_count INTEGER")
+        db.execSQL("ALTER TABLE users ADD COLUMN follower_count_updated_at INTEGER")
+    }
+}
+
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE events ADD COLUMN zap_total_sats INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 val MIGRATION_3_4 = object : Migration(3, 4) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("CREATE INDEX IF NOT EXISTS `index_events_root_id_created_at` ON `events` (`root_id`, `created_at`)")

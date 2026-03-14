@@ -23,6 +23,7 @@ data class FeedRow(
     @ColumnInfo(name = "has_content_warning")   val hasContentWarning: Boolean,
     @ColumnInfo(name = "content_warning_reason") val contentWarningReason: String?,
     @ColumnInfo(name = "cached_at")             val cachedAt: Long,
+    @ColumnInfo(name = "zap_total_sats")        val zapTotalSats: Long,
     // ── Author (may be null until profile arrives) ─────────
     @ColumnInfo(name = "author_name")           val authorName: String?,
     @ColumnInfo(name = "author_display_name")   val authorDisplayName: String?,
@@ -66,6 +67,7 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
+            e.zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
@@ -122,6 +124,7 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
+            e.zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
@@ -161,6 +164,7 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
+            e.zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
@@ -184,11 +188,90 @@ interface EventDao {
     """)
     fun userPostsFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
 
+    /** Notes tab: kind 1 top-level posts only (no replies, no reposts). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
+        FROM events e
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+        LEFT JOIN reactions r   ON r.target_event_id = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        WHERE e.pubkey = :pubkey AND e.kind = 1
+          AND e.reply_to_id IS NULL AND e.root_id IS NULL
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userNotesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+
+    /** Replies tab: kind 1 events that are replies (have reply_to_id or root_id). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
+        FROM events e
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+        LEFT JOIN reactions r   ON r.target_event_id = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        WHERE e.pubkey = :pubkey AND e.kind = 1
+          AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL)
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userRepliesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+
+    /** Longform tab: kind 30023 articles (NIP-23). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
+        FROM events e
+        LEFT JOIN users u ON u.pubkey = e.pubkey
+        WHERE e.pubkey = :pubkey AND e.kind = 30023
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userLongformFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+
     /** All events for thread view (includes replies). */
     @Query("""
         SELECT
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             u.nip05 AS author_nip05,
             COUNT(DISTINCT r.event_id) AS reaction_count,
@@ -243,6 +326,7 @@ interface EventDao {
         SELECT
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             u.nip05 AS author_nip05,
             0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
@@ -254,6 +338,10 @@ interface EventDao {
         LIMIT 50
     """)
     fun searchNotes(query: String): Flow<List<FeedRow>>
+
+    /** Increment the zap sats total for the given event. Called by EventProcessor for kind-9735. */
+    @Query("UPDATE events SET zap_total_sats = zap_total_sats + :sats WHERE id = :eventId")
+    suspend fun addZapSats(eventId: String, sats: Long)
 
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int

@@ -5,16 +5,22 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
@@ -49,6 +55,8 @@ class RelayPool @Inject constructor(
     private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val persistentSubs = ConcurrentHashMap<String, PersistentSub>()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
+
+    private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
 
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
@@ -142,6 +150,11 @@ class RelayPool @Inject constructor(
                     handleEose(conn, raw)
                     return@consumeEach
                 }
+                // NIP-45 COUNT response: ["COUNT","sub-id",{"count":N}]
+                if (raw.startsWith("[\"COUNT\"")) {
+                    handleCount(raw)
+                    return@consumeEach
+                }
                 // Update lastEventTime for persistent sub tracking
                 val subId = extractEventSubId(raw)
                 if (subId != null) {
@@ -173,6 +186,47 @@ class RelayPool @Inject constructor(
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
     }
+
+    /**
+     * Handle a NIP-45 COUNT response: ["COUNT","sub-id",{"count":N}]
+     */
+    private fun handleCount(raw: String) {
+        try {
+            val arr = NostrJson.parseToJsonElement(raw).jsonArray
+            val subId = arr[1].jsonPrimitive.content
+            val countObj = arr[2].jsonObject
+            val count = countObj["count"]?.jsonPrimitive?.long
+            countCallbacks.remove(subId)?.complete(count)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse COUNT response: ${e.message}")
+        }
+    }
+
+    /**
+     * NIP-45 COUNT query: send a COUNT request to a single relay and wait for the response.
+     * Returns the count, or null if the relay doesn't support NIP-45 or times out.
+     */
+    suspend fun sendCount(relayUrl: String, filter: JsonObject): Long? =
+        withContext(Dispatchers.IO) {
+            try {
+                val subId = "count-${System.nanoTime()}"
+                val countRequest = buildJsonArray {
+                    add(JsonPrimitive("COUNT"))
+                    add(JsonPrimitive(subId))
+                    add(filter)
+                }.toString()
+
+                val conn = connections[relayUrl] ?: return@withContext null
+
+                val deferred = CompletableDeferred<Long?>()
+                countCallbacks[subId] = deferred
+
+                conn.send(countRequest)
+
+                withTimeoutOrNull(10_000) { deferred.await() }
+                    .also { countCallbacks.remove(subId) }
+            } catch (_: Exception) { null }
+        }
 
     /**
      * Extract the subscription ID from an EOSE message without JSON parsing.
