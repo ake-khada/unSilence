@@ -103,9 +103,15 @@ private val IMAGE_URL_REGEX = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-// Matches direct video URLs (.mp4 etc.) and known video platforms.
+// Matches direct video file URLs only (no web pages like YouTube).
 internal val VIDEO_URL_REGEX = Regex(
-    """https?://\S+\.(?:mp4|mov|webm|m3u8|m4v|avi)(?:\?\S*)?|https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|streamable\.com/\S+)""",
+    """https?://\S+\.(?:mp4|mov|webm|m3u8|m4v|avi)(?:\?\S*)?""",
+    RegexOption.IGNORE_CASE,
+)
+
+// Matches YouTube and YouTube Shorts URLs, capturing the video ID.
+private val YOUTUBE_URL_REGEX = Regex(
+    """https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})\S*""",
     RegexOption.IGNORE_CASE,
 )
 
@@ -129,9 +135,12 @@ private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     }
 }.getOrNull()
 
+private data class YouTubeEmbed(val url: String, val videoId: String)
+
 private data class MediaExtraction(
     val imageUrls: List<String>,
     val videoUrls: List<String>,
+    val youtubeEmbeds: List<YouTubeEmbed>,
     val linkUrls: List<String>,
     val textContent: String,
 )
@@ -193,32 +202,41 @@ fun NoteCard(
     // Wrapped in remember to avoid re-parsing JSON on every recomposition.
     val imetaMedia = remember(row.tags) { ImetaParser.parse(row.tags) }
     val mediaExtraction = remember(row.id, contentNoNostr) {
-        // Extract videos FIRST so video URLs from image-host domains (e.g.
-        // blossom.primal.net/video.mp4) are not misrouted to Coil.
-        val regexVideoUrls = VIDEO_URL_REGEX.findAll(contentNoNostr).map { it.value }.toList()
+        // 1. Extract YouTube URLs first (web pages, not playable files).
+        val youtubeEmbeds = YOUTUBE_URL_REGEX.findAll(contentNoNostr).map { match ->
+            YouTubeEmbed(url = match.value, videoId = match.groupValues[1])
+        }.toList()
+        val afterYoutube = YOUTUBE_URL_REGEX.replace(contentNoNostr, "")
+
+        // 2. Extract direct video file URLs (e.g. .mp4).
+        val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterYoutube).map { it.value }.toList()
         val imetaVideoUrls = imetaMedia.filter { it.mimeType?.startsWith("video/") == true }.map { it.url }
         val allVideoUrls   = (regexVideoUrls + imetaVideoUrls).distinct()
 
-        val afterVideos    = VIDEO_URL_REGEX.replace(contentNoNostr, "")
+        // 3. Extract image URLs from remaining content.
+        val afterVideos    = VIDEO_URL_REGEX.replace(afterYoutube, "")
         val regexImageUrls = IMAGE_URL_REGEX.findAll(afterVideos).map { it.value }.toList()
         val imetaImageUrls = imetaMedia.filter { it.mimeType?.startsWith("image/") == true }.map { it.url }
         val allImageUrls   = (regexImageUrls + imetaImageUrls).distinct()
                                  .filter { it !in allVideoUrls }
 
         val afterImages    = IMAGE_URL_REGEX.replace(afterVideos, "")
+        val ytUrls         = youtubeEmbeds.map { it.url }.toSet()
 
         MediaExtraction(
-            imageUrls   = allImageUrls,
-            videoUrls   = allVideoUrls,
-            linkUrls    = LINK_URL_REGEX.findAll(afterImages).map { it.value }.distinct().take(3).toList()
-                              .filter { it !in allVideoUrls && it !in allImageUrls },
-            textContent = LINK_URL_REGEX.replace(afterImages, "").trim(),
+            imageUrls      = allImageUrls,
+            videoUrls      = allVideoUrls,
+            youtubeEmbeds  = youtubeEmbeds,
+            linkUrls       = LINK_URL_REGEX.findAll(afterImages).map { it.value }.distinct().take(3).toList()
+                                 .filter { it !in allVideoUrls && it !in allImageUrls && it !in ytUrls },
+            textContent    = LINK_URL_REGEX.replace(afterImages, "").trim(),
         )
     }
-    val imageUrls   = mediaExtraction.imageUrls
-    val videoUrls   = mediaExtraction.videoUrls
-    val linkUrls    = mediaExtraction.linkUrls
-    val textContent = mediaExtraction.textContent
+    val imageUrls      = mediaExtraction.imageUrls
+    val videoUrls      = mediaExtraction.videoUrls
+    val youtubeEmbeds  = mediaExtraction.youtubeEmbeds
+    val linkUrls       = mediaExtraction.linkUrls
+    val textContent    = mediaExtraction.textContent
 
     Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
@@ -425,6 +443,15 @@ fun NoteCard(
                     modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                 )
             }
+        }
+
+        // ── YouTube embed cards ──────────────────────────────────────────────────
+        youtubeEmbeds.forEach { yt ->
+            YouTubeThumbnailCard(
+                youtubeUrl  = yt.url,
+                videoId     = yt.videoId,
+                modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
         }
 
         // ── Link chips for non-media URLs ──────────────────────────────────────
@@ -697,6 +724,52 @@ private fun VideoThumbnailCard(
             tint               = Color.White.copy(alpha = 0.85f),
             modifier           = Modifier.size(52.dp),
         )
+    }
+}
+
+/** YouTube thumbnail card — shows hqdefault thumbnail with a play button overlay. */
+@Composable
+private fun YouTubeThumbnailCard(
+    youtubeUrl: String,
+    videoId: String,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    Box(
+        modifier          = modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f, matchHeightConstraintsFirst = false)
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(Color(0xFF1A1A1A))
+            .clickable {
+                val intent = android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(youtubeUrl),
+                )
+                runCatching { context.startActivity(intent) }
+            },
+        contentAlignment  = Alignment.Center,
+    ) {
+        AsyncImage(
+            model              = "https://img.youtube.com/vi/$videoId/hqdefault.jpg",
+            contentDescription = null,
+            contentScale       = ContentScale.Crop,
+            modifier           = Modifier.matchParentSize(),
+        )
+        // Semi-transparent play button overlay
+        Box(
+            modifier         = Modifier
+                .size(56.dp)
+                .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector        = Icons.Filled.PlayArrow,
+                contentDescription = "Play on YouTube",
+                tint               = Color.White,
+                modifier           = Modifier.size(36.dp),
+            )
+        }
     }
 }
 
