@@ -31,12 +31,11 @@ private const val TAG = "OutboxRouter"
  * Implements NIP-65 outbox routing for the Following feed.
  *
  * Flow:
- * 1. Registers handlers for kind 3 and kind 10002 with EventProcessor.
- * 2. Requests the logged-in user's kind 3 (follow list) from connected relays.
- * 3. When kind 3 arrives → saves followed pubkeys to Room (follows table).
- * 4. Requests kind 10002 (relay list metadata) for all followed pubkeys.
- * 5. When kind 10002 events arrive → saves write relay URLs to Room.
- * 6. Observes relay_list_metadata in Room → calls RelayPool.connectForAuthors()
+ * 1. EventProcessor dispatches kind-3 and kind-10002 events to handler methods.
+ * 2. When kind 3 arrives → saves followed pubkeys to Room (follows table).
+ * 3. Requests kind 10002 (relay list metadata) for all followed pubkeys.
+ * 4. When kind 10002 events arrive → saves write relay URLs to Room.
+ * 5. Observes relay_list_metadata in Room → calls RelayPool.connectForAuthors()
  *    for the top 15 relays ranked by coverage (# of follows they serve).
  *
  * Architecture rule: all data flows Relay → Room. UI reads from Room via Flow.
@@ -48,7 +47,6 @@ class OutboxRouter @Inject constructor(
     private val relayListDao: RelayListDao,
     private val ownRelayDao: OwnRelayDao,
     private val relayPool: RelayPool,
-    private val eventProcessor: EventProcessor,
 ) {
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val started = AtomicBoolean(false)
@@ -71,17 +69,8 @@ class OutboxRouter @Inject constructor(
             return
         }
 
-        // ── Register event handlers ──────────────────────────────────────────
-        eventProcessor.addKindHandler(3) { obj, _ ->
-            val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return@addKindHandler
-            // Only process the logged-in user's own follow list
-            if (pubkey != userPubkeyHex) return@addKindHandler
-            handleKind3(obj, userPubkeyHex)
-        }
-
-        eventProcessor.addKindHandler(10002) { obj, _ ->
-            handleKind10002(obj)
-        }
+        // Kind-3 and kind-10002 handlers are called directly by EventProcessor
+        // via the immutable kindHandlers map — no registration needed.
 
         // ── Step 1: request the user's kind 3 from connected relays ──────────
         relayPool.fetchFollowList(userPubkeyHex)
@@ -114,6 +103,27 @@ class OutboxRouter @Inject constructor(
         routingJob = null
         started.set(false)
         Log.d(TAG, "Stopped")
+    }
+
+    // ── Public handler methods (called by EventProcessor's immutable kindHandlers map) ──
+
+    /**
+     * Called by EventProcessor for every kind-3 event.
+     * Filters to the logged-in user's own contact list only.
+     */
+    suspend fun handleContactList(obj: kotlinx.serialization.json.JsonObject) {
+        val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return
+        val userPubkeyHex = keyManager.getPublicKeyHex() ?: return
+        if (pubkey != userPubkeyHex) return
+        handleKind3(obj, userPubkeyHex)
+    }
+
+    /**
+     * Called by EventProcessor for every kind-10002 event.
+     * Processes relay lists for any pubkey (used for outbox routing).
+     */
+    suspend fun handleRelayList(obj: kotlinx.serialization.json.JsonObject) {
+        handleKind10002(obj)
     }
 
     // ── Kind 3: NIP-02 follow list ───────────────────────────────────────────
