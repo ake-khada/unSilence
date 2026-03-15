@@ -489,6 +489,37 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Publish an event to specific relay URLs. Connects if not already connected.
+     * Used for replaceable events (kind 0, 3, 10002) that target write + indexer relays.
+     */
+    fun publishToRelays(eventJson: String, relayUrls: List<String>) {
+        val cmd = buildJsonArray {
+            add(JsonPrimitive("EVENT"))
+            add(NostrJson.parseToJsonElement(eventJson))
+        }.toString()
+
+        // Send to already-connected relays immediately
+        val sent = mutableSetOf<String>()
+        for (url in relayUrls) {
+            connections[url]?.let { it.send(cmd); sent.add(url) }
+        }
+
+        // Connect to remaining relays and send
+        val remaining = relayUrls.filter { it !in sent }
+        if (remaining.isNotEmpty()) {
+            scope.launch {
+                connect(remaining)
+                delay(2_000)
+                for (url in remaining) {
+                    connections[url]?.send(cmd)
+                }
+            }
+        }
+
+        Log.d(TAG, "Published event to ${sent.size} connected + ${remaining.size} pending relay(s)")
+    }
+
+    /**
      * Fetch a thread: the event itself (by ID) and all direct replies (#e tag filter).
      * Two REQs are sent so both arrive even if the relay processes them separately.
      */

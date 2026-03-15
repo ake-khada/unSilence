@@ -29,9 +29,11 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import javax.inject.Inject
 
+data class DepthRow(val row: FeedRow, val depth: Int)
+
 data class ThreadUiState(
     val focusedNote: FeedRow? = null,
-    val replies: List<FeedRow> = emptyList(),
+    val replies: List<DepthRow> = emptyList(),
     val loading: Boolean = true,
 )
 
@@ -63,10 +65,25 @@ class ThreadViewModel @Inject constructor(
                 .collect { rows ->
                     val focusedId = eventIdFlow.value ?: return@collect
                     val focused = rows.firstOrNull { it.id == focusedId }
-                    val replies = rows.filter { it.id != focusedId && it.kind == 1 }
+                    val replyRows = rows.filter { it.id != focusedId && it.kind == 1 }
+
+                    // Build parent→children map
+                    val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
+                        .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
+
+                    // DFS flatten with depth (cap at 4)
+                    val flatList = mutableListOf<DepthRow>()
+                    fun walk(parentId: String, depth: Int) {
+                        childrenOf[parentId]?.forEach { row ->
+                            flatList.add(DepthRow(row, depth.coerceAtMost(4)))
+                            walk(row.id, depth + 1)
+                        }
+                    }
+                    walk(focusedId, 1)
+
                     _uiState.value = ThreadUiState(
                         focusedNote = focused,
-                        replies     = replies,
+                        replies     = flatList,
                         loading     = false,
                     )
                 }

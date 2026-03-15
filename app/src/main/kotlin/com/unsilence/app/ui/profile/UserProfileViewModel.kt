@@ -3,15 +3,23 @@ package com.unsilence.app.ui.profile
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.dao.RelayListDao
+import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +35,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
@@ -37,6 +49,10 @@ class UserProfileViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val eventRepository: EventRepository,
     private val relayPool: RelayPool,
+    private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
+    private val followDao: FollowDao,
+    private val relayListDao: RelayListDao,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -107,6 +123,97 @@ class UserProfileViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /** Whether the logged-in user follows the viewed pubkey. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val isFollowing: Flow<Boolean> = _pubkeyHex
+        .filterNotNull()
+        .flatMapLatest { followDao.isFollowingFlow(it) }
+
+    val followLoading = MutableStateFlow(false)
+
+    private val myPubkey: String? = keyManager.getPublicKeyHex()
+
+    fun toggleFollow() {
+        val targetPubkey = _pubkeyHex.value ?: return
+        if (myPubkey == null) return
+        if (followLoading.value) return
+        followLoading.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val currentFollows = followDao.allPubkeys()
+                val nowFollowing = targetPubkey in currentFollows
+                val newFollowList = if (nowFollowing) {
+                    currentFollows.filter { it != targetPubkey }
+                } else {
+                    currentFollows + targetPubkey
+                }
+
+                // Build kind-3 event with all p-tags
+                val nowSeconds = System.currentTimeMillis() / 1000L
+                val tags = newFollowList.map { arrayOf("p", it) }.toTypedArray()
+                val template = EventTemplate<Event>(
+                    createdAt = nowSeconds,
+                    kind      = 3,
+                    tags      = tags,
+                    content   = "",
+                )
+                val signed = signingManager.sign(template) ?: return@launch
+
+                // Publish to write relays + indexer relays
+                val writeUrls = getWriteRelayUrls(myPubkey)
+                val targetUrls = (writeUrls + INDEXER_RELAY_URLS).distinct()
+                relayPool.publishToRelays(toEventJson(signed), targetUrls)
+
+                // Update local follows table
+                if (nowFollowing) {
+                    followDao.delete(targetPubkey)
+                } else {
+                    followDao.insert(FollowEntity(pubkey = targetPubkey, followedAt = nowSeconds))
+                }
+            } finally {
+                followLoading.value = false
+            }
+        }
+    }
+
+    private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
+        val relayList = relayListDao.getByPubkey(pubkey) ?: return GLOBAL_RELAY_URLS
+        return runCatching {
+            Json.decodeFromString<List<String>>(relayList.writeRelays)
+        }.getOrDefault(GLOBAL_RELAY_URLS)
+    }
+
+    private fun toEventJson(event: Event): String = buildJsonObject {
+        put("id",         event.id)
+        put("pubkey",     event.pubKey)
+        put("created_at", event.createdAt)
+        put("kind",       event.kind)
+        put("tags",       buildJsonArray {
+            event.tags.forEach { row ->
+                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
+            }
+        })
+        put("content",    event.content)
+        put("sig",        event.sig)
+    }.toString()
+
+    companion object {
+        private val INDEXER_RELAY_URLS = listOf(
+            "wss://purplepag.es",
+            "wss://user.kindpag.es",
+            "wss://indexer.coracle.social",
+            "wss://antiprimal.net",
+        )
+        private val GLOBAL_RELAY_URLS = listOf(
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://nostr.mom",
+            "wss://relay.nostr.net",
+            "wss://relay.primal.net",
+        )
     }
 
     fun loadProfile(pubkey: String) {
