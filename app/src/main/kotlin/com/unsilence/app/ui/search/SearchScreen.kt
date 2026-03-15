@@ -47,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
@@ -152,16 +153,32 @@ fun SearchScreen(
                 }
 
                 state.loading && state.noteResults.isEmpty() && state.peopleResults.isEmpty() -> {
-                    CircularProgressIndicator(
-                        color    = Cyan,
-                        modifier = Modifier.align(Alignment.Center),
-                    )
+                    if (selectedTab == 0) {
+                        // People tab loading
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                color       = Cyan,
+                                modifier    = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(Spacing.small))
+                            Text("Searching relays\u2026", color = TextSecondary, fontSize = 14.sp)
+                        }
+                    } else {
+                        // Notes tab loading
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(3) { ShimmerNoteCard(showMedia = it == 0) }
+                        }
+                    }
                 }
 
                 selectedTab == 0 -> {
                     if (state.peopleResults.isEmpty()) {
                         Text(
-                            text     = "No people found for \"${state.query}\"",
+                            text     = "No results for \"${state.query}\"",
                             color    = TextSecondary,
                             fontSize = 14.sp,
                             modifier = Modifier.align(Alignment.Center),
@@ -182,7 +199,7 @@ fun SearchScreen(
                 else -> {  // Notes tab
                     if (state.noteResults.isEmpty()) {
                         Text(
-                            text     = "No notes found for \"${state.query}\"",
+                            text     = "No results for \"${state.query}\"",
                             color    = TextSecondary,
                             fontSize = 14.sp,
                             modifier = Modifier.align(Alignment.Center),
