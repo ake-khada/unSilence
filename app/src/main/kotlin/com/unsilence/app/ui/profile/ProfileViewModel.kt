@@ -6,6 +6,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.RelayPool
@@ -44,6 +45,7 @@ class ProfileViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val followDao: FollowDao,
     private val userDao: UserDao,
+    private val relayListDao: RelayListDao,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -183,6 +185,17 @@ class ProfileViewModel @Inject constructor(
             val signed = signingManager.sign(template) ?: return@launch
             relayPool.publish(toEventJson(signed))
 
+            // Also publish to indexer relays for discoverability
+            val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
+            val indexerUrls = listOf(
+                "wss://purplepag.es",
+                "wss://user.kindpag.es",
+                "wss://indexer.coracle.social",
+                "wss://antiprimal.net",
+            )
+            val targetUrls = (writeUrls + indexerUrls).distinct()
+            relayPool.publishToRelays(toEventJson(signed), targetUrls)
+
             // EventProcessor will update Room when the relay echoes the event back.
             // Switch to main for the callback.
             launch(Dispatchers.Main) { onDone() }
@@ -190,6 +203,13 @@ class ProfileViewModel @Inject constructor(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
+        val relayList = relayListDao.getByPubkey(pubkey) ?: return emptyList()
+        return runCatching {
+            kotlinx.serialization.json.Json.decodeFromString<List<String>>(relayList.writeRelays)
+        }.getOrDefault(emptyList())
+    }
 
     private fun toEventJson(event: Event): String = buildJsonObject {
         put("id",         event.id)
