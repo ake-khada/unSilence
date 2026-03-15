@@ -855,7 +855,7 @@ private fun MediaGrid(
                                 modifier = Modifier
                                     .matchParentSize()
                                     .background(Color.Black.copy(alpha = 0.5f))
-                                    .clickable { onImageClick(gridImages[3]) },
+                                    .clickable { onImageClick(imageUrls[4]) },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
@@ -1142,13 +1142,13 @@ private fun MentionChip(
         if (lookupProfile != null) value = lookupProfile(pubkeyHex)
     }
 
+    val npubFallback = remember(pubkeyHex) {
+        val npub = runCatching { NPub.Companion.create(pubkeyHex) }.getOrNull()
+        if (npub != null) "@${npub.take(16)}…" else "@${pubkeyHex.take(8)}…"
+    }
     val displayText = profile?.displayName?.takeIf { it.isNotBlank() }
         ?: profile?.name?.takeIf { it.isNotBlank() }
-        ?: run {
-            // Show truncated npub instead of raw hex
-            val npub = runCatching { NPub.Companion.create(pubkeyHex) }.getOrNull()
-            if (npub != null) "@${npub.take(16)}…" else "@${pubkeyHex.take(8)}…"
-        }
+        ?: npubFallback
 
     Box(
         modifier = Modifier
