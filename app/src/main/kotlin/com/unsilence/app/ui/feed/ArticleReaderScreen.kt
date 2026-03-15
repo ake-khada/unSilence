@@ -5,7 +5,9 @@ import android.net.Uri
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,20 +16,30 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,13 +64,31 @@ import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
 import org.intellij.markdown.html.HtmlGenerator
 import org.intellij.markdown.parser.MarkdownParser
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
+fun ArticleReaderScreen(
+    row: FeedRow,
+    onDismiss: () -> Unit,
+    onNoteClick: (String) -> Unit = {},
+    onReact: () -> Unit = {},
+    onRepost: () -> Unit = {},
+    onQuote: (String) -> Unit = {},
+    onZap: (amountSats: Long) -> Unit = {},
+    onSaveNwcUri: (String) -> Unit = {},
+    hasReacted: Boolean = false,
+    hasReposted: Boolean = false,
+    hasZapped: Boolean = false,
+    isNwcConfigured: Boolean = false,
+) {
     val title = articleTagValue(row.tags, "title")
     val image = articleTagValue(row.tags, "image")
     val context = LocalContext.current
 
     val bodyHtml = remember(row.content) { markdownToHtml(row.content) }
+
+    var showRepostMenu    by remember { mutableStateOf(false) }
+    var showConnectWallet by remember { mutableStateOf(false) }
+    var showZapPicker     by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -69,100 +99,187 @@ fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
                 .fillMaxSize()
                 .background(Black),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                // ── Top bar ────────────────────────────────────────────────────
-                Row(
-                    modifier          = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            Column(modifier = Modifier.fillMaxSize()) {
+                // ── Scrollable content ─────────────────────────────────────────
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
                 ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector        = Icons.Filled.Close,
-                            contentDescription = "Close",
-                            tint               = Color.White,
-                            modifier           = Modifier.size(22.dp),
+                    // ── Top bar ────────────────────────────────────────────────
+                    Row(
+                        modifier          = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = onDismiss) {
+                            Icon(
+                                imageVector        = Icons.Filled.Close,
+                                contentDescription = "Close",
+                                tint               = Color.White,
+                                modifier           = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+                    // ── Banner image (16:9, magazine-style header) ─────────────
+                    if (!image.isNullOrBlank()) {
+                        SubcomposeAsyncImage(
+                            model              = image,
+                            contentDescription = null,
+                            contentScale       = ContentScale.Crop,
+                            modifier           = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9f)
+                                .clip(RoundedCornerShape(
+                                    bottomStart = Sizing.mediaCornerRadius,
+                                    bottomEnd   = Sizing.mediaCornerRadius,
+                                )),
                         )
                     }
-                }
 
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    // ── Title ──────────────────────────────────────────────────
+                    if (!title.isNullOrBlank()) {
+                        Text(
+                            text       = title,
+                            color      = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize   = 22.sp,
+                            lineHeight = 30.sp,
+                            modifier   = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium)
+                                .padding(top = Spacing.medium, bottom = Spacing.small),
+                        )
+                    }
 
-                // ── Banner image (16:9, magazine-style header) ─────────────────
-                if (!image.isNullOrBlank()) {
-                    SubcomposeAsyncImage(
-                        model              = image,
-                        contentDescription = null,
-                        contentScale       = ContentScale.Crop,
-                        modifier           = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
-                            .clip(RoundedCornerShape(
-                                bottomStart = Sizing.mediaCornerRadius,
-                                bottomEnd   = Sizing.mediaCornerRadius,
-                            )),
+                    HorizontalDivider(
+                        color    = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.padding(horizontal = Spacing.medium),
                     )
-                }
 
-                // ── Title ──────────────────────────────────────────────────────
-                if (!title.isNullOrBlank()) {
-                    Text(
-                        text       = title,
-                        color      = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize   = 22.sp,
-                        lineHeight = 30.sp,
-                        modifier   = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium)
-                            .padding(top = Spacing.medium, bottom = Spacing.small),
-                    )
-                }
+                    Spacer(Modifier.height(Spacing.small))
 
-                HorizontalDivider(
-                    color    = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.padding(horizontal = Spacing.medium),
-                )
+                    // ── Body content (WebView) ─────────────────────────────────
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                setBackgroundColor(android.graphics.Color.BLACK)
+                                settings.javaScriptEnabled = false
+                                settings.loadWithOverviewMode = true
+                                settings.useWideViewPort = true
+                                isVerticalScrollBarEnabled = false
+                                isHorizontalScrollBarEnabled = false
 
-                Spacer(Modifier.height(Spacing.small))
-
-                // ── Body content (WebView) ──────────────────────────────────────
-                AndroidView(
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            setBackgroundColor(android.graphics.Color.BLACK)
-                            settings.javaScriptEnabled = false
-                            settings.loadWithOverviewMode = true
-                            settings.useWideViewPort = true
-                            isVerticalScrollBarEnabled = false
-                            isHorizontalScrollBarEnabled = false
-
-                            webViewClient = object : WebViewClient() {
-                                override fun shouldOverrideUrlLoading(
-                                    view: WebView?,
-                                    request: WebResourceRequest?,
-                                ): Boolean {
-                                    request?.url?.let { uri ->
-                                        ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                    ): Boolean {
+                                        request?.url?.let { uri ->
+                                            ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                        }
+                                        return true
                                     }
-                                    return true
                                 }
-                            }
 
-                            loadDataWithBaseURL(null, bodyHtml, "text/html", "UTF-8", null)
-                        }
-                    },
+                                loadDataWithBaseURL(null, bodyHtml, "text/html", "UTF-8", null)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = Spacing.xl),
+                    )
+                }
+
+                // ── Sticky bottom action bar ───────────────────────────────────
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = Spacing.xl),
-                )
+                        .background(Color(0xFF0D0D0D))
+                        .navigationBarsPadding()
+                        .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment     = Alignment.CenterVertically,
+                ) {
+                    ActionButton(
+                        icon               = Icons.AutoMirrored.Filled.Chat,
+                        count              = row.replyCount,
+                        contentDescription = "Replies",
+                        onClick            = { onNoteClick(row.id) },
+                    )
+                    Box {
+                        ActionButton(
+                            icon               = Icons.Filled.Repeat,
+                            count              = row.repostCount,
+                            contentDescription = "Reposts",
+                            highlighted        = hasReposted,
+                            onClick            = { showRepostMenu = true },
+                        )
+                        DropdownMenu(
+                            expanded         = showRepostMenu,
+                            onDismissRequest = { showRepostMenu = false },
+                            modifier         = Modifier.background(Black),
+                        ) {
+                            DropdownMenuItem(
+                                text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
+                                onClick = { onRepost(); showRepostMenu = false },
+                            )
+                            DropdownMenuItem(
+                                text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
+                                onClick = { onQuote(row.id); showRepostMenu = false },
+                            )
+                        }
+                    }
+                    ActionButton(
+                        icon               = Icons.Filled.Favorite,
+                        count              = row.reactionCount,
+                        contentDescription = "Reactions",
+                        highlighted        = hasReacted,
+                        onClick            = onReact,
+                    )
+                    ZapButton(
+                        sats        = row.zapTotalSats,
+                        hasZapped   = hasZapped,
+                        onTap       = {
+                            if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                        },
+                        onLongPress = {
+                            if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                        },
+                    )
+                    ActionButton(
+                        icon               = Icons.Filled.Share,
+                        count              = 0,
+                        contentDescription = "Share",
+                    )
+                }
             }
         }
+    }
+
+    if (showConnectWallet) {
+        ConnectWalletDialog(
+            onConnect = { uri ->
+                onSaveNwcUri(uri)
+                showConnectWallet = false
+            },
+            onDismiss = { showConnectWallet = false },
+        )
+    }
+
+    if (showZapPicker) {
+        ZapAmountDialog(
+            onZap = { amount ->
+                onZap(amount)
+                showZapPicker = false
+            },
+            onDismiss = { showZapPicker = false },
+        )
     }
 }
 
