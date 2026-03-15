@@ -405,7 +405,6 @@ class EventProcessor @Inject constructor(
     }
 
     private suspend fun flushBatch(batch: List<ProcessedEvent>) {
-        Log.d(TAG, "flushBatch: ${batch.size} items")
         // LinkedHashMap preserves insertion order while deduplicating by key
         val events    = LinkedHashMap<String, EventEntity>()
         val users     = LinkedHashMap<String, UserEntity>()
@@ -463,27 +462,19 @@ class EventProcessor @Inject constructor(
             when (entity.kind) {
                 1 -> {
                     // Reply: increment reply count on parent
-                    entity.replyToId?.let {
-                        Log.d(TAG, "Updating stats: kind=1 reply → parent=$it")
-                        eventStatsDao.incrementReplyCount(it)
-                    }
+                    entity.replyToId?.let { eventStatsDao.incrementReplyCount(it) }
                     if (entity.rootId != null && entity.rootId != entity.replyToId) {
-                        Log.d(TAG, "Updating stats: kind=1 reply → root=${entity.rootId}")
                         eventStatsDao.incrementReplyCount(entity.rootId)
                     }
                 }
                 6 -> {
                     // Repost: increment repost count on original
-                    entity.rootId?.let {
-                        Log.d(TAG, "Updating stats: kind=6 repost → target=$it")
-                        eventStatsDao.incrementRepostCount(it)
-                    }
+                    entity.rootId?.let { eventStatsDao.incrementRepostCount(it) }
                 }
                 9735 -> {
                     // Zap receipt: increment zap stats on target
                     if (entity.rootId != null) {
                         val sats = extractZapSats(entity.tags)
-                        Log.d(TAG, "Updating stats: kind=9735 zap → target=${entity.rootId} sats=$sats")
                         eventStatsDao.incrementZapStats(entity.rootId, sats)
                     }
                 }
@@ -492,7 +483,6 @@ class EventProcessor @Inject constructor(
 
         // Update reaction stats
         for (entity in reactions.values) {
-            Log.d(TAG, "Updating stats: kind=7 reaction → target=${entity.targetEventId}")
             eventStatsDao.incrementReactionCount(entity.targetEventId)
         }
     }
