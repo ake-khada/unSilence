@@ -90,7 +90,7 @@ class SearchViewModel @Inject constructor(
         val SEARCH_RELAYS = listOf(
             "wss://relay.noswhere.com",
             "wss://search.nos.today",
-            "wss://relay.ditto.pub",
+            "wss://antiprimal.net",
         )
     }
 }
