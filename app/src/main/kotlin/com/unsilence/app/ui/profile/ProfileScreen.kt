@@ -291,6 +291,7 @@ fun ProfileScreen(
                         onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
                         lookupProfile          = actionsViewModel::lookupProfile,
                         lookupEvent            = actionsViewModel::lookupEvent,
+                        fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
                     )
                 }
             }

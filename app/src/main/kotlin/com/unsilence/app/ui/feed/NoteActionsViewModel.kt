@@ -11,6 +11,8 @@ import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.OgFetcher
+import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -46,6 +48,7 @@ class NoteActionsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
     private val userRepository: UserRepository,
+    private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
 ) : ViewModel() {
@@ -194,6 +197,9 @@ class NoteActionsViewModel @Inject constructor(
 
     suspend fun lookupEvent(eventId: String): EventEntity? =
         eventRepository.getEventById(eventId)
+
+    suspend fun fetchOgMetadata(url: String): OgMetadata? =
+        ogFetcher.fetch(url)
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
