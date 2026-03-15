@@ -99,7 +99,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-private val ActionTint = Color(0xFF555555)
+internal val ActionTint = Color(0xFF555555)
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
 // Matches URLs ending in image extensions, or from known Nostr image hosts.
@@ -605,7 +605,7 @@ private fun AvatarImage(pubkey: String, picture: String?, modifier: Modifier = M
 
 /** Single action bar button: vector icon + optional count. Turns Cyan when [highlighted]. */
 @Composable
-private fun ActionButton(
+internal fun ActionButton(
     icon: ImageVector,
     count: Int,
     contentDescription: String,
@@ -642,7 +642,7 @@ private fun ActionButton(
 /** Zap button: Amber when sats > 0 or user has zapped, supports single tap and long-press. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ZapButton(
+internal fun ZapButton(
     sats: Long,
     hasZapped: Boolean,
     onTap: () -> Unit,
@@ -1491,7 +1491,7 @@ private fun relativeTime(createdAtSeconds: Long): String {
     }
 }
 
-private fun formatCount(n: Int): String = when {
+internal fun formatCount(n: Int): String = when {
     n < 1_000  -> "$n"
     n < 10_000 -> "%.1fk".format(n / 1_000f)
     else        -> "${n / 1_000}k"

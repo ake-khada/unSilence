@@ -277,8 +277,16 @@ fun ProfileScreen(
                 items(items = posts, key = { it.id }) { row ->
                     if (row.kind == 30023) {
                         ArticleCard(
-                            row     = row,
-                            onClick = { articleRow = row },
+                            row             = row,
+                            onClick         = { articleRow = row },
+                            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+                            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                            hasReacted      = row.engagementId in reactedIds,
+                            hasReposted     = row.engagementId in repostedIds,
+                            hasZapped       = row.engagementId in zappedIds,
+                            isNwcConfigured = isNwcConfigured,
                         )
                     } else {
                         // Resolve original author profile for kind-6 reposts
@@ -368,7 +376,18 @@ fun ProfileScreen(
         )
     }
     articleRow?.let { row ->
-        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
+        ArticleReaderScreen(
+            row             = row,
+            onDismiss       = { articleRow = null },
+            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+            hasReacted      = row.engagementId in reactedIds,
+            hasReposted     = row.engagementId in repostedIds,
+            hasZapped       = row.engagementId in zappedIds,
+            isNwcConfigured = isNwcConfigured,
+        )
     }
 }
 

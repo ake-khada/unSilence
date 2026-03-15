@@ -1,7 +1,9 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,10 +16,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,6 +42,7 @@ import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -54,10 +66,21 @@ private fun tagValue(tagsJson: String, key: String): String? = runCatching {
         ?.takeIf { it.isNotBlank() }
 }.getOrNull()
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ArticleCard(
     row: FeedRow,
     onClick: () -> Unit,
+    onNoteClick: (String) -> Unit = {},
+    onReact: () -> Unit = {},
+    onRepost: () -> Unit = {},
+    onQuote: (String) -> Unit = {},
+    onZap: (amountSats: Long) -> Unit = {},
+    onSaveNwcUri: (String) -> Unit = {},
+    hasReacted: Boolean = false,
+    hasReposted: Boolean = false,
+    hasZapped: Boolean = false,
+    isNwcConfigured: Boolean = false,
 ) {
     val title   = tagValue(row.tags, "title")
     val summary = tagValue(row.tags, "summary")
@@ -65,6 +88,10 @@ fun ArticleCard(
     val image   = tagValue(row.tags, "image")
 
     val authorLabel = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
+
+    var showRepostMenu    by remember { mutableStateOf(false) }
+    var showConnectWallet by remember { mutableStateOf(false) }
+    var showZapPicker     by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -155,6 +182,88 @@ fun ArticleCard(
                     .padding(bottom = Spacing.small),
             )
         }
+
+        // ── Action bar ─────────────────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.medium)
+                .padding(bottom = Spacing.small),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment     = Alignment.CenterVertically,
+        ) {
+            ActionButton(
+                icon               = Icons.AutoMirrored.Filled.Chat,
+                count              = row.replyCount,
+                contentDescription = "Replies",
+                onClick            = { onNoteClick(row.id) },
+            )
+            Box {
+                ActionButton(
+                    icon               = Icons.Filled.Repeat,
+                    count              = row.repostCount,
+                    contentDescription = "Reposts",
+                    highlighted        = hasReposted,
+                    onClick            = { showRepostMenu = true },
+                )
+                DropdownMenu(
+                    expanded         = showRepostMenu,
+                    onDismissRequest = { showRepostMenu = false },
+                    modifier         = Modifier.background(Black),
+                ) {
+                    DropdownMenuItem(
+                        text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
+                        onClick = { onRepost(); showRepostMenu = false },
+                    )
+                    DropdownMenuItem(
+                        text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
+                        onClick = { onQuote(row.id); showRepostMenu = false },
+                    )
+                }
+            }
+            ActionButton(
+                icon               = Icons.Filled.Favorite,
+                count              = row.reactionCount,
+                contentDescription = "Reactions",
+                highlighted        = hasReacted,
+                onClick            = onReact,
+            )
+            ZapButton(
+                sats          = row.zapTotalSats,
+                hasZapped     = hasZapped,
+                onTap         = {
+                    if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                },
+                onLongPress   = {
+                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                },
+            )
+            ActionButton(
+                icon               = Icons.Filled.Share,
+                count              = 0,
+                contentDescription = "Share",
+            )
+        }
+    }
+
+    if (showConnectWallet) {
+        ConnectWalletDialog(
+            onConnect = { uri ->
+                onSaveNwcUri(uri)
+                showConnectWallet = false
+            },
+            onDismiss = { showConnectWallet = false },
+        )
+    }
+
+    if (showZapPicker) {
+        ZapAmountDialog(
+            onZap = { amount ->
+                onZap(amount)
+                showZapPicker = false
+            },
+            onDismiss = { showZapPicker = false },
+        )
     }
 }
 

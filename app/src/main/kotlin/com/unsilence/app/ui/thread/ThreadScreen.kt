@@ -132,8 +132,17 @@ fun ThreadScreen(
                             item(key = note.id) {
                                 if (note.kind == 30023) {
                                     ArticleCard(
-                                        row     = note,
-                                        onClick = { articleRow = note },
+                                        row             = note,
+                                        onClick         = { articleRow = note },
+                                        onQuote         = onQuote,
+                                        onReact         = { actionsViewModel.react(note.id, note.pubkey) },
+                                        onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                        onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        hasReacted      = note.engagementId in reactedIds,
+                                        hasReposted     = note.engagementId in repostedIds,
+                                        hasZapped       = note.engagementId in zappedIds,
+                                        isNwcConfigured = isNwcConfigured,
                                     )
                                 } else {
                                     NoteCard(
@@ -276,6 +285,18 @@ fun ThreadScreen(
     }
 
     articleRow?.let { row ->
-        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
+        ArticleReaderScreen(
+            row             = row,
+            onDismiss       = { articleRow = null },
+            onQuote         = onQuote,
+            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+            hasReacted      = row.engagementId in reactedIds,
+            hasReposted     = row.engagementId in repostedIds,
+            hasZapped       = row.engagementId in zappedIds,
+            isNwcConfigured = isNwcConfigured,
+        )
     }
 }
