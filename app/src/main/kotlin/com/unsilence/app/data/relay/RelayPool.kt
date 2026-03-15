@@ -525,8 +525,8 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(1))
             })
         }.toString()
-        connections.values.forEach { it.send(req) }
-        Log.d(TAG, "fetchEventById: $eventId → ${connections.size} relay(s)")
+        connections.values.take(6).forEach { it.send(req) }
+        Log.d(TAG, "fetchEventById: $eventId → ${minOf(connections.size, 6)} relay(s)")
     }
 
     fun publish(eventJson: String) {
