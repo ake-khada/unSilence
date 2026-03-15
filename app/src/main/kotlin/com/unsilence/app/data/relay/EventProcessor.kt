@@ -2,10 +2,16 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.db.dao.EventDao
+import com.unsilence.app.data.db.dao.EventRelayDao
+import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.ReactionDao
+import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.db.entity.EventRelayEntity
+import com.unsilence.app.data.db.entity.EventStatsEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
+import com.unsilence.app.data.db.entity.TagEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,6 +76,9 @@ class EventProcessor @Inject constructor(
     private val eventDao: EventDao,
     private val userDao: UserDao,
     private val reactionDao: ReactionDao,
+    private val eventStatsDao: EventStatsDao,
+    private val tagDao: TagDao,
+    private val eventRelayDao: EventRelayDao,
     private val outboxRouter: dagger.Lazy<OutboxRouter>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -395,11 +404,6 @@ class EventProcessor @Inject constructor(
         } catch (_: Exception) { 0L }
     }
 
-    /**
-     * Fix 5 — Write coalescing: deduplicate within the batch by primary key so
-     * that one event arriving from N relays produces exactly one INSERT.
-     * Then writes all three entity types in single batch-insert calls.
-     */
     private suspend fun flushBatch(batch: List<ProcessedEvent>) {
         // LinkedHashMap preserves insertion order while deduplicating by key
         val events    = LinkedHashMap<String, EventEntity>()
@@ -419,14 +423,67 @@ class EventProcessor @Inject constructor(
         if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
         if (reactions.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactions.values.toList())
 
-        // Aggregate zap sats for kind-9735 receipts
+        // Insert tags and event_relays for content events
         for (entity in events.values) {
-            if (entity.kind == 9735 && entity.rootId != null) {
-                val sats = extractZapSats(entity.tags)
-                if (sats > 0) {
-                    eventDao.addZapSats(entity.rootId, sats)
+            // Insert event_relay (provenance tracking)
+            try {
+                eventRelayDao.insertOrIgnore(
+                    EventRelayEntity(
+                        eventId = entity.id,
+                        relayUrl = entity.relayUrl,
+                        seenAt = entity.createdAt,
+                    )
+                )
+            } catch (_: Exception) { }
+
+            // Parse and insert tags
+            try {
+                val tagsArray = NostrJson.parseToJsonElement(entity.tags).jsonArray
+                val tagEntities = tagsArray.mapIndexedNotNull { index, element ->
+                    val tag = element.jsonArray
+                    if (tag.size < 2) return@mapIndexedNotNull null
+                    val tagName = tag[0].jsonPrimitive.content
+                    val tagValue = tag[1].jsonPrimitive.content
+                    val extra = tag.getOrNull(2)?.jsonPrimitive?.content
+                    TagEntity(
+                        eventId = entity.id,
+                        tagName = tagName,
+                        tagPos = index,
+                        tagValue = tagValue,
+                        extra = extra,
+                    )
+                }
+                if (tagEntities.isNotEmpty()) {
+                    tagDao.insertAll(tagEntities)
+                }
+            } catch (_: Exception) { }
+
+            // Update stats for parent events
+            when (entity.kind) {
+                1 -> {
+                    // Reply: increment reply count on parent
+                    entity.replyToId?.let { eventStatsDao.incrementReplyCount(it) }
+                    if (entity.rootId != null && entity.rootId != entity.replyToId) {
+                        eventStatsDao.incrementReplyCount(entity.rootId)
+                    }
+                }
+                6 -> {
+                    // Repost: increment repost count on original
+                    entity.rootId?.let { eventStatsDao.incrementRepostCount(it) }
+                }
+                9735 -> {
+                    // Zap receipt: increment zap stats on target
+                    if (entity.rootId != null) {
+                        val sats = extractZapSats(entity.tags)
+                        eventStatsDao.incrementZapStats(entity.rootId, sats)
+                    }
                 }
             }
+        }
+
+        // Update reaction stats
+        for (entity in reactions.values) {
+            eventStatsDao.incrementReactionCount(entity.targetEventId)
         }
     }
 

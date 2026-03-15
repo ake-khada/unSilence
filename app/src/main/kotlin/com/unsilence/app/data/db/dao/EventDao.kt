@@ -67,31 +67,27 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
-            COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count,
-            COUNT(DISTINCT z.id)        AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
-        LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
-        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
+        LEFT JOIN users       u ON u.pubkey  = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.relay_url IN (:relayUrls)
           AND e.kind      IN (:kinds)
           AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
-        GROUP BY e.id
-        HAVING ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
-            OR (:requireReposts   = 1 AND COUNT(DISTINCT rp.id)      >= 1)
-            OR (:requireReactions = 1 AND COUNT(DISTINCT r.event_id) >= 1)
-            OR (:requireReplies   = 1 AND COUNT(DISTINCT rep.id)     >= 1)
-            OR (:requireZaps      = 1 AND COUNT(DISTINCT z.id)       >= 1))
+          AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
+              OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
+              OR (:requireReactions = 1 AND COALESCE(s.reaction_count, 0) >= 1)
+              OR (:requireReplies   = 1 AND COALESCE(s.reply_count, 0)    >= 1)
+              OR (:requireZaps      = 1 AND COALESCE(s.zap_count, 0)      >= 1))
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -123,25 +119,21 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
-            COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count,
-            COUNT(DISTINCT z.id)        AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        INNER JOIN follows     f   ON f.pubkey          = e.pubkey
-        LEFT JOIN  users       u   ON u.pubkey           = e.pubkey
-        LEFT JOIN  reactions   r   ON r.target_event_id  = e.id
-        LEFT JOIN  events      rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
-        LEFT JOIN  events      z   ON z.root_id          = e.id AND z.kind  = 9735
+        INNER JOIN follows     f ON f.pubkey   = e.pubkey
+        LEFT JOIN  users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN  event_stats s ON s.event_id = e.id
         WHERE e.kind IN (1, 6, 20, 21, 30023)
           AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
-        GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -162,25 +154,21 @@ interface EventDao {
             e.has_content_warning,
             e.content_warning_reason,
             e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
-            COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count,
-            COUNT(DISTINCT z.id)        AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
-        LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
-        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.pubkey = :pubkey
           AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL)
                OR e.kind = 6)
-        GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -192,24 +180,20 @@ interface EventDao {
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
             e.relay_url, e.reply_to_id, e.root_id,
             e.has_content_warning, e.content_warning_reason, e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
-            COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count,
-            COUNT(DISTINCT z.id)        AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
-        LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
-        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.pubkey = :pubkey
           AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
-        GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -221,24 +205,20 @@ interface EventDao {
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
             e.relay_url, e.reply_to_id, e.root_id,
             e.has_content_warning, e.content_warning_reason, e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
-            COUNT(DISTINCT r.event_id)  AS reaction_count,
-            COUNT(DISTINCT rep.id)      AS reply_count,
-            COUNT(DISTINCT rp.id)       AS repost_count,
-            COUNT(DISTINCT z.id)        AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
-        LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
-        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.pubkey = :pubkey AND e.kind = 1
           AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL)
-        GROUP BY e.id
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -250,14 +230,15 @@ interface EventDao {
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
             e.relay_url, e.reply_to_id, e.root_id,
             e.has_content_warning, e.content_warning_reason, e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name            AS author_name,
             u.display_name    AS author_display_name,
             u.picture         AS author_picture,
             u.nip05           AS author_nip05,
             0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
         FROM events e
-        LEFT JOIN users u ON u.pubkey = e.pubkey
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.pubkey = :pubkey AND e.kind = 30023
         ORDER BY e.created_at DESC
         LIMIT :limit
@@ -269,22 +250,18 @@ interface EventDao {
         SELECT
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             u.nip05 AS author_nip05,
-            COUNT(DISTINCT r.event_id) AS reaction_count,
-            COUNT(DISTINCT rep.id)     AS reply_count,
-            COUNT(DISTINCT rp.id)      AS repost_count,
-            COUNT(DISTINCT z.id)       AS zap_count
+            COALESCE(s.reaction_count, 0) AS reaction_count,
+            COALESCE(s.reply_count, 0)    AS reply_count,
+            COALESCE(s.repost_count, 0)   AS repost_count,
+            COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
-        LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
-        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
-        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.id = :eventId
            OR ((e.reply_to_id = :eventId OR e.root_id = :eventId) AND e.kind = 1)
-        GROUP BY e.id
         ORDER BY e.created_at ASC
     """)
     fun threadFlow(eventId: String): Flow<List<FeedRow>>
@@ -328,22 +305,19 @@ interface EventDao {
         SELECT
             e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
             e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
-            e.zap_total_sats,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
             u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
             u.nip05 AS author_nip05,
             0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
         FROM events e
-        LEFT JOIN users u ON u.pubkey = e.pubkey
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.kind = 1
           AND e.content LIKE '%' || :query || '%'
         ORDER BY e.created_at DESC
         LIMIT 50
     """)
     fun searchNotes(query: String): Flow<List<FeedRow>>
-
-    /** Increment the zap sats total for the given event. Called by EventProcessor for kind-9735. */
-    @Query("UPDATE events SET zap_total_sats = zap_total_sats + :sats WHERE id = :eventId")
-    suspend fun addZapSats(eventId: String, sats: Long)
 
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int
@@ -363,11 +337,9 @@ interface EventDao {
     @Query("""
         DELETE FROM events
         WHERE id IN (
-            SELECT e.id FROM events e
-            WHERE e.tags LIKE '%expiration%'
-              AND CAST(
-                    json_extract(e.tags, '$[*][1]') AS INTEGER
-                  ) < :nowSeconds
+            SELECT t.event_id FROM tags t
+            WHERE t.tag_name = 'expiration'
+              AND CAST(t.tag_value AS INTEGER) < :nowSeconds
         )
     """)
     suspend fun pruneExpired(nowSeconds: Long)
