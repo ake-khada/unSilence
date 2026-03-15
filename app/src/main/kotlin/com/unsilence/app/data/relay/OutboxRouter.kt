@@ -3,8 +3,10 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.OwnRelayDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.FollowEntity
+import com.unsilence.app.data.db.entity.OwnRelayEntity
 import com.unsilence.app.data.db.entity.RelayListEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,7 @@ class OutboxRouter @Inject constructor(
     private val keyManager: KeyManager,
     private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
+    private val ownRelayDao: OwnRelayDao,
     private val relayPool: RelayPool,
     private val eventProcessor: EventProcessor,
 ) {
@@ -156,6 +159,25 @@ class OutboxRouter @Inject constructor(
                 updatedAt   = createdAt,
             )
         )
+
+        // If this is our own relay list, populate own_relays table
+        if (pubkey == keyManager.getPublicKeyHex()) {
+            val ownRelays = tags
+                .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "r" }
+                .mapNotNull { tag ->
+                    val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val marker = tag.jsonArray.getOrNull(2)?.jsonPrimitive?.content
+                    OwnRelayEntity(
+                        url   = url,
+                        read  = marker == null || marker.isBlank() || marker == "read",
+                        write = marker == null || marker.isBlank() || marker == "write",
+                    )
+                }
+            if (ownRelays.isNotEmpty()) {
+                ownRelayDao.replaceAll(ownRelays)
+                Log.d(TAG, "Seeded ${ownRelays.size} own relays from kind 10002")
+            }
+        }
     }
 
     // ── Outbox routing: connect to top write relays ───────────────────────────
