@@ -90,6 +90,7 @@ class FeedViewModel @Inject constructor(
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
     private val fetchedProfilePubkeys = mutableSetOf<String>()
+    private val engagementFetchedIds = mutableSetOf<String>()
 
     /**
      * Returns a cached StateFlow for the given pubkey's profile.
@@ -148,6 +149,7 @@ class FeedViewModel @Inject constructor(
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
                     fetchedProfilePubkeys.clear()
+                    engagementFetchedIds.clear()
                     _uiState.value = _uiState.value.copy(loading = true)
                     viewModelScope.launch {
                         delay(3_000)
@@ -200,6 +202,18 @@ class FeedViewModel @Inject constructor(
                     if (newPubkeys.isNotEmpty()) {
                         fetchedProfilePubkeys.addAll(newPubkeys)
                         userRepository.fetchMissingProfiles(newPubkeys)
+                    }
+
+                    // Fetch engagement (replies, reactions, zaps) for posts not yet fetched
+                    val newEventIds = rows
+                        .filter { it.kind != 6 } // skip reposts, they reference original event
+                        .map { it.id }
+                        .filter { it !in engagementFetchedIds }
+                    if (newEventIds.isNotEmpty()) {
+                        engagementFetchedIds.addAll(newEventIds)
+                        newEventIds.chunked(20).forEach { chunk ->
+                            relayPool.fetchEngagementBatch(chunk)
+                        }
                     }
                 }
         }

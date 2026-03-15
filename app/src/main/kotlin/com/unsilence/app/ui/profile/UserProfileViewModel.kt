@@ -105,6 +105,7 @@ class UserProfileViewModel @Inject constructor(
 
     // Tracks which pubkeys we've already requested profiles for — prevents hot loop
     private val fetchedProfilePubkeys = mutableSetOf<String>()
+    private val engagementFetchedIds = mutableSetOf<String>()
 
     init {
         // Fetch missing profiles for repost original authors as posts arrive
@@ -120,6 +121,18 @@ class UserProfileViewModel @Inject constructor(
                 if (newPubkeys.isNotEmpty()) {
                     fetchedProfilePubkeys.addAll(newPubkeys)
                     userRepository.fetchMissingProfiles(newPubkeys)
+                }
+
+                // Fetch engagement for posts not yet fetched
+                val newEventIds = rows
+                    .filter { it.kind != 6 }
+                    .map { it.id }
+                    .filter { it !in engagementFetchedIds }
+                if (newEventIds.isNotEmpty()) {
+                    engagementFetchedIds.addAll(newEventIds)
+                    newEventIds.chunked(20).forEach { chunk ->
+                        relayPool.fetchEngagementBatch(chunk)
+                    }
                 }
             }
         }
@@ -225,6 +238,7 @@ class UserProfileViewModel @Inject constructor(
         oldestTimestamp = Long.MAX_VALUE
         fetching = false
         fetchedProfilePubkeys.clear()
+        engagementFetchedIds.clear()
 
         viewModelScope.launch {
             userRepository.fetchMissingProfiles(listOf(pubkey))
