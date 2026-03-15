@@ -27,16 +27,16 @@ class OgFetcher @Inject constructor(
         .followRedirects(true)
         .build()
 
-    private val cache = ConcurrentHashMap<String, OgMetadata?>()
+    private val cache = ConcurrentHashMap<String, OgMetadata>()
+    private val attempted = ConcurrentHashMap<String, Boolean>()
 
     suspend fun fetch(url: String): OgMetadata? {
         cache[url]?.let { return it }
-        // null sentinel means we already tried and failed
-        if (cache.containsKey(url)) return null
+        if (attempted.containsKey(url)) return null
 
         return withContext(Dispatchers.IO) {
             runCatching { doFetch(url) }.getOrNull()
-        }.also { cache[url] = it }
+        }.also { attempted[url] = true; if (it != null) cache[url] = it }
     }
 
     private fun doFetch(url: String): OgMetadata? {

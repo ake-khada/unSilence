@@ -1195,7 +1195,7 @@ private fun LinkPreviewCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(Color(0xFF1A1A1A))
+                .background(Color(0xFF0D0D0D))
                 .border(0.5.dp, Color(0xFF333333), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } }
                 .padding(Spacing.small),
