@@ -95,6 +95,8 @@ class ProfileViewModel @Inject constructor(
     /** Approximate follower count from NIP-45 COUNT, cached in Room. */
     val followerCount = MutableStateFlow<Long?>(null)
 
+    val isLoadingPosts = MutableStateFlow(true)
+
     // Tracks which pubkeys we've already requested profiles for — prevents hot loop
     private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
@@ -137,6 +139,8 @@ class ProfileViewModel @Inject constructor(
         // Fetch missing profiles for repost original authors as posts arrive
         viewModelScope.launch {
             tabPostsFlow.collectLatest { rows ->
+                isLoadingPosts.value = false
+
                 val pubkeys = rows.flatMap { row ->
                     val embedded = if (row.kind == 6) {
                         extractRepostAuthorPubkey(row.content, row.tags)

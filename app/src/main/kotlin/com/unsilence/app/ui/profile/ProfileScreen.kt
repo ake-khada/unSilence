@@ -50,6 +50,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
@@ -78,6 +79,7 @@ fun ProfileScreen(
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
     val followerCount   by viewModel.followerCount.collectAsStateWithLifecycle()
+    val isLoadingPosts  by viewModel.isLoadingPosts.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -258,7 +260,9 @@ fun ProfileScreen(
             }
 
             // ── Post list ────────────────────────────────────────────────────
-            if (posts.isEmpty()) {
+            if (posts.isEmpty() && isLoadingPosts) {
+                items(3) { ShimmerNoteCard(showMedia = it == 0) }
+            } else if (posts.isEmpty()) {
                 item {
                     Text(
                         text     = when (selectedTab) {

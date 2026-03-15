@@ -114,6 +114,17 @@ class FeedViewModel @Inject constructor(
 
     fun setFeedType(type: FeedType) { _feedType.value = type }
 
+    /** Trigger a re-fetch by toggling the feed type back to itself. */
+    fun refresh() {
+        val current = _feedType.value
+        // Force a re-emission by setting to a different value and back
+        _feedType.value = when (current) {
+            is FeedType.Global -> FeedType.Following
+            else -> FeedType.Global
+        }
+        _feedType.value = current
+    }
+
     /**
      * Fetch events older than the current oldest item (pagination).
      * No-op if the oldest timestamp hasn't changed since the last fetch — avoids

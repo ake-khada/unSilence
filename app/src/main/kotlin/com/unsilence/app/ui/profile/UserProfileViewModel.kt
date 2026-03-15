@@ -104,6 +104,8 @@ class UserProfileViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    val isLoadingPosts = MutableStateFlow(true)
+
     // Tracks which pubkeys we've already requested profiles for — prevents hot loop
     private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
@@ -114,6 +116,8 @@ class UserProfileViewModel @Inject constructor(
         // Fetch missing profiles for repost original authors as posts arrive
         viewModelScope.launch {
             postsFlow.collectLatest { rows ->
+                isLoadingPosts.value = false
+
                 val pubkeys = rows.flatMap { row ->
                     val embedded = if (row.kind == 6) {
                         extractRepostAuthorPubkey(row.content, row.tags)
@@ -254,6 +258,7 @@ class UserProfileViewModel @Inject constructor(
         fetching = false
         fetchedProfilePubkeys.clear()
         engagementFetchedIds.clear()
+        isLoadingPosts.value = true
 
         viewModelScope.launch {
             userRepository.fetchMissingProfiles(listOf(pubkey))

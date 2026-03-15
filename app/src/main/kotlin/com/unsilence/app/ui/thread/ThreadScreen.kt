@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
@@ -120,8 +121,9 @@ fun ThreadScreen(
             // ── Content ───────────────────────────────────────────────────────
             when {
                 state.loading -> {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = Cyan)
+                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        item { ShimmerNoteCard(showMedia = true) }
+                        items(2) { ShimmerNoteCard(showMedia = false) }
                     }
                 }
 
