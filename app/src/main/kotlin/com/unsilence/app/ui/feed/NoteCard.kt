@@ -1382,10 +1382,18 @@ private fun LinkPreviewCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank()) {
-                AsyncImage(
+                SubcomposeAsyncImage(
                     model              = loadedOg.imageUrl,
                     contentDescription = null,
                     contentScale       = ContentScale.Crop,
+                    loading            = {
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .background(MediaPlaceholder),
+                        )
+                    },
+                    error              = { /* Hide broken thumbnail silently */ },
                     modifier           = Modifier
                         .size(72.dp)
                         .clip(RoundedCornerShape(6.dp))

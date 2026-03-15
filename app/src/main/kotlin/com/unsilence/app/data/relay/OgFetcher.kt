@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -77,39 +78,75 @@ class OgFetcher @Inject constructor(
     }
 
     companion object {
+        private const val TAG = "OgFetcher"
+
+        // Matches property= or name= with og: prefix, in either order with content=
         private val OG_TAG_REGEX = Regex(
-            """<meta\s+[^>]*property\s*=\s*["']og:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
-            """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:(\w+)["'][^>]*/?>""",
+            """<meta\s+[^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
+            """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*/?>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
         )
+
+        /** Decode common HTML entities in attribute values. */
+        private fun decodeHtmlEntities(s: String): String = s
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+
+        /** Resolve a potentially relative URL against the page's base URL. */
+        private fun resolveUrl(raw: String, pageUrl: String): String {
+            val decoded = decodeHtmlEntities(raw).trim()
+            return when {
+                decoded.startsWith("http://") || decoded.startsWith("https://") -> decoded
+                decoded.startsWith("//") -> "https:$decoded"
+                decoded.startsWith("/") -> {
+                    // Prepend scheme + host from page URL
+                    runCatching {
+                        val uri = java.net.URI(pageUrl)
+                        "${uri.scheme}://${uri.host}$decoded"
+                    }.getOrDefault(decoded)
+                }
+                else -> {
+                    // Relative path — resolve against page URL directory
+                    runCatching {
+                        java.net.URI(pageUrl).resolve(decoded).toString()
+                    }.getOrDefault(decoded)
+                }
+            }
+        }
 
         internal fun parseOgTags(html: String, originalUrl: String): OgMetadata? {
             val tags = mutableMapOf<String, String>()
             for (match in OG_TAG_REGEX.findAll(html)) {
-                // First alternative: property then content
+                // First alternative: property/name then content
                 val key1 = match.groupValues[1]
                 val val1 = match.groupValues[2]
-                // Second alternative: content then property
+                // Second alternative: content then property/name
                 val key2 = match.groupValues[4]
                 val val2 = match.groupValues[3]
 
                 val key = key1.ifBlank { key2 }
                 val value = val1.ifBlank { val2 }
                 if (key.isNotBlank() && value.isNotBlank()) {
-                    tags.putIfAbsent(key.lowercase(), value)
+                    tags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
                 }
             }
 
             val title = tags["title"]
-            val image = tags["image"]
+            val image = tags["image"]?.let { resolveUrl(it, originalUrl) }
+            Log.d(TAG, "og:image=$image for $originalUrl (raw=${tags["image"]})")
+
             // Require at least a title or image to be useful
             if (title.isNullOrBlank() && image.isNullOrBlank()) return null
 
             return OgMetadata(
-                title       = title,
-                description = tags["description"],
+                title       = decodeHtmlEntities(title ?: ""),
+                description = tags["description"]?.let { decodeHtmlEntities(it) },
                 imageUrl    = image,
-                siteName    = tags["site_name"],
+                siteName    = tags["site_name"]?.let { decodeHtmlEntities(it) },
                 url         = originalUrl,
             )
         }
