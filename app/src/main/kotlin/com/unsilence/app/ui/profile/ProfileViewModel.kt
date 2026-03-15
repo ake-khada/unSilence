@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
@@ -96,6 +98,8 @@ class ProfileViewModel @Inject constructor(
     // Tracks which pubkeys we've already requested profiles for — prevents hot loop
     private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
+    private val engagementQueue = mutableListOf<String>()
+    private var engagementDebounceJob: Job? = null
 
     init {
         if (pubkeyHex != null) {
@@ -145,17 +149,29 @@ class ProfileViewModel @Inject constructor(
                     userRepository.fetchMissingProfiles(newPubkeys)
                 }
 
-                // Fetch engagement for posts not yet fetched
+                // Queue engagement fetch with debounce
                 val newEventIds = rows
                     .filter { it.kind != 6 }
                     .map { it.id }
                     .filter { it !in engagementFetchedIds }
                 if (newEventIds.isNotEmpty()) {
                     engagementFetchedIds.addAll(newEventIds)
-                    newEventIds.chunked(20).forEach { chunk ->
-                        relayPool.fetchEngagementBatch(chunk)
-                    }
+                    queueEngagementFetch(newEventIds)
                 }
+            }
+        }
+    }
+
+    private fun queueEngagementFetch(ids: List<String>) {
+        engagementQueue.addAll(ids)
+        engagementDebounceJob?.cancel()
+        engagementDebounceJob = viewModelScope.launch {
+            delay(500)
+            val toFetch = engagementQueue.toList()
+            engagementQueue.clear()
+            toFetch.chunked(20).forEach { chunk ->
+                relayPool.fetchEngagementBatch(chunk)
+                delay(100)
             }
         }
     }

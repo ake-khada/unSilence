@@ -12,6 +12,9 @@ interface EventRelayDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertOrIgnore(entity: EventRelayEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(entities: List<EventRelayEntity>)
+
     @Query("SELECT relay_url FROM event_relays WHERE event_id = :eventId")
     suspend fun getRelaysForEvent(eventId: String): List<String>
 }

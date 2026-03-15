@@ -423,56 +423,56 @@ class EventProcessor @Inject constructor(
         if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
         if (reactions.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactions.values.toList())
 
-        // Insert tags and event_relays for content events
-        for (entity in events.values) {
-            // Insert event_relay (provenance tracking)
-            try {
-                eventRelayDao.insertOrIgnore(
-                    EventRelayEntity(
-                        eventId = entity.id,
-                        relayUrl = entity.relayUrl,
-                        seenAt = entity.createdAt,
-                    )
-                )
-            } catch (_: Exception) { }
+        // Collect all tags and relay entries across events, then batch-insert once
+        val allRelayEntities = ArrayList<EventRelayEntity>(events.size)
+        val allTagEntities   = ArrayList<TagEntity>(events.size * 4) // ~4 tags per event avg
 
-            // Parse and insert tags
+        for (entity in events.values) {
+            // Relay provenance
+            allRelayEntities.add(
+                EventRelayEntity(
+                    eventId = entity.id,
+                    relayUrl = entity.relayUrl,
+                    seenAt = entity.createdAt,
+                )
+            )
+
+            // Parse tags
             try {
                 val tagsArray = NostrJson.parseToJsonElement(entity.tags).jsonArray
-                val tagEntities = tagsArray.mapIndexedNotNull { index, element ->
-                    val tag = element.jsonArray
-                    if (tag.size < 2) return@mapIndexedNotNull null
-                    val tagName = tag[0].jsonPrimitive.content
-                    val tagValue = tag[1].jsonPrimitive.content
-                    val extra = tag.getOrNull(2)?.jsonPrimitive?.content
-                    TagEntity(
-                        eventId = entity.id,
-                        tagName = tagName,
-                        tagPos = index,
-                        tagValue = tagValue,
-                        extra = extra,
+                for (index in 0 until tagsArray.size) {
+                    val tag = tagsArray[index].jsonArray
+                    if (tag.size < 2) continue
+                    allTagEntities.add(
+                        TagEntity(
+                            eventId = entity.id,
+                            tagName = tag[0].jsonPrimitive.content,
+                            tagPos = index,
+                            tagValue = tag[1].jsonPrimitive.content,
+                            extra = tag.getOrNull(2)?.jsonPrimitive?.content,
+                        )
                     )
                 }
-                if (tagEntities.isNotEmpty()) {
-                    tagDao.insertAll(tagEntities)
-                }
             } catch (_: Exception) { }
+        }
 
-            // Update stats for parent events
+        // Batch insert relay entries and tags — two transactions instead of 2*N
+        if (allRelayEntities.isNotEmpty()) eventRelayDao.insertAll(allRelayEntities)
+        if (allTagEntities.isNotEmpty())   tagDao.insertAll(allTagEntities)
+
+        // Update stats for parent events
+        for (entity in events.values) {
             when (entity.kind) {
                 1 -> {
-                    // Reply: increment reply count on parent
                     entity.replyToId?.let { eventStatsDao.incrementReplyCount(it) }
                     if (entity.rootId != null && entity.rootId != entity.replyToId) {
                         eventStatsDao.incrementReplyCount(entity.rootId)
                     }
                 }
                 6 -> {
-                    // Repost: increment repost count on original
                     entity.rootId?.let { eventStatsDao.incrementRepostCount(it) }
                 }
                 9735 -> {
-                    // Zap receipt: increment zap stats on target
                     if (entity.rootId != null) {
                         val sats = extractZapSats(entity.tags)
                         eventStatsDao.incrementZapStats(entity.rootId, sats)
