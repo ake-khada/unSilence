@@ -1253,8 +1253,8 @@ private fun EmbeddedQuoteCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF111111))
-            .border(1.dp, Color(0xFF333333), RoundedCornerShape(8.dp))
+            .background(if (nestDepth == 0) Color(0xFF0A0A0A) else Color(0xFF0D0D0D))
+            .border(0.5.dp, if (nestDepth == 0) Color(0xFF2A2A2A) else Color(0xFF333333), RoundedCornerShape(8.dp))
             .clickable { onNoteClick(eventId) }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
