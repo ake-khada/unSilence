@@ -393,39 +393,20 @@ fun NoteCard(
             )
         }
 
-        // ── Video URLs: show all videos, not just first ─────────────────────
-        videoUrls.forEachIndexed { index, url ->
-            val videoMeta = imetaMedia.firstOrNull {
-                it.url == url && it.width != null && it.height != null
-            }
-            val posterUrl = imetaMedia.firstOrNull { it.url == url }?.thumb
-            val rawAspect = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null
-
-            if (index == 0 && isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
-                InlineAutoPlayVideo(
-                    exoPlayer       = exoPlayer,
-                    videoUrl        = url,
-                    aspectRatio     = rawAspect,
-                    isMuted         = isMuted,
-                    onToggleMute    = onToggleMute,
-                    onOpenFullscreen = onOpenFullscreen,
-                    modifier        = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                )
-            } else {
-                VideoThumbnailCard(
-                    url         = url,
-                    onPlay      = {
-                        if (isDirectVideoUrl(url)) {
-                            onOpenFullscreen()
-                        } else {
-                            runCatching { uriHandler.openUri(url) }
-                        }
-                    },
-                    aspectRatio = rawAspect,
-                    posterUrl   = posterUrl,
-                    modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                )
-            }
+        // ── Video grid: same layout pattern as images ────────────────────
+        if (videoUrls.isNotEmpty()) {
+            VideoGrid(
+                videoUrls        = videoUrls,
+                imetaMedia       = imetaMedia,
+                exoPlayer        = exoPlayer,
+                isActiveVideo    = isActiveVideo,
+                isMuted          = isMuted,
+                onToggleMute     = onToggleMute,
+                onOpenFullscreen = onOpenFullscreen,
+                modifier         = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            )
         }
 
         // ── YouTube embed cards ──────────────────────────────────────────────────
@@ -880,6 +861,203 @@ private fun MediaGrid(
     }
 }
 
+// ── Video grid composable ────────────────────────────────────────────────
+
+/** Helper to resolve video aspect ratio and poster from imeta tags. */
+private data class VideoMeta(val aspectRatio: Float?, val posterUrl: String?)
+
+private fun resolveVideoMeta(url: String, imetaMedia: List<ImetaMedia>): VideoMeta {
+    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
+    val aspect = meta?.let { it.width!!.toFloat() / it.height!! }
+    val poster = imetaMedia.firstOrNull { it.url == url }?.thumb
+    return VideoMeta(aspect, poster)
+}
+
+/** Single video cell for the grid — thumbnail with play button. */
+@Composable
+private fun VideoGridCell(
+    url: String,
+    imetaMedia: List<ImetaMedia>,
+    onPlay: () -> Unit,
+    modifier: Modifier = Modifier,
+    forceSquare: Boolean = false,
+) {
+    val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
+    VideoThumbnailCard(
+        url         = url,
+        onPlay      = onPlay,
+        aspectRatio = aspectRatio,
+        posterUrl   = posterUrl,
+        forceSquare = forceSquare,
+        modifier    = modifier,
+    )
+}
+
+/** Renders videos in a grid: 1=full (autoplay), 2=side-by-side, 3=1+2, 4+=2x2 with +N overlay. */
+@Composable
+private fun VideoGrid(
+    videoUrls: List<String>,
+    imetaMedia: List<ImetaMedia>,
+    exoPlayer: ExoPlayer?,
+    isActiveVideo: Boolean,
+    isMuted: Boolean,
+    onToggleMute: () -> Unit,
+    onOpenFullscreen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val uriHandler = LocalUriHandler.current
+    val count = videoUrls.size
+
+    fun openVideo(url: String) {
+        if (isDirectVideoUrl(url)) onOpenFullscreen()
+        else runCatching { uriHandler.openUri(url) }
+    }
+
+    /** Renders the first video as inline autoplay when eligible, otherwise as thumbnail. */
+    @Composable
+    fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
+        if (isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
+            val (aspectRatio, _) = resolveVideoMeta(url, imetaMedia)
+            InlineAutoPlayVideo(
+                exoPlayer        = exoPlayer,
+                videoUrl         = url,
+                aspectRatio      = aspectRatio,
+                isMuted          = isMuted,
+                onToggleMute     = onToggleMute,
+                onOpenFullscreen = onOpenFullscreen,
+                modifier         = cellModifier,
+            )
+        } else {
+            VideoGridCell(
+                url         = url,
+                imetaMedia  = imetaMedia,
+                onPlay      = { openVideo(url) },
+                modifier    = cellModifier,
+                forceSquare = forceSquare,
+            )
+        }
+    }
+
+    when {
+        count == 1 -> {
+            ActiveVideoCell(url = videoUrls[0], cellModifier = modifier)
+        }
+        count == 2 -> {
+            Row(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                ActiveVideoCell(
+                    url = videoUrls[0],
+                    cellModifier = Modifier.weight(1f),
+                    forceSquare = true,
+                )
+                VideoGridCell(
+                    url = videoUrls[1],
+                    imetaMedia = imetaMedia,
+                    onPlay = { openVideo(videoUrls[1]) },
+                    modifier = Modifier.weight(1f),
+                    forceSquare = true,
+                )
+            }
+        }
+        count == 3 -> {
+            Column(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                ActiveVideoCell(
+                    url = videoUrls[0],
+                    cellModifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    VideoGridCell(
+                        url = videoUrls[1],
+                        imetaMedia = imetaMedia,
+                        onPlay = { openVideo(videoUrls[1]) },
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    VideoGridCell(
+                        url = videoUrls[2],
+                        imetaMedia = imetaMedia,
+                        onPlay = { openVideo(videoUrls[2]) },
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                }
+            }
+        }
+        else -> {
+            // 4+ videos: 2x2 grid with +N overlay on 4th
+            val gridVideos = videoUrls.take(4)
+            val overflow = count - 4
+            Column(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    ActiveVideoCell(
+                        url = gridVideos[0],
+                        cellModifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    VideoGridCell(
+                        url = gridVideos[1],
+                        imetaMedia = imetaMedia,
+                        onPlay = { openVideo(gridVideos[1]) },
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    VideoGridCell(
+                        url = gridVideos[2],
+                        imetaMedia = imetaMedia,
+                        onPlay = { openVideo(gridVideos[2]) },
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        VideoGridCell(
+                            url = gridVideos[3],
+                            imetaMedia = imetaMedia,
+                            onPlay = { openVideo(gridVideos[3]) },
+                            modifier = Modifier.fillMaxWidth(),
+                            forceSquare = true,
+                        )
+                        if (overflow > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .background(Color.Black.copy(alpha = 0.5f))
+                                    .clickable { openVideo(videoUrls[4]) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text       = "+$overflow",
+                                    color      = Color.White,
+                                    fontSize   = 24.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── BUG #5 FIX: Portrait-aware video thumbnail ───────────────────────────────
 
 /** Tap-to-play placeholder shown for detected video URLs. */
@@ -890,10 +1068,12 @@ private fun VideoThumbnailCard(
     modifier: Modifier = Modifier,
     aspectRatio: Float? = null,
     posterUrl: String? = null,
+    forceSquare: Boolean = false,
 ) {
     val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
-    val displayAspect = effectiveAspectRatio(rawAspect)
-    val contentScale = if (rawAspect >= 1f) ContentScale.Crop else ContentScale.Fit
+    val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(rawAspect)
+    val contentScale = if (forceSquare) ContentScale.Crop
+        else if (rawAspect >= 1f) ContentScale.Crop else ContentScale.Fit
 
     Box(
         modifier          = modifier
