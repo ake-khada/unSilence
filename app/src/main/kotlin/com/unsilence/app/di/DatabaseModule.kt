@@ -10,14 +10,19 @@ import com.unsilence.app.data.db.MIGRATION_4_5
 import com.unsilence.app.data.db.MIGRATION_5_6
 import com.unsilence.app.data.db.MIGRATION_6_7
 import com.unsilence.app.data.db.MIGRATION_7_8
+import com.unsilence.app.data.db.MIGRATION_8_9
 import com.unsilence.app.data.db.dao.EventDao
+import com.unsilence.app.data.db.dao.EventStatsDao
+import com.unsilence.app.data.db.dao.EventRelayDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.OwnRelayDao
 import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelaySetDao
+import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
+import androidx.room.RoomDatabase
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -33,7 +38,8 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext ctx: Context): AppDatabase =
         Room.databaseBuilder(ctx, AppDatabase::class.java, "unsilence.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+            .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
             .build()
 
     @Provides fun provideEventDao(db: AppDatabase): EventDao = db.eventDao()
@@ -44,4 +50,7 @@ object DatabaseModule {
     @Provides fun provideRelayListDao(db: AppDatabase): RelayListDao = db.relayListDao()
     @Provides fun provideNotificationsDao(db: AppDatabase): NotificationsDao = db.notificationsDao()
     @Provides fun provideOwnRelayDao(db: AppDatabase): OwnRelayDao = db.ownRelayDao()
+    @Provides fun provideEventStatsDao(db: AppDatabase): EventStatsDao = db.eventStatsDao()
+    @Provides fun provideTagDao(db: AppDatabase): TagDao = db.tagDao()
+    @Provides fun provideEventRelayDao(db: AppDatabase): EventRelayDao = db.eventRelayDao()
 }

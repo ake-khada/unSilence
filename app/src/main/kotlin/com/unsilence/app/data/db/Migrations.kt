@@ -1,5 +1,7 @@
 package com.unsilence.app.data.db
 
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
@@ -16,7 +18,144 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v5 → v6: Add follower_count and follower_count_updated_at columns to users for NIP-45 cache.
  * v6 → v7: Add own_relays table for relay management screen.
  * v7 → v8: Add created_at column to own_relays for replaceable event semantics.
+ * v8 → v9: Add event_stats, tags, and event_relays tables with indexes.
+ *           Backfill event_relays from events.relay_url, tags from events.tags JSON,
+ *           and event_stats from existing engagement data.
  */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ── Step 1: Create new tables ──────────────────────────────────────
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS event_stats (
+                event_id TEXT NOT NULL PRIMARY KEY,
+                reply_count INTEGER NOT NULL DEFAULT 0,
+                repost_count INTEGER NOT NULL DEFAULT 0,
+                reaction_count INTEGER NOT NULL DEFAULT 0,
+                zap_count INTEGER NOT NULL DEFAULT 0,
+                zap_total_sats INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS tags (
+                event_id TEXT NOT NULL,
+                tag_name TEXT NOT NULL,
+                tag_pos INTEGER NOT NULL,
+                tag_value TEXT NOT NULL,
+                extra TEXT,
+                PRIMARY KEY (event_id, tag_name, tag_pos)
+            )
+        """)
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS event_relays (
+                event_id TEXT NOT NULL,
+                relay_url TEXT NOT NULL,
+                seen_at INTEGER NOT NULL,
+                PRIMARY KEY (event_id, relay_url)
+            )
+        """)
+
+        // ── Step 2: Create indexes ─────────────────────────────────────────
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, created_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_pubkey_kind_ts ON events(pubkey, kind, created_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_root_kind ON events(root_id, kind)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_reply_kind ON events(reply_to_id, kind)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(created_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(tag_name, tag_value, event_id)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_tags_e ON tags(tag_value, event_id) WHERE tag_name='e'")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_tags_p ON tags(tag_value, event_id) WHERE tag_name='p'")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_event_relays_by_relay ON event_relays(relay_url, seen_at DESC, event_id)")
+
+        // ── Step 3: Data migration ─────────────────────────────────────────
+
+        // 3a. Populate event_relays from existing events
+        db.execSQL("""
+            INSERT OR IGNORE INTO event_relays (event_id, relay_url, seen_at)
+            SELECT id, relay_url, created_at FROM events WHERE relay_url IS NOT NULL
+        """)
+
+        // 3b. Populate tags from existing events.tags JSON (Kotlin parsing)
+        migrateTags(db)
+
+        // 3c. Populate event_stats from existing engagement data
+        db.execSQL("""
+            INSERT OR IGNORE INTO event_stats (event_id, reply_count, repost_count, reaction_count, zap_count, zap_total_sats)
+            SELECT e.id,
+                (SELECT COUNT(*) FROM events r WHERE (r.reply_to_id = e.id OR r.root_id = e.id) AND r.kind = 1),
+                (SELECT COUNT(*) FROM events r WHERE r.root_id = e.id AND r.kind = 6),
+                (SELECT COUNT(*) FROM reactions r WHERE r.target_event_id = e.id),
+                (SELECT COUNT(*) FROM events z WHERE z.root_id = e.id AND z.kind = 9735),
+                0
+            FROM events e WHERE e.kind IN (1, 6, 20, 21, 30023)
+        """)
+    }
+
+    private fun migrateTags(db: SupportSQLiteDatabase) {
+        val cursor = db.query("SELECT id, tags FROM events")
+        var count = 0
+        var tagBatch = mutableListOf<ContentValues>()
+
+        try {
+            while (cursor.moveToNext()) {
+                val eventId = cursor.getString(0)
+                val tagsJson = cursor.getString(1) ?: continue
+
+                try {
+                    // Parse tags JSON: [["tagName","value","extra",...], ...]
+                    val tagsStr = tagsJson.trim()
+                    if (tagsStr.isEmpty() || tagsStr == "[]") continue
+
+                    // Simple JSON array parsing using org.json which is available on Android
+                    val jsonArray = org.json.JSONArray(tagsStr)
+                    for (i in 0 until jsonArray.length()) {
+                        val tag = jsonArray.optJSONArray(i) ?: continue
+                        if (tag.length() < 2) continue
+                        val tagName = tag.optString(0) ?: continue
+                        val tagValue = tag.optString(1) ?: continue
+                        val extra = if (tag.length() > 2) tag.optString(2) else null
+
+                        val cv = ContentValues().apply {
+                            put("event_id", eventId)
+                            put("tag_name", tagName)
+                            put("tag_pos", i)
+                            put("tag_value", tagValue)
+                            put("extra", extra)
+                        }
+                        tagBatch.add(cv)
+
+                        if (tagBatch.size >= 500) {
+                            flushTagBatch(db, tagBatch)
+                            tagBatch = mutableListOf()
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Skip malformed tags JSON
+                }
+
+                count++
+                if (count % 10_000 == 0) {
+                    android.util.Log.d("Migration_8_9", "Migrated tags for $count events")
+                }
+            }
+
+            // Flush remaining
+            if (tagBatch.isNotEmpty()) {
+                flushTagBatch(db, tagBatch)
+            }
+            android.util.Log.d("Migration_8_9", "Tag migration complete: $count events processed")
+        } finally {
+            cursor.close()
+        }
+    }
+
+    private fun flushTagBatch(db: SupportSQLiteDatabase, batch: List<ContentValues>) {
+        for (cv in batch) {
+            db.insert("tags", SQLiteDatabase.CONFLICT_IGNORE, cv)
+        }
+    }
+}
+
 val MIGRATION_7_8 = object : Migration(7, 8) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("ALTER TABLE own_relays ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")

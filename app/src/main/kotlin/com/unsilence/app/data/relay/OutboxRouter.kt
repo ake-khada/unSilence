@@ -11,7 +11,9 @@ import com.unsilence.app.data.db.entity.RelayListEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
@@ -89,8 +91,10 @@ class OutboxRouter @Inject constructor(
 
         // ── Step 3: when relay lists arrive, route to write relays ───────────
         routingScope.launch {
+            @OptIn(FlowPreview::class)
             relayListDao.allFlow()
                 .filter { it.isNotEmpty() }
+                .debounce(2000)
                 .collectLatest { relayLists ->
                     routeToWriteRelays(relayLists)
                 }
