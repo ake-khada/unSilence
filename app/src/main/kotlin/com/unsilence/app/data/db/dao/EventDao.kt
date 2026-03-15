@@ -293,6 +293,10 @@ interface EventDao {
     @Query("SELECT * FROM events WHERE id = :id LIMIT 1")
     suspend fun getEventById(id: String): EventEntity?
 
+    /** Reactive flow for a single event by ID. Emits null until the event arrives in Room. */
+    @Query("SELECT * FROM events WHERE id = :eventId LIMIT 1")
+    fun flowById(eventId: String): Flow<EventEntity?>
+
     /**
      * All event IDs that [pubkey] has reacted to.
      * Room re-emits whenever the reactions table changes — drives the heart Cyan state.
