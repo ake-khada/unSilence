@@ -35,7 +35,8 @@ class RelayManagementViewModel @Inject constructor(
         val normalizedUrl = url.trim().removeSuffix("/")
         if (normalizedUrl.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            ownRelayDao.upsert(OwnRelayEntity(url = normalizedUrl))
+            val now = System.currentTimeMillis() / 1000L
+            ownRelayDao.upsert(OwnRelayEntity(url = normalizedUrl, createdAt = now))
             publishKind10002()
         }
     }
@@ -49,14 +50,16 @@ class RelayManagementViewModel @Inject constructor(
 
     fun toggleRead(relay: OwnRelayEntity) {
         viewModelScope.launch(Dispatchers.IO) {
-            ownRelayDao.upsert(relay.copy(read = !relay.read))
+            val now = System.currentTimeMillis() / 1000L
+            ownRelayDao.upsert(relay.copy(read = !relay.read, createdAt = now))
             publishKind10002()
         }
     }
 
     fun toggleWrite(relay: OwnRelayEntity) {
         viewModelScope.launch(Dispatchers.IO) {
-            ownRelayDao.upsert(relay.copy(write = !relay.write))
+            val now = System.currentTimeMillis() / 1000L
+            ownRelayDao.upsert(relay.copy(write = !relay.write, createdAt = now))
             publishKind10002()
         }
     }
@@ -64,6 +67,7 @@ class RelayManagementViewModel @Inject constructor(
     private suspend fun publishKind10002() {
         publishing.value = true
         try {
+            val now = System.currentTimeMillis() / 1000L
             val allRelays = ownRelayDao.getAll()
             val tags = allRelays.mapNotNull { relay ->
                 when {
@@ -75,12 +79,17 @@ class RelayManagementViewModel @Inject constructor(
             }.toTypedArray()
 
             val template = EventTemplate<Event>(
-                createdAt = System.currentTimeMillis() / 1000L,
+                createdAt = now,
                 kind      = 10002,
                 tags      = tags,
                 content   = "",
             )
             val signed = signingManager.sign(template) ?: return
+
+            // Bump stored created_at so echoed events don't overwrite local state
+            for (relay in allRelays) {
+                if (relay.createdAt < now) ownRelayDao.upsert(relay.copy(createdAt = now))
+            }
 
             val eventJson = toEventJson(signed)
             val writeUrls = allRelays.filter { it.write }.map { it.url }
