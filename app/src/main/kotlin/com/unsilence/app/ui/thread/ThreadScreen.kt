@@ -136,6 +136,8 @@ fun ThreadScreen(
                                     onQuote         = onQuote,
                                     onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
                                     onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                    lookupProfile   = actionsViewModel::lookupProfile,
+                                    lookupEvent     = actionsViewModel::lookupEvent,
                                 )
                             }
                         }
@@ -165,6 +167,8 @@ fun ThreadScreen(
                                     onQuote         = onQuote,
                                     onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
                                     onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                    lookupProfile   = actionsViewModel::lookupProfile,
+                                    lookupEvent     = actionsViewModel::lookupEvent,
                                 )
                             }
                         }
