@@ -101,10 +101,6 @@ class EventProcessor @Inject constructor(
 
     private var drainerJob: Job? = null
 
-    init {
-        start()
-    }
-
     /** Launch drainer coroutines under a child Job so they can be cancelled independently. */
     fun start() {
         if (drainerJob?.isActive == true) return
@@ -456,7 +452,7 @@ class EventProcessor @Inject constructor(
         val ids = eTags.mapNotNull { it.getOrNull(1)?.jsonPrimitive?.content }
         return when (ids.size) {
             0    -> Pair(null, null)
-            1    -> Pair(null, ids[0])   // single e = root
+            1    -> Pair(ids[0], ids[0])   // single e = both root and reply-to
             else -> Pair(ids.last(), ids.first())
         }
     }

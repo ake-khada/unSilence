@@ -3,21 +3,18 @@ package com.unsilence.app.data
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.AppDatabase
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.OwnRelayDao
 import com.unsilence.app.data.db.dao.UserDao
+import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.GLOBAL_RELAY_URLS
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,16 +33,15 @@ private val INDEXER_RELAY_URLS = listOf(
 class AppBootstrapper @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
-    private val appDatabase: AppDatabase,
     private val eventProcessor: EventProcessor,
     private val outboxRouter: OutboxRouter,
     private val maintenanceJob: DatabaseMaintenanceJob,
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
+    private val ownRelayDao: OwnRelayDao,
     private val userDao: UserDao,
+    private val nwcManager: NwcManager,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     /**
      * Sequential bootstrap for the logged-in user.
      *
@@ -103,24 +99,26 @@ class AppBootstrapper @Inject constructor(
      * Full teardown on logout. Order matters:
      * 1. Cancel persistent subs (send CLOSE messages while connections are still alive)
      * 2. Disconnect all WebSockets
-     * 3. Clear all Room tables
-     * 4. Clear KeyManager (EncryptedSharedPreferences)
+     * 3. Clear user-specific Room tables (follows, own_relays) — keep events/users as cache
+     * 4. Clear KeyManager, SigningManager, NwcManager credentials
      * 5. Cancel child scopes (OutboxRouter, EventProcessor)
      * 6. Reset in-memory state (seenIds, connection map)
      */
-    fun teardown() {
+    suspend fun teardown() {
         // 1. Cancel persistent subscriptions
         relayPool.clearPersistentSubs()
 
         // 2. Disconnect all WebSockets
         relayPool.disconnectAll()
 
-        // 3. Clear all Room tables
-        scope.launch { appDatabase.clearAllTables() }
+        // 3. Clear only user-specific tables — events/users/reactions are reusable cache
+        followDao.clearAll()
+        ownRelayDao.clearAll()
 
         // 4. Clear credentials and cached signer
         keyManager.clear()
         signingManager.clear()
+        nwcManager.clear()
 
         // 5. Cancel child scopes (NOT this scope — it must survive for next login)
         outboxRouter.stop()

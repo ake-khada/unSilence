@@ -467,10 +467,11 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        for (url in relayUrls) {
-            connections[url]?.send(req)
-        }
-        Log.d(TAG, "Fetching older events until $untilTimestamp from ${relayUrls.size} relay(s)")
+        // Fallback to all connected relays when relayUrls is empty (e.g. Following feed)
+        val targets = if (relayUrls.isEmpty()) connections.values.toList()
+            else relayUrls.mapNotNull { connections[it] }
+        targets.forEach { it.send(req) }
+        Log.d(TAG, "Fetching older events until $untilTimestamp from ${targets.size} relay(s)")
     }
 
     /**
