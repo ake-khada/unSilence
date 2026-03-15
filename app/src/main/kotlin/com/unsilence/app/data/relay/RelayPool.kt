@@ -517,6 +517,21 @@ class RelayPool @Inject constructor(
      * [eventJson] must be the raw JSON object string for the event
      * (not the full ["EVENT", ...] array — this method wraps it).
      */
+    /** One-shot REQ to fetch a single event by ID from all connected relays. */
+    fun fetchEventById(eventId: String) {
+        val subId = "quote-$eventId"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+        connections.values.forEach { it.send(req) }
+        Log.d(TAG, "fetchEventById: $eventId → ${connections.size} relay(s)")
+    }
+
     fun publish(eventJson: String) {
         val cmd = buildJsonArray {
             add(JsonPrimitive("EVENT"))

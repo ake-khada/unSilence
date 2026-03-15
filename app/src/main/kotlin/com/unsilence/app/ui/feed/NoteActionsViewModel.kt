@@ -28,9 +28,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -192,11 +195,33 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
 
+    /** Event IDs we already attempted to fetch from relays (prevents redundant requests). */
+    private val fetchedQuoteIds = mutableSetOf<String>()
+
     suspend fun lookupProfile(pubkey: String): UserEntity? =
         userRepository.getUser(pubkey)
 
-    suspend fun lookupEvent(eventId: String): EventEntity? =
-        eventRepository.getEventById(eventId)
+    /**
+     * Look up an event by ID. Checks Room first; if missing, triggers a one-shot relay
+     * fetch and waits up to 3 seconds for the event to arrive via EventProcessor → Room.
+     */
+    suspend fun lookupEvent(eventId: String): EventEntity? {
+        // Fast path: already cached in Room
+        eventRepository.getEventById(eventId)?.let { return it }
+
+        // Don't re-fetch the same event
+        synchronized(fetchedQuoteIds) {
+            if (!fetchedQuoteIds.add(eventId)) return null
+        }
+
+        // Send REQ to all connected relays
+        relayPool.fetchEventById(eventId)
+
+        // Wait for the event to appear in Room (relay → EventProcessor → Room)
+        return withTimeoutOrNull(3_000L) {
+            eventRepository.flowById(eventId).filterNotNull().first()
+        }
+    }
 
     suspend fun fetchOgMetadata(url: String): OgMetadata? =
         ogFetcher.fetch(url)
