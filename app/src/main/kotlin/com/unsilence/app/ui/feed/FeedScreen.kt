@@ -144,8 +144,18 @@ fun FeedScreen(
 
                         if (row.kind == 30023) {
                             ArticleCard(
-                                row     = row,
-                                onClick = { articleRow = row },
+                                row             = row,
+                                onClick         = { articleRow = row },
+                                onNoteClick     = onNoteClick,
+                                onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+                                onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                                onQuote         = onQuote,
+                                onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                                onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                hasReacted      = row.engagementId in reactedIds,
+                                hasReposted     = row.engagementId in repostedIds,
+                                hasZapped       = row.engagementId in zappedIds,
+                                isNwcConfigured = isNwcConfigured,
                             )
                         } else {
                             NoteCard(
@@ -239,7 +249,20 @@ fun FeedScreen(
     }
 
     articleRow?.let { row ->
-        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
+        ArticleReaderScreen(
+            row             = row,
+            onDismiss       = { articleRow = null },
+            onNoteClick     = onNoteClick,
+            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+            onQuote         = onQuote,
+            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+            hasReacted      = row.engagementId in reactedIds,
+            hasReposted     = row.engagementId in repostedIds,
+            hasZapped       = row.engagementId in zappedIds,
+            isNwcConfigured = isNwcConfigured,
+        )
     }
 
     if (showFullscreenVideo) {
