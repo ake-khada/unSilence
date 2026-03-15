@@ -36,7 +36,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +56,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
@@ -92,6 +97,7 @@ fun UserProfileScreen(
     val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
+    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // Trigger loadMore() when scrolled near bottom
     val shouldLoadMore = remember {
@@ -319,28 +325,35 @@ fun UserProfileScreen(
                 }
             } else {
                 items(items = posts, key = { it.id }) { row ->
-                    // Resolve original author profile for kind-6 reposts
-                    val originalAuthorProfile = if (row.kind == 6) {
-                        extractRepostAuthorPubkey(row.content, row.tags)
-                            ?.let { viewModel.profileFlow(it).collectAsState().value }
-                    } else null
+                    if (row.kind == 30023) {
+                        ArticleCard(
+                            row     = row,
+                            onClick = { articleRow = row },
+                        )
+                    } else {
+                        // Resolve original author profile for kind-6 reposts
+                        val originalAuthorProfile = if (row.kind == 6) {
+                            extractRepostAuthorPubkey(row.content, row.tags)
+                                ?.let { viewModel.profileFlow(it).collectAsState().value }
+                        } else null
 
-                    NoteCard(
-                        row                    = row,
-                        originalAuthorProfile  = originalAuthorProfile,
-                        onAuthorClick          = onAuthorClick,
-                        hasReacted             = row.engagementId in reactedIds,
-                        hasReposted            = row.engagementId in repostedIds,
-                        hasZapped              = row.engagementId in zappedIds,
-                        isNwcConfigured        = isNwcConfigured,
-                        onReact                = { actionsViewModel.react(row.id, row.pubkey) },
-                        onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                        onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                        onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                        lookupProfile          = actionsViewModel::lookupProfile,
-                        lookupEvent            = actionsViewModel::lookupEvent,
-                        fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
-                    )
+                        NoteCard(
+                            row                    = row,
+                            originalAuthorProfile  = originalAuthorProfile,
+                            onAuthorClick          = onAuthorClick,
+                            hasReacted             = row.engagementId in reactedIds,
+                            hasReposted            = row.engagementId in repostedIds,
+                            hasZapped              = row.engagementId in zappedIds,
+                            isNwcConfigured        = isNwcConfigured,
+                            onReact                = { actionsViewModel.react(row.id, row.pubkey) },
+                            onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                            onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                            onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
+                            lookupProfile          = actionsViewModel::lookupProfile,
+                            lookupEvent            = actionsViewModel::lookupEvent,
+                            fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
+                        )
+                    }
                 }
             }
 
@@ -378,5 +391,9 @@ fun UserProfileScreen(
                 )
             }
         }
+    }
+
+    articleRow?.let { row ->
+        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
     }
 }

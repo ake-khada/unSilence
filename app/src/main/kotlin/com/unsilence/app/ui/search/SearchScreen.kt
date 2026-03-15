@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,6 +47,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
@@ -72,6 +76,7 @@ fun SearchScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
 
     var selectedTab by remember { mutableIntStateOf(0) }
+    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     Column(
         modifier = Modifier
@@ -185,29 +190,40 @@ fun SearchScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.noteResults, key = { it.id }) { row ->
-                                NoteCard(
-                                    row             = row,
-                                    onNoteClick     = onNoteClick,
-                                    onAuthorClick   = onAuthorClick,
-                                    hasReacted      = row.engagementId in reactedIds,
-                                    hasReposted     = row.engagementId in repostedIds,
-                                    hasZapped       = row.engagementId in zappedIds,
-                                    isNwcConfigured = isNwcConfigured,
-                                    onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                                    onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                    onQuote         = onQuote,
-                                    onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                    onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                    lookupProfile   = actionsViewModel::lookupProfile,
-                                    lookupEvent     = actionsViewModel::lookupEvent,
-                                    fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                )
+                                if (row.kind == 30023) {
+                                    ArticleCard(
+                                        row     = row,
+                                        onClick = { articleRow = row },
+                                    )
+                                } else {
+                                    NoteCard(
+                                        row             = row,
+                                        onNoteClick     = onNoteClick,
+                                        onAuthorClick   = onAuthorClick,
+                                        hasReacted      = row.engagementId in reactedIds,
+                                        hasReposted     = row.engagementId in repostedIds,
+                                        hasZapped       = row.engagementId in zappedIds,
+                                        isNwcConfigured = isNwcConfigured,
+                                        onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+                                        onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                                        onQuote         = onQuote,
+                                        onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        lookupProfile   = actionsViewModel::lookupProfile,
+                                        lookupEvent     = actionsViewModel::lookupEvent,
+                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    articleRow?.let { row ->
+        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
     }
 }
 
