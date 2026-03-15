@@ -57,7 +57,7 @@ class RelayPool @Inject constructor(
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
-    private val profileFetchAttempted = ConcurrentHashMap<String, Boolean>()
+    private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
@@ -406,8 +406,13 @@ class RelayPool @Inject constructor(
     /** Send a kind 0 profile request for [pubkeys] to indexer relays only (deduped). */
     fun fetchProfiles(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
-        val novel = pubkeys.filter { profileFetchAttempted.putIfAbsent(it, true) == null }
+        val now = System.currentTimeMillis()
+        val novel = pubkeys.filter { pk ->
+            val lastAttempt = profileFetchAttempted[pk]
+            lastAttempt == null || (now - lastAttempt) > 300_000 // 5 min TTL
+        }
         if (novel.isEmpty()) return
+        novel.forEach { profileFetchAttempted[it] = now }
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("profiles-${System.nanoTime()}"))

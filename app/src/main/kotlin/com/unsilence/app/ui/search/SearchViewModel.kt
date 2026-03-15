@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
@@ -68,17 +69,23 @@ class SearchViewModel @Inject constructor(
                     // Send NIP-50 REQ to search relays — results flow into Room via EventProcessor.
                     relayPool.searchNotes(SEARCH_RELAYS, query)
 
+                    // Give relays time to respond before declaring "no results"
+                    val searchStart = System.currentTimeMillis()
+
                     // Collect Room results reactively — re-emits as relay responses arrive.
                     combine(
                         eventRepository.searchNotes(query),
                         userRepository.searchUsers(query),
                     ) { notes, people -> Pair(notes, people) }
                         .collect { (notes, people) ->
+                            val hasResults = notes.isNotEmpty() || people.isNotEmpty()
+                            val elapsed = System.currentTimeMillis() - searchStart
+                            val doneLoading = hasResults || elapsed > 3_000
                             _uiState.update {
                                 it.copy(
                                     noteResults   = notes,
                                     peopleResults = people,
-                                    loading       = false,
+                                    loading       = !doneLoading,
                                 )
                             }
                         }

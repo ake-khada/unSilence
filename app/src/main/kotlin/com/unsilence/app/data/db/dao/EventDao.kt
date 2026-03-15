@@ -312,7 +312,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users       u ON u.pubkey   = e.pubkey
         LEFT JOIN event_stats s ON s.event_id = e.id
-        WHERE e.kind = 1
+        WHERE e.kind IN (1, 30023)
           AND e.content LIKE '%' || :query || '%'
         ORDER BY e.created_at DESC
         LIMIT 50

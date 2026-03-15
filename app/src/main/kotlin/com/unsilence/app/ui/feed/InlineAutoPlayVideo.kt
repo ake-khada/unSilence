@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +47,13 @@ fun InlineAutoPlayVideo(
         exoPlayer.setMediaItem(MediaItem.fromUri(videoUrl))
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
+    }
+
+    DisposableEffect(videoUrl) {
+        onDispose {
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+        }
     }
 
     // Sync mute state reactively
