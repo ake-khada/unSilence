@@ -20,6 +20,9 @@ abstract class OwnRelayDao {
     @Query("SELECT url FROM own_relays WHERE `write` = 1")
     abstract suspend fun writeRelayUrls(): List<String>
 
+    @Query("SELECT MAX(created_at) FROM own_relays")
+    abstract suspend fun maxCreatedAt(): Long?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsert(relay: OwnRelayEntity)
 

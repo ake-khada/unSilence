@@ -9,6 +9,7 @@ import com.unsilence.app.data.db.MIGRATION_3_4
 import com.unsilence.app.data.db.MIGRATION_4_5
 import com.unsilence.app.data.db.MIGRATION_5_6
 import com.unsilence.app.data.db.MIGRATION_6_7
+import com.unsilence.app.data.db.MIGRATION_7_8
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NotificationsDao
@@ -32,7 +33,7 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext ctx: Context): AppDatabase =
         Room.databaseBuilder(ctx, AppDatabase::class.java, "unsilence.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
             .build()
 
     @Provides fun provideEventDao(db: AppDatabase): EventDao = db.eventDao()
