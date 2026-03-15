@@ -6,12 +6,14 @@ import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.ReactionDao
+import com.unsilence.app.data.db.dao.OwnRelayDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelaySetDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
+import com.unsilence.app.data.db.entity.OwnRelayEntity
 import com.unsilence.app.data.db.entity.RelayListEntity
 import com.unsilence.app.data.db.entity.RelaySetEntity
 import com.unsilence.app.data.db.entity.UserEntity
@@ -24,8 +26,9 @@ import com.unsilence.app.data.db.entity.UserEntity
         ReactionEntity::class,
         FollowEntity::class,
         RelayListEntity::class,
+        OwnRelayEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -36,4 +39,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun followDao(): FollowDao
     abstract fun relayListDao(): RelayListDao
     abstract fun notificationsDao(): NotificationsDao
+    abstract fun ownRelayDao(): OwnRelayDao
 }

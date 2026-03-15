@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Drafts
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.EmojiEmotions
@@ -31,6 +32,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,6 +43,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -45,6 +51,7 @@ import com.unsilence.app.ui.theme.Spacing
 @Composable
 fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     BackHandler(onBack = onDismiss)
+    var showRelays by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -85,6 +92,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
 
             // ── Menu items ─────────────────────────────────────────────────────
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                SettingsItem(icon = Icons.Filled.Dns,          label = "Relays",       onClick = { showRelays = true })
                 SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {})
                 SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {})
                 SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {})
@@ -113,6 +121,10 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
                 }
             }
         }
+    }
+
+    if (showRelays) {
+        RelayManagementScreen(onDismiss = { showRelays = false })
     }
 }
 
