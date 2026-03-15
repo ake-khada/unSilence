@@ -147,28 +147,61 @@ class RelayPool @Inject constructor(
     }
 
     private suspend fun subscribeAfterConnect(conn: RelayConnection) {
-        // Feed subscription: kinds 1 (notes), 6 (reposts), 7 (reactions), 9735 (zap receipts), 20, 21, 30023 (articles)
-        val subId = "feed-${conn.url.hashCode()}"
-        val feedReq = buildJsonArray {
+        val hash = conn.url.hashCode()
+
+        // REQ 1: posts and reposts — the main feed content
+        val postsSubId = "feed-posts-$hash"
+        val postsReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
+            add(JsonPrimitive(postsSubId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(7))
-                    add(JsonPrimitive(9735))
-                    add(JsonPrimitive(20))
-                    add(JsonPrimitive(21))
-                    add(JsonPrimitive(30023))
-                })
-                put("limit", JsonPrimitive(500))
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(6)) })
+                put("limit", JsonPrimitive(300))
             })
         }.toString()
 
-        registerPersistentSub(subId, feedReq)
-        conn.send(feedReq)
-        Log.d(TAG, "Subscribed to ${conn.url}")
+        // REQ 2: pictures, videos, longform articles
+        val mediaSubId = "feed-media-$hash"
+        val mediaReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(mediaSubId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(20)); add(JsonPrimitive(21)); add(JsonPrimitive(30023)) })
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        // REQ 3: reactions — needed for heart counts
+        val reactionsSubId = "feed-reactions-$hash"
+        val reactionsReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(reactionsSubId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+
+        // REQ 4: zap receipts — needed for zap counts
+        val zapsSubId = "feed-zaps-$hash"
+        val zapsReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(zapsSubId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+
+        registerPersistentSub(postsSubId, postsReq)
+        registerPersistentSub(mediaSubId, mediaReq)
+        registerPersistentSub(reactionsSubId, reactionsReq)
+        registerPersistentSub(zapsSubId, zapsReq)
+        conn.send(postsReq)
+        conn.send(mediaReq)
+        conn.send(reactionsReq)
+        conn.send(zapsReq)
+        Log.d(TAG, "Subscribed to ${conn.url} (4 feed subscriptions)")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -280,18 +313,22 @@ class RelayPool @Inject constructor(
      * Subscription IDs are prefixed to encode their lifecycle type.
      *
      *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, search-, older-,
-     *                                thread-event-, thread-replies-, user-posts-
+     *                                thread-event-, thread-replies-, thread-reactions-,
+     *                                thread-zaps-, user-posts-, user-engagement-
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
     private fun isOneShotSubscription(subId: String): Boolean =
-        subId.startsWith("kind3-")          ||
-        subId.startsWith("kind10002-")      ||
-        subId.startsWith("profiles-")       ||
-        subId.startsWith("search-")         ||
-        subId.startsWith("older-")          ||
-        subId.startsWith("thread-event-")   ||
-        subId.startsWith("thread-replies-") ||
-        subId.startsWith("user-posts-")
+        subId.startsWith("kind3-")             ||
+        subId.startsWith("kind10002-")         ||
+        subId.startsWith("profiles-")          ||
+        subId.startsWith("search-")            ||
+        subId.startsWith("older-")             ||
+        subId.startsWith("thread-event-")      ||
+        subId.startsWith("thread-replies-")    ||
+        subId.startsWith("thread-reactions-")  ||
+        subId.startsWith("thread-zaps-")       ||
+        subId.startsWith("user-posts-")        ||
+        subId.startsWith("user-engagement-")
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
@@ -399,7 +436,7 @@ class RelayPool @Inject constructor(
      *
      * Two filters are sent:
      *  - kind 0 (profiles) — drives the People tab
-     *  - kind 1 (notes)    — drives the Notes tab
+     *  - kind 1/30023 (notes + articles) — drives the Notes tab
      */
     fun searchNotes(searchRelayUrls: List<String>, query: String) {
         if (query.isBlank()) return
@@ -411,7 +448,7 @@ class RelayPool @Inject constructor(
             add(buildJsonObject {
                 put("kinds",  buildJsonArray { add(JsonPrimitive(0)) })
                 put("search", JsonPrimitive(query))
-                put("limit",  JsonPrimitive(20))
+                put("limit",  JsonPrimitive(50))
             })
         }.toString()
 
@@ -419,9 +456,9 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("search-notes-$ts"))
             add(buildJsonObject {
-                put("kinds",  buildJsonArray { add(JsonPrimitive(1)) })
+                put("kinds",  buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(30023)) })
                 put("search", JsonPrimitive(query))
-                put("limit",  JsonPrimitive(30))
+                put("limit",  JsonPrimitive(50))
             })
         }.toString()
 
@@ -521,12 +558,13 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Fetch a thread: the event itself (by ID) and all direct replies (#e tag filter).
-     * Two REQs are sent so both arrive even if the relay processes them separately.
+     * Fetch a thread: the event itself, replies, reactions, and zaps.
+     * Separate REQs so each kind gets its own limit and they don't compete.
      */
     fun fetchThread(relayUrls: List<String>, eventId: String) {
         val ts = System.currentTimeMillis()
 
+        // The event itself
         val eventReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("thread-event-$ts"))
@@ -535,11 +573,34 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
+        // Replies (kind 1 referencing this event)
         val repliesReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("thread-replies-$ts"))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+
+        // Reactions on this event and its replies
+        val reactionsReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("thread-reactions-$ts"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
+                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        // Zaps on this event and its replies
+        val zapsReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("thread-zaps-$ts"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
                 put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
                 put("limit", JsonPrimitive(100))
             })
@@ -549,9 +610,11 @@ class RelayPool @Inject constructor(
             connections[url]?.let { conn ->
                 conn.send(eventReq)
                 conn.send(repliesReq)
+                conn.send(reactionsReq)
+                conn.send(zapsReq)
             }
         }
-        Log.d(TAG, "Fetching thread for $eventId from ${relayUrls.size} relay(s)")
+        Log.d(TAG, "Fetching thread + engagement for $eventId from ${relayUrls.size} relay(s)")
     }
 
     /**
@@ -587,9 +650,12 @@ class RelayPool @Inject constructor(
      * One-shot subscription — CLOSE is sent after EOSE.
      */
     fun fetchUserPosts(pubkey: String) {
-        val req = buildJsonArray {
+        val ts = System.currentTimeMillis()
+
+        // Posts by this author
+        val postsReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("user-posts-${System.currentTimeMillis()}"))
+            add(JsonPrimitive("user-posts-$ts"))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
@@ -599,11 +665,26 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(30023))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                put("limit", JsonPrimitive(50))
+                put("limit", JsonPrimitive(200))
             })
         }.toString()
-        connections.values.forEach { it.send(req) }
-        Log.d(TAG, "Fetching user posts for $pubkey from ${connections.size} relay(s)")
+
+        // Reactions and zaps targeting this author (#p tag)
+        val engagementReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("user-engagement-$ts"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)); add(JsonPrimitive(9735)) })
+                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        connections.values.forEach {
+            it.send(postsReq)
+            it.send(engagementReq)
+        }
+        Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${connections.size} relay(s)")
     }
 
     /**
