@@ -79,7 +79,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.relay_url IN (:relayUrls)
@@ -136,7 +136,7 @@ interface EventDao {
         INNER JOIN follows     f   ON f.pubkey          = e.pubkey
         LEFT JOIN  users       u   ON u.pubkey           = e.pubkey
         LEFT JOIN  reactions   r   ON r.target_event_id  = e.id
-        LEFT JOIN  events      rep ON rep.reply_to_id    = e.id AND rep.kind = 1
+        LEFT JOIN  events      rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN  events      rp  ON rp.root_id         = e.id AND rp.kind = 6
         LEFT JOIN  events      z   ON z.root_id          = e.id AND z.kind  = 9735
         WHERE e.kind IN (1, 6, 20, 21, 30023)
@@ -174,7 +174,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.pubkey = :pubkey
@@ -204,7 +204,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
         WHERE e.pubkey = :pubkey
@@ -233,7 +233,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
         WHERE e.pubkey = :pubkey AND e.kind = 1
@@ -279,7 +279,7 @@ interface EventDao {
         FROM events e
         LEFT JOIN users     u   ON u.pubkey          = e.pubkey
         LEFT JOIN reactions r   ON r.target_event_id = e.id
-        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rep ON (rep.reply_to_id = e.id OR rep.root_id = e.id) AND rep.kind = 1
         LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind = 6
         LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
         WHERE e.id = :eventId

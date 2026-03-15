@@ -38,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -155,23 +157,45 @@ fun ThreadScreen(
                                     ),
                                 )
                             }
-                            items(state.replies, key = { it.id }) { reply ->
-                                NoteCard(
-                                    row             = reply,
-                                    onAuthorClick   = onAuthorClick,
-                                    hasReacted      = reply.engagementId in reactedIds,
-                                    hasReposted     = reply.engagementId in repostedIds,
-                                    hasZapped       = reply.engagementId in zappedIds,
-                                    isNwcConfigured = isNwcConfigured,
-                                    onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                    onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                    onQuote         = onQuote,
-                                    onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
-                                    onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                    lookupProfile   = actionsViewModel::lookupProfile,
-                                    lookupEvent     = actionsViewModel::lookupEvent,
-                                    fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                )
+                            items(state.replies, key = { it.row.id }) { depthRow ->
+                                val reply = depthRow.row
+                                val depth = depthRow.depth
+                                val indent = (depth * 20).dp
+                                val lineColor = Color.White.copy(alpha = 0.06f)
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .drawBehind {
+                                            for (d in 1..depth) {
+                                                val x = (d * 20).dp.toPx()
+                                                drawLine(
+                                                    color       = lineColor,
+                                                    start       = Offset(x, 0f),
+                                                    end         = Offset(x, size.height),
+                                                    strokeWidth = 1.dp.toPx(),
+                                                )
+                                            }
+                                        }
+                                        .padding(start = indent),
+                                ) {
+                                    NoteCard(
+                                        row             = reply,
+                                        onAuthorClick   = onAuthorClick,
+                                        hasReacted      = reply.engagementId in reactedIds,
+                                        hasReposted     = reply.engagementId in repostedIds,
+                                        hasZapped       = reply.engagementId in zappedIds,
+                                        isNwcConfigured = isNwcConfigured,
+                                        onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                        onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                        onQuote         = onQuote,
+                                        onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        lookupProfile   = actionsViewModel::lookupProfile,
+                                        lookupEvent     = actionsViewModel::lookupEvent,
+                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                                    )
+                                }
                             }
                         }
                     }

@@ -251,7 +251,7 @@ fun NoteCard(
     val linkUrls       = mediaExtraction.linkUrls
     val textContent    = mediaExtraction.textContent
 
-    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
+    Column(modifier = modifier.fillMaxWidth()) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
         if (row.kind == 6) {
@@ -259,6 +259,7 @@ fun NoteCard(
             Row(
                 modifier          = Modifier
                     .fillMaxWidth()
+                    .clickable { onNoteClick(row.id) }
                     .padding(horizontal = Spacing.medium)
                     .padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -348,6 +349,7 @@ fun NoteCard(
                 text     = relativeTime(effectiveCreatedAt),
                 color    = TextSecondary,
                 fontSize = 12.sp,
+                modifier = Modifier.clickable { onNoteClick(row.id) },
             )
         }
 
@@ -365,6 +367,7 @@ fun NoteCard(
                 overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier   = Modifier
                     .fillMaxWidth()
+                    .clickable { onNoteClick(row.id) }
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (isLong) 2.dp else Spacing.small),
             )
@@ -470,6 +473,7 @@ fun NoteCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable { onNoteClick(row.id) }
                 .padding(horizontal = Spacing.medium)
                 .padding(bottom = Spacing.small),
             horizontalArrangement = Arrangement.SpaceEvenly,

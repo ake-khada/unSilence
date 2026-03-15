@@ -44,4 +44,14 @@ abstract class FollowDao {
     /** Reactive follow count — re-emits on every follow list change. */
     @Query("SELECT COUNT(*) FROM follows")
     abstract fun countFlow(): Flow<Int>
+
+    /** Reactive check: does this pubkey exist in the follows table? */
+    @Query("SELECT COUNT(*) > 0 FROM follows WHERE pubkey = :pubkey")
+    abstract fun isFollowingFlow(pubkey: String): Flow<Boolean>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insert(follow: FollowEntity)
+
+    @Query("DELETE FROM follows WHERE pubkey = :pubkey")
+    abstract suspend fun delete(pubkey: String)
 }

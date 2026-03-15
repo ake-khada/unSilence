@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -23,8 +24,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +88,8 @@ fun UserProfileScreen(
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
+    val isFollowing    by viewModel.isFollowing.collectAsStateWithLifecycle(initialValue = false)
+    val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
 
@@ -247,6 +254,40 @@ fun UserProfileScreen(
                             .padding(horizontal = Spacing.medium),
                     )
                     Spacer(Modifier.height(Spacing.small))
+                }
+
+                // Follow/Unfollow button
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    if (followLoading) {
+                        CircularProgressIndicator(
+                            color    = Cyan,
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else if (isFollowing) {
+                        OutlinedButton(
+                            onClick = { viewModel.toggleFollow() },
+                            border  = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
+                                brush = androidx.compose.ui.graphics.SolidColor(Cyan),
+                            ),
+                            modifier = Modifier.widthIn(min = 120.dp),
+                        ) {
+                            Text("Following", color = Cyan, fontSize = 14.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick  = { viewModel.toggleFollow() },
+                            colors   = ButtonDefaults.buttonColors(containerColor = Cyan),
+                            modifier = Modifier.widthIn(min = 120.dp),
+                        ) {
+                            Text("Follow", color = Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(Spacing.large))
