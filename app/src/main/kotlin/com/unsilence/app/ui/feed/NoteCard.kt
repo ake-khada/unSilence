@@ -38,8 +38,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -70,9 +72,11 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.ImetaParser
+import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
@@ -153,6 +157,10 @@ private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".m4v", ignoreCase = true) ||
     url.contains(".avi", ignoreCase = true)
 
+/** Cap portrait aspect ratios so images don't dominate the feed. */
+private fun effectiveAspectRatio(raw: Float): Float =
+    if (raw >= 1f) raw else maxOf(raw, 2f / 3f)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NoteCard(
@@ -175,10 +183,13 @@ fun NoteCard(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     onOpenFullscreen: () -> Unit = {},
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    lookupEvent: (suspend (String) -> EventEntity?)? = null,
 ) {
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
+    var fullscreenImageUrl by remember { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
 
     // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
@@ -368,61 +379,31 @@ fun NoteCard(
             }
         }
 
-        // ── First inline image only; overflow count shown as muted label ───────
-        imageUrls.firstOrNull()?.let { url ->
-            val imgAspect = imetaMedia
-                .firstOrNull { it.url == url && it.width != null && it.height != null }
-                ?.let { it.width!!.toFloat() / it.height!! }
-                ?: 4f / 3f  // default aspect ratio when imeta unavailable
-            SubcomposeAsyncImage(
-                model              = url,
-                contentDescription = null,
-                contentScale       = ContentScale.FillWidth,
-                loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
-                error              = {
-                    Box(
-                        modifier         = Modifier.fillMaxSize().background(Color(0xFF1A1A1A)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector        = Icons.Filled.BrokenImage,
-                            contentDescription = "Image failed to load",
-                            tint               = TextSecondary,
-                            modifier           = Modifier.size(32.dp),
-                        )
-                    }
-                },
-                modifier           = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(imgAspect, matchHeightConstraintsFirst = false)
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = if (imageUrls.size > 1) 2.dp else Spacing.small)
-                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-            )
-        }
-        if (imageUrls.size > 1) {
-            Text(
-                text     = "+${imageUrls.size - 1} more",
-                color    = TextSecondary,
-                fontSize = 12.sp,
-                modifier = Modifier
+        // ── BUG #4 FIX: Media grid for multiple images ──────────────────────
+        if (imageUrls.isNotEmpty()) {
+            MediaGrid(
+                imageUrls  = imageUrls,
+                imetaMedia = imetaMedia,
+                onImageClick = { url -> fullscreenImageUrl = url },
+                modifier   = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
         }
 
-        // ── First video URL: thumbnail with play button ────────────────────────
-        videoUrls.firstOrNull()?.let { url ->
+        // ── Video URLs: show all videos, not just first ─────────────────────
+        videoUrls.forEachIndexed { index, url ->
             val videoMeta = imetaMedia.firstOrNull {
                 it.url == url && it.width != null && it.height != null
             }
             val posterUrl = imetaMedia.firstOrNull { it.url == url }?.thumb
+            val rawAspect = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null
 
-            if (isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
+            if (index == 0 && isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
                 InlineAutoPlayVideo(
                     exoPlayer       = exoPlayer,
                     videoUrl        = url,
-                    aspectRatio     = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
+                    aspectRatio     = rawAspect,
                     isMuted         = isMuted,
                     onToggleMute    = onToggleMute,
                     onOpenFullscreen = onOpenFullscreen,
@@ -438,7 +419,7 @@ fun NoteCard(
                             runCatching { uriHandler.openUri(url) }
                         }
                     },
-                    aspectRatio = if (videoMeta != null) videoMeta.width!!.toFloat() / videoMeta.height!! else null,
+                    aspectRatio = rawAspect,
                     posterUrl   = posterUrl,
                     modifier    = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                 )
@@ -465,18 +446,20 @@ fun NoteCard(
             }
         }
 
-        // ── NIP-19 embedded quotes ─────────────────────────────────────────────
+        // ── NIP-19 embedded quotes (Bug #3: show actual content) ─────────────
         nostrRefs.filterIsInstance<NostrRef.EventRef>().forEach { ref ->
             EmbeddedQuoteCard(
                 eventId     = ref.eventId,
                 onNoteClick = onNoteClick,
+                lookupEvent = lookupEvent,
+                lookupProfile = lookupProfile,
                 modifier    = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
         }
 
-        // ── NIP-19 mention chips ───────────────────────────────────────────────
+        // ── NIP-19 mention chips (Bug #2: show display names) ────────────────
         val profileRefs = nostrRefs.filterIsInstance<NostrRef.ProfileRef>()
         if (profileRefs.isNotEmpty()) {
             Row(
@@ -486,7 +469,11 @@ fun NoteCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 profileRefs.forEach { ref ->
-                    MentionChip(pubkeyHex = ref.pubkeyHex, onAuthorClick = onAuthorClick)
+                    MentionChip(
+                        pubkeyHex     = ref.pubkeyHex,
+                        onAuthorClick = onAuthorClick,
+                        lookupProfile = lookupProfile,
+                    )
                 }
             }
         }
@@ -575,6 +562,13 @@ fun NoteCard(
         )
     }
 
+    // ── Fullscreen image viewer ────────────────────────────────────────────
+    fullscreenImageUrl?.let { url ->
+        FullScreenImageDialog(
+            imageUrl  = url,
+            onDismiss = { fullscreenImageUrl = null },
+        )
+    }
 }
 
 // ── Sub-composables ────────────────────────────────────────────────────────────
@@ -689,6 +683,198 @@ private fun ZapButton(
     }
 }
 
+// ── BUG #4 FIX: Media grid composable ─────────────────────────────────────────
+
+/** Single image cell with proper portrait aspect ratio handling (Bug #5). */
+@Composable
+private fun MediaImage(
+    url: String,
+    imetaMedia: List<ImetaMedia>,
+    onImageClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    forceSquare: Boolean = false,
+) {
+    val imgAspect = imetaMedia
+        .firstOrNull { it.url == url && it.width != null && it.height != null }
+        ?.let { it.width!!.toFloat() / it.height!! }
+        ?: 4f / 3f
+
+    val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(imgAspect)
+    val contentScale = if (forceSquare) ContentScale.Crop
+        else if (imgAspect >= 1f) ContentScale.FillWidth
+        else ContentScale.Fit
+
+    SubcomposeAsyncImage(
+        model              = url,
+        contentDescription = null,
+        contentScale       = contentScale,
+        loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
+        error              = {
+            Box(
+                modifier         = Modifier.fillMaxSize().background(MediaPlaceholder),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.BrokenImage,
+                    contentDescription = "Image failed to load",
+                    tint               = TextSecondary,
+                    modifier           = Modifier.size(32.dp),
+                )
+            }
+        },
+        modifier           = modifier
+            .fillMaxWidth()
+            .aspectRatio(displayAspect, matchHeightConstraintsFirst = false)
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(MediaPlaceholder)
+            .clickable { onImageClick(url) },
+    )
+}
+
+/** Renders images in a grid: 1=full, 2=side-by-side, 3=1+2, 4=2x2, 5+=2x2 with +N overlay. */
+@Composable
+private fun MediaGrid(
+    imageUrls: List<String>,
+    imetaMedia: List<ImetaMedia>,
+    onImageClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val count = imageUrls.size
+    when {
+        count == 1 -> {
+            MediaImage(
+                url = imageUrls[0],
+                imetaMedia = imetaMedia,
+                onImageClick = onImageClick,
+                modifier = modifier,
+            )
+        }
+        count == 2 -> {
+            Row(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                MediaImage(
+                    url = imageUrls[0],
+                    imetaMedia = imetaMedia,
+                    onImageClick = onImageClick,
+                    modifier = Modifier.weight(1f),
+                    forceSquare = true,
+                )
+                MediaImage(
+                    url = imageUrls[1],
+                    imetaMedia = imetaMedia,
+                    onImageClick = onImageClick,
+                    modifier = Modifier.weight(1f),
+                    forceSquare = true,
+                )
+            }
+        }
+        count == 3 -> {
+            Column(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                MediaImage(
+                    url = imageUrls[0],
+                    imetaMedia = imetaMedia,
+                    onImageClick = onImageClick,
+                    modifier = Modifier.fillMaxWidth(),
+                    forceSquare = false,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    MediaImage(
+                        url = imageUrls[1],
+                        imetaMedia = imetaMedia,
+                        onImageClick = onImageClick,
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    MediaImage(
+                        url = imageUrls[2],
+                        imetaMedia = imetaMedia,
+                        onImageClick = onImageClick,
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                }
+            }
+        }
+        else -> {
+            // 4+ images: 2x2 grid
+            val gridImages = imageUrls.take(4)
+            val overflow = count - 4
+            Column(
+                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    MediaImage(
+                        url = gridImages[0],
+                        imetaMedia = imetaMedia,
+                        onImageClick = onImageClick,
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    MediaImage(
+                        url = gridImages[1],
+                        imetaMedia = imetaMedia,
+                        onImageClick = onImageClick,
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    MediaImage(
+                        url = gridImages[2],
+                        imetaMedia = imetaMedia,
+                        onImageClick = onImageClick,
+                        modifier = Modifier.weight(1f),
+                        forceSquare = true,
+                    )
+                    // 4th image with optional +N overlay
+                    Box(modifier = Modifier.weight(1f)) {
+                        MediaImage(
+                            url = gridImages[3],
+                            imetaMedia = imetaMedia,
+                            onImageClick = onImageClick,
+                            modifier = Modifier.fillMaxWidth(),
+                            forceSquare = true,
+                        )
+                        if (overflow > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .background(Color.Black.copy(alpha = 0.5f))
+                                    .clickable { onImageClick(gridImages[3]) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text     = "+$overflow",
+                                    color    = Color.White,
+                                    fontSize = 24.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── BUG #5 FIX: Portrait-aware video thumbnail ───────────────────────────────
+
 /** Tap-to-play placeholder shown for detected video URLs. */
 @Composable
 private fun VideoThumbnailCard(
@@ -698,15 +884,16 @@ private fun VideoThumbnailCard(
     aspectRatio: Float? = null,
     posterUrl: String? = null,
 ) {
+    val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
+    val displayAspect = effectiveAspectRatio(rawAspect)
+    val contentScale = if (rawAspect >= 1f) ContentScale.Crop else ContentScale.Fit
+
     Box(
         modifier          = modifier
             .fillMaxWidth()
-            .aspectRatio(
-                ratio = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f,
-                matchHeightConstraintsFirst = false,
-            )
+            .aspectRatio(displayAspect, matchHeightConstraintsFirst = false)
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(Color(0xFF1A1A1A))
+            .background(MediaPlaceholder)
             .clickable { onPlay() },
         contentAlignment  = Alignment.Center,
     ) {
@@ -714,7 +901,7 @@ private fun VideoThumbnailCard(
             AsyncImage(
                 model = posterUrl,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = contentScale,
                 modifier = Modifier.matchParentSize(),
             )
         }
@@ -740,7 +927,7 @@ private fun YouTubeThumbnailCard(
             .fillMaxWidth()
             .aspectRatio(16f / 9f, matchHeightConstraintsFirst = false)
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(Color(0xFF1A1A1A))
+            .background(MediaPlaceholder)
             .clickable {
                 val intent = android.content.Intent(
                     android.content.Intent.ACTION_VIEW,
@@ -811,13 +998,62 @@ fun FullScreenVideoDialog(
     }
 }
 
-/** Tappable inline card for a quoted nostr event. Opens the thread on tap. */
+/** Full-screen image viewer dialog. */
+@Composable
+private fun FullScreenImageDialog(
+    imageUrl: String,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties       = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier         = Modifier.fillMaxSize().background(Color.Black).clickable { onDismiss() },
+            contentAlignment = Alignment.Center,
+        ) {
+            SubcomposeAsyncImage(
+                model              = imageUrl,
+                contentDescription = null,
+                contentScale       = ContentScale.Fit,
+                modifier           = Modifier.fillMaxSize(),
+            )
+            IconButton(
+                onClick  = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp),
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint               = Color.White,
+                )
+            }
+        }
+    }
+}
+
+// ── BUG #3 FIX: Rich embedded quote card ────────────────────────────────────
+
+/** Tappable inline card for a quoted nostr event. Shows actual content when available. */
 @Composable
 private fun EmbeddedQuoteCard(
     eventId: String,
     onNoteClick: (String) -> Unit,
+    lookupEvent: (suspend (String) -> EventEntity?)? = null,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
     modifier: Modifier = Modifier,
 ) {
+    // Try to load the quoted event from Room
+    val event by produceState<EventEntity?>(null, eventId) {
+        if (lookupEvent != null) value = lookupEvent(eventId)
+    }
+    val author by produceState<UserEntity?>(null, event?.pubkey) {
+        val pk = event?.pubkey
+        if (pk != null && lookupProfile != null) value = lookupProfile(pk)
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -827,29 +1063,93 @@ private fun EmbeddedQuoteCard(
             .clickable { onNoteClick(eventId) }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector        = Icons.Filled.FormatQuote,
-                contentDescription = null,
-                tint               = TextSecondary,
-                modifier           = Modifier.size(16.dp),
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text     = "Quoted post",
-                color    = TextSecondary,
-                fontSize = 13.sp,
-            )
+        val loadedEvent = event
+        if (loadedEvent != null) {
+            // Rich quote: show author + truncated content
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AvatarImage(
+                        pubkey   = loadedEvent.pubkey,
+                        picture  = author?.picture,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text     = author?.displayName?.takeIf { it.isNotBlank() }
+                            ?: author?.name?.takeIf { it.isNotBlank() }
+                            ?: "${loadedEvent.pubkey.take(6)}…${loadedEvent.pubkey.takeLast(4)}",
+                        color    = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text     = relativeTime(loadedEvent.createdAt),
+                        color    = TextSecondary,
+                        fontSize = 11.sp,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                // Strip URLs from quoted content for cleaner display
+                val cleanContent = LINK_URL_REGEX.replace(
+                    NOSTR_URI_REGEX.replace(loadedEvent.content, ""),
+                    ""
+                ).trim()
+                if (cleanContent.isNotBlank()) {
+                    Text(
+                        text     = cleanContent,
+                        color    = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        } else {
+            // Fallback: minimal quote placeholder
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector        = Icons.Filled.FormatQuote,
+                    contentDescription = null,
+                    tint               = TextSecondary,
+                    modifier           = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text     = "Quoted post",
+                    color    = TextSecondary,
+                    fontSize = 13.sp,
+                )
+            }
         }
     }
 }
 
-/** Inline mention chip for a nostr pubkey. Tapping opens the user's profile. */
+// ── BUG #2 FIX: Mention chip with display name lookup ───────────────────────
+
+/** Inline mention chip for a nostr pubkey. Shows display name when available. */
 @Composable
 private fun MentionChip(
     pubkeyHex: String,
     onAuthorClick: (String) -> Unit,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
 ) {
+    val profile by produceState<UserEntity?>(null, pubkeyHex) {
+        if (lookupProfile != null) value = lookupProfile(pubkeyHex)
+    }
+
+    val displayText = profile?.displayName?.takeIf { it.isNotBlank() }
+        ?: profile?.name?.takeIf { it.isNotBlank() }
+        ?: run {
+            // Show truncated npub instead of raw hex
+            val npub = runCatching { NPub.Companion.create(pubkeyHex) }.getOrNull()
+            if (npub != null) "@${npub.take(16)}…" else "@${pubkeyHex.take(8)}…"
+        }
+
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
@@ -859,7 +1159,7 @@ private fun MentionChip(
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
         Text(
-            text     = "@${pubkeyHex.take(8)}…",
+            text     = if (displayText.startsWith("@")) displayText else "@$displayText",
             color    = Cyan,
             fontSize = 12.sp,
         )

@@ -172,6 +172,8 @@ fun FeedScreen(
                                     isMuted = false
                                     showFullscreenVideo = true
                                 },
+                                lookupProfile          = actionsViewModel::lookupProfile,
+                                lookupEvent            = actionsViewModel::lookupEvent,
                             )
                         }
                     }
