@@ -4,45 +4,84 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.unsilence.app.data.db.entity.UserEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface UserDao {
+abstract class UserDao {
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(user: UserEntity)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract suspend fun insertOrIgnore(user: UserEntity)
 
-    /** Batch upsert for the event pipeline. Room wraps the list insert in a single transaction. */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertBatch(users: List<UserEntity>)
+    @Query("""
+        UPDATE users SET
+            name = :name,
+            display_name = :displayName,
+            about = :about,
+            picture = :picture,
+            banner = :banner,
+            nip05 = :nip05,
+            lud16 = :lud16,
+            updated_at = :updatedAt
+        WHERE pubkey = :pubkey
+    """)
+    abstract suspend fun updateProfile(
+        pubkey: String,
+        name: String?,
+        displayName: String?,
+        about: String?,
+        picture: String?,
+        banner: String?,
+        nip05: String?,
+        lud16: String?,
+        updatedAt: Long,
+    )
+
+    @Transaction
+    open suspend fun upsert(user: UserEntity) {
+        insertOrIgnore(user)
+        updateProfile(
+            pubkey = user.pubkey,
+            name = user.name,
+            displayName = user.displayName,
+            about = user.about,
+            picture = user.picture,
+            banner = user.banner,
+            nip05 = user.nip05,
+            lud16 = user.lud16,
+            updatedAt = user.updatedAt,
+        )
+    }
+
+    @Transaction
+    open suspend fun upsertBatch(users: List<UserEntity>) {
+        for (user in users) {
+            upsert(user)
+        }
+    }
 
     @Query("SELECT * FROM users WHERE pubkey = :pubkey")
-    suspend fun getUser(pubkey: String): UserEntity?
+    abstract suspend fun getUser(pubkey: String): UserEntity?
 
     @Query("SELECT * FROM users WHERE pubkey = :pubkey")
-    fun userFlow(pubkey: String): Flow<UserEntity?>
+    abstract fun userFlow(pubkey: String): Flow<UserEntity?>
 
     @Query("SELECT pubkey FROM users")
-    suspend fun allPubkeys(): List<String>
+    abstract suspend fun allPubkeys(): List<String>
 
     @Query("SELECT follower_count FROM users WHERE pubkey = :pubkey")
-    suspend fun getFollowerCount(pubkey: String): Long?
+    abstract suspend fun getFollowerCount(pubkey: String): Long?
 
     @Query("SELECT follower_count_updated_at FROM users WHERE pubkey = :pubkey")
-    suspend fun getFollowerCountUpdatedAt(pubkey: String): Long?
+    abstract suspend fun getFollowerCountUpdatedAt(pubkey: String): Long?
 
     @Query("UPDATE users SET follower_count = :count, follower_count_updated_at = :updatedAt WHERE pubkey = :pubkey")
-    suspend fun updateFollowerCount(pubkey: String, count: Long, updatedAt: Long)
+    abstract suspend fun updateFollowerCount(pubkey: String, count: Long, updatedAt: Long)
 
-    /** Pubkeys with profiles older than [olderThan] epoch seconds. */
     @Query("SELECT pubkey FROM users WHERE updated_at < :olderThan")
-    suspend fun stalePubkeys(olderThan: Long): List<String>
+    abstract suspend fun stalePubkeys(olderThan: Long): List<String>
 
-    /**
-     * Full-text-style search across name, display_name, and about fields.
-     * Re-emits whenever the users table changes (i.e. as search results arrive from the relay).
-     */
     @Query("""
         SELECT * FROM users
         WHERE name         LIKE '%' || :query || '%'
@@ -51,5 +90,5 @@ interface UserDao {
         ORDER BY display_name ASC
         LIMIT 50
     """)
-    fun searchUsers(query: String): Flow<List<UserEntity>>
+    abstract fun searchUsers(query: String): Flow<List<UserEntity>>
 }
