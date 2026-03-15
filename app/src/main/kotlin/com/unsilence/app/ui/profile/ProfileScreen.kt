@@ -289,6 +289,8 @@ fun ProfileScreen(
                         onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
                         onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
                         onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
+                        lookupProfile          = actionsViewModel::lookupProfile,
+                        lookupEvent            = actionsViewModel::lookupEvent,
                     )
                 }
             }

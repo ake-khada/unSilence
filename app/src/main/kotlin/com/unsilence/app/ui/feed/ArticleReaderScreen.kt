@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -138,7 +139,7 @@ fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
                         h3        = MaterialTheme.typography.headlineSmall.copy(color = Color.White),
                         paragraph = MaterialTheme.typography.bodyLarge.copy(color = Color.White, lineHeight = 24.sp),
                         code      = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace),
-                        link      = TextStyle(color = Cyan),
+                        textLink  = TextLinkStyles(style = TextStyle(color = Cyan).toSpanStyle()),
                     ),
                     modifier         = Modifier
                         .fillMaxWidth()

@@ -53,11 +53,15 @@ fun InlineAutoPlayVideo(
         exoPlayer.volume = if (isMuted) 0f else 1f
     }
 
+    val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
+    // Cap portrait videos so they don't dominate the feed (max height = 1.5x width)
+    val displayAspect = if (rawAspect >= 1f) rawAspect else maxOf(rawAspect, 2f / 3f)
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .aspectRatio(
-                ratio = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f,
+                ratio = displayAspect,
                 matchHeightConstraintsFirst = false,
             )
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))

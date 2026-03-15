@@ -9,9 +9,11 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
+import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
+import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -43,6 +45,7 @@ class NoteActionsViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
+    private val userRepository: UserRepository,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
 ) : ViewModel() {
@@ -183,6 +186,14 @@ class NoteActionsViewModel @Inject constructor(
         if (saved) isNwcConfigured = true   // triggers recomposition; zap button activates immediately
         return saved
     }
+
+    // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
+
+    suspend fun lookupProfile(pubkey: String): UserEntity? =
+        userRepository.getUser(pubkey)
+
+    suspend fun lookupEvent(eventId: String): EventEntity? =
+        eventRepository.getEventById(eventId)
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
