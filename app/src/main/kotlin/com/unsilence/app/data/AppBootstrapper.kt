@@ -53,8 +53,8 @@ class AppBootstrapper @Inject constructor(
      * 5. Connect to global relays → opens persistent feed subscriptions
      */
     suspend fun bootstrap(pubkeyHex: String) {
-        eventProcessor.start()
-        // Register kind-3/kind-10002 handlers before any relay events can arrive
+        // EventProcessor drainers start in init{} with immutable kindHandlers —
+        // no registration race. Just start OutboxRouter's internal flows.
         outboxRouter.start()
 
         // ── Step 1: Connect to indexer relays ───────────────────────────────

@@ -27,9 +27,6 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
-// Type alias for external kind handlers registered by other components (e.g. OutboxRouter).
-private typealias KindHandler = suspend (obj: JsonObject, relayUrl: String) -> Unit
-
 private const val TAG = "EventProcessor"
 
 // Dedup cache limits
@@ -73,6 +70,7 @@ class EventProcessor @Inject constructor(
     private val eventDao: EventDao,
     private val userDao: UserDao,
     private val reactionDao: ReactionDao,
+    private val outboxRouter: dagger.Lazy<OutboxRouter>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
@@ -95,9 +93,18 @@ class EventProcessor @Inject constructor(
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<ProcessedEvent>(capacity = 500)
 
-    // ── External kind handlers ────────────────────────────────────────────────
+    // ── Kind handlers (immutable — populated at construction, no race) ─────────
 
-    private val kindHandlers = mutableMapOf<Int, MutableList<KindHandler>>()
+    /**
+     * Handlers for specific event kinds, dispatched after entity building.
+     * Immutable map: handlers exist from construction, before drainers start.
+     * Uses dagger.Lazy<OutboxRouter> to break the circular DI dependency
+     * (EventProcessor ↔ OutboxRouter).
+     */
+    private val kindHandlers: Map<Int, suspend (JsonObject) -> Unit> = mapOf(
+        3     to { obj -> outboxRouter.get().handleContactList(obj) },
+        10002 to { obj -> outboxRouter.get().handleRelayList(obj) },
+    )
 
     private var drainerJob: Job? = null
 
@@ -120,16 +127,10 @@ class EventProcessor @Inject constructor(
         drainerJob?.cancel()
         drainerJob = null
         seenIds.clear()
-        synchronized(kindHandlers) { kindHandlers.clear() }
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
         Log.d(TAG, "Stopped and cleared state")
-    }
-
-    @Synchronized
-    fun addKindHandler(kind: Int, handler: KindHandler) {
-        kindHandlers.getOrPut(kind) { mutableListOf() }.add(handler)
     }
 
     // ── Public entry point ────────────────────────────────────────────────────
@@ -234,11 +235,10 @@ class EventProcessor @Inject constructor(
             if (isHot) hotChannel.trySend(processed) else coldChannel.trySend(processed)
         }
 
-        // Dispatch to external handlers (OutboxRouter for kind 3 / 10002, etc.)
+        // Dispatch to kind handlers (OutboxRouter for kind 3 / 10002).
         // Launched in a new coroutine so that a slow handler (e.g. OutboxRouter doing
         // Room writes or opening relay connections) never blocks the relay message loop.
-        val handlers = synchronized(kindHandlers) { kindHandlers[kind]?.toList() }
-        handlers?.forEach { handler -> scope.launch { handler(obj, relayUrl) } }
+        kindHandlers[kind]?.let { handler -> scope.launch { handler(obj) } }
     }
 
     // ── Entity builders (no DB access — just data class construction) ─────────
