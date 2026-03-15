@@ -24,6 +24,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 val MIGRATION_8_9 = object : Migration(8, 9) {
     override fun migrate(db: SupportSQLiteDatabase) {
+        // ── Step 0: Ensure events columns that may be missing from older schemas ─
+        // These were added to EventEntity without migrations at some point.
+        // ALTER TABLE ADD COLUMN throws if the column already exists, so we catch.
+        try { db.execSQL("ALTER TABLE events ADD COLUMN cached_at INTEGER NOT NULL DEFAULT 0") } catch (_: Exception) {}
+        try { db.execSQL("ALTER TABLE events ADD COLUMN has_content_warning INTEGER NOT NULL DEFAULT 0") } catch (_: Exception) {}
+        try { db.execSQL("ALTER TABLE events ADD COLUMN content_warning_reason TEXT") } catch (_: Exception) {}
+
         // ── Step 1: Create new tables ──────────────────────────────────────
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS event_stats (
