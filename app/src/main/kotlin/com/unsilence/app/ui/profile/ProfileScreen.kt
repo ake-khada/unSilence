@@ -48,7 +48,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
@@ -83,6 +86,7 @@ fun ProfileScreen(
 
     var showEditProfile by remember { mutableStateOf(false) }
     var showSettings    by remember { mutableStateOf(false) }
+    var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
@@ -271,28 +275,35 @@ fun ProfileScreen(
                 }
             } else {
                 items(items = posts, key = { it.id }) { row ->
-                    // Resolve original author profile for kind-6 reposts
-                    val originalAuthorProfile = if (row.kind == 6) {
-                        extractRepostAuthorPubkey(row.content, row.tags)
-                            ?.let { viewModel.profileFlow(it).collectAsState().value }
-                    } else null
+                    if (row.kind == 30023) {
+                        ArticleCard(
+                            row     = row,
+                            onClick = { articleRow = row },
+                        )
+                    } else {
+                        // Resolve original author profile for kind-6 reposts
+                        val originalAuthorProfile = if (row.kind == 6) {
+                            extractRepostAuthorPubkey(row.content, row.tags)
+                                ?.let { viewModel.profileFlow(it).collectAsState().value }
+                        } else null
 
-                    NoteCard(
-                        row                    = row,
-                        originalAuthorProfile  = originalAuthorProfile,
-                        onAuthorClick          = onAuthorClick,
-                        hasReacted             = row.engagementId in reactedIds,
-                        hasReposted            = row.engagementId in repostedIds,
-                        hasZapped              = row.engagementId in zappedIds,
-                        isNwcConfigured        = isNwcConfigured,
-                        onReact                = { actionsViewModel.react(row.id, row.pubkey) },
-                        onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                        onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                        onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                        lookupProfile          = actionsViewModel::lookupProfile,
-                        lookupEvent            = actionsViewModel::lookupEvent,
-                        fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
-                    )
+                        NoteCard(
+                            row                    = row,
+                            originalAuthorProfile  = originalAuthorProfile,
+                            onAuthorClick          = onAuthorClick,
+                            hasReacted             = row.engagementId in reactedIds,
+                            hasReposted            = row.engagementId in repostedIds,
+                            hasZapped              = row.engagementId in zappedIds,
+                            isNwcConfigured        = isNwcConfigured,
+                            onReact                = { actionsViewModel.react(row.id, row.pubkey) },
+                            onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+                            onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+                            onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
+                            lookupProfile          = actionsViewModel::lookupProfile,
+                            lookupEvent            = actionsViewModel::lookupEvent,
+                            fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
+                        )
+                    }
                 }
             }
 
@@ -355,6 +366,9 @@ fun ProfileScreen(
             viewModel = viewModel,
             onDismiss = { showEditProfile = false },
         )
+    }
+    articleRow?.let { row ->
+        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
     }
 }
 

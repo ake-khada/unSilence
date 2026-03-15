@@ -48,7 +48,10 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
@@ -79,6 +82,7 @@ fun ThreadScreen(
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     var replyText by remember { mutableStateOf("") }
+    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     Box(
         modifier = Modifier
@@ -126,22 +130,29 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
-                                NoteCard(
-                                    row             = note,
-                                    onAuthorClick   = onAuthorClick,
-                                    hasReacted      = note.engagementId in reactedIds,
-                                    hasReposted     = note.engagementId in repostedIds,
-                                    hasZapped       = note.engagementId in zappedIds,
-                                    isNwcConfigured = isNwcConfigured,
-                                    onReact         = { actionsViewModel.react(note.id, note.pubkey) },
-                                    onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                    onQuote         = onQuote,
-                                    onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
-                                    onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                    lookupProfile   = actionsViewModel::lookupProfile,
-                                    lookupEvent     = actionsViewModel::lookupEvent,
-                                    fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                )
+                                if (note.kind == 30023) {
+                                    ArticleCard(
+                                        row     = note,
+                                        onClick = { articleRow = note },
+                                    )
+                                } else {
+                                    NoteCard(
+                                        row             = note,
+                                        onAuthorClick   = onAuthorClick,
+                                        hasReacted      = note.engagementId in reactedIds,
+                                        hasReposted     = note.engagementId in repostedIds,
+                                        hasZapped       = note.engagementId in zappedIds,
+                                        isNwcConfigured = isNwcConfigured,
+                                        onReact         = { actionsViewModel.react(note.id, note.pubkey) },
+                                        onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                        onQuote         = onQuote,
+                                        onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        lookupProfile   = actionsViewModel::lookupProfile,
+                                        lookupEvent     = actionsViewModel::lookupEvent,
+                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                                    )
+                                }
                             }
                         }
 
@@ -262,5 +273,9 @@ fun ThreadScreen(
                 }
             }
         }
+    }
+
+    articleRow?.let { row ->
+        ArticleReaderScreen(row = row, onDismiss = { articleRow = null })
     }
 }

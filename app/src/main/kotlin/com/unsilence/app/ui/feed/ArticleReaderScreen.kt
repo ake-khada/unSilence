@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -87,17 +87,19 @@ fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
-                // ── Banner image ───────────────────────────────────────────────
+                // ── Banner image (16:9, magazine-style header) ─────────────────
                 if (!image.isNullOrBlank()) {
                     SubcomposeAsyncImage(
                         model              = image,
                         contentDescription = null,
-                        contentScale       = ContentScale.FillWidth,
+                        contentScale       = ContentScale.Crop,
                         modifier           = Modifier
                             .fillMaxWidth()
-                            .defaultMinSize(minHeight = 200.dp)
-                            .padding(Spacing.medium)
-                            .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(
+                                bottomStart = Sizing.mediaCornerRadius,
+                                bottomEnd   = Sizing.mediaCornerRadius,
+                            )),
                     )
                 }
 
