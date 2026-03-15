@@ -170,22 +170,29 @@ class OutboxRouter @Inject constructor(
             )
         )
 
-        // If this is our own relay list, populate own_relays table
+        // If this is our own relay list, populate own_relays table.
+        // Only accept if newer than what we already have (replaceable event semantics).
         if (pubkey == keyManager.getPublicKeyHex()) {
+            val existing = ownRelayDao.maxCreatedAt() ?: 0L
+            if (createdAt <= existing) {
+                Log.d(TAG, "Skipping older own kind-10002 (have=$existing, got=$createdAt)")
+                return
+            }
             val ownRelays = tags
                 .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "r" }
                 .mapNotNull { tag ->
                     val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     val marker = tag.jsonArray.getOrNull(2)?.jsonPrimitive?.content
                     OwnRelayEntity(
-                        url   = url,
-                        read  = marker == null || marker.isBlank() || marker == "read",
-                        write = marker == null || marker.isBlank() || marker == "write",
+                        url       = url,
+                        read      = marker == null || marker.isBlank() || marker == "read",
+                        write     = marker == null || marker.isBlank() || marker == "write",
+                        createdAt = createdAt,
                     )
                 }
             if (ownRelays.isNotEmpty()) {
                 ownRelayDao.replaceAll(ownRelays)
-                Log.d(TAG, "Seeded ${ownRelays.size} own relays from kind 10002")
+                Log.d(TAG, "Seeded ${ownRelays.size} own relays from kind 10002 (created_at=$createdAt)")
             }
         }
     }

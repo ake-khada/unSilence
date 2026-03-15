@@ -15,7 +15,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v4 → v5: Add zap_total_sats column to events for displaying total zap amount.
  * v5 → v6: Add follower_count and follower_count_updated_at columns to users for NIP-45 cache.
  * v6 → v7: Add own_relays table for relay management screen.
+ * v7 → v8: Add created_at column to own_relays for replaceable event semantics.
  */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE own_relays ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 val MIGRATION_6_7 = object : Migration(6, 7) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("""
