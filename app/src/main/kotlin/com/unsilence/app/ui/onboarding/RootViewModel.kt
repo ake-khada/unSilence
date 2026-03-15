@@ -27,7 +27,9 @@ class RootViewModel @Inject constructor(
     }
 
     fun logout() {
-        bootstrapper.teardown()
-        isLoggedIn = false
+        viewModelScope.launch {
+            bootstrapper.teardown()
+            isLoggedIn = false
+        }
     }
 }

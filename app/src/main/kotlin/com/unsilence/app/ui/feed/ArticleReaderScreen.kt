@@ -49,6 +49,23 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
+/**
+ * Probes whether multiplatform-markdown-renderer is ABI-compatible with the
+ * current Compose runtime. The check runs once at class-load time. If it fails,
+ * we fall back to plain Text() rendering instead of crashing at runtime.
+ */
+private val isMarkdownAvailable: Boolean by lazy {
+    try {
+        // Force class loading of the Markdown composable's enclosing class.
+        // If the library was compiled against an incompatible Compose version,
+        // this triggers NoSuchMethodError / NoClassDefFoundError immediately.
+        Class.forName("com.mikepenz.markdown.m3.MarkdownKt")
+        true
+    } catch (_: Throwable) {
+        false
+    }
+}
+
 @Composable
 fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
     val title  = articleTagValue(row.tags, "title")
@@ -123,29 +140,45 @@ fun ArticleReaderScreen(row: FeedRow, onDismiss: () -> Unit) {
 
                 Spacer(Modifier.height(Spacing.medium))
 
-                // ── Body content (full markdown via multiplatform-markdown-renderer) ──
-                Markdown(
-                    content          = row.content,
-                    imageTransformer = Coil3ImageTransformerImpl,
-                    colors           = markdownColor(
-                        text                 = Color.White,
-                        codeBackground       = Color(0xFF1A1A1A),
-                        inlineCodeBackground = Color(0xFF1A1A1A),
-                        dividerColor         = MaterialTheme.colorScheme.surfaceVariant,
-                    ),
-                    typography       = markdownTypography(
-                        h1        = MaterialTheme.typography.headlineLarge.copy(color = Color.White),
-                        h2        = MaterialTheme.typography.headlineMedium.copy(color = Color.White),
-                        h3        = MaterialTheme.typography.headlineSmall.copy(color = Color.White),
-                        paragraph = MaterialTheme.typography.bodyLarge.copy(color = Color.White, lineHeight = 24.sp),
-                        code      = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace),
-                        textLink  = TextLinkStyles(style = TextStyle(color = Cyan).toSpanStyle()),
-                    ),
-                    modifier         = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium)
-                        .padding(bottom = Spacing.xl),
-                )
+                // ── Body content ──────────────────────────────────────────────
+                // markdown-renderer 0.39.2 may throw NoSuchMethodError with
+                // Compose BOM 2025.05.00 due to ABI mismatch. Detected at
+                // class-load time; falls back to plain Text() if incompatible.
+                if (isMarkdownAvailable) {
+                    Markdown(
+                        content          = row.content,
+                        imageTransformer = Coil3ImageTransformerImpl,
+                        colors           = markdownColor(
+                            text                 = Color.White,
+                            codeBackground       = Color(0xFF1A1A1A),
+                            inlineCodeBackground = Color(0xFF1A1A1A),
+                            dividerColor         = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                        typography       = markdownTypography(
+                            h1        = MaterialTheme.typography.headlineLarge.copy(color = Color.White),
+                            h2        = MaterialTheme.typography.headlineMedium.copy(color = Color.White),
+                            h3        = MaterialTheme.typography.headlineSmall.copy(color = Color.White),
+                            paragraph = MaterialTheme.typography.bodyLarge.copy(color = Color.White, lineHeight = 24.sp),
+                            code      = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace),
+                            textLink  = TextLinkStyles(style = TextStyle(color = Cyan).toSpanStyle()),
+                        ),
+                        modifier         = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.medium)
+                            .padding(bottom = Spacing.xl),
+                    )
+                } else {
+                    Text(
+                        text       = row.content,
+                        color      = Color.White,
+                        fontSize   = 15.sp,
+                        lineHeight = 22.sp,
+                        modifier   = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.medium)
+                            .padding(bottom = Spacing.xl),
+                    )
+                }
             }
         }
     }
