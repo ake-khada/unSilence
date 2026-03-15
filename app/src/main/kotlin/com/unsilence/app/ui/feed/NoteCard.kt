@@ -77,6 +77,7 @@ import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.ImetaMedia
+import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
@@ -185,6 +186,7 @@ fun NoteCard(
     onOpenFullscreen: () -> Unit = {},
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
+    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
 ) {
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
@@ -435,14 +437,19 @@ fun NoteCard(
             )
         }
 
-        // ── Link chips for non-media URLs ──────────────────────────────────────
+        // ── Link preview / chips for non-media URLs ─────────────────────────
         if (linkUrls.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             ) {
-                linkUrls.forEach { url -> LinkChip(url = url) }
+                // First link gets an OG preview card; rest stay as simple chips
+                LinkPreviewCard(
+                    url            = linkUrls.first(),
+                    fetchOgMetadata = fetchOgMetadata,
+                )
+                linkUrls.drop(1).forEach { url -> LinkChip(url = url) }
             }
         }
 
@@ -1163,6 +1170,85 @@ private fun MentionChip(
             color    = Cyan,
             fontSize = 12.sp,
         )
+    }
+}
+
+/** OpenGraph link preview card. Falls back to a simple domain chip if OG fetch fails. */
+@Composable
+private fun LinkPreviewCard(
+    url: String,
+    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+) {
+    val uriHandler = LocalUriHandler.current
+    val domain = remember(url) {
+        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
+    }
+
+    val og by produceState<OgMetadata?>(null, url) {
+        if (fetchOgMetadata != null) value = fetchOgMetadata(url)
+    }
+
+    val loadedOg = og
+    if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
+        // Rich preview card
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                .background(Color(0xFF1A1A1A))
+                .border(0.5.dp, Color(0xFF333333), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .clickable { runCatching { uriHandler.openUri(url) } }
+                .padding(Spacing.small),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!loadedOg.imageUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model              = loadedOg.imageUrl,
+                    contentDescription = null,
+                    contentScale       = ContentScale.Crop,
+                    modifier           = Modifier
+                        .size(72.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MediaPlaceholder),
+                )
+                Spacer(Modifier.width(Spacing.small))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                if (!loadedOg.title.isNullOrBlank()) {
+                    Text(
+                        text       = loadedOg.title,
+                        color      = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize   = 13.sp,
+                        lineHeight = 17.sp,
+                        maxLines   = 2,
+                        overflow   = TextOverflow.Ellipsis,
+                    )
+                }
+                if (!loadedOg.description.isNullOrBlank()) {
+                    Text(
+                        text     = loadedOg.description,
+                        color    = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Text(
+                    text     = loadedOg.siteName ?: domain,
+                    color    = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+    } else {
+        // Fallback: simple domain chip (also shown while loading)
+        LinkChip(url = url)
     }
 }
 
