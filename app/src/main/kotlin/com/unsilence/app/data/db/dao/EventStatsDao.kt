@@ -13,15 +13,12 @@ abstract class EventStatsDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract suspend fun insertOrIgnore(stats: EventStatsEntity)
 
-    @Query("INSERT OR IGNORE INTO event_stats (event_id) VALUES (:eventId)")
-    abstract suspend fun ensureExists(eventId: String)
-
     @Query("UPDATE event_stats SET reply_count = reply_count + 1 WHERE event_id = :eventId")
     abstract suspend fun incrementReplyCountInternal(eventId: String)
 
     @Transaction
     open suspend fun incrementReplyCount(eventId: String) {
-        ensureExists(eventId)
+        insertOrIgnore(EventStatsEntity(eventId = eventId))
         incrementReplyCountInternal(eventId)
     }
 
@@ -30,7 +27,7 @@ abstract class EventStatsDao {
 
     @Transaction
     open suspend fun incrementRepostCount(eventId: String) {
-        ensureExists(eventId)
+        insertOrIgnore(EventStatsEntity(eventId = eventId))
         incrementRepostCountInternal(eventId)
     }
 
@@ -39,7 +36,7 @@ abstract class EventStatsDao {
 
     @Transaction
     open suspend fun incrementReactionCount(eventId: String) {
-        ensureExists(eventId)
+        insertOrIgnore(EventStatsEntity(eventId = eventId))
         incrementReactionCountInternal(eventId)
     }
 
@@ -48,7 +45,7 @@ abstract class EventStatsDao {
 
     @Transaction
     open suspend fun incrementZapStats(eventId: String, sats: Long) {
-        ensureExists(eventId)
+        insertOrIgnore(EventStatsEntity(eventId = eventId))
         incrementZapStatsInternal(eventId, sats)
     }
 }
