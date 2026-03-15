@@ -1227,7 +1227,10 @@ private fun FullScreenImageDialog(
 
 // ── BUG #3 FIX: Rich embedded quote card ────────────────────────────────────
 
-/** Tappable inline card for a quoted nostr event. Shows actual content when available. */
+/**
+ * Tappable inline card for a quoted nostr event. Shows actual content when available.
+ * [nestDepth] prevents infinite recursion: 0 = top-level quote, 1 = nested, 2+ = stop.
+ */
 @Composable
 private fun EmbeddedQuoteCard(
     eventId: String,
@@ -1235,8 +1238,9 @@ private fun EmbeddedQuoteCard(
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     modifier: Modifier = Modifier,
+    nestDepth: Int = 0,
 ) {
-    // Try to load the quoted event from Room
+    // Try to load the quoted event (Room first, then relay fetch via lookupEvent)
     val event by produceState<EventEntity?>(null, eventId) {
         if (lookupEvent != null) value = lookupEvent(eventId)
     }
@@ -1284,7 +1288,7 @@ private fun EmbeddedQuoteCard(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                // Strip URLs from quoted content for cleaner display
+                // Strip nostr URIs and URLs from quoted content for cleaner display
                 val cleanContent = LINK_URL_REGEX.replace(
                     NOSTR_URI_REGEX.replace(loadedEvent.content, ""),
                     ""
@@ -1298,6 +1302,26 @@ private fun EmbeddedQuoteCard(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+
+                // Nested quote: render one level of quotes inside this quoted post
+                if (nestDepth < 1) {
+                    val nestedEventRefs = remember(loadedEvent.content) {
+                        NOSTR_URI_REGEX.findAll(loadedEvent.content)
+                            .mapNotNull { decodeNostrRef(it.value) }
+                            .filterIsInstance<NostrRef.EventRef>()
+                            .toList()
+                    }
+                    nestedEventRefs.forEach { ref ->
+                        Spacer(Modifier.height(4.dp))
+                        EmbeddedQuoteCard(
+                            eventId       = ref.eventId,
+                            onNoteClick   = onNoteClick,
+                            lookupEvent   = lookupEvent,
+                            lookupProfile = lookupProfile,
+                            nestDepth     = nestDepth + 1,
+                        )
+                    }
                 }
             }
         } else {

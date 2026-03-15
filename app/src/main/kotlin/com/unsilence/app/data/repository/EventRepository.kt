@@ -65,6 +65,10 @@ class EventRepository @Inject constructor(
     suspend fun getEventById(id: String): EventEntity? =
         eventDao.getEventById(id)
 
+    /** Reactive flow for a single event by ID. Emits null until the event arrives in Room. */
+    fun flowById(eventId: String): Flow<EventEntity?> =
+        eventDao.flowById(eventId)
+
     /** All event IDs the given pubkey has reacted to. Room-backed reactive flow. */
     fun reactedEventIds(pubkey: String): Flow<List<String>> =
         reactionDao.reactedEventIds(pubkey)
