@@ -251,7 +251,7 @@ fun NoteCard(
     val linkUrls       = mediaExtraction.linkUrls
     val textContent    = mediaExtraction.textContent
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
         if (row.kind == 6) {
