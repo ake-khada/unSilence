@@ -101,6 +101,10 @@ class EventProcessor @Inject constructor(
 
     private var drainerJob: Job? = null
 
+    init {
+        start()
+    }
+
     /** Launch drainer coroutines under a child Job so they can be cancelled independently. */
     fun start() {
         if (drainerJob?.isActive == true) return
