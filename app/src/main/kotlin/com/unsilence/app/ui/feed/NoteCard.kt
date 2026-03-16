@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -187,7 +188,19 @@ fun NoteCard(
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    isNewPost: Boolean = false,
+    onNewPostAnimated: () -> Unit = {},
 ) {
+    // Subtle flash animation for newly arrived posts
+    val flashAlpha = remember { Animatable(if (isNewPost) 1f else 0f) }
+    LaunchedEffect(isNewPost) {
+        if (isNewPost) {
+            flashAlpha.snapTo(1f)
+            flashAlpha.animateTo(0f, tween(durationMillis = 1000))
+            onNewPostAnimated()
+        }
+    }
+
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
@@ -251,7 +264,12 @@ fun NoteCard(
     val linkUrls       = mediaExtraction.linkUrls
     val textContent    = mediaExtraction.textContent
 
-    Column(modifier = modifier.fillMaxWidth().clickable { onNoteClick(row.id) }) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1A1A1A).copy(alpha = flashAlpha.value))
+            .clickable { onNoteClick(row.id) },
+    ) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
         if (row.kind == 6) {
