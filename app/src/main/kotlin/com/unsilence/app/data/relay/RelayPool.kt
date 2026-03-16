@@ -233,7 +233,7 @@ class RelayPool @Inject constructor(
             connections[url] = conn
             scope.launch {
                 conn.connect()
-                if (isHomeFeed) subscribeAfterConnect(conn)
+                subscribeAfterConnect(conn)
                 listenForEvents(conn)
             }
         }
