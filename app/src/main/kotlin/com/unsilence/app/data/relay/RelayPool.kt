@@ -51,6 +51,8 @@ class RelayPool @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val processor: EventProcessor,
     private val relayConfigDao: dagger.Lazy<com.unsilence.app.data.db.dao.RelayConfigDao>,
+    private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
+    private val coverageRepository: dagger.Lazy<com.unsilence.app.data.repository.CoverageRepository>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -157,20 +159,50 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Open connections to [relayUrls] and subscribe to feed events.
-     * Calling this multiple times with the same URLs is idempotent.
+     * Register a single coverage handle spanning feed subs across [relayUrls].
+     * Called once from connect() when new relay connections will send REQs
+     * via subscribeAfterConnect(). EOSE from each relay resolves lanes.
      */
+    private fun registerHomeCoverage(relayUrls: List<String>) {
+        val lanes = mutableSetOf<Lane>()
+        for (url in relayUrls) {
+            val hash = url.hashCode()
+            lanes.add(Lane("feed-posts-$hash", url))
+            lanes.add(Lane("feed-media-$hash", url))
+            lanes.add(Lane("feed-longform-$hash", url))
+        }
+        if (lanes.isEmpty()) return
+        val handle = CoverageHandle(
+            handleId = "home-${System.nanoTime()}",
+            scopeType = "home", scopeKey = "home", relaySetId = "global",
+            expectedLanes = lanes,
+        )
+        subscriptionRegistry.get().register(handle)
+        Log.d(TAG, "Registered home coverage handle: ${lanes.size} lanes across ${relayUrls.size} relays")
+    }
+
     fun connect(relayUrls: List<String>) {
+        // Collect URLs that will actually be connected
+        val newUrls = mutableListOf<String>()
         for (url in relayUrls) {
             if (url in blockedUrls) {
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
             if (connections.containsKey(url)) continue
-            if (connections.size >= 25) {
+            if (connections.size + newUrls.size >= 25) {
                 Log.d(TAG, "Connection cap (25) reached — skipping $url")
                 continue
             }
+            newUrls.add(url)
+        }
+
+        // Register ONE coverage handle spanning ALL new relays' feed subs
+        if (newUrls.isNotEmpty()) {
+            registerHomeCoverage(newUrls)
+        }
+
+        for (url in newUrls) {
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
             scope.launch {
@@ -221,6 +253,7 @@ class RelayPool @Inject constructor(
         registerPersistentSub(postsSubId, postsReq)
         registerPersistentSub(mediaSubId, mediaReq)
         registerPersistentSub(longformSubId, longformReq)
+
         conn.send(postsReq)
         conn.send(mediaReq)
         conn.send(longformReq)
@@ -254,6 +287,25 @@ class RelayPool @Inject constructor(
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
         }
+        // Relay disconnected — mark all pending lanes for this relay as failed
+        handleRelayFailure(conn.url)
+    }
+
+    /**
+     * When a relay disconnects or errors, mark all its pending subscription
+     * lanes as failed so coverage handles can reach terminal state.
+     */
+    private fun handleRelayFailure(relayUrl: String) {
+        val registry = subscriptionRegistry.get()
+        for (lane in registry.subsForRelay(relayUrl)) {
+            val terminalHandle = registry.onLaneFailure(lane.subId, lane.relayUrl)
+            if (terminalHandle != null) {
+                scope.launch {
+                    coverageRepository.get().markFromHandle(terminalHandle)
+                    registry.cleanup(terminalHandle.handleId)
+                }
+            }
+        }
     }
 
     /**
@@ -271,6 +323,14 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             conn.send("""["CLOSE","$subId"]""")
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
+        }
+        // Notify coverage registry — returns handle only when ALL lanes resolved
+        val terminalHandle = subscriptionRegistry.get().onEose(subId, conn.url)
+        if (terminalHandle != null) {
+            scope.launch {
+                coverageRepository.get().markFromHandle(terminalHandle)
+                subscriptionRegistry.get().cleanup(terminalHandle.handleId)
+            }
         }
     }
 
@@ -786,10 +846,14 @@ class RelayPool @Inject constructor(
         if (eventIds.isEmpty()) return
         val ts = System.currentTimeMillis()
 
+        val repliesSubId = "engagement-replies-$ts"
+        val reactionsSubId = "engagement-reactions-$ts"
+        val zapsSubId = "engagement-zaps-$ts"
+
         // Replies (kind 1 referencing these events)
         val repliesReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("engagement-replies-$ts"))
+            add(JsonPrimitive(repliesSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
                 put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
@@ -800,7 +864,7 @@ class RelayPool @Inject constructor(
         // Reactions (kind 7 referencing these events)
         val reactionsReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("engagement-reactions-$ts"))
+            add(JsonPrimitive(reactionsSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
                 put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
@@ -811,7 +875,7 @@ class RelayPool @Inject constructor(
         // Zap receipts (kind 9735 referencing these events)
         val zapsReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("engagement-zaps-$ts"))
+            add(JsonPrimitive(zapsSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
                 put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
@@ -820,12 +884,34 @@ class RelayPool @Inject constructor(
         }.toString()
 
         val targets = connections.values.take(6)
+
+        // Register coverage lanes: 3 subs × N relays
+        val lanes = mutableSetOf<Lane>()
+        for (conn in targets) {
+            lanes.add(Lane(repliesSubId, conn.url))
+            lanes.add(Lane(reactionsSubId, conn.url))
+            lanes.add(Lane(zapsSubId, conn.url))
+        }
+        val scopeKeyHash = eventIds.sorted().joinToString(",")
+            .let {
+                java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(it.toByteArray())
+                    .joinToString("") { b -> "%02x".format(b) }
+                    .take(16)
+            }
+        val handle = CoverageHandle(
+            handleId = "engagement-$ts",
+            scopeType = "engagement", scopeKey = scopeKeyHash,
+            relaySetId = "global", expectedLanes = lanes,
+        )
+        subscriptionRegistry.get().register(handle)
+
         targets.forEach { conn ->
             conn.send(repliesReq)
             conn.send(reactionsReq)
             conn.send(zapsReq)
         }
-        Log.d(TAG, "Fetching engagement for ${eventIds.size} events from ${targets.size} relay(s)")
+        Log.d(TAG, "Fetching engagement for ${eventIds.size} events from ${targets.size} relay(s) (${lanes.size} lanes)")
     }
 
     /**
