@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -940,17 +941,20 @@ private fun VideoGrid(
     fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
         if (exoPlayer != null && isDirectVideoUrl(url)) {
             val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
-            InlineAutoPlayVideo(
-                exoPlayer        = exoPlayer,
-                videoUrl         = url,
-                aspectRatio      = aspectRatio,
-                isMuted          = isMuted,
-                onToggleMute     = onToggleMute,
-                onOpenFullscreen = onOpenFullscreen,
-                isActive         = isActiveVideo,
-                thumbnailUrl     = posterUrl,
-                modifier         = cellModifier,
-            )
+            // key by videoUrl so Compose doesn't recycle surfaces between different videos
+            key(url) {
+                InlineAutoPlayVideo(
+                    exoPlayer        = exoPlayer,
+                    videoUrl         = url,
+                    aspectRatio      = aspectRatio,
+                    isMuted          = isMuted,
+                    onToggleMute     = onToggleMute,
+                    onOpenFullscreen = onOpenFullscreen,
+                    isActive         = isActiveVideo,
+                    thumbnailUrl     = posterUrl,
+                    modifier         = cellModifier,
+                )
+            }
         } else {
             VideoGridCell(
                 url         = url,

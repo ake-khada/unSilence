@@ -2,7 +2,10 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -47,52 +50,66 @@ class OgFetcher @Inject constructor(
         }.also { attempted[url] = true; if (it != null) cache[url] = it }
     }
 
-    private fun doFetch(url: String): OgMetadata? {
-        // HEAD first to verify content-type is HTML
-        val headReq = Request.Builder()
-            .url(url)
-            .head()
-            .header("User-Agent", "Mozilla/5.0 (compatible; unSilence/1.0)")
-            .build()
+    /** Execute an OkHttp call with coroutine cancellation propagation. */
+    private suspend fun executeWithCancellation(call: okhttp3.Call): okhttp3.Response {
+        return suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            try {
+                val response = call.execute()
+                cont.resume(response) { _, _, _ -> response.close() }
+            } catch (e: Exception) {
+                if (!cont.isCancelled) cont.resumeWithException(e)
+            }
+        }
+    }
 
-        Log.d(TAG, "Opening HEAD for $url")
-        val headResp = runCatching { client.newCall(headReq).execute() }.getOrNull()
+    private suspend fun doFetch(url: String): OgMetadata? {
+        // HEAD first to verify content-type is HTML
+        val headResp = executeWithCancellation(
+            client.newCall(
+                Request.Builder()
+                    .url(url)
+                    .head()
+                    .header("User-Agent", UA)
+                    .build()
+            )
+        )
         try {
-            val contentType = headResp?.header("Content-Type") ?: headResp?.header("content-type")
+            val contentType = headResp.header("Content-Type")
+                ?: headResp.header("content-type")
             if (contentType != null && !contentType.contains("text/html", ignoreCase = true)) {
                 return null
             }
         } finally {
-            headResp?.close()
-            Log.d(TAG, "Closed HEAD for $url")
+            headResp.close()
         }
 
         // GET with body size limit
-        val getReq = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (compatible; unSilence/1.0)")
-            .build()
-
-        Log.d(TAG, "Opening GET for $url")
-        val response = client.newCall(getReq).execute()
-        try {
-            if (!response.isSuccessful) return null
-            val ct = response.header("Content-Type") ?: ""
+        val response = executeWithCancellation(
+            client.newCall(
+                Request.Builder()
+                    .url(url)
+                    .header("User-Agent", UA)
+                    .build()
+            )
+        )
+        response.use {
+            if (!it.isSuccessful) return null
+            val ct = it.header("Content-Type") ?: ""
             if (!ct.contains("text/html", ignoreCase = true)) return null
             // Read at most 50KB
-            val source = response.body.source()
+            val source = it.body.source()
             val buf = okio.Buffer()
-            source.read(buf, 50_000)
+            source.read(buf, MAX_BODY_SIZE)
             val body = buf.readUtf8()
             return parseOgTags(body, url)
-        } finally {
-            response.close()
-            Log.d(TAG, "Closed GET for $url")
         }
     }
 
     companion object {
         private const val TAG = "OgFetcher"
+        private const val UA = "Mozilla/5.0 (compatible; unSilence/1.0)"
+        private const val MAX_BODY_SIZE = 50_000L
 
         // Matches property= or name= with og: prefix, in either order with content=
         private val OG_TAG_REGEX = Regex(
