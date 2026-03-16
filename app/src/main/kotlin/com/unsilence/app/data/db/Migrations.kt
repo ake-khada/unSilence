@@ -21,7 +21,90 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v8 → v9: Add event_stats, tags, and event_relays tables with indexes.
  *           Backfill event_relays from events.relay_url, tags from events.tags JSON,
  *           and event_stats from existing engagement data.
+ * v9 → v10: NIP-51 relay ecosystem tables (relay_configs, nostr_relay_sets,
+ *            nostr_relay_set_members) + coverage ledger table. Migrate own_relays
+ *            data into relay_configs (kind 10002).
  */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ── relay_configs: unified relay storage for kinds 10002/10006/10007/10012 ──
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS relay_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind INTEGER NOT NULL,
+                relay_url TEXT NOT NULL,
+                marker TEXT,
+                set_ref TEXT,
+                owner_pubkey TEXT NOT NULL DEFAULT '',
+                event_created_at INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_relay_configs_kind ON relay_configs(kind)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_relay_configs_owner ON relay_configs(owner_pubkey, kind)")
+
+        // ── nostr_relay_sets: NIP-51 kind 30002 parameterized replaceable relay sets ──
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS nostr_relay_sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                d_tag TEXT NOT NULL,
+                owner_pubkey TEXT NOT NULL DEFAULT '',
+                title TEXT,
+                description TEXT,
+                image TEXT,
+                event_created_at INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_nostr_relay_sets_d_tag_owner_pubkey ON nostr_relay_sets(d_tag, owner_pubkey)")
+
+        // ── nostr_relay_set_members: relay URLs belonging to a kind 30002 set ──
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS nostr_relay_set_members (
+                set_d_tag TEXT NOT NULL,
+                owner_pubkey TEXT NOT NULL DEFAULT '',
+                relay_url TEXT NOT NULL,
+                PRIMARY KEY(set_d_tag, owner_pubkey, relay_url)
+            )
+        """)
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_nostr_relay_set_members_set_d_tag ON nostr_relay_set_members(set_d_tag)")
+
+        // ── coverage: ledger tracking what time ranges have been fetched ──
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS coverage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                since_ts INTEGER NOT NULL DEFAULT 0,
+                until_ts INTEGER NOT NULL DEFAULT 0,
+                relay_set_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                eose_count INTEGER NOT NULL DEFAULT 0,
+                expected_relays INTEGER NOT NULL DEFAULT 0,
+                oldest_seen_ts INTEGER NOT NULL DEFAULT 0,
+                newest_seen_ts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_success_at INTEGER NOT NULL DEFAULT 0,
+                stale_after_ms INTEGER NOT NULL DEFAULT 300000
+            )
+        """)
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_coverage_scope_type_scope_key ON coverage(scope_type, scope_key)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_coverage_last_attempt_at ON coverage(last_attempt_at)")
+
+        // ── Migrate own_relays → relay_configs (kind 10002) ──
+        db.execSQL("""
+            INSERT OR IGNORE INTO relay_configs (kind, relay_url, marker, owner_pubkey, event_created_at)
+            SELECT 10002, url,
+                CASE WHEN `read` = 1 AND `write` = 1 THEN NULL
+                     WHEN `read` = 1 THEN 'read'
+                     WHEN `write` = 1 THEN 'write'
+                     ELSE NULL END,
+                '', created_at
+            FROM own_relays
+        """)
+
+        // own_relays kept as dead table for safety — will be dropped in a future migration.
+    }
+}
+
 val MIGRATION_8_9 = object : Migration(8, 9) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── Step 0: Ensure events columns that may be missing from older schemas ─

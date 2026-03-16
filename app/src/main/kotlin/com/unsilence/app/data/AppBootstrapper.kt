@@ -5,7 +5,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.dao.OwnRelayDao
+import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.relay.EventProcessor
@@ -38,7 +38,7 @@ class AppBootstrapper @Inject constructor(
     private val maintenanceJob: DatabaseMaintenanceJob,
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
-    private val ownRelayDao: OwnRelayDao,
+    private val relayConfigDao: RelayConfigDao,
     private val userDao: UserDao,
     private val nwcManager: NwcManager,
 ) {
@@ -50,6 +50,7 @@ class AppBootstrapper @Inject constructor(
      * 2. Fetch kind-3 (contact list) → wait for follows to appear in Room
      * 3. Fetch kind-0 (own profile) → wait for profile to appear in Room
      * 4. Fetch kind-10002 (relay list) → fire and let OutboxRouter handle reactively
+     * 4b. Fetch NIP-51 relay kinds (10006, 10007, 10012, 30002)
      * 5. Connect to global relays → opens persistent feed subscriptions
      */
     suspend fun bootstrap(pubkeyHex: String) {
@@ -87,6 +88,16 @@ class AppBootstrapper @Inject constructor(
         relayPool.fetchRelayLists(listOf(pubkeyHex))
         Log.d(TAG, "Step 4: kind-10002 requested")
 
+        // ── Step 4b: Fetch NIP-51 relay ecosystem kinds ─────────────────────
+        // One-shot: blocked relays, search relays, favorites, relay sets.
+        // EventProcessor routes these through OutboxRouter handlers.
+        relayPool.fetchRelayEcosystem(pubkeyHex, INDEXER_RELAY_URLS)
+        Log.d(TAG, "Step 4b: NIP-51 relay kinds (10006/10007/10012/30002) requested")
+
+        // ── Step 4c: Pre-load blocked relays before opening global connections ──
+        relayPool.refreshBlockedRelays()
+        Log.d(TAG, "Step 4c: blocked relay snapshot loaded")
+
         // ── Step 5: Connect to global relays (feed subscriptions) ───────────
         relayPool.connect(GLOBAL_RELAY_URLS)
         Log.d(TAG, "Step 5: global relays connecting")
@@ -99,7 +110,7 @@ class AppBootstrapper @Inject constructor(
      * Full teardown on logout. Order matters:
      * 1. Cancel persistent subs (send CLOSE messages while connections are still alive)
      * 2. Disconnect all WebSockets
-     * 3. Clear user-specific Room tables (follows, own_relays) — keep events/users as cache
+     * 3. Clear user-specific Room tables (follows, relay_configs) — keep events/users as cache
      * 4. Clear KeyManager, SigningManager, NwcManager credentials
      * 5. Cancel child scopes (OutboxRouter, EventProcessor)
      * 6. Reset in-memory state (seenIds, connection map)
@@ -113,7 +124,7 @@ class AppBootstrapper @Inject constructor(
 
         // 3. Clear only user-specific tables — events/users/reactions are reusable cache
         followDao.clearAll()
-        ownRelayDao.clearAll()
+        relayConfigDao.clearAll()
 
         // 4. Clear credentials and cached signer
         keyManager.clear()

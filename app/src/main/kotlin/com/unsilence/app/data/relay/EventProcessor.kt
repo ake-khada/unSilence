@@ -113,6 +113,10 @@ class EventProcessor @Inject constructor(
     private val kindHandlers: Map<Int, suspend (JsonObject) -> Unit> = mapOf(
         3     to { obj -> outboxRouter.get().handleContactList(obj) },
         10002 to { obj -> outboxRouter.get().handleRelayList(obj) },
+        10006 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10006) },
+        10007 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10007) },
+        10012 to { obj -> outboxRouter.get().handleFavoriteRelays(obj) },
+        30002 to { obj -> outboxRouter.get().handleRelaySet(obj) },
     )
 
     private var drainerJob: Job? = null
