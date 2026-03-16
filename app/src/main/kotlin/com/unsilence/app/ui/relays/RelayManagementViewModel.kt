@@ -14,6 +14,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -30,10 +32,10 @@ class RelayManagementViewModel @Inject constructor(
 
     val relays: Flow<List<OwnRelayEntity>> = ownRelayDao.allFlow()
     val publishing = MutableStateFlow(false)
+    private val publishMutex = Mutex()
 
     fun addRelay(url: String) {
-        val normalizedUrl = url.trim().removeSuffix("/")
-        if (normalizedUrl.isBlank()) return
+        val normalizedUrl = normalizeRelayUrl(url) ?: return
         viewModelScope.launch(Dispatchers.IO) {
             val now = System.currentTimeMillis() / 1000L
             ownRelayDao.upsert(OwnRelayEntity(url = normalizedUrl, createdAt = now))
@@ -64,7 +66,7 @@ class RelayManagementViewModel @Inject constructor(
         }
     }
 
-    private suspend fun publishKind10002() {
+    private suspend fun publishKind10002(): Unit = publishMutex.withLock {
         publishing.value = true
         try {
             val now = System.currentTimeMillis() / 1000L
@@ -118,4 +120,22 @@ class RelayManagementViewModel @Inject constructor(
         put("content",    event.content)
         put("sig",        event.sig)
     }.toString()
+
+    companion object {
+        /** Normalize relay URL: ensure wss:// prefix, trim, strip trailing slash. */
+        internal fun normalizeRelayUrl(raw: String): String? {
+            var url = raw.trim().removeSuffix("/")
+            if (url.isBlank()) return null
+            // Strip http(s):// if user pasted a web URL, replace with wss://
+            url = url.removePrefix("https://").removePrefix("http://")
+            // Add wss:// if no scheme present
+            if (!url.startsWith("wss://") && !url.startsWith("ws://")) {
+                url = "wss://$url"
+            }
+            // Basic validation: must have a dot in the host
+            val host = url.removePrefix("wss://").removePrefix("ws://").split("/").firstOrNull() ?: return null
+            if (!host.contains(".")) return null
+            return url
+        }
+    }
 }
