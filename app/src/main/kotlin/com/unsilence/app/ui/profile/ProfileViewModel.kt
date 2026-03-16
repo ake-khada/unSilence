@@ -26,7 +26,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -100,9 +99,6 @@ class ProfileViewModel @Inject constructor(
     // Tracks which pubkeys we've already requested profiles for — prevents hot loop
     private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
-    private val engagementQueue = mutableListOf<String>()
-    private var engagementDebounceJob: Job? = null
-    private var engagementInFlight = false
 
     init {
         if (pubkeyHex != null) {
@@ -154,35 +150,17 @@ class ProfileViewModel @Inject constructor(
                     userRepository.fetchMissingProfiles(newPubkeys)
                 }
 
-                // Queue engagement fetch with debounce
+                // Capped engagement fetch — one batch of 20 max, debounced
                 val newEventIds = rows
                     .filter { it.kind != 6 }
                     .map { it.id }
                     .filter { it !in engagementFetchedIds }
+                    .take(20)
                 if (newEventIds.isNotEmpty()) {
                     engagementFetchedIds.addAll(newEventIds)
-                    queueEngagementFetch(newEventIds)
+                    delay(500)
+                    relayPool.fetchEngagementBatch(newEventIds)
                 }
-            }
-        }
-    }
-
-    private fun queueEngagementFetch(ids: List<String>) {
-        if (engagementInFlight) return
-        engagementQueue.addAll(ids)
-        engagementDebounceJob?.cancel()
-        engagementDebounceJob = viewModelScope.launch {
-            delay(500)
-            engagementInFlight = true
-            try {
-                val toFetch = engagementQueue.toList()
-                engagementQueue.clear()
-                toFetch.chunked(20).forEach { chunk ->
-                    relayPool.fetchEngagementBatch(chunk)
-                    delay(200)
-                }
-            } finally {
-                engagementInFlight = false
             }
         }
     }
