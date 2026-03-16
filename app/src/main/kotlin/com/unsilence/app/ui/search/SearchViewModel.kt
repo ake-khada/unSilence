@@ -6,6 +6,7 @@ import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.SearchResult
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -17,6 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -43,17 +47,35 @@ class SearchViewModel @Inject constructor(
 
     private val _queryFlow = MutableStateFlow("")
 
+    /** Accumulates event IDs that arrive on search-notes-* subscriptions from RelayPool. */
+    private val _searchResultEventIds = MutableStateFlow<Set<String>>(emptySet())
+
+    /** Token of the current search session — late results from old tokens are dropped. */
+    private val _currentSearchToken = MutableStateFlow(0L)
+
     fun search(query: String) {
         _queryFlow.value = query
         _uiState.update { it.copy(query = query) }
     }
 
     init {
+        // Collect search result IDs for the lifetime of the ViewModel.
+        // Only accumulate results matching the current search token —
+        // late arrivals from previous queries are silently dropped.
+        viewModelScope.launch {
+            relayPool.searchResults.collect { result ->
+                if (result.token == _currentSearchToken.value) {
+                    _searchResultEventIds.update { it + result.eventId }
+                }
+            }
+        }
+
         viewModelScope.launch {
             _queryFlow
                 .debounce(300)
                 .collectLatest { query ->
                     if (query.isBlank()) {
+                        _searchResultEventIds.value = emptySet()
                         _uiState.update {
                             it.copy(
                                 peopleResults = emptyList(),
@@ -71,24 +93,44 @@ class SearchViewModel @Inject constructor(
                     val userSearchRelays = relayConfigDao.searchRelayUrls()
                     val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAYS }
 
+                    // Generate token and set it BEFORE sending any REQ so the collector
+                    // is ready to accept the first fast result.
+                    val token = System.currentTimeMillis()
+                    _currentSearchToken.value = token
+                    _searchResultEventIds.value = emptySet()
+
                     // Send NIP-50 REQ to search relays — results flow into Room via EventProcessor.
-                    relayPool.searchNotes(searchRelays, query)
+                    relayPool.searchNotes(searchRelays, query, token)
 
                     // Give relays time to respond before declaring "no results"
                     val searchStart = System.currentTimeMillis()
 
-                    // Collect Room results reactively — re-emits as relay responses arrive.
+                    // Relay results: events whose IDs were emitted by RelayPool's search-notes subs.
+                    // flatMapLatest re-queries Room each time new IDs arrive.
+                    val relayResults = _searchResultEventIds
+                        .map { ids -> ids.toList() }
+                        .flatMapLatest { ids ->
+                            if (ids.isEmpty()) flowOf(emptyList())
+                            else eventRepository.eventsByIds(ids)
+                        }
+
+                    // Combine local LIKE results with relay-returned results + people search.
                     combine(
                         eventRepository.searchNotes(query),
+                        relayResults,
                         userRepository.searchUsers(query),
-                    ) { notes, people -> Pair(notes, people) }
-                        .collect { (notes, people) ->
-                            val hasResults = notes.isNotEmpty() || people.isNotEmpty()
+                    ) { localNotes, relayNotes, people ->
+                        Triple(localNotes, relayNotes, people)
+                    }.collect { (localNotes, relayNotes, people) ->
+                            val mergedNotes = (localNotes + relayNotes)
+                                .distinctBy { it.id }
+                                .sortedByDescending { it.createdAt }
+                            val hasResults = mergedNotes.isNotEmpty() || people.isNotEmpty()
                             val elapsed = System.currentTimeMillis() - searchStart
                             val doneLoading = hasResults || elapsed > 3_000
                             _uiState.update {
                                 it.copy(
-                                    noteResults   = notes,
+                                    noteResults   = mergedNotes,
                                     peopleResults = people,
                                     loading       = !doneLoading,
                                 )

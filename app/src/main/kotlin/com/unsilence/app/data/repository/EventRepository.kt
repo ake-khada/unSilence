@@ -85,6 +85,10 @@ class EventRepository @Inject constructor(
     fun searchNotes(query: String): Flow<List<FeedRow>> =
         eventDao.searchNotes(query)
 
+    /** Fetch events by a known set of IDs (e.g. search relay results). */
+    fun eventsByIds(eventIds: List<String>): Flow<List<FeedRow>> =
+        eventDao.eventsByIds(eventIds)
+
     suspend fun pruneExpired() =
         eventDao.pruneExpired(System.currentTimeMillis() / 1000L)
 }

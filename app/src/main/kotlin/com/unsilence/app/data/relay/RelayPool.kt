@@ -7,8 +7,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,6 +43,9 @@ data class PersistentSub(
     val lastEventTime: Long = 0L,
 )
 
+/** A search result correlated with the token of the search session that produced it. */
+data class SearchResult(val token: Long, val eventId: String)
+
 /**
  * Manages multiple relay WebSocket connections for the global feed.
  *
@@ -67,6 +73,10 @@ class RelayPool @Inject constructor(
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
 
+    /** Emits (token, eventId) pairs for events arriving on search-notes-* subscriptions. */
+    private val _searchResults = MutableSharedFlow<SearchResult>(extraBufferCapacity = 256)
+    val searchResults: SharedFlow<SearchResult> = _searchResults.asSharedFlow()
+
     /** Register a subscription as persistent so it's replayed after reconnect. */
     private fun registerPersistentSub(subId: String, reqJson: String) {
         persistentSubs[subId] = PersistentSub(subId = subId, reqJson = reqJson)
@@ -85,6 +95,21 @@ class RelayPool @Inject constructor(
         val quoteClose = raw.indexOf('"', subStart)
         if (quoteClose < 0) return null
         return raw.substring(subStart, quoteClose)
+    }
+
+    /**
+     * Extract the Nostr event ID from a raw EVENT message without JSON parsing.
+     * Scans for the `"id":"` marker and grabs the next 64 hex chars.
+     */
+    private fun extractEventIdFromRaw(raw: String): String? {
+        val marker = "\"id\":\""
+        val markerIdx = raw.indexOf(marker)
+        if (markerIdx < 0) return null
+        val idStart = markerIdx + marker.length
+        if (idStart + 64 > raw.length) return null
+        val id = raw.substring(idStart, idStart + 64)
+        if (!id.all { it in '0'..'9' || it in 'a'..'f' }) return null
+        return id
     }
 
     private fun updateConnectionStates() {
@@ -181,7 +206,7 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "Registered home coverage handle: ${lanes.size} lanes across ${relayUrls.size} relays")
     }
 
-    fun connect(relayUrls: List<String>) {
+    fun connect(relayUrls: List<String>, isHomeFeed: Boolean = false) {
         // Collect URLs that will actually be connected
         val newUrls = mutableListOf<String>()
         for (url in relayUrls) {
@@ -197,8 +222,9 @@ class RelayPool @Inject constructor(
             newUrls.add(url)
         }
 
-        // Register ONE coverage handle spanning ALL new relays' feed subs
-        if (newUrls.isNotEmpty()) {
+        // Register ONE coverage handle spanning ALL new relays' feed subs —
+        // but ONLY for home feed connections (not outbox/search/profile relays).
+        if (newUrls.isNotEmpty() && isHomeFeed) {
             registerHomeCoverage(newUrls)
         }
 
@@ -207,7 +233,7 @@ class RelayPool @Inject constructor(
             connections[url] = conn
             scope.launch {
                 conn.connect()
-                subscribeAfterConnect(conn)
+                if (isHomeFeed) subscribeAfterConnect(conn)
                 listenForEvents(conn)
             }
         }
@@ -280,6 +306,16 @@ class RelayPool @Inject constructor(
                 if (subId != null) {
                     persistentSubs.computeIfPresent(subId) { _, sub ->
                         sub.copy(lastEventTime = System.currentTimeMillis() / 1000L)
+                    }
+                    // Emit (token, eventId) for search-notes subscriptions so SearchViewModel
+                    // can correlate relay results with the correct query session.
+                    if (subId.startsWith("search-notes-")) {
+                        val token = subId.removePrefix("search-notes-").toLongOrNull()
+                        if (token != null) {
+                            extractEventIdFromRaw(raw)?.let {
+                                _searchResults.tryEmit(SearchResult(token, it))
+                            }
+                        }
                     }
                 }
                 processor.process(raw, conn.url)
@@ -559,7 +595,14 @@ class RelayPool @Inject constructor(
             "wss://indexer.coracle.social",
             "wss://antiprimal.net",
         )
-        val targets = indexerUrls.mapNotNull { connections[it] }.ifEmpty { connections.values.take(3) }
+        val indexerConns = indexerUrls.mapNotNull { connections[it] }
+        // Always aim for at least 3 targets: supplement with general relays if needed
+        val targets = if (indexerConns.size >= 3) {
+            indexerConns
+        } else {
+            val extras = connections.values.filter { it !in indexerConns }.take(3 - indexerConns.size)
+            indexerConns + extras
+        }.ifEmpty { connections.values.take(3) }
         targets.forEach { it.send(req) }
         Log.d(TAG, "Fetching ${novel.size} profiles from ${targets.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }
@@ -572,13 +615,12 @@ class RelayPool @Inject constructor(
      *  - kind 0 (profiles) — drives the People tab
      *  - kind 1/30023 (notes + articles) — drives the Notes tab
      */
-    fun searchNotes(searchRelayUrls: List<String>, query: String) {
+    fun searchNotes(searchRelayUrls: List<String>, query: String, token: Long) {
         if (query.isBlank()) return
-        val ts = System.currentTimeMillis()
 
         val profileReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("search-profiles-$ts"))
+            add(JsonPrimitive("search-profiles-$token"))
             add(buildJsonObject {
                 put("kinds",  buildJsonArray { add(JsonPrimitive(0)) })
                 put("search", JsonPrimitive(query))
@@ -588,7 +630,7 @@ class RelayPool @Inject constructor(
 
         val notesReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("search-notes-$ts"))
+            add(JsonPrimitive("search-notes-$token"))
             add(buildJsonObject {
                 put("kinds",  buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(30023)) })
                 put("search", JsonPrimitive(query))
@@ -613,7 +655,7 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Connected to search relay: $url")
             }
         }
-        Log.d(TAG, "Sent NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s)")
+        Log.d(TAG, "Sent NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
     }
 
     /**
@@ -883,7 +925,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        val targets = connections.values.take(6)
+        val targets = connections.values.take(3)
 
         // Register coverage lanes: 3 subs × N relays
         val lanes = mutableSetOf<Lane>()

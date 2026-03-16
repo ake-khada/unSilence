@@ -55,12 +55,16 @@ class OgFetcher @Inject constructor(
             .header("User-Agent", "Mozilla/5.0 (compatible; unSilence/1.0)")
             .build()
 
+        Log.d(TAG, "Opening HEAD for $url")
         val headResp = runCatching { client.newCall(headReq).execute() }.getOrNull()
-        val contentType = headResp?.header("Content-Type") ?: headResp?.header("content-type")
-        headResp?.close()
-
-        if (contentType != null && !contentType.contains("text/html", ignoreCase = true)) {
-            return null
+        try {
+            val contentType = headResp?.header("Content-Type") ?: headResp?.header("content-type")
+            if (contentType != null && !contentType.contains("text/html", ignoreCase = true)) {
+                return null
+            }
+        } finally {
+            headResp?.close()
+            Log.d(TAG, "Closed HEAD for $url")
         }
 
         // GET with body size limit
@@ -69,6 +73,7 @@ class OgFetcher @Inject constructor(
             .header("User-Agent", "Mozilla/5.0 (compatible; unSilence/1.0)")
             .build()
 
+        Log.d(TAG, "Opening GET for $url")
         val response = client.newCall(getReq).execute()
         try {
             if (!response.isSuccessful) return null
@@ -82,6 +87,7 @@ class OgFetcher @Inject constructor(
             return parseOgTags(body, url)
         } finally {
             response.close()
+            Log.d(TAG, "Closed GET for $url")
         }
     }
 
