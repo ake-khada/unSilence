@@ -920,8 +920,8 @@ private fun VideoGrid(
     /** Renders the first video as inline autoplay when eligible, otherwise as thumbnail. */
     @Composable
     fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
-        if (isActiveVideo && exoPlayer != null && isDirectVideoUrl(url)) {
-            val (aspectRatio, _) = resolveVideoMeta(url, imetaMedia)
+        if (exoPlayer != null && isDirectVideoUrl(url)) {
+            val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
             InlineAutoPlayVideo(
                 exoPlayer        = exoPlayer,
                 videoUrl         = url,
@@ -930,6 +930,7 @@ private fun VideoGrid(
                 onToggleMute     = onToggleMute,
                 onOpenFullscreen = onOpenFullscreen,
                 isActive         = isActiveVideo,
+                thumbnailUrl     = posterUrl,
                 modifier         = cellModifier,
             )
         } else {
