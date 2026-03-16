@@ -51,9 +51,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.relay.ImetaParser
 import androidx.media3.common.MediaItem
 import kotlin.math.abs
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -291,6 +293,7 @@ fun FeedScreen(
                                 }
                                 ?.key as? String
                         }
+                        .debounce(300)
                         .distinctUntilChanged()
                         .collect { newActiveId ->
                             if (activeVideoNoteId != newActiveId) {
