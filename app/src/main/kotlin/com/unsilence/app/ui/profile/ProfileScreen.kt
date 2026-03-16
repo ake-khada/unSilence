@@ -70,6 +70,7 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 fun ProfileScreen(
     onLogout: () -> Unit = {},
     onBack: () -> Unit = {},
+    onNoteClick: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: ProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -301,6 +302,7 @@ fun ProfileScreen(
 
                         NoteCard(
                             row                    = row,
+                            onNoteClick            = onNoteClick,
                             originalAuthorProfile  = originalAuthorProfile,
                             onAuthorClick          = onAuthorClick,
                             hasReacted             = row.engagementId in reactedIds,

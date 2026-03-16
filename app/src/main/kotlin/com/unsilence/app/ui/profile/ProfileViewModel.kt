@@ -102,6 +102,7 @@ class ProfileViewModel @Inject constructor(
     private val engagementFetchedIds = mutableSetOf<String>()
     private val engagementQueue = mutableListOf<String>()
     private var engagementDebounceJob: Job? = null
+    private var engagementInFlight = false
 
     init {
         if (pubkeyHex != null) {
@@ -167,15 +168,21 @@ class ProfileViewModel @Inject constructor(
     }
 
     private fun queueEngagementFetch(ids: List<String>) {
+        if (engagementInFlight) return
         engagementQueue.addAll(ids)
         engagementDebounceJob?.cancel()
         engagementDebounceJob = viewModelScope.launch {
             delay(500)
-            val toFetch = engagementQueue.toList()
-            engagementQueue.clear()
-            toFetch.chunked(20).forEach { chunk ->
-                relayPool.fetchEngagementBatch(chunk)
-                delay(100)
+            engagementInFlight = true
+            try {
+                val toFetch = engagementQueue.toList()
+                engagementQueue.clear()
+                toFetch.chunked(20).forEach { chunk ->
+                    relayPool.fetchEngagementBatch(chunk)
+                    delay(200)
+                }
+            } finally {
+                engagementInFlight = false
             }
         }
     }
