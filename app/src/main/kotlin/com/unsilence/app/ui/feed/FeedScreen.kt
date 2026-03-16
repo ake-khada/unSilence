@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.relay.ImetaParser
+import androidx.media3.common.MediaItem
 import kotlin.math.abs
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -97,6 +98,34 @@ fun FeedScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // ── FeedScreen owns ALL playback transitions ───────────────────────────
+    val activeVideoUrl = remember(activeVideoNoteId, state.events) {
+        activeVideoNoteId?.let { noteId ->
+            state.events.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
+        }
+    }
+
+    LaunchedEffect(activeVideoUrl) {
+        val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+
+        if (activeVideoUrl == null) {
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+            exoPlayer.playWhenReady = false
+            return@LaunchedEffect
+        }
+
+        // Same video already playing — do nothing
+        if (activeVideoUrl == currentUrl) return@LaunchedEffect
+
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        exoPlayer.playWhenReady = false
+        exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = true
     }
 
     LaunchedEffect(scrollToTopTrigger) {
@@ -303,4 +332,17 @@ fun FeedScreen(
             },
         )
     }
+}
+
+/**
+ * Extract the first playable video URL from a FeedRow.
+ * Uses imeta tags (MIME-based) then falls back to regex content extraction.
+ */
+internal fun extractVideoUrl(row: FeedRow): String? {
+    // 1. Check imeta tags for video MIME types
+    val imetaVideo = ImetaParser.videos(row.tags).firstOrNull()?.url
+    if (imetaVideo != null) return imetaVideo
+
+    // 2. Fall back to regex match on content
+    return VIDEO_URL_REGEX.find(row.content)?.value
 }

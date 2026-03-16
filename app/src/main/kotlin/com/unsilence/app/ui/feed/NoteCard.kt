@@ -929,6 +929,7 @@ private fun VideoGrid(
                 isMuted          = isMuted,
                 onToggleMute     = onToggleMute,
                 onOpenFullscreen = onOpenFullscreen,
+                isActive         = isActiveVideo,
                 modifier         = cellModifier,
             )
         } else {
