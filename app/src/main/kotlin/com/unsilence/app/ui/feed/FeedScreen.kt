@@ -52,8 +52,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.relay.ImetaParser
 import androidx.media3.common.MediaItem
 import kotlin.math.abs
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -285,6 +287,21 @@ fun FeedScreen(
                                 viewModel.loadMore()
                             }
                         }
+                }
+
+                // Engagement fetch: only for visible items, debounced
+                LaunchedEffect(listState) {
+                    snapshotFlow {
+                        listState.layoutInfo.visibleItemsInfo
+                            .mapNotNull { it.key as? String }
+                            .toSet()
+                    }
+                    .filter { it.isNotEmpty() }
+                    .debounce(500)
+                    .distinctUntilChanged()
+                    .collectLatest { visibleIds ->
+                        viewModel.fetchEngagementForVisible(visibleIds)
+                    }
                 }
 
                 // Keep a stable reference that the long-lived LaunchedEffect can read
