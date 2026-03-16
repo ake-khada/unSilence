@@ -8,9 +8,12 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.entity.RelaySetEntity
+import com.unsilence.app.data.relay.CoverageIntent
+import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.data.repository.CoverageRepository
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -41,6 +44,7 @@ sealed class FeedType {
 data class FeedUiState(
     val events: List<FeedRow> = emptyList(),
     val loading: Boolean = true,
+    val coverageStatus: CoverageStatus = CoverageStatus.NEVER_FETCHED,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -52,6 +56,7 @@ class FeedViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,
     private val followDao: FollowDao,
+    private val coverageRepository: CoverageRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -172,11 +177,23 @@ class FeedViewModel @Inject constructor(
                     _displayLimit.value = 200
                     fetchedProfilePubkeys.clear()
                     engagementFetchedIds.clear()
-                    _uiState.value = _uiState.value.copy(loading = true)
+
+                    // Check coverage before deciding whether to fetch
+                    val intent = CoverageIntent.HomeFeed()
+                    val status = coverageRepository.ensureCoverage(intent)
+                    _uiState.value = FeedUiState(loading = status != CoverageStatus.COMPLETE, coverageStatus = status)
+
+                    // Timeout: if still LOADING after 10s, persist FAILED and update UI
                     viewModelScope.launch {
-                        delay(3_000)
-                        if (_uiState.value.loading) _uiState.update { it.copy(loading = false) }
+                        delay(10_000)
+                        if (_uiState.value.coverageStatus == CoverageStatus.LOADING) {
+                            coverageRepository.markFailed(
+                                intent.scopeType, intent.scopeKey, intent.relaySetId
+                            )
+                            _uiState.update { it.copy(loading = false, coverageStatus = CoverageStatus.FAILED) }
+                        }
                     }
+
                     when (type) {
                         is FeedType.Global    -> {
                             currentRelayUrls = urls
@@ -212,7 +229,16 @@ class FeedViewModel @Inject constructor(
                     }
                     newestTimestamp = incomingNewest
 
-                    _uiState.value = FeedUiState(events = rows, loading = false)
+                    // Re-check coverage status from DB on each emission
+                    val intent = CoverageIntent.HomeFeed()
+                    val status = coverageRepository.getStatus(
+                        intent.scopeType, intent.scopeKey, intent.relaySetId
+                    )
+                    _uiState.value = FeedUiState(
+                        events = rows,
+                        loading = false,
+                        coverageStatus = status,
+                    )
 
                     val pubkeys = rows.flatMap { row ->
                         val embedded = if (row.kind == 6) {
