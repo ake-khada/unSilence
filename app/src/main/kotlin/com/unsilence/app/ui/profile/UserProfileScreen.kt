@@ -82,12 +82,14 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlin.math.abs
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
 private val BANNER_HEIGHT       = 150.dp
 private val PROFILE_AVATAR_SIZE = 85.dp
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun UserProfileScreen(
     pubkey: String,
@@ -219,6 +221,7 @@ fun UserProfileScreen(
                     }
                     ?.key as? String
             }
+            .debounce(300)
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (activeVideoNoteId != newActiveId) {

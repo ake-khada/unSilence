@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -36,7 +37,13 @@ class OgFetcher @Inject constructor(
         if (attempted.containsKey(url)) return null
 
         return withContext(Dispatchers.IO) {
-            runCatching { doFetch(url) }.getOrNull()
+            try {
+                doFetch(url)
+            } catch (e: CancellationException) {
+                throw e          // let coroutine cancellation propagate
+            } catch (_: Exception) {
+                null
+            }
         }.also { attempted[url] = true; if (it != null) cache[url] = it }
     }
 
