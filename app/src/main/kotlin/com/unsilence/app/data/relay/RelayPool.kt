@@ -50,11 +50,14 @@ data class PersistentSub(
 class RelayPool @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val processor: EventProcessor,
+    private val relayConfigDao: dagger.Lazy<com.unsilence.app.data.db.dao.RelayConfigDao>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val persistentSubs = ConcurrentHashMap<String, PersistentSub>()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
+    /** Cached blocked relay URLs, refreshed before each connect(). */
+    @Volatile private var blockedUrls: Set<String> = emptySet()
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
@@ -131,11 +134,38 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Pre-load blocked relay URLs into the in-memory snapshot.
+     * Must be called during bootstrap BEFORE any connect() calls.
+     */
+    suspend fun refreshBlockedRelays() {
+        blockedUrls = relayConfigDao.get().blockedRelayUrls().toSet()
+        Log.d(TAG, "Blocked relay snapshot loaded: ${blockedUrls.size} URL(s)")
+    }
+
+    /**
+     * Update the blocked relay snapshot and disconnect any currently-connected
+     * blocked relays with a proper WebSocket close handshake.
+     */
+    fun onBlockedRelaysChanged(newBlockedUrls: Set<String>) {
+        blockedUrls = newBlockedUrls
+        for (url in newBlockedUrls) {
+            connections.remove(url)?.let { conn ->
+                conn.close()
+                Log.d(TAG, "Disconnected newly-blocked relay: $url")
+            }
+        }
+    }
+
+    /**
      * Open connections to [relayUrls] and subscribe to feed events.
      * Calling this multiple times with the same URLs is idempotent.
      */
     fun connect(relayUrls: List<String>) {
         for (url in relayUrls) {
+            if (url in blockedUrls) {
+                Log.d(TAG, "Blocked relay — skipping $url")
+                continue
+            }
             if (connections.containsKey(url)) continue
             if (connections.size >= 25) {
                 Log.d(TAG, "Connection cap (25) reached — skipping $url")
@@ -306,6 +336,7 @@ class RelayPool @Inject constructor(
      * Subscription IDs are prefixed to encode their lifecycle type.
      *
      *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, search-, older-,
+     *                                relay-ecosystem-,
      *                                thread-event-, thread-replies-, thread-reactions-,
      *                                thread-zaps-, user-posts-, user-engagement-,
      *                                engagement-replies-, engagement-reactions-, engagement-zaps-
@@ -317,6 +348,7 @@ class RelayPool @Inject constructor(
         subId.startsWith("profiles-")               ||
         subId.startsWith("search-")                 ||
         subId.startsWith("older-")                  ||
+        subId.startsWith("relay-ecosystem-")        ||
         subId.startsWith("thread-event-")           ||
         subId.startsWith("thread-replies-")         ||
         subId.startsWith("thread-reactions-")       ||
@@ -364,6 +396,33 @@ class RelayPool @Inject constructor(
             connections.values.forEach { it.send(req) }
         }
         Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s)")
+    }
+
+    /**
+     * One-shot fetch for NIP-51 relay ecosystem kinds: 10006, 10007, 10012, 30002.
+     * Sent to the specified indexer relays. These are replaceable/parameterized
+     * replaceable events, so we only need the latest for the logged-in user.
+     */
+    fun fetchRelayEcosystem(pubkeyHex: String, indexerRelayUrls: List<String>) {
+        val subId = "relay-ecosystem-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(10006))
+                    add(JsonPrimitive(10007))
+                    add(JsonPrimitive(10012))
+                    add(JsonPrimitive(30002))
+                })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("limit", JsonPrimitive(50))
+            })
+        }.toString()
+        for (url in indexerRelayUrls) {
+            connections[url]?.send(req)
+        }
+        Log.d(TAG, "Fetching NIP-51 relay ecosystem for $pubkeyHex from ${indexerRelayUrls.size} indexers")
     }
 
     /**
