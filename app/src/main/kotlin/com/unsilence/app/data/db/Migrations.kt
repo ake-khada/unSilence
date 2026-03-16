@@ -30,7 +30,7 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         // ── relay_configs: unified relay storage for kinds 10002/10006/10007/10012 ──
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS relay_configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
                 kind INTEGER NOT NULL,
                 relay_url TEXT NOT NULL,
                 marker TEXT,
@@ -39,13 +39,13 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
                 event_created_at INTEGER NOT NULL DEFAULT 0
             )
         """)
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_relay_configs_kind ON relay_configs(kind)")
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_relay_configs_owner ON relay_configs(owner_pubkey, kind)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_relay_configs_kind ON relay_configs(kind)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_relay_configs_owner_pubkey_kind ON relay_configs(owner_pubkey, kind)")
 
         // ── nostr_relay_sets: NIP-51 kind 30002 parameterized replaceable relay sets ──
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS nostr_relay_sets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
                 d_tag TEXT NOT NULL,
                 owner_pubkey TEXT NOT NULL DEFAULT '',
                 title TEXT,
@@ -70,7 +70,7 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         // ── coverage: ledger tracking what time ranges have been fetched ──
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS coverage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
                 scope_type TEXT NOT NULL,
                 scope_key TEXT NOT NULL,
                 since_ts INTEGER NOT NULL DEFAULT 0,
