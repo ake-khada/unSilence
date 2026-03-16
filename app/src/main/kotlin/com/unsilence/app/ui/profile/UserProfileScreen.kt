@@ -48,7 +48,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -61,7 +60,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
-import androidx.media3.exoplayer.ExoPlayer
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
@@ -119,13 +117,10 @@ fun UserProfileScreen(
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── Video autoplay state ─────────────────────────────────────────────────
-    val context = LocalContext.current
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            repeatMode = ExoPlayer.REPEAT_MODE_ALL
-        }
-    }
-    DisposableEffect(Unit) { onDispose { exoPlayer.stop(); exoPlayer.release() } }
+    val holder = actionsViewModel.sharedPlayerHolder
+    val ownerId = "userprofile-$pubkey"
+    val exoPlayer = holder.player
+    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
 
     var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
     var isMuted by remember { mutableStateOf(true) }
@@ -154,23 +149,19 @@ fun UserProfileScreen(
     }
 
     LaunchedEffect(activeVideoUrl) {
-        val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-
-        if (activeVideoUrl == null) {
-            exoPlayer.stop()
-            exoPlayer.clearMediaItems()
-            exoPlayer.playWhenReady = false
-            return@LaunchedEffect
+        if (activeVideoUrl != null) {
+            holder.claim(ownerId)
+            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (currentUrl != activeVideoUrl) {
+                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
+                exoPlayer.prepare()
+            }
+            exoPlayer.playWhenReady = true
+        } else {
+            if (holder.isOwner(ownerId)) {
+                exoPlayer.stop()
+            }
         }
-
-        if (activeVideoUrl == currentUrl) return@LaunchedEffect
-
-        exoPlayer.stop()
-        exoPlayer.clearMediaItems()
-        exoPlayer.playWhenReady = false
-        exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-        exoPlayer.prepare()
-        exoPlayer.playWhenReady = true
     }
 
     // Trigger loadMore() when scrolled near bottom
