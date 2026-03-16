@@ -37,6 +37,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -156,7 +157,11 @@ fun FeedScreen(
     ) {
         Crossfade(
             targetState = when {
-                state.loading && state.events.isEmpty() -> "loading"
+                state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
+                    && state.events.isEmpty() -> "loading"
+                state.coverageStatus == CoverageStatus.FAILED && state.events.isEmpty() -> "failed"
+                state.coverageStatus in listOf(CoverageStatus.COMPLETE, CoverageStatus.PARTIAL)
+                    && state.events.isEmpty() -> "empty"
                 !state.loading && state.events.isEmpty() -> "empty"
                 else -> "content"
             },
@@ -174,7 +179,32 @@ fun FeedScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        text       = "Couldn't load feed.\nTap to retry.",
+                        text       = "No posts yet.\nTap to retry.",
+                        color      = TextSecondary,
+                        fontSize   = 15.sp,
+                        textAlign  = TextAlign.Center,
+                        lineHeight = 22.sp,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Retry",
+                        tint = Cyan,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clickable { viewModel.refresh() },
+                    )
+                }
+            }
+
+            "failed" -> {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text       = "All relays failed.\nTap to retry.",
                         color      = TextSecondary,
                         fontSize   = 15.sp,
                         textAlign  = TextAlign.Center,
