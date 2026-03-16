@@ -85,6 +85,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.coil.video)
 
     // Markdown → HTML for NIP-23 long-form articles (rendered in WebView)
     implementation(libs.jetbrains.markdown)
