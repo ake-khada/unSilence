@@ -54,6 +54,7 @@ class NoteActionsViewModel @Inject constructor(
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
+    val sharedPlayerHolder: SharedPlayerHolder,
 ) : ViewModel() {
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()

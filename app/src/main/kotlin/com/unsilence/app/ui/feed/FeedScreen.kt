@@ -48,7 +48,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.ui.platform.LocalContext
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.relay.ImetaParser
 import androidx.media3.common.MediaItem
@@ -91,13 +90,10 @@ fun FeedScreen(
     }
 
     // ── Video autoplay state ─────────────────────────────────────────────────
-    val context = LocalContext.current
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            repeatMode = ExoPlayer.REPEAT_MODE_ALL
-        }
-    }
-    DisposableEffect(Unit) { onDispose { exoPlayer.stop(); exoPlayer.release() } }
+    val holder = actionsViewModel.sharedPlayerHolder
+    val ownerId = "feed"
+    val exoPlayer = holder.player
+    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
 
     var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
     var isMuted by remember { mutableStateOf(true) }
@@ -126,24 +122,19 @@ fun FeedScreen(
     }
 
     LaunchedEffect(activeVideoUrl) {
-        val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-
-        if (activeVideoUrl == null) {
-            exoPlayer.stop()
-            exoPlayer.clearMediaItems()
-            exoPlayer.playWhenReady = false
-            return@LaunchedEffect
+        if (activeVideoUrl != null) {
+            holder.claim(ownerId)
+            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (currentUrl != activeVideoUrl) {
+                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
+                exoPlayer.prepare()
+            }
+            exoPlayer.playWhenReady = true
+        } else {
+            if (holder.isOwner(ownerId)) {
+                exoPlayer.stop()
+            }
         }
-
-        // Same video already playing — do nothing
-        if (activeVideoUrl == currentUrl) return@LaunchedEffect
-
-        exoPlayer.stop()
-        exoPlayer.clearMediaItems()
-        exoPlayer.playWhenReady = false
-        exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-        exoPlayer.prepare()
-        exoPlayer.playWhenReady = true
     }
 
     LaunchedEffect(scrollToTopTrigger) {
