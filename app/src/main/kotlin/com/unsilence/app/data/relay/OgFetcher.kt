@@ -63,18 +63,19 @@ class OgFetcher @Inject constructor(
             .build()
 
         val response = client.newCall(getReq).execute()
-        val body = response.use { resp ->
-            if (!resp.isSuccessful) return null
-            val ct = resp.header("Content-Type") ?: ""
+        try {
+            if (!response.isSuccessful) return null
+            val ct = response.header("Content-Type") ?: ""
             if (!ct.contains("text/html", ignoreCase = true)) return null
             // Read at most 50KB
-            val source = resp.body.source()
+            val source = response.body.source()
             val buf = okio.Buffer()
             source.read(buf, 50_000)
-            buf.readUtf8()
+            val body = buf.readUtf8()
+            return parseOgTags(body, url)
+        } finally {
+            response.close()
         }
-
-        return parseOgTags(body, url)
     }
 
     companion object {
