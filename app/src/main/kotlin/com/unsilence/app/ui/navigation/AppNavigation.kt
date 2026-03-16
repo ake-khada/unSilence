@@ -183,7 +183,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                     2    -> NotificationsScreen(
                         onNoteClick = { eventId -> threadEventId = eventId },
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onAuthorClick = onAuthorClick)
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick)
                     else -> PlaceholderScreen()
                 }
             }
@@ -349,6 +349,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                 UserProfileScreen(
                     pubkey        = pubkey,
                     onDismiss     = { userProfilePubkey = null },
+                    onNoteClick   = { eventId -> threadEventId = eventId },
                     onAuthorClick = onAuthorClick,
                 )
             }
