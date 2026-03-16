@@ -297,7 +297,7 @@ interface EventDao {
     fun zappedEventIds(pubkey: String): Flow<List<String>>
 
     /**
-     * NIP-50 content search: kind 1 events whose content contains [query].
+     * NIP-50 content search: kind 1/30023 events whose content contains [query].
      * Engagement counts omitted (0) for performance — search results don't need live counts.
      * Re-emits as new search results arrive from the relay via EventProcessor.
      */
@@ -318,6 +318,27 @@ interface EventDao {
         LIMIT 50
     """)
     fun searchNotes(query: String): Flow<List<FeedRow>>
+
+    /**
+     * Fetch events by a set of known IDs. Used by search to retrieve NIP-50 relay results
+     * that were stored in Room but may not match a local LIKE query.
+     * Re-emits reactively as the events table changes.
+     */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags, e.relay_url,
+            e.reply_to_id, e.root_id, e.has_content_warning, e.content_warning_reason, e.cached_at,
+            COALESCE(s.zap_total_sats, 0) AS zap_total_sats,
+            u.name AS author_name, u.display_name AS author_display_name, u.picture AS author_picture,
+            u.nip05 AS author_nip05,
+            0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
+        FROM events e
+        LEFT JOIN users       u ON u.pubkey   = e.pubkey
+        LEFT JOIN event_stats s ON s.event_id = e.id
+        WHERE e.id IN (:eventIds)
+        ORDER BY e.created_at DESC
+    """)
+    fun eventsByIds(eventIds: List<String>): Flow<List<FeedRow>>
 
     @Query("SELECT COUNT(*) FROM events")
     suspend fun count(): Int

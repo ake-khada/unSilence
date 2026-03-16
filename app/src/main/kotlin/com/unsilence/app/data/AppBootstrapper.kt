@@ -99,7 +99,7 @@ class AppBootstrapper @Inject constructor(
         Log.d(TAG, "Step 4c: blocked relay snapshot loaded")
 
         // ── Step 5: Connect to global relays (feed subscriptions) ───────────
-        relayPool.connect(GLOBAL_RELAY_URLS)
+        relayPool.connect(GLOBAL_RELAY_URLS, isHomeFeed = true)
         Log.d(TAG, "Step 5: global relays connecting")
 
         maintenanceJob.start()
