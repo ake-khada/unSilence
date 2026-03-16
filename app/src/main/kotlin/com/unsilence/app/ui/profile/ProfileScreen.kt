@@ -119,7 +119,7 @@ fun ProfileScreen(
             repeatMode = ExoPlayer.REPEAT_MODE_ALL
         }
     }
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+    DisposableEffect(Unit) { onDispose { exoPlayer.stop(); exoPlayer.release() } }
 
     var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
     var isMuted by remember { mutableStateOf(true) }
@@ -131,8 +131,8 @@ fun ProfileScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_START -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
+                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
+                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
                 else -> {}
             }
         }

@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,6 +75,18 @@ fun FeedScreen(
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
+    // ── New-post flash animation tracking ──────────────────────────────────────
+    val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
+    var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    LaunchedEffect(state.events) {
+        val currentIds = state.events.map { it.id }.toSet()
+        if (previousEventIds.isNotEmpty()) {
+            val freshIds = currentIds - previousEventIds
+            for (id in freshIds) newEventIds[id] = true
+        }
+        previousEventIds = currentIds
+    }
+
     // ── Video autoplay state ─────────────────────────────────────────────────
     val context = LocalContext.current
     val exoPlayer = remember {
@@ -81,7 +94,7 @@ fun FeedScreen(
             repeatMode = ExoPlayer.REPEAT_MODE_ALL
         }
     }
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+    DisposableEffect(Unit) { onDispose { exoPlayer.stop(); exoPlayer.release() } }
 
     var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
     var isMuted by remember { mutableStateOf(true) }
@@ -93,8 +106,8 @@ fun FeedScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_START -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
+                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
+                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
                 else -> {}
             }
         }
@@ -244,6 +257,8 @@ fun FeedScreen(
                                 lookupProfile          = actionsViewModel::lookupProfile,
                                 lookupEvent            = actionsViewModel::lookupEvent,
                                 fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
+                                isNewPost              = row.id in newEventIds,
+                                onNewPostAnimated      = { newEventIds.remove(row.id) },
                             )
                         }
                     }

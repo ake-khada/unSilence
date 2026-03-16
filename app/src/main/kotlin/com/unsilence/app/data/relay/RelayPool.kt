@@ -166,22 +166,35 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // REQ 2: pictures, videos, longform articles
+        // REQ 2: pictures and videos
         val mediaSubId = "feed-media-$hash"
         val mediaReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(mediaSubId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(20)); add(JsonPrimitive(21)); add(JsonPrimitive(30023)) })
+                put("kinds", buildJsonArray { add(JsonPrimitive(20)); add(JsonPrimitive(21)) })
                 put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        // REQ 3: longform articles (NIP-23)
+        val longformSubId = "feed-longform-$hash"
+        val longformReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(longformSubId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30023)) })
+                put("limit", JsonPrimitive(50))
             })
         }.toString()
 
         registerPersistentSub(postsSubId, postsReq)
         registerPersistentSub(mediaSubId, mediaReq)
+        registerPersistentSub(longformSubId, longformReq)
         conn.send(postsReq)
         conn.send(mediaReq)
-        Log.d(TAG, "Subscribed to ${conn.url} (2 feed subscriptions)")
+        conn.send(longformReq)
+        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subscriptions)")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
