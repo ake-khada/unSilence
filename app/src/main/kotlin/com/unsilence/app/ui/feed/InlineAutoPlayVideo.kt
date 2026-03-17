@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -67,9 +68,12 @@ internal fun VideoThumbnailImage(
             modifier = modifier,
         )
     } else if (thumbnailCache != null) {
-        // Fetch first frame via MediaMetadataRetriever (HTTP range requests)
-        var thumbnail by remember(model.videoUrl) { mutableStateOf<VideoThumbnail?>(null) }
+        // Seed from cache synchronously — no blank frame on recomposition
+        var thumbnail by remember(model.videoUrl) {
+            mutableStateOf(thumbnailCache.getCached(model.videoUrl))
+        }
         LaunchedEffect(model.videoUrl) {
+            if (thumbnail != null) return@LaunchedEffect // already have it
             thumbnailCache.getThumbnail(model.videoUrl)?.let {
                 thumbnail = it
                 onAspectRatioResolved?.invoke(it.aspectRatio)
@@ -219,6 +223,8 @@ fun InlineVideoPlayer(
 
         // Stable AndroidView — created once, player swapped via update lambda.
         // NO key(videoUrl) — media source is swapped in VideoPlaybackScope.
+        // Hidden (alpha 0) until first frame renders so the opaque SurfaceView
+        // doesn't cover the poster with a black rectangle while buffering.
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -234,7 +240,9 @@ fun InlineVideoPlayer(
                 view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(if (isFirstFrameRendered) 1f else 0f),
         )
 
         // Mute toggle
