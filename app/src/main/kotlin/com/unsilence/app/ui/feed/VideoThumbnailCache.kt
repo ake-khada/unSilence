@@ -35,6 +35,12 @@ class VideoThumbnailCache @Inject constructor(
     private val inFlight = ConcurrentHashMap<String, Boolean>()
 
     /**
+     * Aspect ratios resolved from fetched thumbnails, keyed by video URL.
+     * Read by [InlineVideoPlayer] so its container matches the preview card exactly — zero jump.
+     */
+    val resolvedAspectRatios = ConcurrentHashMap<String, Float>()
+
+    /**
      * Return a cached first-frame thumbnail for [videoUrl], or fetch it on [Dispatchers.IO].
      * Returns null immediately if another coroutine is already fetching this URL,
      * or if extraction fails.
@@ -50,11 +56,13 @@ class VideoThumbnailCache @Inject constructor(
                 val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 retriever.release()
                 frame?.let {
+                    val ratio = it.width.toFloat() / it.height
                     val thumb = VideoThumbnail(
                         bitmap = it,
-                        aspectRatio = it.width.toFloat() / it.height,
+                        aspectRatio = ratio,
                     )
                     cache[videoUrl] = thumb
+                    resolvedAspectRatios[videoUrl] = ratio
                     thumb
                 }
             } catch (_: Exception) {
