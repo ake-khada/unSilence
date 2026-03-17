@@ -8,6 +8,7 @@ import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.wallet.NwcManager
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
@@ -43,6 +44,7 @@ class AppBootstrapper @Inject constructor(
     private val userDao: UserDao,
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
+    private val cardHydrator: CardHydrator,
 ) {
     /**
      * Sequential bootstrap for the logged-in user.
@@ -141,7 +143,10 @@ class AppBootstrapper @Inject constructor(
         // 6. Release shared ExoPlayer
         sharedPlayerHolder.release()
 
-        // 7. In-memory state already cleared by eventProcessor.stop() (seenIds)
+        // 7. Clear card hydration cache (prevents stale data across accounts)
+        cardHydrator.clearCache()
+
+        // 8. In-memory state already cleared by eventProcessor.stop() (seenIds)
         // and relayPool.disconnectAll() (connections map)
 
         Log.d(TAG, "Teardown complete")

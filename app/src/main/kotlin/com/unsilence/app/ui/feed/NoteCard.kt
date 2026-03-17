@@ -391,7 +391,7 @@ fun NoteCard(
                     .fillMaxWidth()
                     .clickable { onNoteClick(navigateId) }
                     .padding(horizontal = Spacing.medium)
-                    .padding(bottom = if (isLong) 2.dp else Spacing.small),
+                    .padding(bottom = if (isLong) 2.dp else 4.dp),
             )
             if (isLong) {
                 Text(
@@ -400,7 +400,7 @@ fun NoteCard(
                     fontSize = 13.sp,
                     modifier = Modifier
                         .padding(horizontal = Spacing.medium)
-                        .padding(bottom = Spacing.small)
+                        .padding(bottom = 4.dp)
                         .clickable { expanded = !expanded },
                 )
             }
@@ -712,14 +712,11 @@ private fun MediaImage(
         ?: 4f / 3f
 
     val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(imgAspect)
-    val contentScale = if (forceSquare) ContentScale.Crop
-        else if (imgAspect >= 1f) ContentScale.FillWidth
-        else ContentScale.Fit
 
     SubcomposeAsyncImage(
         model              = url,
         contentDescription = null,
-        contentScale       = contentScale,
+        contentScale       = ContentScale.Crop,
         loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
         error              = {
             Box(
@@ -1094,8 +1091,6 @@ private fun VideoThumbnailCard(
 ) {
     val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
     val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(rawAspect)
-    val contentScale = if (forceSquare) ContentScale.Crop
-        else if (rawAspect >= 1f) ContentScale.Crop else ContentScale.Fit
 
     Box(
         modifier          = modifier
@@ -1110,7 +1105,19 @@ private fun VideoThumbnailCard(
             AsyncImage(
                 model = posterUrl,
                 contentDescription = null,
-                contentScale = contentScale,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        } else {
+            // Fallback: extract first frame from video URL via Coil VideoFrameDecoder
+            val context = LocalContext.current
+            AsyncImage(
+                model = coil3.request.ImageRequest.Builder(context)
+                    .data(url)
+                    .decoderFactory(coil3.video.VideoFrameDecoder.Factory())
+                    .build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
         }
