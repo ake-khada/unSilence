@@ -247,9 +247,12 @@ class FeedViewModel @Inject constructor(
                         coverageStatus = status,
                     )
 
-                    // Hydrate first batch of cards (profiles + referenced events)
-                    android.util.Log.d("FeedVM", "hydrateVisibleCards from collectLatest: ${rows.size} total rows, hydrating first 20")
-                    cardHydrator.hydrateVisibleCards(rows.take(20))
+                    // Hydrate first batch independently so collectLatest re-emissions don't cancel it
+                    val batch = rows.take(20)
+                    android.util.Log.d("FeedVM", "hydrateVisibleCards from collectLatest: ${rows.size} total rows, hydrating first ${batch.size}")
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        cardHydrator.hydrateVisibleCards(batch)
+                    }
                 }
         }
     }

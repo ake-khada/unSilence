@@ -114,8 +114,11 @@ class UserProfileViewModel @Inject constructor(
             postsFlow.collectLatest { rows ->
                 isLoadingPosts.value = false
 
-                // Hydrate profiles + referenced events
-                cardHydrator.hydrateVisibleCards(rows.take(20))
+                // Hydrate independently so collectLatest re-emissions don't cancel it
+                val batch = rows.take(20)
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    cardHydrator.hydrateVisibleCards(batch)
+                }
 
                 // Capped engagement fetch — one batch of 20 max, debounced
                 val newEventIds = rows
