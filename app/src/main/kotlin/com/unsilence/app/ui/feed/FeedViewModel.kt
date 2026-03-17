@@ -109,6 +109,7 @@ class FeedViewModel @Inject constructor(
     }
 
     fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
+        android.util.Log.d("FeedVM", "hydrateVisibleCards from snapshotFlow: ${visibleEvents.size} events, kinds=${visibleEvents.map { it.kind }.distinct()}")
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             cardHydrator.hydrateVisibleCards(visibleEvents)
         }
@@ -247,6 +248,7 @@ class FeedViewModel @Inject constructor(
                     )
 
                     // Hydrate first batch of cards (profiles + referenced events)
+                    android.util.Log.d("FeedVM", "hydrateVisibleCards from collectLatest: ${rows.size} total rows, hydrating first 20")
                     cardHydrator.hydrateVisibleCards(rows.take(20))
                 }
         }
