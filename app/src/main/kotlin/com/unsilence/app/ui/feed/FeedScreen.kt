@@ -30,6 +30,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,41 +45,12 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.requiredHeight
-import androidx.compose.foundation.layout.requiredWidth
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.IconButton
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.graphics.Color
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
-import com.unsilence.app.data.relay.ImetaParser
-import androidx.media3.common.MediaItem
-import androidx.media3.common.VideoSize
-import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -108,70 +81,9 @@ fun FeedScreen(
         previousEventIds = currentIds
     }
 
-    // ── Video autoplay state ─────────────────────────────────────────────────
-    val holder = actionsViewModel.sharedPlayerHolder
-    val ownerId = "feed"
-    val exoPlayer = holder.player
-    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
-
-    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
-    var isMuted by remember { mutableStateOf(true) }
-    var showFullscreenVideo by remember { mutableStateOf(false) }
-    var preFullscreenMuted by remember { mutableStateOf(true) }
-
-    // ── Overlay positioning state ─────────────────────────────────────────
-    var feedBoxCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    var overlayOffset by remember { mutableStateOf(Offset.Zero) }
-    var overlayWidth by remember { mutableStateOf(0) }
-    var overlayHeight by remember { mutableStateOf(0) }
-    var overlayVisible by remember { mutableStateOf(false) }
-
-    // Clear overlay when active video changes
-    LaunchedEffect(activeVideoNoteId) {
-        if (activeVideoNoteId == null) overlayVisible = false
-    }
-
-    // Pause playback when app goes to background, resume when foregrounded
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Sync mute state reactively
-    LaunchedEffect(isMuted) {
-        exoPlayer.volume = if (isMuted) 0f else 1f
-    }
-
-    // ── FeedScreen owns ALL playback transitions ───────────────────────────
-    val activeVideoUrl = remember(activeVideoNoteId, state.events) {
-        activeVideoNoteId?.let { noteId ->
-            state.events.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
-        }
-    }
-
-    LaunchedEffect(activeVideoUrl) {
-        if (activeVideoUrl != null) {
-            holder.claim(ownerId)
-            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (currentUrl != activeVideoUrl) {
-                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-                exoPlayer.prepare()
-            }
-            exoPlayer.playWhenReady = true
-        } else {
-            if (holder.isOwner(ownerId)) {
-                exoPlayer.stop()
-            }
-        }
-    }
+    // ── Video playback (shared composables) ───────────────────────────────────
+    val videoState = rememberVideoPlaybackState(actionsViewModel.sharedPlayerHolder, "feed")
+    VideoPlaybackTransitions(videoState, state.events)
 
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
@@ -182,7 +94,7 @@ fun FeedScreen(
             .fillMaxSize()
             .background(Black)
             .clipToBounds()
-            .onGloballyPositioned { feedBoxCoords = it },
+            .onGloballyPositioned { videoState.feedBoxCoords = it },
     ) {
         Crossfade(
             targetState = when {
@@ -252,14 +164,7 @@ fun FeedScreen(
             }
 
             else -> {
-                // Precompute which notes have video for scroll detection
-                val noteIdsWithVideo = remember(state.events) {
-                    state.events.filter { row ->
-                        row.kind != 30023 &&
-                        (ImetaParser.videos(row.tags).isNotEmpty() ||
-                            VIDEO_URL_REGEX.containsMatchIn(row.content))
-                    }.map { it.id }.toSet()
-                }
+                val noteIdsWithVideo = rememberNoteIdsWithVideo(state.events)
 
                 LazyColumn(
                     state    = listState,
@@ -305,23 +210,9 @@ fun FeedScreen(
                                 onQuote                = onQuote,
                                 onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
                                 onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                isActiveVideo          = row.id == activeVideoNoteId,
-                                onOpenFullscreen       = {
-                                    activeVideoNoteId = row.id
-                                    preFullscreenMuted = isMuted
-                                    isMuted = false
-                                    showFullscreenVideo = true
-                                },
-                                onVideoPositioned      = if (row.id == activeVideoNoteId) { coords ->
-                                    val box = feedBoxCoords
-                                    if (box != null && coords.isAttached && box.isAttached) {
-                                        val pos = box.localPositionOf(coords, Offset.Zero)
-                                        overlayOffset = pos
-                                        overlayWidth = coords.size.width
-                                        overlayHeight = coords.size.height
-                                        overlayVisible = true
-                                    }
-                                } else null,
+                                isActiveVideo          = row.id == videoState.activeVideoNoteId,
+                                onOpenFullscreen       = { videoState.openFullscreen(row.id) },
+                                onVideoPositioned      = videoState.onVideoPositionedFor(row.id),
                                 lookupProfile          = actionsViewModel::lookupProfile,
                                 lookupEvent            = actionsViewModel::lookupEvent,
                                 fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
@@ -332,11 +223,7 @@ fun FeedScreen(
                     }
                 }
 
-                // Auto-scroll: keyed on hasNewTopPost so it re-fires the moment a new
-                // top post arrives. snapshotFlow on firstVisibleItemIndex can't work here
-                // because LazyColumn preserves scroll position on prepend — the index
-                // shifts from 0 to 1 when an item inserts above, so "index == 0" never
-                // fires. Keying LaunchedEffect on the flag itself sidesteps that entirely.
+                // Auto-scroll on new top post
                 LaunchedEffect(viewModel.hasNewTopPost) {
                     if (viewModel.hasNewTopPost && listState.firstVisibleItemIndex <= 2) {
                         listState.scrollToItem(0)
@@ -344,12 +231,12 @@ fun FeedScreen(
                     }
                 }
 
-                // Pagination: separate observer so it's not tangled with scroll-to-top.
+                // Pagination: trigger near bottom of list
                 LaunchedEffect(Unit) {
                     snapshotFlow { listState.firstVisibleItemIndex }
                         .collect { index ->
                             val total = listState.layoutInfo.totalItemsCount
-                            if (total > 0 && index > total * 0.5) {
+                            if (total > 0 && index > total - 10) {
                                 viewModel.loadMore()
                             }
                         }
@@ -366,88 +253,20 @@ fun FeedScreen(
                     .debounce(500)
                     .distinctUntilChanged()
                     .collectLatest { visibleIds ->
-                        android.util.Log.d("FeedScreen", "snapshotFlow visibleIds=${visibleIds.size}")
                         viewModel.fetchEngagementForVisible(visibleIds)
                         val visibleEvents = state.events.filter { it.id in visibleIds }
                         viewModel.hydrateVisibleCards(visibleEvents)
                     }
                 }
 
-                // Keep a stable reference that the long-lived LaunchedEffect can read
-                // without restarting when the set changes (e.g. after pagination).
-                val noteIdsWithVideoState = rememberUpdatedState(noteIdsWithVideo)
-                val showFullscreenVideoState = rememberUpdatedState(showFullscreenVideo)
-
-                // Active video detection: find video note closest to viewport center
-                LaunchedEffect(Unit) {
-                    snapshotFlow { listState.layoutInfo }
-                        .map { layoutInfo ->
-                            if (showFullscreenVideoState.value) return@map activeVideoNoteId
-                            val currentIds = noteIdsWithVideoState.value
-                            val viewportCenter = (layoutInfo.viewportStartOffset +
-                                layoutInfo.viewportEndOffset) / 2
-                            layoutInfo.visibleItemsInfo
-                                .filter { (it.key as? String) in currentIds }
-                                .minByOrNull {
-                                    val itemCenter = it.offset + it.size / 2
-                                    abs(itemCenter - viewportCenter)
-                                }
-                                ?.key as? String
-                        }
-                        .debounce(300)
-                        .distinctUntilChanged()
-                        .collect { newActiveId ->
-                            if (activeVideoNoteId != newActiveId) {
-                                activeVideoNoteId = newActiveId
-                                if (newActiveId == null) {
-                                    exoPlayer.playWhenReady = false
-                                }
-                            }
-                        }
-                }
+                // Active video detection
+                ActiveVideoDetection(videoState, listState, noteIdsWithVideo)
             }
         }
         }
 
-        // ── Video overlay: single PlayerView positioned over active cell ────
-        val density = LocalDensity.current
-        if (overlayVisible && activeVideoNoteId != null && overlayWidth > 0) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        player = exoPlayer
-                        useController = false
-                        setEnableComposeSurfaceSyncWorkaround(true)
-                    }
-                },
-                update = { view -> view.player = exoPlayer },
-                modifier = Modifier
-                    .offset { IntOffset(overlayOffset.x.roundToInt(), overlayOffset.y.roundToInt()) }
-                    .requiredWidth(with(density) { overlayWidth.toDp() })
-                    .requiredHeight(with(density) { overlayHeight.toDp() }),
-            )
-
-            // Mute toggle — top-right corner of overlay
-            IconButton(
-                onClick = { isMuted = !isMuted },
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            (overlayOffset.x + overlayWidth - with(density) { 44.dp.toPx() }).roundToInt(),
-                            (overlayOffset.y + with(density) { 8.dp.toPx() }).roundToInt(),
-                        )
-                    }
-                    .size(36.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape),
-            ) {
-                Icon(
-                    imageVector = if (isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
+        // Video overlay
+        VideoOverlay(videoState)
     }
 
     articleRow?.let { row ->
@@ -467,13 +286,10 @@ fun FeedScreen(
         )
     }
 
-    if (showFullscreenVideo) {
+    if (videoState.showFullscreenVideo) {
         FullScreenVideoDialog(
-            exoPlayer = exoPlayer,
-            onDismiss = {
-                showFullscreenVideo = false
-                isMuted = preFullscreenMuted
-            },
+            exoPlayer = videoState.exoPlayer,
+            onDismiss = { videoState.closeFullscreen() },
         )
     }
 }
@@ -484,7 +300,7 @@ fun FeedScreen(
  */
 internal fun extractVideoUrl(row: FeedRow): String? {
     // 1. Check imeta tags for video MIME types
-    val imetaVideo = ImetaParser.videos(row.tags).firstOrNull()?.url
+    val imetaVideo = com.unsilence.app.data.relay.ImetaParser.videos(row.tags).firstOrNull()?.url
     if (imetaVideo != null) return imetaVideo
 
     // 2. Fall back to regex match on content
