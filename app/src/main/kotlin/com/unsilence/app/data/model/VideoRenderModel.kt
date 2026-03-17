@@ -51,7 +51,10 @@ private const val DEFAULT_ASPECT_RATIO = 16f / 9f
  * with regex-detected video URLs from content. Mirrors the extraction logic
  * that previously lived inside NoteCard's remember {} block.
  */
-fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
+fun buildVideoRenderModels(
+    row: FeedRow,
+    resolvedAspectRatios: Map<String, Float> = emptyMap(),
+): List<VideoRenderModel> {
     val imetaMedia = ImetaParser.parse(row.tags)
 
     // For kind-6 reposts, extract effective content from embedded JSON
@@ -85,13 +88,19 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
     if (allVideoUrls.isEmpty()) return emptyList()
 
     return allVideoUrls.map { url ->
-        buildModelForUrl(url, imetaMedia)
+        buildModelForUrl(url, imetaMedia, resolvedAspectRatios)
     }
 }
 
-private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRenderModel {
+private fun buildModelForUrl(
+    url: String,
+    imetaMedia: List<ImetaMedia>,
+    resolvedAspectRatios: Map<String, Float> = emptyMap(),
+): VideoRenderModel {
     val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
-    val aspect = meta?.let { it.width!!.toFloat() / it.height!! } ?: DEFAULT_ASPECT_RATIO
+    val aspect = resolvedAspectRatios[url]
+        ?: meta?.let { it.width!!.toFloat() / it.height!! }
+        ?: DEFAULT_ASPECT_RATIO
     val poster = imetaMedia.firstOrNull { it.url == url }?.thumb
     val mimeType = imetaMedia.firstOrNull { it.url == url }?.mimeType
 
