@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -36,11 +39,12 @@ import com.unsilence.app.ui.theme.Sizing
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
 /**
- * Inline video cell that hosts the shared ExoPlayer's PlayerView directly
- * when [isActive], eliminating the overlay coordinate-tracking glitch.
+ * Inline video cell — poster is ALWAYS rendered, PlayerView fades in on top
+ * when [isActive]. Same container box for both states: zero dimension jump.
  *
- * When inactive, shows a thumbnail (poster or first-frame fallback) with a play icon.
- * Uses `key(videoUrl)` so the PlayerView is recreated only on active-video switch.
+ * Uses [feedVideoAspectRatio] for container sizing so thumbnail and player
+ * share identical geometry. PlayerView uses RESIZE_MODE_FIT with a transparent
+ * shutter so the poster shows through until the first video frame arrives.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -53,14 +57,11 @@ fun InlineAutoPlayVideo(
     onOpenFullscreen: () -> Unit,
     isActive: Boolean,
     thumbnailUrl: String? = null,
+    forceSquare: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val rawAspect =
-        if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
-    // Allow true portrait ratios down to 9:16; cap ultra-tall to prevent
-    // a single video from consuming the entire visible list.
-    val displayAspect =
-        if (rawAspect >= 1f) rawAspect else maxOf(rawAspect, 9f / 16f)
+    val displayAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
+    val context = LocalContext.current
 
     Box(
         modifier = modifier
@@ -71,7 +72,33 @@ fun InlineAutoPlayVideo(
             .clickable { onOpenFullscreen() },
         contentAlignment = Alignment.Center,
     ) {
-        if (isActive) {
+        // Poster ALWAYS rendered — same box, same ContentScale
+        if (!thumbnailUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = thumbnailUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.matchParentSize(),
+            )
+        } else {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(videoUrl)
+                    .decoderFactory(VideoFrameDecoder.Factory())
+                    .build(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+
+        // Player fades in on top — same box, zero jump
+        AnimatedVisibility(
+            visible = isActive,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.matchParentSize(),
+        ) {
             key(videoUrl) {
                 AndroidView(
                     factory = { ctx ->
@@ -79,17 +106,39 @@ fun InlineAutoPlayVideo(
                             player = exoPlayer
                             useController = false
                             setKeepContentOnPlayerReset(true)
+                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         }
                     },
                     update = { view ->
                         view.player = exoPlayer
                         view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                     },
                     modifier = Modifier.matchParentSize(),
                 )
             }
+        }
 
+        // Play icon when inactive
+        if (!isActive) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = "Play",
+                    tint = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier.size(36.dp),
+                )
+            }
+        }
+
+        // Mute toggle when active
+        if (isActive) {
             IconButton(
                 onClick = onToggleMute,
                 modifier = Modifier
@@ -99,46 +148,11 @@ fun InlineAutoPlayVideo(
                     .background(Color.Black.copy(alpha = 0.5f), CircleShape),
             ) {
                 Icon(
-                    imageVector =
-                        if (isMuted) Icons.AutoMirrored.Filled.VolumeOff
+                    imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff
                         else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = if (isMuted) "Unmute" else "Mute",
                     tint = Color.White,
                     modifier = Modifier.size(20.dp),
-                )
-            }
-        } else {
-            if (!thumbnailUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = thumbnailUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
-                )
-            } else {
-                val context = LocalContext.current
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(videoUrl)
-                        .decoderFactory(VideoFrameDecoder.Factory())
-                        .build(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp),
                 )
             }
         }
