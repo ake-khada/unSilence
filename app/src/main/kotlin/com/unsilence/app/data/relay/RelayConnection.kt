@@ -6,6 +6,8 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -38,6 +40,19 @@ class RelayConnection(
 
     /** True while the WebSocket handshake has completed and onClosed/onFailure has not fired. */
     val isConnected: Boolean get() = _state.value == RelayState.CONNECTED
+
+    /** Suspend until the WebSocket reaches CONNECTED state, or throw on timeout/failure. */
+    suspend fun awaitConnected(timeoutMs: Long = 5000) {
+        if (_state.value == RelayState.CONNECTED) return
+        withTimeout(timeoutMs) {
+            val result = _state.first {
+                it == RelayState.CONNECTED || it == RelayState.DISCONNECTED || it == RelayState.FAILED
+            }
+            if (result != RelayState.CONNECTED) {
+                error("Relay connection failed: $url")
+            }
+        }
+    }
 
     fun connect() {
         if (connected.getAndSet(true)) return
