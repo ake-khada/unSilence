@@ -76,8 +76,18 @@ class CardHydrator @Inject constructor(
         }
 
         // 3. Fetch missing referenced events
+        for (id in referencedIds) {
+            val found = eventDao.getEventById(id) != null
+            Log.d(TAG, "Ref ${id.take(12)} inRoom=$found")
+        }
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
+        Log.d(TAG, "Referenced IDs: ${referencedIds.size} total, ${missingRefs.size} missing from Room")
+        if (referencedIds.isNotEmpty()) {
+            Log.d(TAG, "Ref IDs: ${referencedIds.map { it.take(12) }}")
+            Log.d(TAG, "Missing: ${missingRefs.map { it.take(12) }}")
+        }
         for (id in missingRefs) {
+            Log.d(TAG, "Fetching missing ref: ${id.take(12)}")
             relayPool.fetchEventById(id)
         }
 
