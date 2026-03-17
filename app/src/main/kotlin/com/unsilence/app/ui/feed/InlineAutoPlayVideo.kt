@@ -57,8 +57,10 @@ fun InlineAutoPlayVideo(
 ) {
     val rawAspect =
         if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
+    // Allow true portrait ratios down to 9:16; cap ultra-tall to prevent
+    // a single video from consuming the entire visible list.
     val displayAspect =
-        if (rawAspect >= 1f) rawAspect else maxOf(rawAspect, 2f / 3f)
+        if (rawAspect >= 1f) rawAspect else maxOf(rawAspect, 9f / 16f)
 
     Box(
         modifier = modifier
@@ -77,12 +79,12 @@ fun InlineAutoPlayVideo(
                             player = exoPlayer
                             useController = false
                             setKeepContentOnPlayerReset(true)
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         }
                     },
                     update = { view ->
                         view.player = exoPlayer
-                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     },
                     modifier = Modifier.matchParentSize(),
                 )
