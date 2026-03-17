@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,35 +47,42 @@ private val MediaPlaceholder = Color(0xFF1A1A1A)
  * otherwise fetches the first frame via [VideoThumbnailCache] (MediaMetadataRetriever
  * with HTTP range requests — lightweight). Shows dark placeholder at correct
  * aspect ratio while loading.
+ *
+ * When a thumbnail bitmap is fetched, its native aspect ratio is reported
+ * via [onAspectRatioResolved] so the parent container can resize.
  */
 @Composable
 internal fun VideoThumbnailImage(
     model: VideoRenderModel,
     thumbnailCache: VideoThumbnailCache?,
     modifier: Modifier = Modifier,
+    onAspectRatioResolved: ((Float) -> Unit)? = null,
 ) {
     if (!model.posterUrl.isNullOrBlank()) {
         AsyncImage(
             model = model.posterUrl,
             contentDescription = null,
-            contentScale = ContentScale.Fit,
+            contentScale = ContentScale.Crop,
             modifier = modifier,
         )
     } else if (thumbnailCache != null) {
         // Fetch first frame via MediaMetadataRetriever (HTTP range requests)
-        var bitmap by remember(model.videoUrl) { mutableStateOf<Bitmap?>(null) }
+        var thumbnail by remember(model.videoUrl) { mutableStateOf<VideoThumbnail?>(null) }
         LaunchedEffect(model.videoUrl) {
-            bitmap = thumbnailCache.getThumbnail(model.videoUrl)
+            thumbnailCache.getThumbnail(model.videoUrl)?.let {
+                thumbnail = it
+                onAspectRatioResolved?.invoke(it.aspectRatio)
+            }
         }
-        if (bitmap != null) {
+        if (thumbnail != null) {
             Image(
-                bitmap = bitmap!!.asImageBitmap(),
+                bitmap = thumbnail!!.bitmap.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Fit,
+                contentScale = ContentScale.Crop,
                 modifier = modifier,
             )
         }
-        // While loading (bitmap == null): dark placeholder shows through from parent Box
+        // While loading (thumbnail == null): dark placeholder shows through from parent Box
     }
 }
 
@@ -86,6 +92,7 @@ internal fun VideoThumbnailImage(
  * SurfaceView, no player. Used for ALL inactive video cards.
  *
  * Poster fallback chain: imeta thumb → MediaMetadataRetriever first-frame → dark placeholder.
+ * When the thumbnail bitmap arrives, its native aspect ratio overrides the container.
  */
 @Composable
 fun VideoPreviewCard(
@@ -95,7 +102,8 @@ fun VideoPreviewCard(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    val displayAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    val baseAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
 
     Box(
         modifier = modifier
@@ -110,6 +118,7 @@ fun VideoPreviewCard(
             model = model,
             thumbnailCache = thumbnailCache,
             modifier = Modifier.matchParentSize(),
+            onAspectRatioResolved = { if (!forceSquare) displayAspect = feedVideoAspectRatio(it, false) },
         )
 
         // Play icon overlay
@@ -136,6 +145,7 @@ fun VideoPreviewCard(
  *
  * Poster is shown underneath until the first video frame renders, then
  * the player covers it — zero black flash, zero resize.
+ * When the thumbnail bitmap arrives, its native aspect ratio overrides the container.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -149,7 +159,8 @@ fun InlineVideoPlayer(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    val displayAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    val baseAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
     var isFirstFrameRendered by remember { mutableStateOf(false) }
 
     // Reset first-frame flag when the video URL changes
@@ -181,6 +192,7 @@ fun InlineVideoPlayer(
                 model = model,
                 thumbnailCache = thumbnailCache,
                 modifier = Modifier.matchParentSize(),
+                onAspectRatioResolved = { if (!forceSquare) displayAspect = feedVideoAspectRatio(it, false) },
             )
         }
 
@@ -193,12 +205,12 @@ fun InlineVideoPlayer(
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 }
             },
             update = { view ->
                 view.player = exoPlayer
-                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
             modifier = Modifier.fillMaxSize(),

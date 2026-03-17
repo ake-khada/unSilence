@@ -11,6 +11,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
+ * First-frame thumbnail with its native aspect ratio.
+ */
+data class VideoThumbnail(
+    val bitmap: Bitmap,
+    val aspectRatio: Float,  // width / height
+)
+
+/**
  * In-memory cache of video first-frame thumbnails extracted via [MediaMetadataRetriever].
  *
  * [MediaMetadataRetriever.setDataSource] with a URL uses HTTP range requests — it fetches
@@ -23,15 +31,15 @@ import javax.inject.Singleton
 class VideoThumbnailCache @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private val cache = ConcurrentHashMap<String, Bitmap?>()
+    private val cache = ConcurrentHashMap<String, VideoThumbnail?>()
     private val inFlight = ConcurrentHashMap<String, Boolean>()
 
     /**
-     * Return a cached first-frame bitmap for [videoUrl], or fetch it on [Dispatchers.IO].
+     * Return a cached first-frame thumbnail for [videoUrl], or fetch it on [Dispatchers.IO].
      * Returns null immediately if another coroutine is already fetching this URL,
      * or if extraction fails.
      */
-    suspend fun getThumbnail(videoUrl: String): Bitmap? {
+    suspend fun getThumbnail(videoUrl: String): VideoThumbnail? {
         cache[videoUrl]?.let { return it }
         if (inFlight.putIfAbsent(videoUrl, true) != null) return null
 
@@ -41,7 +49,14 @@ class VideoThumbnailCache @Inject constructor(
                 retriever.setDataSource(videoUrl, HashMap<String, String>())
                 val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 retriever.release()
-                frame?.also { cache[videoUrl] = it }
+                frame?.let {
+                    val thumb = VideoThumbnail(
+                        bitmap = it,
+                        aspectRatio = it.width.toFloat() / it.height,
+                    )
+                    cache[videoUrl] = thumb
+                    thumb
+                }
             } catch (_: Exception) {
                 inFlight.remove(videoUrl)
                 null
