@@ -131,6 +131,7 @@ private fun EventFeedItem(
             onToggleMute = { videoScope?.toggleMute() },
             isActiveVideo = showVideo && videoScope.isActiveVideo(row.id),
             onOpenFullscreen = { videoScope?.openFullscreen(row.id) },
+            videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
             lookupProfile = callbacks.lookupProfile,
             lookupEvent = callbacks.lookupEvent,
             fetchOgMetadata = callbacks.fetchOgMetadata,
