@@ -239,10 +239,14 @@ fun NoteCard(
         }.toList()
         val afterYoutube = YOUTUBE_URL_REGEX.replace(contentNoNostr, "")
 
-        // 2. Extract direct video file URLs (e.g. .mp4).
+        // 2. Extract direct video file URLs (e.g. .mp4) — only inline-playable files.
         val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterYoutube).map { it.value }.toList()
-        val imetaVideoUrls = imetaMedia.filter { it.mimeType?.startsWith("video/") == true }.map { it.url }
-        val allVideoUrls   = (regexVideoUrls + imetaVideoUrls).distinct()
+        val imetaVideoUrls = imetaMedia
+            .filter { it.mimeType?.startsWith("video/") == true && isDirectVideoUrl(it.url) }
+            .map { it.url }
+        val allVideoUrls   = (regexVideoUrls + imetaVideoUrls)
+            .distinct()
+            .filter(::isDirectVideoUrl)
 
         // 3. Extract image URLs from remaining content.
         val afterVideos    = VIDEO_URL_REGEX.replace(afterYoutube, "")
@@ -1166,20 +1170,6 @@ private fun YouTubeThumbnailCard(
             contentScale       = ContentScale.Crop,
             modifier           = Modifier.matchParentSize(),
         )
-        // Semi-transparent play button overlay
-        Box(
-            modifier         = Modifier
-                .size(56.dp)
-                .background(Color.Black.copy(alpha = 0.6f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector        = Icons.Filled.PlayArrow,
-                contentDescription = "Play on YouTube",
-                tint               = Color.White,
-                modifier           = Modifier.size(36.dp),
-            )
-        }
     }
 }
 
