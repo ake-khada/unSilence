@@ -55,6 +55,7 @@ class NoteActionsViewModel @Inject constructor(
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
     val sharedPlayerHolder: SharedPlayerHolder,
+    val videoThumbnailCache: VideoThumbnailCache,
 ) : ViewModel() {
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()

@@ -198,6 +198,7 @@ fun FeedScreen(
                         context = RenderContext.Feed,
                         newEventIds = newEventIds.keys,
                         onNewPostAnimated = { newEventIds.remove(it) },
+                        thumbnailCache = actionsViewModel.videoThumbnailCache,
                     )
                 }
 

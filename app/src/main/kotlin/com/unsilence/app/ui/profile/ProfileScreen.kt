@@ -319,6 +319,7 @@ fun ProfileScreen(
                     callbacks = callbacks,
                     videoScope = videoScope,
                     context = RenderContext.Profile,
+                    thumbnailCache = actionsViewModel.videoThumbnailCache,
                 )
             }
 

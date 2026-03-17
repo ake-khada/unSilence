@@ -71,6 +71,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.asImageBitmap
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
@@ -189,6 +190,7 @@ fun NoteCard(
     isActiveVideo: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
     videoRenderModels: List<VideoRenderModel> = emptyList(),
+    thumbnailCache: VideoThumbnailCache? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -436,6 +438,7 @@ fun NoteCard(
                 exoPlayer         = exoPlayer,
                 isMuted           = isMuted,
                 onToggleMute      = onToggleMute,
+                thumbnailCache    = thumbnailCache,
                 modifier          = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -910,6 +913,7 @@ private fun VideoGridCell(
     url: String,
     imetaMedia: List<ImetaMedia>,
     videoRenderModels: List<VideoRenderModel>,
+    thumbnailCache: VideoThumbnailCache? = null,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
@@ -918,22 +922,24 @@ private fun VideoGridCell(
     val model = videoRenderModels.firstOrNull { it.videoUrl == url }
     if (model != null) {
         VideoThumbnailCard(
-            url         = url,
-            onPlay      = onPlay,
-            aspectRatio = model.aspectRatio,
-            posterUrl   = model.posterUrl,
-            forceSquare = forceSquare,
-            modifier    = modifier,
+            url            = url,
+            onPlay         = onPlay,
+            aspectRatio    = model.aspectRatio,
+            posterUrl      = model.posterUrl,
+            thumbnailCache = thumbnailCache,
+            forceSquare    = forceSquare,
+            modifier       = modifier,
         )
     } else {
         val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
         VideoThumbnailCard(
-            url         = url,
-            onPlay      = onPlay,
-            aspectRatio = aspectRatio,
-            posterUrl   = posterUrl,
-            forceSquare = forceSquare,
-            modifier    = modifier,
+            url            = url,
+            onPlay         = onPlay,
+            aspectRatio    = aspectRatio,
+            posterUrl      = posterUrl,
+            thumbnailCache = thumbnailCache,
+            forceSquare    = forceSquare,
+            modifier       = modifier,
         )
     }
 }
@@ -956,6 +962,7 @@ private fun VideoGrid(
     exoPlayer: ExoPlayer?,
     isMuted: Boolean,
     onToggleMute: () -> Unit,
+    thumbnailCache: VideoThumbnailCache? = null,
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -983,6 +990,7 @@ private fun VideoGrid(
                     onToggleMute     = onToggleMute,
                     onOpenFullscreen = onOpenFullscreen,
                     forceSquare      = forceSquare,
+                    thumbnailCache   = thumbnailCache,
                     modifier         = cellModifier,
                 )
             } else {
@@ -991,6 +999,7 @@ private fun VideoGrid(
                     model            = model,
                     onOpenFullscreen = onOpenFullscreen,
                     forceSquare      = forceSquare,
+                    thumbnailCache   = thumbnailCache,
                     modifier         = cellModifier,
                 )
             }
@@ -1000,6 +1009,7 @@ private fun VideoGrid(
                 url              = url,
                 imetaMedia       = imetaMedia,
                 videoRenderModels = videoRenderModels,
+                thumbnailCache   = thumbnailCache,
                 onPlay           = { openVideo(url) },
                 modifier         = cellModifier,
                 forceSquare      = forceSquare,
@@ -1025,6 +1035,7 @@ private fun VideoGrid(
                     url = videoUrls[1],
                     imetaMedia = imetaMedia,
                     videoRenderModels = videoRenderModels,
+                    thumbnailCache = thumbnailCache,
                     onPlay = { openVideo(videoUrls[1]) },
                     modifier = Modifier.weight(1f),
                     forceSquare = true,
@@ -1048,6 +1059,7 @@ private fun VideoGrid(
                         url = videoUrls[1],
                         imetaMedia = imetaMedia,
                         videoRenderModels = videoRenderModels,
+                        thumbnailCache = thumbnailCache,
                         onPlay = { openVideo(videoUrls[1]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1056,6 +1068,7 @@ private fun VideoGrid(
                         url = videoUrls[2],
                         imetaMedia = imetaMedia,
                         videoRenderModels = videoRenderModels,
+                        thumbnailCache = thumbnailCache,
                         onPlay = { openVideo(videoUrls[2]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1084,6 +1097,7 @@ private fun VideoGrid(
                         url = gridVideos[1],
                         imetaMedia = imetaMedia,
                         videoRenderModels = videoRenderModels,
+                        thumbnailCache = thumbnailCache,
                         onPlay = { openVideo(gridVideos[1]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1097,6 +1111,7 @@ private fun VideoGrid(
                         url = gridVideos[2],
                         imetaMedia = imetaMedia,
                         videoRenderModels = videoRenderModels,
+                        thumbnailCache = thumbnailCache,
                         onPlay = { openVideo(gridVideos[2]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1106,6 +1121,7 @@ private fun VideoGrid(
                             url = gridVideos[3],
                             imetaMedia = imetaMedia,
                             videoRenderModels = videoRenderModels,
+                            thumbnailCache = thumbnailCache,
                             onPlay = { openVideo(gridVideos[3]) },
                             modifier = Modifier.fillMaxWidth(),
                             forceSquare = true,
@@ -1143,6 +1159,7 @@ private fun VideoThumbnailCard(
     modifier: Modifier = Modifier,
     aspectRatio: Float? = null,
     posterUrl: String? = null,
+    thumbnailCache: VideoThumbnailCache? = null,
     forceSquare: Boolean = false,
 ) {
     val displayAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
@@ -1163,14 +1180,21 @@ private fun VideoThumbnailCard(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.matchParentSize(),
             )
-        } else {
-            // No imeta poster — extract first frame via VideoFrameDecoder
-            AsyncImage(
-                model = videoFrameRequest(url),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
+        } else if (thumbnailCache != null) {
+            // No imeta poster — extract first frame via MediaMetadataRetriever (HTTP range requests)
+            var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+            LaunchedEffect(url) {
+                bitmap = thumbnailCache.getThumbnail(url)
+            }
+            if (bitmap != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap!!.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.matchParentSize(),
+                )
+            }
+            // While loading (bitmap == null): dark placeholder shows through from parent Box
         }
         Icon(
             imageVector        = Icons.Filled.PlayArrow,
