@@ -81,6 +81,7 @@ import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.data.relay.extractRepostTargetId
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -219,6 +220,9 @@ fun NoteCard(
     val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
     val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
 
+    // For kind-6 reposts, navigate to the referenced event, not the wrapper
+    val navigateId = if (row.kind == 6) extractRepostTargetId(row.tags) ?: row.id else row.id
+
     // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
     val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
         .mapNotNull { decodeNostrRef(it.value) }
@@ -269,7 +273,7 @@ fun NoteCard(
         modifier = modifier
             .fillMaxWidth()
             .background(Color(0xFF1A1A1A).copy(alpha = flashAlpha.value))
-            .clickable { onNoteClick(row.id) },
+            .clickable { onNoteClick(navigateId) },
     ) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
@@ -278,7 +282,7 @@ fun NoteCard(
             Row(
                 modifier          = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(row.id) }
+                    .clickable { onNoteClick(navigateId) }
                     .padding(horizontal = Spacing.medium)
                     .padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -368,7 +372,7 @@ fun NoteCard(
                 text     = relativeTime(effectiveCreatedAt),
                 color    = TextSecondary,
                 fontSize = 12.sp,
-                modifier = Modifier.clickable { onNoteClick(row.id) },
+                modifier = Modifier.clickable { onNoteClick(navigateId) },
             )
         }
 
@@ -386,7 +390,7 @@ fun NoteCard(
                 overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier   = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(row.id) }
+                    .clickable { onNoteClick(navigateId) }
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (isLong) 2.dp else Spacing.small),
             )
@@ -492,7 +496,7 @@ fun NoteCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onNoteClick(row.id) }
+                .clickable { onNoteClick(navigateId) }
                 .padding(horizontal = Spacing.medium)
                 .padding(bottom = Spacing.small),
             horizontalArrangement = Arrangement.SpaceEvenly,
