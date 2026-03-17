@@ -56,7 +56,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -183,9 +182,11 @@ fun NoteCard(
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
     originalAuthorProfile: UserEntity? = null,
+    exoPlayer: ExoPlayer? = null,
+    isMuted: Boolean = true,
+    onToggleMute: () -> Unit = {},
     isActiveVideo: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
-    onVideoPositioned: ((LayoutCoordinates) -> Unit)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -425,7 +426,9 @@ fun NoteCard(
                 imetaMedia        = imetaMedia,
                 isActiveVideo     = isActiveVideo,
                 onOpenFullscreen  = onOpenFullscreen,
-                onVideoPositioned = onVideoPositioned,
+                exoPlayer         = exoPlayer,
+                isMuted           = isMuted,
+                onToggleMute      = onToggleMute,
                 modifier          = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -921,7 +924,9 @@ private fun VideoGrid(
     imetaMedia: List<ImetaMedia>,
     isActiveVideo: Boolean,
     onOpenFullscreen: () -> Unit,
-    onVideoPositioned: ((LayoutCoordinates) -> Unit)?,
+    exoPlayer: ExoPlayer?,
+    isMuted: Boolean,
+    onToggleMute: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -935,15 +940,17 @@ private fun VideoGrid(
     /** Renders the first video as inline autoplay thumbnail when eligible, otherwise as static thumbnail. */
     @Composable
     fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
-        if (isDirectVideoUrl(url)) {
+        if (isDirectVideoUrl(url) && exoPlayer != null) {
             val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
             InlineAutoPlayVideo(
+                exoPlayer        = exoPlayer,
                 videoUrl         = url,
                 aspectRatio      = if (forceSquare) 1f else aspectRatio,
-                isActive         = isActiveVideo,
+                isMuted          = isMuted,
+                onToggleMute     = onToggleMute,
                 onOpenFullscreen = onOpenFullscreen,
+                isActive         = isActiveVideo,
                 thumbnailUrl     = posterUrl,
-                onPositioned     = onVideoPositioned,
                 modifier         = cellModifier,
             )
         } else {
