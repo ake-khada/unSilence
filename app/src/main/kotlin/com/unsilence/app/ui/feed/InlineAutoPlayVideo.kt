@@ -19,21 +19,17 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.video.VideoFrameDecoder
 import com.unsilence.app.ui.theme.Sizing
 
 private val MediaPlaceholder = Color(0xFF1A1A1A)
@@ -61,7 +57,6 @@ fun InlineAutoPlayVideo(
     modifier: Modifier = Modifier,
 ) {
     val displayAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
-    val context = LocalContext.current
 
     Box(
         modifier = modifier
@@ -72,7 +67,10 @@ fun InlineAutoPlayVideo(
             .clickable { onOpenFullscreen() },
         contentAlignment = Alignment.Center,
     ) {
-        // Poster ALWAYS rendered — same box, same ContentScale
+        // Poster ALWAYS rendered — same box, same ContentScale.
+        // When no poster URL, use a cheap static placeholder instead of
+        // VideoFrameDecoder which would download the video just to extract
+        // a frame — far too expensive in a scrolling list.
         if (!thumbnailUrl.isNullOrBlank()) {
             AsyncImage(
                 model = thumbnailUrl,
@@ -81,43 +79,49 @@ fun InlineAutoPlayVideo(
                 modifier = Modifier.matchParentSize(),
             )
         } else {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(videoUrl)
-                    .decoderFactory(VideoFrameDecoder.Factory())
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
+            // Static placeholder — no remote video frame extraction
+            Box(
+                modifier = Modifier.matchParentSize().background(MediaPlaceholder),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.3f),
+                    modifier = Modifier.size(48.dp),
+                )
+            }
         }
 
-        // Player fades in on top — same box, zero jump
+        // Player fades in on top — same box, zero jump.
+        // NO key(videoUrl) — that was destroying and recreating the
+        // SurfaceView on every URL change, causing severe surface churn
+        // (surfaceCreated/surfaceDestroyed spam). Instead the PlayerView
+        // instance stays stable and the media source is swapped via
+        // ExoPlayer.setMediaItem in the playback scope.
         AnimatedVisibility(
             visible = isActive,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.matchParentSize(),
         ) {
-            key(videoUrl) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = exoPlayer
-                            useController = false
-                            setKeepContentOnPlayerReset(true)
-                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        }
-                    },
-                    update = { view ->
-                        view.player = exoPlayer
-                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    },
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = false
+                        setKeepContentOnPlayerReset(true)
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                },
+                update = { view ->
+                    view.player = exoPlayer
+                    view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                },
+                modifier = Modifier.matchParentSize(),
+            )
         }
 
         // Play icon when inactive

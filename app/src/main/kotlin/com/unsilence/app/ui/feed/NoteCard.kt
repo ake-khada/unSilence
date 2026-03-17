@@ -1120,17 +1120,20 @@ private fun VideoThumbnailCard(
                 modifier = Modifier.matchParentSize(),
             )
         } else {
-            // Fallback: extract first frame from video URL via Coil VideoFrameDecoder
-            val context = LocalContext.current
-            AsyncImage(
-                model = coil3.request.ImageRequest.Builder(context)
-                    .data(url)
-                    .decoderFactory(coil3.video.VideoFrameDecoder.Factory())
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize(),
-            )
+            // Static placeholder — no remote video frame extraction in lists.
+            // VideoFrameDecoder downloads the video to extract a frame, which
+            // is too expensive during scroll and causes overheating.
+            Box(
+                modifier = Modifier.matchParentSize().background(MediaPlaceholder),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.3f),
+                    modifier = Modifier.size(36.dp),
+                )
+            }
         }
         Icon(
             imageVector        = Icons.Filled.PlayArrow,
