@@ -321,6 +321,7 @@ fun FeedScreen(
                     .debounce(500)
                     .distinctUntilChanged()
                     .collectLatest { visibleIds ->
+                        android.util.Log.d("FeedScreen", "snapshotFlow visibleIds=${visibleIds.size}")
                         viewModel.fetchEngagementForVisible(visibleIds)
                         val visibleEvents = state.events.filter { it.id in visibleIds }
                         viewModel.hydrateVisibleCards(visibleEvents)

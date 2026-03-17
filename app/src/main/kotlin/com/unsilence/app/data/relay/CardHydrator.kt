@@ -40,6 +40,7 @@ class CardHydrator @Inject constructor(
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         val newEvents = events.filter { it.id !in hydratedIds }
         if (newEvents.isEmpty()) return
+        Log.d(TAG, "hydrateVisibleCards count=${events.size} new=${newEvents.size} ids=${newEvents.map { it.id.take(8) }}")
         hydratedIds.addAll(newEvents.map { it.id })
 
         // 1. Collect all pubkeys needing profiles (authors + repost original authors)
@@ -50,14 +51,23 @@ class CardHydrator @Inject constructor(
             pubkeys.add(event.pubkey)
 
             if (event.kind == 6) {
+                Log.d(TAG, "Kind-6 repost ${event.id.take(12)}: tags.class=${event.tags::class.simpleName} tags=${event.tags.take(300)}")
                 // Repost: extract original author pubkey from p-tag
-                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
+                val repostPubkey = extractRepostAuthorPubkey(event.content, event.tags)
+                Log.d(TAG, "  repostAuthorPubkey=${repostPubkey?.take(12)}")
+                repostPubkey?.let { pubkeys.add(it) }
                 // Repost: extract target event ID from e-tag
-                extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
+                val targetId = extractRepostTargetId(event.tags)
+                Log.d(TAG, "  repostTargetId=${targetId?.take(12)}")
+                targetId?.let { referencedIds.add(it) }
             }
 
             // Quote: nostr:nevent1... or nostr:note1... in content
-            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
+            val quotedIds = extractQuotedEventIds(event.content)
+            if (quotedIds.isNotEmpty()) {
+                Log.d(TAG, "Quoted refs in ${event.id.take(12)}: ${quotedIds.map { it.take(12) }}")
+            }
+            quotedIds.forEach { referencedIds.add(it) }
         }
 
         // 2. Fetch missing profiles
@@ -87,11 +97,20 @@ class CardHydrator @Inject constructor(
 }
 
 /** Extract the repost target event ID from the first "e" tag in a tags JSON string. */
-fun extractRepostTargetId(tagsJson: String): String? = runCatching {
-    NostrJson.parseToJsonElement(tagsJson).jsonArray
-        .firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
-        ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-}.getOrNull()
+fun extractRepostTargetId(tagsJson: String): String? {
+    return try {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
+        val result = eTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+        if (result == null) {
+            Log.d("CardHydrator", "extractRepostTargetId: no e-tag found in ${parsed.size} tags, input=${tagsJson.take(200)}")
+        }
+        result
+    } catch (e: Exception) {
+        Log.w("CardHydrator", "extractRepostTargetId parse failed: ${e.message}, input=${tagsJson.take(200)}")
+        null
+    }
+}
 
 /** Extract quoted event IDs from nostr:nevent1.../nostr:note1... URIs in content. */
 fun extractQuotedEventIds(content: String): List<String> {
