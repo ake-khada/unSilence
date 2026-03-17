@@ -103,8 +103,14 @@ fun VideoPreviewCard(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    val baseAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
-    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
+    // Seed from cache so cards that were previously fetched start at the right size
+    val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
+    val initialAspect = if (!forceSquare && cachedRatio != null) {
+        feedVideoAspectRatio(cachedRatio, false)
+    } else {
+        feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    }
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
 
     Log.d("VIDEO_DEBUG", "PREVIEW ${model.videoUrl.takeLast(20)} aspect=$displayAspect")
 
