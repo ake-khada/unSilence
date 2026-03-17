@@ -28,15 +28,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,40 +45,30 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.media3.common.MediaItem
 import coil3.compose.AsyncImage
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
-import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
-import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import com.unsilence.app.ui.feed.NoteCard
-import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.engagementId
-import com.unsilence.app.ui.feed.extractVideoUrl
 import com.unsilence.app.ui.feed.toCompactSats
+import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventActionCallbacks
+import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.eventFeedItems
+import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlin.math.abs
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 
 private val BANNER_HEIGHT       = 150.dp
 private val PROFILE_AVATAR_SIZE = 85.dp
 
-@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun ProfileScreen(
     onLogout: () -> Unit = {},
@@ -110,97 +95,34 @@ fun ProfileScreen(
     var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
     val listState = rememberLazyListState()
 
-    // ── Shared player state ─────────────────────────────────────────────────────
-    val holder = actionsViewModel.sharedPlayerHolder
-    val ownerId = "profile"
-    val exoPlayer = holder.player
-    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
+    // ── Shared video playback — replaces ~80 lines of duplicated state ────────
+    val videoScope = rememberVideoPlaybackScope(
+        ownerId = "profile",
+        holder = actionsViewModel.sharedPlayerHolder,
+        events = posts,
+        listState = listState,
+    )
 
-    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
-    var isMuted by remember { mutableStateOf(true) }
-    var showFullscreenVideo by remember { mutableStateOf(false) }
-    var preFullscreenMuted by remember { mutableStateOf(true) }
-
-    // Lifecycle: pause on background, resume on foreground
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Mute sync
-    LaunchedEffect(isMuted) {
-        exoPlayer.volume = if (isMuted) 0f else 1f
-    }
-
-    // ── Playback transitions ────────────────────────────────────────────────────
-    val activeVideoUrl = remember(activeVideoNoteId, posts) {
-        activeVideoNoteId?.let { noteId ->
-            posts.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
-        }
-    }
-
-    LaunchedEffect(activeVideoUrl) {
-        if (activeVideoUrl != null) {
-            holder.claim(ownerId)
-            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (currentUrl != activeVideoUrl) {
-                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-                exoPlayer.prepare()
-            }
-            exoPlayer.playWhenReady = true
-        } else {
-            if (holder.isOwner(ownerId)) {
-                exoPlayer.stop()
-            }
-        }
-    }
-
-    // Precompute which notes have video
-    val noteIdsWithVideo = remember(posts) {
-        posts.filter { row ->
-            row.kind != 30023 &&
-            (ImetaParser.videos(row.tags).isNotEmpty() ||
-                VIDEO_URL_REGEX.containsMatchIn(row.content))
-        }.map { it.id }.toSet()
-    }
-
-    // Active video detection
-    val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
-    val showFullscreenRef = rememberUpdatedState(showFullscreenVideo)
-    LaunchedEffect(Unit) {
-        snapshotFlow { listState.layoutInfo }
-            .map { layoutInfo ->
-                if (showFullscreenRef.value) return@map activeVideoNoteId
-                val currentIds = noteIdsRef.value
-                val viewportCenter = (layoutInfo.viewportStartOffset +
-                    layoutInfo.viewportEndOffset) / 2
-                layoutInfo.visibleItemsInfo
-                    .filter { (it.key as? String) in currentIds }
-                    .minByOrNull {
-                        val itemCenter = it.offset + it.size / 2
-                        abs(itemCenter - viewportCenter)
-                    }
-                    ?.key as? String
-            }
-            .debounce(300)
-            .distinctUntilChanged()
-            .collect { newActiveId ->
-                if (activeVideoNoteId != newActiveId) {
-                    activeVideoNoteId = newActiveId
-                    if (newActiveId == null) {
-                        exoPlayer.playWhenReady = false
-                    }
-                }
-            }
-    }
+    // ── Shared callbacks + engagement snapshot ────────────────────────────────
+    val engagement = EngagementSnapshot(
+        reactedIds = reactedIds,
+        repostedIds = repostedIds,
+        zappedIds = zappedIds,
+        isNwcConfigured = isNwcConfigured,
+    )
+    val callbacks = EventActionCallbacks(
+        onNoteClick = onNoteClick,
+        onAuthorClick = onAuthorClick,
+        onArticleClick = { articleRow = it },
+        react = { id, pk -> actionsViewModel.react(id, pk) },
+        repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
+        zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
+        saveNwcUri = { actionsViewModel.saveNwcUri(it) },
+        lookupProfile = actionsViewModel::lookupProfile,
+        lookupEvent = actionsViewModel::lookupEvent,
+        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+        profileFlow = viewModel::profileFlow,
+    )
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
@@ -391,56 +313,13 @@ fun ProfileScreen(
                     )
                 }
             } else {
-                items(items = posts, key = { it.id }) { row ->
-                    if (row.kind == 30023) {
-                        ArticleCard(
-                            row             = row,
-                            onClick         = { articleRow = row },
-                            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                            hasReacted      = row.engagementId in reactedIds,
-                            hasReposted     = row.engagementId in repostedIds,
-                            hasZapped       = row.engagementId in zappedIds,
-                            isNwcConfigured = isNwcConfigured,
-                        )
-                    } else {
-                        // Resolve original author profile for kind-6 reposts
-                        val originalAuthorProfile = if (row.kind == 6) {
-                            extractRepostAuthorPubkey(row.content, row.tags)
-                                ?.let { viewModel.profileFlow(it).collectAsState().value }
-                        } else null
-
-                        NoteCard(
-                            row                    = row,
-                            onNoteClick            = onNoteClick,
-                            originalAuthorProfile  = originalAuthorProfile,
-                            onAuthorClick          = onAuthorClick,
-                            hasReacted             = row.engagementId in reactedIds,
-                            hasReposted            = row.engagementId in repostedIds,
-                            hasZapped              = row.engagementId in zappedIds,
-                            isNwcConfigured        = isNwcConfigured,
-                            onReact                = { actionsViewModel.react(row.id, row.pubkey) },
-                            onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                            onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                            onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                            exoPlayer              = exoPlayer,
-                            isMuted                = isMuted,
-                            onToggleMute           = { isMuted = !isMuted },
-                            isActiveVideo          = row.id == activeVideoNoteId,
-                            onOpenFullscreen       = {
-                                activeVideoNoteId = row.id
-                                preFullscreenMuted = isMuted
-                                isMuted = false
-                                showFullscreenVideo = true
-                            },
-                            lookupProfile          = actionsViewModel::lookupProfile,
-                            lookupEvent            = actionsViewModel::lookupEvent,
-                            fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
-                        )
-                    }
-                }
+                eventFeedItems(
+                    events = posts,
+                    engagement = engagement,
+                    callbacks = callbacks,
+                    videoScope = videoScope,
+                    context = RenderContext.Profile,
+                )
             }
 
             item { Spacer(Modifier.height(Spacing.xl)) }
@@ -518,13 +397,10 @@ fun ProfileScreen(
         )
     }
 
-    if (showFullscreenVideo) {
+    if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(
-            exoPlayer = exoPlayer,
-            onDismiss = {
-                showFullscreenVideo = false
-                isMuted = preFullscreenMuted
-            },
+            exoPlayer = videoScope.exoPlayer,
+            onDismiss = { videoScope.dismissFullscreen() },
         )
     }
 }

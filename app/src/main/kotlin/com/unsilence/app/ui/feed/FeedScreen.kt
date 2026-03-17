@@ -10,25 +10,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,26 +31,22 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.media3.common.MediaItem
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
-import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.ui.common.LoadingScreen
+import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventActionCallbacks
+import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.eventFeedItems
+import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
-import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlin.math.abs
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -88,97 +79,35 @@ fun FeedScreen(
         previousEventIds = currentIds
     }
 
-    // ── Shared player state ─────────────────────────────────────────────────────
-    val holder = actionsViewModel.sharedPlayerHolder
-    val ownerId = "feed"
-    val exoPlayer = holder.player
-    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
+    // ── Shared video playback — all wiring in one call ───────────────────────
+    val videoScope = rememberVideoPlaybackScope(
+        ownerId = "feed",
+        holder = actionsViewModel.sharedPlayerHolder,
+        events = state.events,
+        listState = listState,
+    )
 
-    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
-    var isMuted by remember { mutableStateOf(true) }
-    var showFullscreenVideo by remember { mutableStateOf(false) }
-    var preFullscreenMuted by remember { mutableStateOf(true) }
-
-    // Lifecycle: pause on background, resume on foreground
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Mute sync
-    LaunchedEffect(isMuted) {
-        exoPlayer.volume = if (isMuted) 0f else 1f
-    }
-
-    // ── Playback transitions ────────────────────────────────────────────────────
-    val activeVideoUrl = remember(activeVideoNoteId, state.events) {
-        activeVideoNoteId?.let { noteId ->
-            state.events.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
-        }
-    }
-
-    LaunchedEffect(activeVideoUrl) {
-        if (activeVideoUrl != null) {
-            holder.claim(ownerId)
-            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (currentUrl != activeVideoUrl) {
-                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-                exoPlayer.prepare()
-            }
-            exoPlayer.playWhenReady = true
-        } else {
-            if (holder.isOwner(ownerId)) {
-                exoPlayer.stop()
-            }
-        }
-    }
-
-    // Precompute which notes have video
-    val noteIdsWithVideo = remember(state.events) {
-        state.events.filter { row ->
-            row.kind != 30023 &&
-            (ImetaParser.videos(row.tags).isNotEmpty() ||
-                VIDEO_URL_REGEX.containsMatchIn(row.content))
-        }.map { it.id }.toSet()
-    }
-
-    // Active video detection
-    val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
-    val showFullscreenRef = rememberUpdatedState(showFullscreenVideo)
-    LaunchedEffect(Unit) {
-        snapshotFlow { listState.layoutInfo }
-            .map { layoutInfo ->
-                if (showFullscreenRef.value) return@map activeVideoNoteId
-                val currentIds = noteIdsRef.value
-                val viewportCenter = (layoutInfo.viewportStartOffset +
-                    layoutInfo.viewportEndOffset) / 2
-                layoutInfo.visibleItemsInfo
-                    .filter { (it.key as? String) in currentIds }
-                    .minByOrNull {
-                        val itemCenter = it.offset + it.size / 2
-                        abs(itemCenter - viewportCenter)
-                    }
-                    ?.key as? String
-            }
-            .debounce(300)
-            .distinctUntilChanged()
-            .collect { newActiveId ->
-                if (activeVideoNoteId != newActiveId) {
-                    activeVideoNoteId = newActiveId
-                    if (newActiveId == null) {
-                        exoPlayer.playWhenReady = false
-                    }
-                }
-            }
-    }
+    // ── Shared callbacks + engagement snapshot ────────────────────────────────
+    val engagement = EngagementSnapshot(
+        reactedIds = reactedIds,
+        repostedIds = repostedIds,
+        zappedIds = zappedIds,
+        isNwcConfigured = isNwcConfigured,
+    )
+    val callbacks = EventActionCallbacks(
+        onNoteClick = onNoteClick,
+        onAuthorClick = onAuthorClick,
+        onQuote = onQuote,
+        onArticleClick = { articleRow = it },
+        react = { id, pk -> actionsViewModel.react(id, pk) },
+        repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
+        zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
+        saveNwcUri = { actionsViewModel.saveNwcUri(it) },
+        lookupProfile = actionsViewModel::lookupProfile,
+        lookupEvent = actionsViewModel::lookupEvent,
+        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+        profileFlow = viewModel::profileFlow,
+    )
 
     LaunchedEffect(scrollToTopTrigger) {
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
@@ -261,64 +190,15 @@ fun FeedScreen(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    items(
-                        items = state.events,
-                        key   = { it.id },
-                    ) { row ->
-                        // Resolve original author profile for kind-6 reposts
-                        val originalAuthorProfile = if (row.kind == 6) {
-                            extractRepostAuthorPubkey(row.content, row.tags)
-                                ?.let { viewModel.profileFlow(it).collectAsState().value }
-                        } else null
-
-                        if (row.kind == 30023) {
-                            ArticleCard(
-                                row             = row,
-                                onClick         = { articleRow = row },
-                                onNoteClick     = onNoteClick,
-                                onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                                onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                onQuote         = onQuote,
-                                onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                hasReacted      = row.engagementId in reactedIds,
-                                hasReposted     = row.engagementId in repostedIds,
-                                hasZapped       = row.engagementId in zappedIds,
-                                isNwcConfigured = isNwcConfigured,
-                            )
-                        } else {
-                            NoteCard(
-                                row                    = row,
-                                onNoteClick            = onNoteClick,
-                                onAuthorClick          = onAuthorClick,
-                                hasReacted             = row.engagementId in reactedIds,
-                                hasReposted            = row.engagementId in repostedIds,
-                                hasZapped              = row.engagementId in zappedIds,
-                                isNwcConfigured        = isNwcConfigured,
-                                originalAuthorProfile  = originalAuthorProfile,
-                                onReact                = { actionsViewModel.react(row.id, row.pubkey) },
-                                onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                onQuote                = onQuote,
-                                onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                exoPlayer              = exoPlayer,
-                                isMuted                = isMuted,
-                                onToggleMute           = { isMuted = !isMuted },
-                                isActiveVideo          = row.id == activeVideoNoteId,
-                                onOpenFullscreen       = {
-                                    activeVideoNoteId = row.id
-                                    preFullscreenMuted = isMuted
-                                    isMuted = false
-                                    showFullscreenVideo = true
-                                },
-                                lookupProfile          = actionsViewModel::lookupProfile,
-                                lookupEvent            = actionsViewModel::lookupEvent,
-                                fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
-                                isNewPost              = row.id in newEventIds,
-                                onNewPostAnimated      = { newEventIds.remove(row.id) },
-                            )
-                        }
-                    }
+                    eventFeedItems(
+                        events = state.events,
+                        engagement = engagement,
+                        callbacks = callbacks,
+                        videoScope = videoScope,
+                        context = RenderContext.Feed,
+                        newEventIds = newEventIds.keys,
+                        onNewPostAnimated = { newEventIds.remove(it) },
+                    )
                 }
 
                 // Auto-scroll on new top post
@@ -378,13 +258,10 @@ fun FeedScreen(
         )
     }
 
-    if (showFullscreenVideo) {
+    if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(
-            exoPlayer = exoPlayer,
-            onDismiss = {
-                showFullscreenVideo = false
-                isMuted = preFullscreenMuted
-            },
+            exoPlayer = videoScope.exoPlayer,
+            onDismiss = { videoScope.dismissFullscreen() },
         )
     }
 }
@@ -395,7 +272,7 @@ fun FeedScreen(
  */
 internal fun extractVideoUrl(row: FeedRow): String? {
     // 1. Check imeta tags for video MIME types
-    val imetaVideo = ImetaParser.videos(row.tags).firstOrNull()?.url
+    val imetaVideo = com.unsilence.app.data.relay.ImetaParser.videos(row.tags).firstOrNull()?.url
     if (imetaVideo != null) return imetaVideo
 
     // 2. Fall back to regex match on content

@@ -247,12 +247,10 @@ class FeedViewModel @Inject constructor(
                         coverageStatus = status,
                     )
 
-                    // Hydrate first batch independently so collectLatest re-emissions don't cancel it
-                    val batch = rows.take(20)
-                    android.util.Log.d("FeedVM", "hydrateVisibleCards from collectLatest: ${rows.size} total rows, hydrating first ${batch.size}")
-                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        cardHydrator.hydrateVisibleCards(batch)
-                    }
+                    // Hydration is now handled exclusively by the snapshotFlow-based
+                    // visible-card observer in FeedScreen. The old collectLatest hydration
+                    // was causing duplicate work — both paths were hydrating the same first
+                    // 20 rows, triggering redundant relay REQs and profile fetches.
                 }
         }
     }
