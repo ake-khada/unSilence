@@ -49,11 +49,13 @@ import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventActionCallbacks
+import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -205,43 +207,33 @@ fun SearchScreen(
                             modifier = Modifier.align(Alignment.Center),
                         )
                     } else {
+                        val engagement = EngagementSnapshot(
+                            reactedIds = reactedIds,
+                            repostedIds = repostedIds,
+                            zappedIds = zappedIds,
+                            isNwcConfigured = isNwcConfigured,
+                        )
+                        val callbacks = EventActionCallbacks(
+                            onNoteClick = onNoteClick,
+                            onAuthorClick = onAuthorClick,
+                            onQuote = onQuote,
+                            onArticleClick = { articleRow = it },
+                            react = { id, pk -> actionsViewModel.react(id, pk) },
+                            repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
+                            zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
+                            saveNwcUri = { actionsViewModel.saveNwcUri(it) },
+                            lookupProfile = actionsViewModel::lookupProfile,
+                            lookupEvent = actionsViewModel::lookupEvent,
+                            fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                        )
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(state.noteResults, key = { it.id }) { row ->
-                                if (row.kind == 30023) {
-                                    ArticleCard(
-                                        row             = row,
-                                        onClick         = { articleRow = row },
-                                        onNoteClick     = onNoteClick,
-                                        onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                                        onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                        onQuote         = onQuote,
-                                        onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        hasReacted      = row.engagementId in reactedIds,
-                                        hasReposted     = row.engagementId in repostedIds,
-                                        hasZapped       = row.engagementId in zappedIds,
-                                        isNwcConfigured = isNwcConfigured,
-                                    )
-                                } else {
-                                    NoteCard(
-                                        row             = row,
-                                        onNoteClick     = onNoteClick,
-                                        onAuthorClick   = onAuthorClick,
-                                        hasReacted      = row.engagementId in reactedIds,
-                                        hasReposted     = row.engagementId in repostedIds,
-                                        hasZapped       = row.engagementId in zappedIds,
-                                        isNwcConfigured = isNwcConfigured,
-                                        onReact         = { actionsViewModel.react(row.id, row.pubkey) },
-                                        onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-                                        onQuote         = onQuote,
-                                        onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
-                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        lookupProfile   = actionsViewModel::lookupProfile,
-                                        lookupEvent     = actionsViewModel::lookupEvent,
-                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                    )
-                                }
-                            }
+                            eventFeedItems(
+                                events = state.noteResults,
+                                engagement = engagement,
+                                callbacks = callbacks,
+                                videoScope = null,
+                                context = RenderContext.Search,
+                            )
                         }
                     }
                 }

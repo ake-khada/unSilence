@@ -56,6 +56,7 @@ import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
