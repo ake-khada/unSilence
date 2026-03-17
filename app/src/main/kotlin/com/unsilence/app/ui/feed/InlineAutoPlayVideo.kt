@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -27,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -77,12 +77,14 @@ fun InlineAutoPlayVideo(
                             player = exoPlayer
                             useController = false
                             setKeepContentOnPlayerReset(true)
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                         }
                     },
                     update = { view ->
                         view.player = exoPlayer
+                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                     },
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.matchParentSize(),
                 )
             }
 
@@ -109,7 +111,7 @@ fun InlineAutoPlayVideo(
                     model = thumbnailUrl,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.matchParentSize(),
                 )
             } else {
                 val context = LocalContext.current
@@ -120,7 +122,7 @@ fun InlineAutoPlayVideo(
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.matchParentSize(),
                 )
             }
 
