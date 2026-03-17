@@ -23,6 +23,8 @@ import android.util.Log
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import kotlin.math.abs
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -117,18 +119,13 @@ fun rememberVideoPlaybackScope(
         val allVideoUrls = videoRows.flatMap { row ->
             buildVideoRenderModels(row).map { it.videoUrl }
         }.distinct()
-        for (url in allVideoUrls) {
-            kotlinx.coroutines.launch { thumbnailCache.getThumbnail(url) }
+        coroutineScope {
+            for (url in allVideoUrls) {
+                launch { thumbnailCache.getThumbnail(url) }
+            }
         }
-        // Snapshot resolved ratios after all launches are started
-        kotlinx.coroutines.delay(100)
+        // All fetches complete — snapshot resolved ratios to trigger recomposition
         resolvedRatios = HashMap(thumbnailCache.resolvedAspectRatios)
-        // Refresh periodically as more thumbnails resolve
-        repeat(10) {
-            kotlinx.coroutines.delay(500)
-            val current = HashMap(thumbnailCache.resolvedAspectRatios)
-            if (current != resolvedRatios) resolvedRatios = current
-        }
     }
 
     // Precompute VideoRenderModels for all events (moved from NoteCard composable)
