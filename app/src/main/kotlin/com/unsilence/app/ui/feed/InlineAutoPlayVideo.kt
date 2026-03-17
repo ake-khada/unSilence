@@ -5,28 +5,22 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.video.VideoFrameDecoder
@@ -34,26 +28,23 @@ import com.unsilence.app.ui.theme.Sizing
 
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+/**
+ * Thumbnail placeholder for video cells. Never creates a PlayerView — the
+ * parent screen renders a single overlay PlayerView on top of the active cell.
+ *
+ * When [isActive], reports its layout position via [onPositioned] so the
+ * overlay can track this cell, and hides the play icon (the overlay covers it).
+ */
 @Composable
 fun InlineAutoPlayVideo(
-    exoPlayer: ExoPlayer,
     videoUrl: String,
     aspectRatio: Float?,
-    isMuted: Boolean,
-    onToggleMute: () -> Unit,
-    onOpenFullscreen: () -> Unit,
     isActive: Boolean,
+    onOpenFullscreen: () -> Unit,
     thumbnailUrl: String? = null,
+    onPositioned: ((LayoutCoordinates) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    // Sync mute state reactively — only when active
-    if (isActive) {
-        LaunchedEffect(isMuted) {
-            exoPlayer.volume = if (isMuted) 0f else 1f
-        }
-    }
-
     val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
     // Cap portrait videos so they don't dominate the feed (max height = 1.5x width)
     val displayAspect = if (rawAspect >= 1f) rawAspect else maxOf(rawAspect, 2f / 3f)
@@ -67,63 +58,37 @@ fun InlineAutoPlayVideo(
             )
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .background(MediaPlaceholder)
-            .clickable { onOpenFullscreen() },
+            .clickable { onOpenFullscreen() }
+            .then(
+                if (onPositioned != null) Modifier.onGloballyPositioned(onPositioned)
+                else Modifier
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        if (isActive) {
-            // ExoPlayer surface — only ONE exists in the entire feed
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        player = exoPlayer
-                        useController = false
-                        setEnableComposeSurfaceSyncWorkaround(true)
-                    }
-                },
-                update = { view -> view.player = exoPlayer },
+        // Always render thumbnail — the overlay PlayerView draws on top when active
+        if (!thumbnailUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = thumbnailUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
-
-            // Mute toggle — top-right
-            IconButton(
-                onClick = onToggleMute,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .size(36.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape),
-            ) {
-                Icon(
-                    imageVector = if (isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
         } else {
-            // Static thumbnail — NO PlayerView, NO surface, zero churn
-            if (!thumbnailUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = thumbnailUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
-                )
-            } else {
-                // Fallback: extract first frame from video URL via Coil VideoFrameDecoder
-                val context = LocalContext.current
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(videoUrl)
-                        .decoderFactory(VideoFrameDecoder.Factory())
-                        .build(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
+            // Fallback: extract first frame from video URL via Coil VideoFrameDecoder
+            val context = LocalContext.current
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(videoUrl)
+                    .decoderFactory(VideoFrameDecoder.Factory())
+                    .build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
 
-            // Play icon overlay
+        // Play icon — hidden when active (overlay covers it)
+        if (!isActive) {
             Box(
                 modifier = Modifier
                     .size(52.dp)
