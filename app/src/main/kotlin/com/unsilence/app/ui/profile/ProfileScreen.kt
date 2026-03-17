@@ -101,7 +101,6 @@ fun ProfileScreen(
         holder = actionsViewModel.sharedPlayerHolder,
         events = posts,
         listState = listState,
-        thumbnailCache = actionsViewModel.videoThumbnailCache,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────

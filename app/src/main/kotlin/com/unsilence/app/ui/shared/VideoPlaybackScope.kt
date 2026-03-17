@@ -21,10 +21,7 @@ import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.buildVideoRenderModels
 import android.util.Log
 import com.unsilence.app.ui.feed.SharedPlayerHolder
-import com.unsilence.app.ui.feed.VideoThumbnailCache
 import kotlin.math.abs
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -82,7 +79,6 @@ fun rememberVideoPlaybackScope(
     holder: SharedPlayerHolder,
     events: List<FeedRow>,
     listState: LazyListState,
-    thumbnailCache: VideoThumbnailCache? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
@@ -109,31 +105,12 @@ fun rememberVideoPlaybackScope(
         exoPlayer.volume = if (scope.isMuted) 0f else 1f
     }
 
-    // Collect video URLs for pre-fetching and track resolved aspect ratios
-    var resolvedRatios by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
-
-    // Pre-fetch thumbnails so aspect ratios are known before cards scroll into view
-    LaunchedEffect(events) {
-        if (thumbnailCache == null) return@LaunchedEffect
-        val videoRows = events.filter { it.kind != 30023 }
-        val allVideoUrls = videoRows.flatMap { row ->
-            buildVideoRenderModels(row).map { it.videoUrl }
-        }.distinct()
-        coroutineScope {
-            for (url in allVideoUrls) {
-                launch { thumbnailCache.getThumbnail(url) }
-            }
-        }
-        // All fetches complete — snapshot resolved ratios to trigger recomposition
-        resolvedRatios = HashMap(thumbnailCache.resolvedAspectRatios)
-    }
-
     // Precompute VideoRenderModels for all events (moved from NoteCard composable)
-    val renderModelsMap = remember(events, resolvedRatios) {
+    val renderModelsMap = remember(events) {
         events
             .filter { it.kind != 30023 }
             .mapNotNull { row ->
-                val models = buildVideoRenderModels(row, resolvedRatios)
+                val models = buildVideoRenderModels(row)
                 if (models.isNotEmpty()) row.id to models else null
             }
             .toMap()
