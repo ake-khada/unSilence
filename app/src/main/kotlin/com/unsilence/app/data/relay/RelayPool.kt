@@ -293,12 +293,22 @@ class RelayPool @Inject constructor(
                 // for one-shot subscriptions. EventProcessor's process() would already
                 // early-return for non-EVENT strings, but we need the relay URL here.
                 if (raw.startsWith("[\"EOSE\"")) {
+                    val eoseSubId = extractEoseSubId(raw)
+                    if (eoseSubId != null && eoseSubId.startsWith("search-")) {
+                        Log.d(TAG, "Search EOSE: subId=$eoseSubId relay=${conn.url}")
+                    }
                     handleEose(conn, raw)
                     return@consumeEach
                 }
                 // NIP-45 COUNT response: ["COUNT","sub-id",{"count":N}]
                 if (raw.startsWith("[\"COUNT\"")) {
                     handleCount(raw)
+                    return@consumeEach
+                }
+                // Relay NOTICE — log for diagnostics
+                if (raw.startsWith("[\"NOTICE\"")) {
+                    val notice = raw.substringAfter("\"NOTICE\",\"", "").substringBefore("\"")
+                    Log.w(TAG, "Relay NOTICE ${conn.url}: $notice")
                     return@consumeEach
                 }
                 // Update lastEventTime for persistent sub tracking
@@ -312,10 +322,16 @@ class RelayPool @Inject constructor(
                     if (subId.startsWith("search-notes-")) {
                         val token = subId.removePrefix("search-notes-").toLongOrNull()
                         if (token != null) {
-                            extractEventIdFromRaw(raw)?.let {
-                                _searchResults.tryEmit(SearchResult(token, it))
+                            val eventId = extractEventIdFromRaw(raw)
+                            if (eventId != null) {
+                                Log.d(TAG, "Search EVENT received: subId=$subId relay=${conn.url} eventId=${eventId.take(12)}…")
+                                _searchResults.tryEmit(SearchResult(token, eventId))
                             }
                         }
+                    }
+                    // Also log search-profiles events
+                    if (subId.startsWith("search-profiles-")) {
+                        Log.d(TAG, "Search EVENT received: subId=$subId relay=${conn.url}")
                     }
                 }
                 processor.process(raw, conn.url)
@@ -639,23 +655,26 @@ class RelayPool @Inject constructor(
         }.toString()
 
         for (url in searchRelayUrls) {
-            val existing = connections[url]
-            if (existing != null) {
-                existing.send(profileReq)
-                existing.send(notesReq)
-            } else {
-                val conn = RelayConnection(url, okHttpClient)
-                connections[url] = conn
-                conn.connect()
-                scope.launch {
+            val conn = connections.getOrPut(url) {
+                RelayConnection(url, okHttpClient).also { c ->
+                    scope.launch { listenForEvents(c) }
+                }
+            }
+            if (!conn.isConnected) conn.connect()
+
+            scope.launch {
+                try {
+                    conn.awaitConnected()
+                    Log.d(TAG, "Search relay ready: $url")
                     conn.send(profileReq)
                     conn.send(notesReq)
-                    listenForEvents(conn)
+                    Log.d(TAG, "Search REQs sent to $url")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Search relay $url failed: ${e.message}")
                 }
-                Log.d(TAG, "Connected to search relay: $url")
             }
         }
-        Log.d(TAG, "Sent NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
+        Log.d(TAG, "Queued NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
     }
 
     /**
