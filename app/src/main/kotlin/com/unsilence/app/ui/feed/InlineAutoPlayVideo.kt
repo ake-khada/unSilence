@@ -62,7 +62,7 @@ internal fun VideoThumbnailImage(
         AsyncImage(
             model = model.posterUrl,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = ContentScale.Fit,
             modifier = modifier,
         )
     } else if (thumbnailCache != null) {
@@ -78,7 +78,7 @@ internal fun VideoThumbnailImage(
             Image(
                 bitmap = thumbnail!!.bitmap.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = modifier,
             )
         }
@@ -145,7 +145,9 @@ fun VideoPreviewCard(
  *
  * Poster is shown underneath until the first video frame renders, then
  * the player covers it — zero black flash, zero resize.
- * When the thumbnail bitmap arrives, its native aspect ratio overrides the container.
+ *
+ * Reads [VideoThumbnailCache.resolvedAspectRatios] so its container matches
+ * the preview card's container exactly — zero jump on activation.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -159,7 +161,14 @@ fun InlineVideoPlayer(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    val baseAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    // Use the resolved bitmap aspect ratio if available (matches preview card exactly),
+    // otherwise fall back to imeta / 16:9 default.
+    val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
+    val baseAspect = if (!forceSquare && resolvedRatio != null) {
+        feedVideoAspectRatio(resolvedRatio, false)
+    } else {
+        feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
     var isFirstFrameRendered by remember { mutableStateOf(false) }
 
@@ -205,12 +214,12 @@ fun InlineVideoPlayer(
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
             update = { view ->
                 view.player = exoPlayer
-                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
             modifier = Modifier.fillMaxSize(),
