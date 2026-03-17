@@ -945,12 +945,13 @@ private fun VideoGrid(
             InlineAutoPlayVideo(
                 exoPlayer        = exoPlayer,
                 videoUrl         = url,
-                aspectRatio      = if (forceSquare) 1f else aspectRatio,
+                aspectRatio      = aspectRatio,
                 isMuted          = isMuted,
                 onToggleMute     = onToggleMute,
                 onOpenFullscreen = onOpenFullscreen,
                 isActive         = isActiveVideo,
                 thumbnailUrl     = posterUrl,
+                forceSquare      = forceSquare,
                 modifier         = cellModifier,
             )
         } else {
@@ -1096,8 +1097,7 @@ private fun VideoThumbnailCard(
     posterUrl: String? = null,
     forceSquare: Boolean = false,
 ) {
-    val rawAspect = if (aspectRatio != null && aspectRatio > 0f) aspectRatio else 16f / 9f
-    val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(rawAspect)
+    val displayAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
 
     Box(
         modifier          = modifier
