@@ -85,6 +85,7 @@ fun FeedScreen(
         holder = actionsViewModel.sharedPlayerHolder,
         events = state.events,
         listState = listState,
+        thumbnailCache = actionsViewModel.videoThumbnailCache,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
