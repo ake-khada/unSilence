@@ -31,8 +31,6 @@ class SharedPlayerHolder @Inject constructor(
 
     fun releaseOwnership(ownerId: String) {
         if (_currentOwner == ownerId) {
-            player.stop()
-            player.clearMediaItems()
             _currentOwner = null
         }
     }
