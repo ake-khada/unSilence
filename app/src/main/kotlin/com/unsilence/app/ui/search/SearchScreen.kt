@@ -233,6 +233,7 @@ fun SearchScreen(
                                 callbacks = callbacks,
                                 videoScope = null,
                                 context = RenderContext.Search,
+                                thumbnailCache = actionsViewModel.videoThumbnailCache,
                             )
                         }
                     }

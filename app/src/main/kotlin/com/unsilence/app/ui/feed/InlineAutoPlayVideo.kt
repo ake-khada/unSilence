@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -27,8 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
@@ -36,35 +38,54 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.size.Dimension
-import coil3.size.Size
-import coil3.video.VideoFrameDecoder
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
 
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
 /**
- * Build a Coil [ImageRequest] that extracts the first video frame as a thumbnail.
- * Uses [VideoFrameDecoder] with a capped decode size to limit bandwidth.
- * Only used when imeta provides no poster URL.
+ * Composable that shows a video thumbnail: imeta poster if available,
+ * otherwise fetches the first frame via [VideoThumbnailCache] (MediaMetadataRetriever
+ * with HTTP range requests — lightweight). Shows dark placeholder at correct
+ * aspect ratio while loading.
  */
 @Composable
-internal fun videoFrameRequest(videoUrl: String): ImageRequest =
-    ImageRequest.Builder(LocalContext.current)
-        .data(videoUrl)
-        .decoderFactory(VideoFrameDecoder.Factory())
-        .size(Size(Dimension(480), Dimension(270)))   // cap decode resolution
-        .memoryCacheKey("vframe:$videoUrl")
-        .build()
+internal fun VideoThumbnailImage(
+    model: VideoRenderModel,
+    thumbnailCache: VideoThumbnailCache?,
+    modifier: Modifier = Modifier,
+) {
+    if (!model.posterUrl.isNullOrBlank()) {
+        AsyncImage(
+            model = model.posterUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = modifier,
+        )
+    } else if (thumbnailCache != null) {
+        // Fetch first frame via MediaMetadataRetriever (HTTP range requests)
+        var bitmap by remember(model.videoUrl) { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(model.videoUrl) {
+            bitmap = thumbnailCache.getThumbnail(model.videoUrl)
+        }
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = modifier,
+            )
+        }
+        // While loading (bitmap == null): dark placeholder shows through from parent Box
+    }
+}
 
 /**
  * Pure Compose video preview — poster image or first-frame thumbnail at the
  * correct aspect ratio with a centered play icon. No AndroidView, no
  * SurfaceView, no player. Used for ALL inactive video cards.
  *
- * Poster fallback chain: imeta thumb → VideoFrameDecoder first-frame → dark placeholder.
+ * Poster fallback chain: imeta thumb → MediaMetadataRetriever first-frame → dark placeholder.
  */
 @Composable
 fun VideoPreviewCard(
@@ -72,6 +93,7 @@ fun VideoPreviewCard(
     onOpenFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
+    thumbnailCache: VideoThumbnailCache? = null,
 ) {
     val displayAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
 
@@ -84,22 +106,11 @@ fun VideoPreviewCard(
             .clickable { onOpenFullscreen() },
         contentAlignment = Alignment.Center,
     ) {
-        if (!model.posterUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = model.posterUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
-        } else {
-            // No imeta poster — extract first frame via VideoFrameDecoder
-            AsyncImage(
-                model = videoFrameRequest(model.videoUrl),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
-        }
+        VideoThumbnailImage(
+            model = model,
+            thumbnailCache = thumbnailCache,
+            modifier = Modifier.matchParentSize(),
+        )
 
         // Play icon overlay
         Box(
@@ -136,6 +147,7 @@ fun InlineVideoPlayer(
     onOpenFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
+    thumbnailCache: VideoThumbnailCache? = null,
 ) {
     val displayAspect = feedVideoAspectRatio(model.aspectRatio, forceSquare)
     var isFirstFrameRendered by remember { mutableStateOf(false) }
@@ -165,22 +177,11 @@ fun InlineVideoPlayer(
     ) {
         // Poster underneath — visible until first frame renders
         if (!isFirstFrameRendered) {
-            if (!model.posterUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = model.posterUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.matchParentSize(),
-                )
-            } else {
-                // No imeta poster — extract first frame via VideoFrameDecoder
-                AsyncImage(
-                    model = videoFrameRequest(model.videoUrl),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
+            VideoThumbnailImage(
+                model = model,
+                thumbnailCache = thumbnailCache,
+                modifier = Modifier.matchParentSize(),
+            )
         }
 
         // Stable AndroidView — created once, player swapped via update lambda.
