@@ -164,9 +164,6 @@ private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".avi", ignoreCase = true)
 
 /** Cap portrait aspect ratios so images don't dominate the feed. */
-private fun effectiveAspectRatio(raw: Float): Float =
-    if (raw >= 1f) raw else maxOf(raw, 2f / 3f)
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NoteCard(
@@ -719,17 +716,41 @@ private fun MediaImage(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
 ) {
-    val imgAspect = imetaMedia
+    // imeta dim gives us the true aspect ratio; null when dimensions are unknown.
+    val imetaAspect = imetaMedia
         .firstOrNull { it.url == url && it.width != null && it.height != null }
         ?.let { it.width!!.toFloat() / it.height!! }
-        ?: 4f / 3f
 
-    val displayAspect = if (forceSquare) 1f else effectiveAspectRatio(imgAspect)
+    // Grid cells: forced square with crop to fill uniformly.
+    // Single images: use the image's true aspect ratio — no crop, no padding.
+    val imageModifier = if (forceSquare) {
+        modifier
+            .fillMaxWidth()
+            .aspectRatio(1f, matchHeightConstraintsFirst = false)
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(MediaPlaceholder)
+            .clickable { onImageClick(url) }
+    } else if (imetaAspect != null) {
+        // Known dimensions: pre-size the container at the true aspect ratio (no layout jump).
+        modifier
+            .fillMaxWidth()
+            .aspectRatio(imetaAspect, matchHeightConstraintsFirst = false)
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(MediaPlaceholder)
+            .clickable { onImageClick(url) }
+    } else {
+        // Unknown dimensions: no aspect ratio constraint — Coil sizes naturally once loaded.
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+            .background(MediaPlaceholder)
+            .clickable { onImageClick(url) }
+    }
 
     SubcomposeAsyncImage(
         model              = url,
         contentDescription = null,
-        contentScale       = ContentScale.Crop,
+        contentScale       = if (forceSquare) ContentScale.Crop else ContentScale.Fit,
         loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
         error              = {
             Box(
@@ -744,12 +765,7 @@ private fun MediaImage(
                 )
             }
         },
-        modifier           = modifier
-            .fillMaxWidth()
-            .aspectRatio(displayAspect, matchHeightConstraintsFirst = false)
-            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(MediaPlaceholder)
-            .clickable { onImageClick(url) },
+        modifier           = imageModifier,
     )
 }
 
