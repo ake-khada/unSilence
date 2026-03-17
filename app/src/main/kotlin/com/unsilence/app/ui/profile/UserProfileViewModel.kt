@@ -10,8 +10,8 @@ import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -53,6 +53,7 @@ class UserProfileViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -105,27 +106,16 @@ class UserProfileViewModel @Inject constructor(
 
     val isLoadingPosts = MutableStateFlow(true)
 
-    // Tracks which pubkeys we've already requested profiles for — prevents hot loop
-    private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
 
     init {
-        // Fetch missing profiles for repost original authors as posts arrive
+        // Unified card hydration + engagement fetch as posts arrive
         viewModelScope.launch {
             postsFlow.collectLatest { rows ->
                 isLoadingPosts.value = false
 
-                val pubkeys = rows.flatMap { row ->
-                    val embedded = if (row.kind == 6) {
-                        extractRepostAuthorPubkey(row.content, row.tags)
-                    } else null
-                    listOfNotNull(row.pubkey, embedded)
-                }.distinct()
-                val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
-                if (newPubkeys.isNotEmpty()) {
-                    fetchedProfilePubkeys.addAll(newPubkeys)
-                    userRepository.fetchMissingProfiles(newPubkeys)
-                }
+                // Hydrate profiles + referenced events
+                cardHydrator.hydrateVisibleCards(rows.take(20))
 
                 // Capped engagement fetch — one batch of 20 max, debounced
                 val newEventIds = rows
@@ -241,7 +231,7 @@ class UserProfileViewModel @Inject constructor(
         _displayLimit.value = 200
         oldestTimestamp = Long.MAX_VALUE
         fetching = false
-        fetchedProfilePubkeys.clear()
+        cardHydrator.clearCache()
         engagementFetchedIds.clear()
         isLoadingPosts.value = true
 
