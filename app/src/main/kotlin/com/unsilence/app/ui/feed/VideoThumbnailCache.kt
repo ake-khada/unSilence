@@ -40,6 +40,9 @@ class VideoThumbnailCache @Inject constructor(
      */
     val resolvedAspectRatios = ConcurrentHashMap<String, Float>()
 
+    /** Return a cached thumbnail immediately, or null if not yet fetched. No I/O. */
+    fun getCached(videoUrl: String): VideoThumbnail? = cache[videoUrl]
+
     /**
      * Return a cached first-frame thumbnail for [videoUrl], or fetch it on [Dispatchers.IO].
      * Returns null immediately if another coroutine is already fetching this URL,
