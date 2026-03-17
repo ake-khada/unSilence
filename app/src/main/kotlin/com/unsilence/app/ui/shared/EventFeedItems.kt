@@ -11,6 +11,7 @@ import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.engagementId
 import kotlinx.coroutines.flow.StateFlow
 
@@ -60,6 +61,7 @@ fun LazyListScope.eventFeedItems(
     context: RenderContext = RenderContext.Feed,
     newEventIds: Set<String> = emptySet(),
     onNewPostAnimated: (String) -> Unit = {},
+    thumbnailCache: VideoThumbnailCache? = null,
 ) {
     items(
         items = events,
@@ -73,6 +75,7 @@ fun LazyListScope.eventFeedItems(
             context = context,
             isNewPost = row.id in newEventIds,
             onNewPostAnimated = { onNewPostAnimated(row.id) },
+            thumbnailCache = thumbnailCache,
         )
     }
 }
@@ -86,6 +89,7 @@ private fun EventFeedItem(
     context: RenderContext,
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
+    thumbnailCache: VideoThumbnailCache? = null,
 ) {
     if (row.kind == 30023) {
         ArticleCard(
@@ -132,6 +136,7 @@ private fun EventFeedItem(
             isActiveVideo = showVideo && videoScope.isActiveVideo(row.id),
             onOpenFullscreen = { videoScope?.openFullscreen(row.id) },
             videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
+            thumbnailCache = thumbnailCache,
             lookupProfile = callbacks.lookupProfile,
             lookupEvent = callbacks.lookupEvent,
             fetchOgMetadata = callbacks.fetchOgMetadata,
