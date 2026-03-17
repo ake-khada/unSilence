@@ -1162,7 +1162,8 @@ private fun VideoThumbnailCard(
     thumbnailCache: VideoThumbnailCache? = null,
     forceSquare: Boolean = false,
 ) {
-    val displayAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
+    val baseAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
+    var displayAspect by remember(url, forceSquare) { mutableStateOf(baseAspect) }
 
     Box(
         modifier          = modifier
@@ -1177,24 +1178,27 @@ private fun VideoThumbnailCard(
             AsyncImage(
                 model = posterUrl,
                 contentDescription = null,
-                contentScale = ContentScale.Fit,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
         } else if (thumbnailCache != null) {
             // No imeta poster — extract first frame via MediaMetadataRetriever (HTTP range requests)
-            var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+            var thumbnail by remember(url) { mutableStateOf<VideoThumbnail?>(null) }
             LaunchedEffect(url) {
-                bitmap = thumbnailCache.getThumbnail(url)
+                thumbnailCache.getThumbnail(url)?.let {
+                    thumbnail = it
+                    if (!forceSquare) displayAspect = feedVideoAspectRatio(it.aspectRatio, false)
+                }
             }
-            if (bitmap != null) {
+            if (thumbnail != null) {
                 androidx.compose.foundation.Image(
-                    bitmap = bitmap!!.asImageBitmap(),
+                    bitmap = thumbnail!!.bitmap.asImageBitmap(),
                     contentDescription = null,
-                    contentScale = ContentScale.Fit,
+                    contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize(),
                 )
             }
-            // While loading (bitmap == null): dark placeholder shows through from parent Box
+            // While loading (thumbnail == null): dark placeholder shows through from parent Box
         }
         Icon(
             imageVector        = Icons.Filled.PlayArrow,
