@@ -17,10 +17,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.relay.ImetaParser
+import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.SharedPlayerHolder
-import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
-import com.unsilence.app.ui.feed.extractVideoUrl
 import kotlin.math.abs
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -44,6 +43,10 @@ class VideoPlaybackScope(
     var showFullscreenVideo by mutableStateOf(false)
         internal set
     var preFullscreenMuted by mutableStateOf(true)
+        internal set
+
+    /** Pre-computed video render models keyed by event ID. */
+    var videoRenderModels by mutableStateOf<Map<String, List<VideoRenderModel>>>(emptyMap())
         internal set
 
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
@@ -101,10 +104,24 @@ fun rememberVideoPlaybackScope(
         exoPlayer.volume = if (scope.isMuted) 0f else 1f
     }
 
+    // Precompute VideoRenderModels for all events (moved from NoteCard composable)
+    val renderModelsMap = remember(events) {
+        events
+            .filter { it.kind != 30023 }
+            .mapNotNull { row ->
+                val models = buildVideoRenderModels(row)
+                if (models.isNotEmpty()) row.id to models else null
+            }
+            .toMap()
+    }
+    scope.videoRenderModels = renderModelsMap
+
+    val noteIdsWithVideo = remember(renderModelsMap) { renderModelsMap.keys }
+
     // Playback transitions: swap media source on active note change
-    val activeVideoUrl = remember(scope.activeVideoNoteId, events) {
+    val activeVideoUrl = remember(scope.activeVideoNoteId, renderModelsMap) {
         scope.activeVideoNoteId?.let { noteId ->
-            events.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
+            renderModelsMap[noteId]?.firstOrNull()?.videoUrl
         }
     }
 
@@ -122,15 +139,6 @@ fun rememberVideoPlaybackScope(
                 exoPlayer.stop()
             }
         }
-    }
-
-    // Precompute which notes have video
-    val noteIdsWithVideo = remember(events) {
-        events.filter { row ->
-            row.kind != 30023 &&
-                (ImetaParser.videos(row.tags).isNotEmpty() ||
-                    VIDEO_URL_REGEX.containsMatchIn(row.content))
-        }.map { it.id }.toSet()
     }
 
     // Active video detection via scroll position
