@@ -56,7 +56,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.core.Animatable
@@ -69,8 +72,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.graphics.lerp
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
@@ -182,11 +183,9 @@ fun NoteCard(
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
     originalAuthorProfile: UserEntity? = null,
-    exoPlayer: ExoPlayer? = null,
     isActiveVideo: Boolean = false,
-    isMuted: Boolean = true,
-    onToggleMute: () -> Unit = {},
     onOpenFullscreen: () -> Unit = {},
+    onVideoPositioned: ((LayoutCoordinates) -> Unit)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -422,14 +421,12 @@ fun NoteCard(
         // ── Video grid: same layout pattern as images ────────────────────
         if (videoUrls.isNotEmpty()) {
             VideoGrid(
-                videoUrls        = videoUrls,
-                imetaMedia       = imetaMedia,
-                exoPlayer        = exoPlayer,
-                isActiveVideo    = isActiveVideo,
-                isMuted          = isMuted,
-                onToggleMute     = onToggleMute,
-                onOpenFullscreen = onOpenFullscreen,
-                modifier         = Modifier
+                videoUrls         = videoUrls,
+                imetaMedia        = imetaMedia,
+                isActiveVideo     = isActiveVideo,
+                onOpenFullscreen  = onOpenFullscreen,
+                onVideoPositioned = onVideoPositioned,
+                modifier          = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
@@ -925,11 +922,9 @@ private fun VideoGridCell(
 private fun VideoGrid(
     videoUrls: List<String>,
     imetaMedia: List<ImetaMedia>,
-    exoPlayer: ExoPlayer?,
     isActiveVideo: Boolean,
-    isMuted: Boolean,
-    onToggleMute: () -> Unit,
     onOpenFullscreen: () -> Unit,
+    onVideoPositioned: ((LayoutCoordinates) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -940,25 +935,20 @@ private fun VideoGrid(
         else runCatching { uriHandler.openUri(url) }
     }
 
-    /** Renders the first video as inline autoplay when eligible, otherwise as thumbnail. */
+    /** Renders the first video as inline autoplay thumbnail when eligible, otherwise as static thumbnail. */
     @Composable
     fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
-        if (exoPlayer != null && isDirectVideoUrl(url)) {
+        if (isDirectVideoUrl(url)) {
             val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
-            // key by videoUrl so Compose doesn't recycle surfaces between different videos
-            key(url) {
-                InlineAutoPlayVideo(
-                    exoPlayer        = exoPlayer,
-                    videoUrl         = url,
-                    aspectRatio      = aspectRatio,
-                    isMuted          = isMuted,
-                    onToggleMute     = onToggleMute,
-                    onOpenFullscreen = onOpenFullscreen,
-                    isActive         = isActiveVideo,
-                    thumbnailUrl     = posterUrl,
-                    modifier         = cellModifier,
-                )
-            }
+            InlineAutoPlayVideo(
+                videoUrl         = url,
+                aspectRatio      = if (forceSquare) 1f else aspectRatio,
+                isActive         = isActiveVideo,
+                onOpenFullscreen = onOpenFullscreen,
+                thumbnailUrl     = posterUrl,
+                onPositioned     = onVideoPositioned,
+                modifier         = cellModifier,
+            )
         } else {
             VideoGridCell(
                 url         = url,

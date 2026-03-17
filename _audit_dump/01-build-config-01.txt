@@ -1,0 +1,281 @@
+
+
+===== FILE: app/build.gradle.kts =====
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    id("com.google.devtools.ksp")
+    id("com.google.dagger.hilt.android")
+}
+
+android {
+    namespace  = "com.unsilence.app"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.unsilence.app"
+        minSdk        = 26
+        targetSdk     = 36
+        versionCode   = 1
+        versionName   = "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled   = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+
+    buildFeatures {
+        compose = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+dependencies {
+    // Compose
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.icons.extended)
+
+    // Activity / Navigation / Lifecycle
+    implementation(libs.activity.compose)
+    implementation(libs.navigation.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.lifecycle.runtime.compose)
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+
+    // Networking
+    implementation(libs.okhttp)
+
+    // Serialization / Coroutines
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
+
+    // Hilt (DI)
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
+    implementation(libs.hilt.navigation.compose)
+
+    // Room (local cache — UI reads only from Room)
+    implementation(libs.room.runtime)
+    ksp(libs.room.compiler)
+
+    // Coil (image loading, GIF, blurhash)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
+    implementation(libs.coil.network.okhttp)
+    implementation(libs.coil.video)
+
+    // Markdown → HTML for NIP-23 long-form articles (rendered in WebView)
+    implementation(libs.jetbrains.markdown)
+
+    // Media (ExoPlayer — kind 21 tap-to-play only in v1)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.ui)
+
+    // Other
+    implementation(libs.security.crypto)    // NWC key storage (Android Keystore)
+    implementation(libs.splashscreen)
+    implementation(libs.zxing.core)         // QR scanner for NWC setup (Sprint 4)
+
+    // Nostr protocol (event parsing, signing, NIP implementations)
+    implementation(libs.quartz.android)
+
+    // Pubkey-derived identicons (Maven Central)
+    implementation(libs.identikon.android)
+}
+
+
+
+===== FILE: app/src/main/AndroidManifest.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <queries>
+        <!-- NIP-55 Amber signer -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="nostrsigner" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".UnsilenceApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="unSilence"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:largeHeap="true"
+        android:theme="@style/Theme.UnSilence.Splash">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>
+
+
+
+===== FILE: build.gradle.kts =====
+
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
+    alias(libs.plugins.ksp) apply false
+    alias(libs.plugins.hilt.android) apply false
+}
+
+
+
+===== FILE: gradle/libs.versions.toml =====
+
+[versions]
+kotlin            = "2.3.0"
+agp               = "8.9.1"
+ksp               = "2.3.0"
+compose-bom       = "2025.05.00"
+okhttp            = "4.12.0"
+kotlinx-serialization = "1.8.0"
+coil              = "3.0.4"
+security-crypto   = "1.1.0-alpha06"
+media3            = "1.5.1"
+coroutines        = "1.9.0"
+splashscreen      = "1.0.1"
+zxing             = "3.5.3"
+activity-compose  = "1.9.3"
+navigation-compose = "2.8.5"
+lifecycle         = "2.8.7"
+hilt              = "2.58"
+hilt-navigation   = "1.2.0"
+room              = "2.7.1"
+quartz            = "1.05.1"
+identikon         = "1.0.0"
+jetbrains-markdown = "0.7.3"
+
+[libraries]
+# Compose
+compose-bom                 = { group = "androidx.compose",            name = "compose-bom",                     version.ref = "compose-bom" }
+compose-ui                  = { group = "androidx.compose.ui",         name = "ui" }
+compose-ui-graphics         = { group = "androidx.compose.ui",         name = "ui-graphics" }
+compose-material3           = { group = "androidx.compose.material3",  name = "material3" }
+compose-icons-extended      = { group = "androidx.compose.material",   name = "material-icons-extended" }
+
+# Activity / Navigation / Lifecycle
+activity-compose            = { group = "androidx.activity",           name = "activity-compose",                version.ref = "activity-compose" }
+navigation-compose          = { group = "androidx.navigation",         name = "navigation-compose",              version.ref = "navigation-compose" }
+lifecycle-viewmodel-compose = { group = "androidx.lifecycle",          name = "lifecycle-viewmodel-compose",     version.ref = "lifecycle" }
+lifecycle-runtime-compose   = { group = "androidx.lifecycle",          name = "lifecycle-runtime-compose",       version.ref = "lifecycle" }
+
+# Networking
+okhttp                      = { group = "com.squareup.okhttp3",        name = "okhttp",                          version.ref = "okhttp" }
+
+# Serialization / Coroutines
+kotlinx-serialization-json  = { group = "org.jetbrains.kotlinx",      name = "kotlinx-serialization-json",      version.ref = "kotlinx-serialization" }
+kotlinx-coroutines-android  = { group = "org.jetbrains.kotlinx",      name = "kotlinx-coroutines-android",      version.ref = "coroutines" }
+
+# Hilt (DI)
+hilt-android                = { group = "com.google.dagger",           name = "hilt-android",                    version.ref = "hilt" }
+hilt-compiler               = { group = "com.google.dagger",           name = "hilt-android-compiler",           version.ref = "hilt" }
+hilt-navigation-compose     = { group = "androidx.hilt",               name = "hilt-navigation-compose",         version.ref = "hilt-navigation" }
+
+# Room (local cache)
+room-runtime                = { group = "androidx.room",               name = "room-runtime",                    version.ref = "room" }
+room-ktx                    = { group = "androidx.room",               name = "room-ktx",                        version.ref = "room" }
+room-compiler               = { group = "androidx.room",               name = "room-compiler",                   version.ref = "room" }
+
+# Coil (image loading)
+coil-compose                = { group = "io.coil-kt.coil3",            name = "coil-compose",                    version.ref = "coil" }
+coil-gif                    = { group = "io.coil-kt.coil3",            name = "coil-gif",                        version.ref = "coil" }
+coil-network-okhttp         = { group = "io.coil-kt.coil3",            name = "coil-network-okhttp",             version.ref = "coil" }
+coil-video                  = { group = "io.coil-kt.coil3",            name = "coil-video",                      version.ref = "coil" }
+
+# Media
+media3-exoplayer            = { group = "androidx.media3",             name = "media3-exoplayer",                version.ref = "media3" }
+media3-ui                   = { group = "androidx.media3",             name = "media3-ui",                       version.ref = "media3" }
+
+# Other
+security-crypto             = { group = "androidx.security",           name = "security-crypto",                 version.ref = "security-crypto" }
+splashscreen                = { group = "androidx.core",               name = "core-splashscreen",               version.ref = "splashscreen" }
+zxing-core                  = { group = "com.google.zxing",            name = "core",                            version.ref = "zxing" }
+
+# Nostr protocol (event parsing, signing, NIP implementations)
+quartz-android               = { group = "com.vitorpamplona.quartz",    name = "quartz-android",                  version.ref = "quartz" }
+
+# Pubkey-derived identicons (Maven Central)
+identikon-android            = { group = "io.github.thibseisel.identikon", name = "identikon-android",            version.ref = "identikon" }
+
+# Markdown → HTML (NIP-23 articles, rendered in WebView)
+jetbrains-markdown              = { group = "org.jetbrains",               name = "markdown",                              version.ref = "jetbrains-markdown" }
+
+[plugins]
+android-application         = { id = "com.android.application",           version.ref = "agp" }
+kotlin-android              = { id = "org.jetbrains.kotlin.android",       version.ref = "kotlin" }
+kotlin-compose              = { id = "org.jetbrains.kotlin.plugin.compose",version.ref = "kotlin" }
+kotlin-serialization        = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ksp                         = { id = "com.google.devtools.ksp",            version.ref = "ksp" }
+hilt-android                = { id = "com.google.dagger.hilt.android",     version.ref = "hilt" }
+
+
+
+===== FILE: settings.gradle.kts =====
+
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+@Suppress("UnstableApiUsage")
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "unsilence"
+include(":app")
+

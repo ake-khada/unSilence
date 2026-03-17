@@ -45,13 +45,31 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.unsilence.app.data.relay.ImetaParser
 import androidx.media3.common.MediaItem
+import androidx.media3.common.VideoSize
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -59,6 +77,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -100,6 +119,18 @@ fun FeedScreen(
     var showFullscreenVideo by remember { mutableStateOf(false) }
     var preFullscreenMuted by remember { mutableStateOf(true) }
 
+    // ── Overlay positioning state ─────────────────────────────────────────
+    var feedBoxCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var overlayOffset by remember { mutableStateOf(Offset.Zero) }
+    var overlayWidth by remember { mutableStateOf(0) }
+    var overlayHeight by remember { mutableStateOf(0) }
+    var overlayVisible by remember { mutableStateOf(false) }
+
+    // Clear overlay when active video changes
+    LaunchedEffect(activeVideoNoteId) {
+        if (activeVideoNoteId == null) overlayVisible = false
+    }
+
     // Pause playback when app goes to background, resume when foregrounded
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -112,6 +143,11 @@ fun FeedScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Sync mute state reactively
+    LaunchedEffect(isMuted) {
+        exoPlayer.volume = if (isMuted) 0f else 1f
     }
 
     // ── FeedScreen owns ALL playback transitions ───────────────────────────
@@ -144,7 +180,9 @@ fun FeedScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Black),
+            .background(Black)
+            .clipToBounds()
+            .onGloballyPositioned { feedBoxCoords = it },
     ) {
         Crossfade(
             targetState = when {
@@ -267,16 +305,23 @@ fun FeedScreen(
                                 onQuote                = onQuote,
                                 onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
                                 onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                exoPlayer              = exoPlayer,
                                 isActiveVideo          = row.id == activeVideoNoteId,
-                                isMuted                = isMuted,
-                                onToggleMute           = { isMuted = !isMuted },
                                 onOpenFullscreen       = {
                                     activeVideoNoteId = row.id
                                     preFullscreenMuted = isMuted
                                     isMuted = false
                                     showFullscreenVideo = true
                                 },
+                                onVideoPositioned      = if (row.id == activeVideoNoteId) { coords ->
+                                    val box = feedBoxCoords
+                                    if (box != null && coords.isAttached && box.isAttached) {
+                                        val pos = box.localPositionOf(coords, Offset.Zero)
+                                        overlayOffset = pos
+                                        overlayWidth = coords.size.width
+                                        overlayHeight = coords.size.height
+                                        overlayVisible = true
+                                    }
+                                } else null,
                                 lookupProfile          = actionsViewModel::lookupProfile,
                                 lookupEvent            = actionsViewModel::lookupEvent,
                                 fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
@@ -362,6 +407,46 @@ fun FeedScreen(
                 }
             }
         }
+        }
+
+        // ── Video overlay: single PlayerView positioned over active cell ────
+        val density = LocalDensity.current
+        if (overlayVisible && activeVideoNoteId != null && overlayWidth > 0) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = false
+                        setEnableComposeSurfaceSyncWorkaround(true)
+                    }
+                },
+                update = { view -> view.player = exoPlayer },
+                modifier = Modifier
+                    .offset { IntOffset(overlayOffset.x.roundToInt(), overlayOffset.y.roundToInt()) }
+                    .requiredWidth(with(density) { overlayWidth.toDp() })
+                    .requiredHeight(with(density) { overlayHeight.toDp() }),
+            )
+
+            // Mute toggle — top-right corner of overlay
+            IconButton(
+                onClick = { isMuted = !isMuted },
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (overlayOffset.x + overlayWidth - with(density) { 44.dp.toPx() }).roundToInt(),
+                            (overlayOffset.y + with(density) { 8.dp.toPx() }).roundToInt(),
+                        )
+                    }
+                    .size(36.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), CircleShape),
+            ) {
+                Icon(
+                    imageVector = if (isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                    contentDescription = if (isMuted) "Unmute" else "Mute",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
     }
 

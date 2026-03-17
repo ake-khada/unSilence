@@ -1,0 +1,4628 @@
+
+
+===== FILE: docs/superpowers/plans/2026-03-14-sprint23-profile-zaps-polish.md =====
+
+# Sprint 23: Profile & Zaps Polish — Implementation Plan
+
+> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Six changes that transform the app from "work in progress" to "looks finished": zap total sats, profile tabs, following count, followers count (NIP-45), own-profile repost names fix, and startup frame skip investigation.
+
+**Architecture:** All changes follow the existing Relay → EventProcessor → Room → Flow/StateFlow → Compose UI pipeline. No new architectural patterns. One Room migration (v4→v5), one optional migration (v5→v6 if NIP-45 task proceeds).
+
+**Tech Stack:** Kotlin 2.3.0, Room 2.7.1, Hilt 2.58 (KSP), Compose BOM 2025.05.00, Quartz 1.05.1, compileSdk 36.
+
+**Build constraint:** Never run `./gradlew` from terminal while Android Studio is open. Verify builds in Android Studio. Git operations from `aivii` user terminal only.
+
+**Spec:** `docs/superpowers/specs/2026-03-14-sprint23-profile-zaps-polish-design.md`
+
+---
+
+## Chunk 1: Quick Fixes (Tasks 6, 5)
+
+### Task 1: Startup Frame Skip Investigation
+
+**Files:**
+- Investigate: `app/src/main/kotlin/com/unsilence/app/ui/feed/FeedViewModel.kt`
+- Investigate: `app/src/main/kotlin/com/unsilence/app/ui/onboarding/RootViewModel.kt`
+- Investigate: `app/src/main/kotlin/com/unsilence/app/data/AppBootstrapper.kt`
+
+**Context:** `Choreographer: Skipped 81 frames!` on cold launch with Amber login. AppBootstrapper already runs on `Dispatchers.IO`. Need to find if any `viewModelScope.launch` defaults to Main with heavy work.
+
+- [ ] **Step 1: Investigate FeedViewModel.init**
+
+`FeedViewModel.kt:132` — `viewModelScope.launch { ... }` has NO explicit dispatcher. This defaults to `Dispatchers.Main`. Inside it:
+- `followDao.count()` — Room auto-dispatches to IO, fine
+- `relaySetRepository.seedDefaults()` — likely Room, auto-dispatches
+- `relaySetRepository.defaultSet()` — likely Room
+- `relayPool.connect(urls)` — launches on RelayPool's own IO scope
+- The `combine/flatMapLatest/collectLatest` chain collects on Main
+
+The collection callback (lines 181-204) does list operations on fetched rows — lightweight. The real frame skip is likely Compose laying out 200 NoteCard items simultaneously on first render.
+
+Check `RootViewModel.kt` — it's clean: `onOnboardingComplete()` just calls `bootstrapper.bootstrap()` which runs on its own IO scope. No Main thread work.
+
+Read the code, assess, and decide: is there a fixable dispatcher issue, or is this Compose composition overhead?
+
+- [ ] **Step 2: Apply fix OR document skip**
+
+**If fixable:** The `viewModelScope.launch` at `FeedViewModel.kt:132` could be changed to `viewModelScope.launch(Dispatchers.IO)` BUT the `collectLatest` callback updates `_uiState` (a MutableStateFlow) and `hasNewTopPost` (a mutableStateOf). StateFlow emissions are thread-safe, but `mutableStateOf` must be updated on Main. So switching the entire launch to IO would break Compose state.
+
+**Most likely outcome:** The 81 frames are Compose initial composition of the feed list (200 items). This is framework overhead — not fixable without lazy pagination of the LazyColumn (which already exists). **Skip this task.** Document finding as a comment in the commit.
+
+- [ ] **Step 3: Commit investigation findings**
+
+```bash
+git add -A && git commit -m "chore: investigate startup frame skip — Compose composition overhead, not dispatcher issue"
+```
+
+---
+
+### Task 2: Own-Profile Repost Names Fix
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt:64-73`
+
+**Context:** `ProfileViewModel` doesn't call `fetchMissingProfiles` for repost original authors. `UserProfileViewModel` (lines 77-95) already has this pattern. Copy-paste-adapt.
+
+- [ ] **Step 1: Add fetchedProfilePubkeys set and collectLatest init block**
+
+In `ProfileViewModel.kt`, add import for `extractRepostAuthorPubkey`:
+```kotlin
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import kotlinx.coroutines.flow.collectLatest
+```
+
+Add the tracking set before the existing `init` block (after line 63):
+```kotlin
+private val fetchedProfilePubkeys = mutableSetOf<String>()
+```
+
+Modify the existing `init` block at line 67 to add a second launch:
+```kotlin
+init {
+    viewModelScope.launch {
+        if (pubkeyHex != null) {
+            userRepository.fetchMissingProfiles(listOf(pubkeyHex))
+        }
+    }
+    // Fetch missing profiles for repost original authors as posts arrive
+    viewModelScope.launch {
+        postsFlow.collectLatest { rows ->
+            val pubkeys = rows.flatMap { row ->
+                val embedded = if (row.kind == 6) {
+                    extractRepostAuthorPubkey(row.content, row.tags)
+                } else null
+                listOfNotNull(row.pubkey, embedded)
+            }.distinct()
+            val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
+            if (newPubkeys.isNotEmpty()) {
+                fetchedProfilePubkeys.addAll(newPubkeys)
+                userRepository.fetchMissingProfiles(newPubkeys)
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Build and verify**
+
+Build in Android Studio. Verify no compile errors. Test by opening own profile with reposts — original author names should now resolve.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt
+git commit -m "fix: resolve repost author names on own profile
+
+Add fetchMissingProfiles collectLatest to ProfileViewModel init,
+matching the existing pattern in UserProfileViewModel."
+```
+
+---
+
+## Chunk 2: Zap Total Sats (Task 1)
+
+### Task 3: Room Migration v4→v5 — Add zap_total_sats Column
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/entity/EventEntity.kt:62-64`
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/Migrations.kt:1-20`
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/AppDatabase.kt:28`
+- Modify: `app/src/main/kotlin/com/unsilence/app/di/DatabaseModule.kt:31`
+
+- [ ] **Step 1: Add zapTotalSats to EventEntity**
+
+In `EventEntity.kt`, add after the `cachedAt` field (line 63):
+```kotlin
+    /** Aggregated zap amount in sats from kind-9735 receipts */
+    @ColumnInfo(name = "zap_total_sats")
+    val zapTotalSats: Long = 0,
+```
+
+- [ ] **Step 2: Add MIGRATION_4_5 to Migrations.kt**
+
+Add at the top of `Migrations.kt` (before `MIGRATION_3_4` at line 16), with doc comment update:
+```kotlin
+/**
+ * Room schema migrations.
+ *
+ * v1 → v2: Add follows and relay_list_metadata tables (NIP-65 outbox routing).
+ * v2 → v3: Replace single-column indexes with composite indexes for query performance.
+ * v3 → v4: Add (root_id, created_at) index for thread queries.
+ * v4 → v5: Add zap_total_sats column to events for displaying total zap amount.
+ */
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE events ADD COLUMN zap_total_sats INTEGER NOT NULL DEFAULT 0")
+    }
+}
+```
+
+- [ ] **Step 3: Bump AppDatabase version to 5**
+
+In `AppDatabase.kt` line 28, change `version = 4` to `version = 5`.
+
+- [ ] **Step 4: Register MIGRATION_4_5 in DatabaseModule**
+
+In `DatabaseModule.kt` line 31, add the import and migration:
+```kotlin
+import com.unsilence.app.data.db.MIGRATION_4_5
+```
+
+Change `.addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)` to:
+```kotlin
+.addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+```
+
+- [ ] **Step 5: Build and verify**
+
+Build in Android Studio. Room schema validation should pass — the entity column matches the migration SQL.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/db/entity/EventEntity.kt \
+       app/src/main/kotlin/com/unsilence/app/data/db/Migrations.kt \
+       app/src/main/kotlin/com/unsilence/app/data/db/AppDatabase.kt \
+       app/src/main/kotlin/com/unsilence/app/di/DatabaseModule.kt
+git commit -m "feat: add zap_total_sats column to events table (migration v4→v5)"
+```
+
+---
+
+### Task 4: Add zap_total_sats to FeedRow and All Existing Queries
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/dao/EventDao.kt:12-36,55-96,111-147,150-185,188-209,242-256`
+
+- [ ] **Step 1: Add zapTotalSats to FeedRow data class**
+
+In `EventDao.kt`, add after `cachedAt` field (line 25) and before the Author section comment (line 26):
+```kotlin
+    @ColumnInfo(name = "zap_total_sats")     val zapTotalSats: Long,
+```
+
+The full FeedRow now has 21 fields.
+
+- [ ] **Step 2: Add e.zap_total_sats to feedFlow query**
+
+In the `feedFlow` SELECT (lines 56-76), add after `e.cached_at,` (line 68):
+```sql
+            e.zap_total_sats,
+```
+
+- [ ] **Step 3: Add e.zap_total_sats to followingFeedFlow query**
+
+In the `followingFeedFlow` SELECT (lines 112-132), add after `e.cached_at,` (line 124):
+```sql
+            e.zap_total_sats,
+```
+
+- [ ] **Step 4: Add e.zap_total_sats to userPostsFlow query**
+
+In the `userPostsFlow` SELECT (lines 151-171), add after `e.cached_at,` (line 163):
+```sql
+            e.zap_total_sats,
+```
+
+- [ ] **Step 5: Add e.zap_total_sats to threadFlow query**
+
+In the `threadFlow` SELECT (lines 189-197), add after `e.cached_at,` (line 191):
+```sql
+            e.zap_total_sats,
+```
+
+- [ ] **Step 6: Add e.zap_total_sats to searchNotes query**
+
+In the `searchNotes` SELECT (lines 243-248), add after `e.cached_at,` (line 245):
+```sql
+            e.zap_total_sats,
+```
+
+- [ ] **Step 7: Add addZapSats DAO method**
+
+Add after the `searchNotes` method (after line 256):
+```kotlin
+    /** Increment the zap sats total for the given event. Called by EventProcessor for kind-9735. */
+    @Query("UPDATE events SET zap_total_sats = zap_total_sats + :sats WHERE id = :eventId")
+    suspend fun addZapSats(eventId: String, sats: Long)
+```
+
+- [ ] **Step 8: Build and verify**
+
+Build in Android Studio. All 5 existing queries + the new DAO method should compile against the updated FeedRow and EventEntity.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/db/dao/EventDao.kt
+git commit -m "feat: add zap_total_sats to FeedRow and all feed queries"
+```
+
+---
+
+### Task 5: extractZapSats + EventProcessor Integration
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/relay/EventProcessor.kt:1-27,361-379`
+
+- [ ] **Step 1: Add imports**
+
+Add to `EventProcessor.kt` imports (after line 24):
+```kotlin
+import java.math.BigDecimal
+```
+
+Note: `jsonPrimitive` is already imported. Do NOT add `import kotlinx.serialization.json.Json` — the code uses `NostrJson` (defined in the same package) for all JSON parsing.
+
+Check if `LnInvoiceUtil` is accessible. Add import:
+```kotlin
+import com.vitorpamplona.quartz.lightning.LnInvoiceUtil
+```
+
+If the import path doesn't resolve (Quartz 1.05.1 may not expose it), skip bolt11 parsing and use amount-tag-only approach.
+
+- [ ] **Step 2: Add tagValue helper and extractZapSats function**
+
+Add before the `flushBatch` method (before line 361):
+
+```kotlin
+    // ── Zap sats extraction ─────────────────────────────────────────────
+
+    /** Extract a tag value from a JSON-serialized tags array: [["key","value"],...] */
+    private fun tagValue(tagsJson: String, key: String): String? = runCatching {
+        NostrJson.parseToJsonElement(tagsJson).jsonArray
+            .firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == key }
+            ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+    }.getOrNull()
+
+    /**
+     * Extract sats from a kind-9735 zap receipt's tags.
+     * Primary: parse bolt11 invoice via Quartz's LnInvoiceUtil.
+     * Fallback: read "amount" tag from embedded zap request (millisats).
+     */
+    private fun extractZapSats(tagsJson: String): Long {
+        // Primary: parse bolt11 tag via Quartz's LnInvoiceUtil
+        val bolt11 = tagValue(tagsJson, "bolt11")
+        if (bolt11 != null) {
+            try {
+                val sats = LnInvoiceUtil.getAmountInSats(bolt11)
+                if (sats > BigDecimal.ZERO) return sats.toLong()
+            } catch (_: Exception) { }
+        }
+
+        // Fallback: read "amount" tag from embedded zap request (millisats)
+        val descriptionJson = tagValue(tagsJson, "description") ?: return 0L
+        return try {
+            val zapRequest = NostrJson.parseToJsonElement(descriptionJson).jsonObject
+            val tags = zapRequest["tags"]?.jsonArray
+            val amountTag = tags?.firstOrNull { tag ->
+                tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "amount"
+            }
+            val msats = amountTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()
+            (msats ?: 0L) / 1_000L
+        } catch (_: Exception) { 0L }
+    }
+```
+
+**Note:** Use `NostrJson` (already imported/used in this file) instead of `Json` for parsing consistency. Check if `NostrJson` is the same as `kotlinx.serialization.json.Json` — it's defined in `NostrJson.kt` in the same package.
+
+- [ ] **Step 3: Add zap sats aggregation to flushBatch**
+
+In `flushBatch()`, after the `eventDao.insertOrIgnoreBatch()` call (line 376), add:
+
+```kotlin
+        // Aggregate zap sats for kind-9735 receipts
+        for (entity in events.values) {
+            if (entity.kind == 9735 && entity.rootId != null) {
+                val sats = extractZapSats(entity.tags)
+                if (sats > 0) {
+                    eventDao.addZapSats(entity.rootId, sats)
+                }
+            }
+        }
+```
+
+The full `flushBatch` now looks like:
+```kotlin
+    private suspend fun flushBatch(batch: List<ProcessedEvent>) {
+        val events    = LinkedHashMap<String, EventEntity>()
+        val users     = LinkedHashMap<String, UserEntity>()
+        val reactions = LinkedHashMap<String, ReactionEntity>()
+
+        for (item in batch) {
+            when (item) {
+                is ProcessedEvent.Event    -> events[item.entity.id]          = item.entity
+                is ProcessedEvent.User     -> users[item.entity.pubkey]       = item.entity
+                is ProcessedEvent.Reaction -> reactions[item.entity.eventId]  = item.entity
+            }
+        }
+
+        if (events.isNotEmpty())    eventDao.insertOrIgnoreBatch(events.values.toList())
+        if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
+        if (reactions.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactions.values.toList())
+
+        // Aggregate zap sats for kind-9735 receipts
+        for (entity in events.values) {
+            if (entity.kind == 9735 && entity.rootId != null) {
+                val sats = extractZapSats(entity.tags)
+                if (sats > 0) {
+                    eventDao.addZapSats(entity.rootId, sats)
+                }
+            }
+        }
+    }
+```
+
+- [ ] **Step 4: Build and verify**
+
+Build in Android Studio. Check that `LnInvoiceUtil` import resolves. If not, remove the bolt11 block and keep only the amount-tag fallback.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/relay/EventProcessor.kt
+git commit -m "feat: extract and aggregate zap sats from kind-9735 receipts
+
+Uses Quartz LnInvoiceUtil for bolt11 parsing with amount-tag fallback.
+Aggregation runs in flushBatch() after batch insert."
+```
+
+---
+
+### Task 6: ZapButton UI — Display Sats Instead of Count
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/feed/NoteCard.kt:488-497,606-640,823-827`
+
+- [ ] **Step 1: Add toCompactSats formatter**
+
+In `NoteCard.kt`, add after `formatCount` (after line 827). Use `internal` visibility so `ProfileScreen` can reuse it for follower count display:
+```kotlin
+/** Format sats compactly: 21000 → "21k", 1500000 → "1.5M" */
+internal fun Long.toCompactSats(): String = when {
+    this >= 1_000_000 -> {
+        val s = "%.1fM".format(this / 1_000_000.0)
+        if (s.endsWith(".0M")) s.dropLast(3) + "M" else s
+    }
+    this >= 1_000 -> {
+        val s = "%.1fk".format(this / 1_000.0)
+        if (s.endsWith(".0k")) s.dropLast(3) + "k" else s
+    }
+    else -> this.toString()
+}
+```
+
+- [ ] **Step 2: Change ZapButton to accept sats: Long**
+
+Replace the `ZapButton` composable (lines 606-640) with:
+```kotlin
+/** Zap button: Amber when sats > 0 or user has zapped, supports single tap and long-press. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ZapButton(
+    sats: Long,
+    hasZapped: Boolean,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val tint = if (sats > 0 || hasZapped) ZapAmber else ActionTint
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier          = Modifier
+            .defaultMinSize(minWidth = 48.dp)
+            .combinedClickable(
+                onClick     = onTap,
+                onLongClick = onLongPress,
+            ),
+    ) {
+        Icon(
+            imageVector        = Icons.Filled.ElectricBolt,
+            contentDescription = "Zap",
+            tint               = tint,
+            modifier           = Modifier.size(Sizing.actionIcon),
+        )
+        if (sats > 0) {
+            Spacer(Modifier.width(Spacing.micro))
+            Text(
+                text     = sats.toCompactSats(),
+                color    = tint,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Update ZapButton call site**
+
+In `NoteCard.kt` at the ZapButton call (lines 488-497), change `count = row.zapCount` to `sats = row.zapTotalSats`:
+```kotlin
+            ZapButton(
+                sats          = row.zapTotalSats,
+                hasZapped     = hasZapped,
+                onTap         = {
+                    if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                },
+                onLongPress   = {
+                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                },
+            )
+```
+
+- [ ] **Step 4: Build and verify**
+
+Build in Android Studio. The ZapButton should now show sats amounts like "21k" instead of zap counts like "3".
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/ui/feed/NoteCard.kt
+git commit -m "feat: display total zap sats instead of zap count in action bar
+
+Shows compact sats (21k, 1.5M) with amber color. Uses toCompactSats() formatter."
+```
+
+---
+
+## Chunk 3: Following Count + Profile Tabs (Tasks 3, 2)
+
+### Task 7: Following Count on Own Profile
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/dao/FollowDao.kt:41-43`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt:33-39,64-65`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileScreen.kt:74-75,228-238,382-403`
+
+- [ ] **Step 1: Add countFlow() to FollowDao**
+
+In `FollowDao.kt`, add after the existing `count()` method (after line 42):
+```kotlin
+    /** Reactive follow count — re-emits on every follow list change. */
+    @Query("SELECT COUNT(*) FROM follows")
+    abstract fun countFlow(): Flow<Int>
+```
+
+- [ ] **Step 2: Add followDao injection and followingCount to ProfileViewModel**
+
+In `ProfileViewModel.kt`, add `FollowDao` to constructor (line 38, after `relayPool`):
+```kotlin
+    private val followDao: com.unsilence.app.data.db.dao.FollowDao,
+```
+
+Add import:
+```kotlin
+import com.unsilence.app.data.db.dao.FollowDao
+```
+
+Replace the hardcoded `val following: Int? = null` and `val followers: Int? = null` (lines 64-65) with:
+```kotlin
+    /** Live following count from local follows table. */
+    val followingCount: StateFlow<Int> = followDao.countFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+```
+
+- [ ] **Step 3: Update StatLabel to accept String**
+
+In `ProfileScreen.kt`, change `StatLabel` (lines 382-397) to accept `String` for the value:
+```kotlin
+@Composable
+private fun StatLabel(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text       = value,
+            color      = Color.White,
+            fontSize   = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.size(4.dp))
+        Text(
+            text     = label,
+            color    = TextSecondary,
+            fontSize = 13.sp,
+        )
+    }
+}
+```
+
+Remove the `formatStatCount` function (lines 399-403) — no longer needed since callers will format before passing.
+
+- [ ] **Step 4: Update stats row in ProfileScreen**
+
+In `ProfileScreen.kt`, add state collection (after line 75):
+```kotlin
+    val followingCount by viewModel.followingCount.collectAsStateWithLifecycle()
+```
+
+Update the stats row (lines 228-238):
+```kotlin
+                // Following / Followers stats row
+                Row(
+                    modifier              = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    StatLabel(label = "Following", value = "$followingCount")
+                    Spacer(Modifier.size(20.dp))
+                    StatLabel(label = "Followers", value = "—")
+                }
+```
+
+- [ ] **Step 5: Build and verify**
+
+Build in Android Studio. Profile should show the actual following count and "—" for followers.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/db/dao/FollowDao.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileScreen.kt
+git commit -m "feat: show live following count on own profile
+
+Adds FollowDao.countFlow() reactive query. Followers shows '—' until NIP-45 support."
+```
+
+---
+
+### Task 8: Profile Tab Queries — DAO + Repository
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/dao/EventDao.kt` (add 3 new query methods)
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/repository/EventRepository.kt` (add 3 pass-through methods)
+
+- [ ] **Step 1: Add userNotesFlow to EventDao**
+
+Add after `userPostsFlow` method (after line 185):
+```kotlin
+    /** Notes tab: kind 1 top-level posts only (no replies, no reposts). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
+        FROM events e
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+        LEFT JOIN reactions r   ON r.target_event_id = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        WHERE e.pubkey = :pubkey AND e.kind = 1
+          AND e.reply_to_id IS NULL AND e.root_id IS NULL
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userNotesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+```
+
+- [ ] **Step 2: Add userRepliesFlow to EventDao**
+
+Add after `userNotesFlow`:
+```kotlin
+    /** Replies tab: kind 1 events that are replies (have reply_to_id or root_id). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            COUNT(DISTINCT r.event_id)  AS reaction_count,
+            COUNT(DISTINCT rep.id)      AS reply_count,
+            COUNT(DISTINCT rp.id)       AS repost_count,
+            COUNT(DISTINCT z.id)        AS zap_count
+        FROM events e
+        LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+        LEFT JOIN reactions r   ON r.target_event_id = e.id
+        LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+        LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+        LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind   = 9735
+        WHERE e.pubkey = :pubkey AND e.kind = 1
+          AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL)
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userRepliesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+```
+
+- [ ] **Step 3: Add userLongformFlow to EventDao**
+
+Add after `userRepliesFlow`:
+```kotlin
+    /** Longform tab: kind 30023 articles (NIP-23). */
+    @Query("""
+        SELECT
+            e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+            e.relay_url, e.reply_to_id, e.root_id,
+            e.has_content_warning, e.content_warning_reason, e.cached_at,
+            e.zap_total_sats,
+            u.name            AS author_name,
+            u.display_name    AS author_display_name,
+            u.picture         AS author_picture,
+            u.nip05           AS author_nip05,
+            0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
+        FROM events e
+        LEFT JOIN users u ON u.pubkey = e.pubkey
+        WHERE e.pubkey = :pubkey AND e.kind = 30023
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        LIMIT :limit
+    """)
+    fun userLongformFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+```
+
+- [ ] **Step 4: Add pass-through methods to EventRepository**
+
+In `EventRepository.kt`, add after `userPostsFlow` (after line 45):
+```kotlin
+    fun userNotesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userNotesFlow(pubkey, limit)
+
+    fun userRepliesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userRepliesFlow(pubkey, limit)
+
+    fun userLongformFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>> =
+        eventDao.userLongformFlow(pubkey, limit)
+```
+
+- [ ] **Step 5: Build and verify**
+
+Build in Android Studio. All queries should compile against FeedRow.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/db/dao/EventDao.kt \
+       app/src/main/kotlin/com/unsilence/app/data/repository/EventRepository.kt
+git commit -m "feat: add filtered DAO queries for profile tabs (notes/replies/longform)"
+```
+
+---
+
+### Task 9: ProfileTab Enum + ProfileTabRow Composable
+
+**Files:**
+- Create: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileTab.kt`
+
+- [ ] **Step 1: Create ProfileTab.kt**
+
+Create `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileTab.kt`:
+```kotlin
+package com.unsilence.app.ui.profile
+
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.TextSecondary
+
+enum class ProfileTab { NOTES, REPLIES, LONGFORM }
+
+@Composable
+fun ProfileTabRow(
+    selectedTab: ProfileTab,
+    onTabSelected: (ProfileTab) -> Unit,
+) {
+    TabRow(
+        selectedTabIndex = selectedTab.ordinal,
+        containerColor   = Black,
+        contentColor     = Color.White,
+        indicator        = { tabPositions ->
+            if (selectedTab.ordinal < tabPositions.size) {
+                TabRowDefaults.SecondaryIndicator(
+                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab.ordinal]),
+                    color    = Cyan,
+                )
+            }
+        },
+    ) {
+        ProfileTab.entries.forEach { tab ->
+            Tab(
+                selected = selectedTab == tab,
+                onClick  = { onTabSelected(tab) },
+                text     = {
+                    Text(
+                        text  = when (tab) {
+                            ProfileTab.NOTES    -> "Notes"
+                            ProfileTab.REPLIES  -> "Replies"
+                            ProfileTab.LONGFORM -> "Longform"
+                        },
+                        color = if (selectedTab == tab) Color.White else TextSecondary,
+                    )
+                },
+            )
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Build and verify**
+
+Build in Android Studio. The new file should compile cleanly.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileTab.kt
+git commit -m "feat: add ProfileTab enum and ProfileTabRow composable"
+```
+
+---
+
+### Task 10: Wire Profile Tabs into ViewModels + Screens
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileViewModel.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileScreen.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileScreen.kt`
+
+- [ ] **Step 1: Add tab state and tabPostsFlow to ProfileViewModel**
+
+In `ProfileViewModel.kt`, add imports:
+```kotlin
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
+```
+
+Add after `postsFlow` (after line 53):
+```kotlin
+    // ── Profile tabs ──────────────────────────────────────────────────
+    val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val tabPostsFlow: Flow<List<FeedRow>> =
+        if (pubkeyHex != null) {
+            selectedTab.flatMapLatest { tab ->
+                when (tab) {
+                    ProfileTab.NOTES    -> eventRepository.userNotesFlow(pubkeyHex)
+                    ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pubkeyHex)
+                    ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pubkeyHex)
+                }
+            }
+        } else emptyFlow()
+```
+
+Update the `fetchMissingProfiles` collectLatest to use `tabPostsFlow` instead of `postsFlow`:
+```kotlin
+    // Fetch missing profiles for repost original authors as posts arrive
+    viewModelScope.launch {
+        tabPostsFlow.collectLatest { rows ->
+            // ... same body as before
+        }
+    }
+```
+
+- [ ] **Step 2: Add tab state and tabPostsFlow to UserProfileViewModel**
+
+In `UserProfileViewModel.kt`, add after `postsFlow` (after line 61):
+```kotlin
+    // ── Profile tabs ──────────────────────────────────────────────────
+    val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+
+    val tabPostsFlow: Flow<List<FeedRow>> =
+        combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab -> pk to tab }
+            .flatMapLatest { (pk, tab) ->
+                when (tab) {
+                    ProfileTab.NOTES    -> eventRepository.userNotesFlow(pk)
+                    ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pk)
+                    ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pk)
+                }
+            }
+```
+
+Reset tab on profile load — in `loadProfile()` (line 102), add:
+```kotlin
+        selectedTab.value = ProfileTab.NOTES
+```
+
+Update the `fetchMissingProfiles` collectLatest to use `tabPostsFlow` instead of `postsFlow`.
+
+- [ ] **Step 3: Update ProfileScreen to use tabs**
+
+In `ProfileScreen.kt`, add imports:
+```kotlin
+import androidx.compose.runtime.collectAsState
+```
+
+Change posts collection (line 75) from:
+```kotlin
+    val posts           by viewModel.postsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+```
+to:
+```kotlin
+    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
+```
+
+Replace the "Posts section header" item (lines 244-256) with:
+```kotlin
+            // ── Profile tabs ──────────────────────────────────────────────────
+            item {
+                ProfileTabRow(
+                    selectedTab   = selectedTab,
+                    onTabSelected = { viewModel.selectedTab.value = it },
+                )
+            }
+```
+
+Update the empty state text to be tab-aware:
+```kotlin
+            if (posts.isEmpty()) {
+                item {
+                    Text(
+                        text     = when (selectedTab) {
+                            ProfileTab.NOTES    -> "No notes yet"
+                            ProfileTab.REPLIES  -> "No replies yet"
+                            ProfileTab.LONGFORM -> "No articles yet"
+                        },
+                        color    = TextSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(Spacing.medium),
+                    )
+                }
+            }
+```
+
+- [ ] **Step 4: Update UserProfileScreen to use tabs**
+
+Apply the same pattern to `UserProfileScreen.kt`:
+
+Change posts collection (line 81):
+```kotlin
+    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
+```
+
+Replace the "Posts section header" item (lines 257-269) with the same `ProfileTabRow` pattern.
+
+Update empty state text to be tab-aware (same as ProfileScreen).
+
+- [ ] **Step 5: Handle longform article taps**
+
+In both `ProfileScreen.kt` and `UserProfileScreen.kt`, the `NoteCard` already handles kind-30023 via `ArticleReaderScreen` if that's wired up. Verify: check if NoteCard or the profile screens handle article taps. If not, add:
+
+```kotlin
+// In the items() block, before NoteCard:
+var showArticle by remember { mutableStateOf<FeedRow?>(null) }
+
+// After NoteCard, check for article tap:
+if (row.kind == 30023) {
+    // NoteCard click should open ArticleReaderScreen
+}
+```
+
+Check existing code first — this may already work via the existing NoteCard article handling.
+
+- [ ] **Step 6: Build and verify**
+
+Build in Android Studio. Test:
+- Own profile: tabs should show Notes/Replies/Longform with cyan underline
+- Other user profile: same tabs
+- Tab switching should filter content correctly
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileViewModel.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileScreen.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileScreen.kt
+git commit -m "feat: add Notes/Replies/Longform tabs to profile screens
+
+Shared ProfileTabRow composable, tab-specific DAO queries via flatMapLatest.
+Both own profile and other user profiles get the same tab system."
+```
+
+---
+
+## Chunk 4: Followers Count — NIP-45 (Task 4)
+
+### Task 11: RelayPool.sendCount() — NIP-45 COUNT Support
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/relay/RelayPool.kt`
+
+**Bail-out:** If this gets complicated, skip. Show "—" for followers, ship what we have.
+
+- [ ] **Step 1: Read RelayPool and RelayConnection to understand WebSocket messaging**
+
+Read the full `RelayPool.kt` and the `RelayConnection` class to understand:
+- How messages are sent to relays (`send()` or `sendMessage()`)
+- How responses are received and dispatched
+- Whether there's a way to intercept a one-shot response without routing through EventProcessor
+
+- [ ] **Step 2: Implement sendCount()**
+
+Add to `RelayPool.kt`:
+
+```kotlin
+    /**
+     * NIP-45 COUNT query: send a COUNT request to a single relay and wait for the response.
+     * Returns the count, or null if the relay doesn't support NIP-45 or times out.
+     */
+    suspend fun sendCount(relayUrl: String, filter: JsonObject): Long? =
+        withContext(Dispatchers.IO) {
+            try {
+                val subId = "count-${System.nanoTime()}"
+                val countRequest = buildJsonArray {
+                    add("COUNT")
+                    add(subId)
+                    add(filter)
+                }.toString()
+
+                // Use existing connection if available, otherwise open temporary one
+                val conn = connections[relayUrl]
+                if (conn == null) return@withContext null
+
+                val result = CompletableDeferred<Long?>()
+
+                // Register a one-shot message listener for the COUNT response
+                conn.setCountListener(subId) { count ->
+                    result.complete(count)
+                }
+
+                conn.send(countRequest)
+
+                // Wait up to 10 seconds for response
+                withTimeoutOrNull(10_000) { result.await() }
+            } catch (_: Exception) { null }
+        }
+```
+
+**Note:** This depends on `RelayConnection` having a way to register a one-shot listener for COUNT responses. Read the actual `RelayConnection` code to determine the right approach. If `RelayConnection` routes everything through `EventProcessor.process()` and there's no easy way to intercept COUNT responses, the implementation needs to:
+
+1. Add COUNT response detection in `RelayConnection.onMessage()`
+2. Route COUNT responses to a callback instead of EventProcessor
+
+If this requires significant changes to RelayConnection, **bail out** — skip Task 11 entirely.
+
+- [ ] **Step 3: If bail-out — skip to commit with TODO comment**
+
+If sendCount is too complex, add a TODO to `ProfileViewModel.kt`:
+```kotlin
+    // TODO Sprint 24: Add NIP-45 COUNT for followers via RelayPool.sendCount()
+```
+
+- [ ] **Step 4: Build and verify**
+
+Build in Android Studio.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A
+git commit -m "feat: add NIP-45 COUNT support to RelayPool (followers count)"
+# OR if bailed out:
+git commit -m "chore: skip NIP-45 followers count — deferred to Sprint 24"
+```
+
+---
+
+### Task 12: Wire Followers Count into ProfileViewModel + UI
+
+**Only if Task 11 succeeded. If bailed out, skip this task.**
+
+**Files:**
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/entity/UserEntity.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/Migrations.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/AppDatabase.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/di/DatabaseModule.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/data/db/dao/UserDao.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt`
+- Modify: `app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileScreen.kt`
+
+- [ ] **Step 1: Add follower columns to UserEntity**
+
+In `UserEntity.kt`, add after `updatedAt` (after line 35):
+```kotlin
+    @ColumnInfo(name = "follower_count")
+    val followerCount: Long? = null,
+
+    @ColumnInfo(name = "follower_count_updated_at")
+    val followerCountUpdatedAt: Long? = null,
+```
+
+- [ ] **Step 2: Add MIGRATION_5_6**
+
+In `Migrations.kt`, add:
+```kotlin
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE users ADD COLUMN follower_count INTEGER")
+        db.execSQL("ALTER TABLE users ADD COLUMN follower_count_updated_at INTEGER")
+    }
+}
+```
+
+Bump `AppDatabase.kt` version to 6. Add `MIGRATION_5_6` to `DatabaseModule.kt`.
+
+- [ ] **Step 3: Add UserDao methods for follower count**
+
+In `UserDao.kt`, add:
+```kotlin
+    @Query("SELECT follower_count FROM users WHERE pubkey = :pubkey")
+    suspend fun getFollowerCount(pubkey: String): Long?
+
+    @Query("SELECT follower_count_updated_at FROM users WHERE pubkey = :pubkey")
+    suspend fun getFollowerCountUpdatedAt(pubkey: String): Long?
+
+    @Query("UPDATE users SET follower_count = :count, follower_count_updated_at = :updatedAt WHERE pubkey = :pubkey")
+    suspend fun updateFollowerCount(pubkey: String, count: Long, updatedAt: Long)
+```
+
+- [ ] **Step 4: Add follower count fetching to ProfileViewModel**
+
+In `ProfileViewModel.kt`, add:
+```kotlin
+    val followerCount = MutableStateFlow<Long?>(null)
+
+    init {
+        // Fetch follower count via NIP-45
+        if (pubkeyHex != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                // Check cache first
+                val cached = userDao.getFollowerCount(pubkeyHex)
+                val cachedAt = userDao.getFollowerCountUpdatedAt(pubkeyHex)
+                val oneDayAgo = System.currentTimeMillis() / 1000 - 86_400
+
+                if (cached != null && cachedAt != null && cachedAt > oneDayAgo) {
+                    followerCount.value = cached
+                    return@launch
+                }
+
+                val count = relayPool.sendCount(
+                    relayUrl = "wss://purplepag.es",
+                    filter = buildJsonObject {
+                        put("kinds", buildJsonArray { add(3) })
+                        put("#p", buildJsonArray { add(pubkeyHex) })
+                    },
+                )
+                if (count != null) {
+                    followerCount.value = count
+                    userDao.updateFollowerCount(pubkeyHex, count, System.currentTimeMillis() / 1000)
+                }
+            }
+        }
+    }
+```
+
+Add necessary imports and `UserDao` injection.
+
+- [ ] **Step 5: Update ProfileScreen stats row**
+
+Change the Followers StatLabel:
+```kotlin
+    val followerCount by viewModel.followerCount.collectAsStateWithLifecycle()
+```
+
+```kotlin
+    StatLabel(
+        label = "Followers",
+        value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+    )
+```
+
+Note: `toCompactSats()` is declared `internal` in NoteCard.kt (Task 6). Import it directly: `import com.unsilence.app.ui.feed.toCompactSats`.
+
+- [ ] **Step 6: Build and verify**
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A
+git commit -m "feat: show approximate follower count via NIP-45 COUNT
+
+Queries purplepag.es for kind-3 events mentioning the user's pubkey.
+Cached in Room, refreshed daily. Shows '~12.5k followers' format."
+```
+
+---
+
+## Post-Implementation
+
+After all tasks are complete:
+1. Build full project in Android Studio
+2. Test on device: cold launch, own profile, other user profile, zap display, tab switching
+3. Verify no regressions in feed, thread view, search
+4. Final commit with any cleanup
+
+
+
+===== FILE: docs/superpowers/plans/2026-03-15-sprint24-threads-follow-publish.md =====
+
+# Sprint 24: Thread Nesting, Follow/Unfollow, Publish Replaceable Kinds
+
+> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add visual thread nesting with depth indicators, follow/unfollow buttons on user profiles, and publish replaceable events (kind-0, kind-3, kind-10002) to the network.
+
+**Architecture:** Thread nesting is a pure ViewModel+UI change — flatten the tree with depth annotations, render with indents and vertical lines. Follow/Unfollow adds a reactive button on UserProfileScreen backed by FollowDao + kind-3 publishing. Replaceable event publishing adds a `publishToRelays()` helper on RelayPool that targets write relays + indexer relays, then wires it into ProfileViewModel.saveProfile() and a new relay management screen.
+
+**Tech Stack:** Kotlin, Jetpack Compose, Room, Hilt, Quartz (Nostr), OkHttp WebSockets, ExoPlayer
+
+---
+
+## Chunk 1: Feature 1 — Nested Thread Replies
+
+### Task 1: Flatten thread tree with depth annotations in ThreadViewModel
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/thread/ThreadViewModel.kt`
+
+The current `ThreadUiState.replies` is a flat `List<FeedRow>` sorted by `created_at ASC`. The SQL already returns `reply_to_id` for each row. We need to build a tree and flatten it with depth.
+
+- [ ] **Step 1: Add DepthRow data class and update ThreadUiState**
+
+In `ThreadViewModel.kt`, add before the class:
+
+```kotlin
+data class DepthRow(val row: FeedRow, val depth: Int)
+```
+
+Change `ThreadUiState`:
+
+```kotlin
+data class ThreadUiState(
+    val focusedNote: FeedRow? = null,
+    val replies: List<DepthRow> = emptyList(),
+    val loading: Boolean = true,
+)
+```
+
+- [ ] **Step 2: Implement tree flattening in the collect block**
+
+Replace the `.collect` block inside `init`:
+
+```kotlin
+.collect { rows ->
+    val focusedId = eventIdFlow.value ?: return@collect
+    val focused = rows.firstOrNull { it.id == focusedId }
+    // Filter to kind-1 only, exclude the focused note
+    val replyRows = rows.filter { it.id != focusedId && it.kind == 1 }
+
+    // Build parent→children map
+    val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
+        .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
+
+    // DFS flatten with depth
+    val flatList = mutableListOf<DepthRow>()
+    fun walk(parentId: String, depth: Int) {
+        childrenOf[parentId]?.forEach { row ->
+            flatList.add(DepthRow(row, depth.coerceAtMost(4)))
+            walk(row.id, depth + 1)
+        }
+    }
+    walk(focusedId, 1)
+
+    _uiState.value = ThreadUiState(
+        focusedNote = focused,
+        replies     = flatList,
+        loading     = false,
+    )
+}
+```
+
+- [ ] **Step 3: Build and verify compilation**
+
+Run: `./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-17-openjdk assembleDebug 2>&1 | grep -E "^e:|BUILD"`
+Expected: BUILD SUCCESSFUL (ThreadScreen will have type errors — that's next)
+
+### Task 2: Render nested replies in ThreadScreen
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/thread/ThreadScreen.kt`
+
+- [ ] **Step 1: Add drawBehind import and update reply rendering**
+
+Add imports at top:
+
+```kotlin
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+```
+
+Replace the `items(state.replies, key = { it.id }) { reply ->` block (lines 158-175) with:
+
+```kotlin
+items(state.replies, key = { it.row.id }) { depthRow ->
+    val reply = depthRow.row
+    val depth = depthRow.depth
+    val indent = (depth * 20).dp
+    val lineColor = Color.White.copy(alpha = 0.06f)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                // Draw vertical nesting lines for each depth level
+                for (d in 1..depth) {
+                    val x = (d * 20).dp.toPx()
+                    drawLine(
+                        color       = lineColor,
+                        start       = Offset(x, 0f),
+                        end         = Offset(x, size.height),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                }
+            }
+            .padding(start = indent),
+    ) {
+        NoteCard(
+            row             = reply,
+            onAuthorClick   = onAuthorClick,
+            hasReacted      = reply.engagementId in reactedIds,
+            hasReposted     = reply.engagementId in repostedIds,
+            hasZapped       = reply.engagementId in zappedIds,
+            isNwcConfigured = isNwcConfigured,
+            onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
+            onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+            onQuote         = onQuote,
+            onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
+            lookupProfile   = actionsViewModel::lookupProfile,
+            lookupEvent     = actionsViewModel::lookupEvent,
+            fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+        )
+    }
+}
+```
+
+- [ ] **Step 2: Update reply count to use new structure**
+
+Change `state.replies.size` reference (line 149) — it should still work since `DepthRow` list `.size` is correct. Just verify:
+
+```kotlin
+"${state.replies.size} ${if (state.replies.size == 1) "reply" else "replies"}"
+```
+
+- [ ] **Step 3: Build and verify**
+
+Run: `./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-17-openjdk assembleDebug 2>&1 | grep -E "^e:|BUILD"`
+Expected: BUILD SUCCESSFUL
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/ui/thread/ThreadViewModel.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/thread/ThreadScreen.kt
+git commit -m "feat: nested thread replies with depth indentation and vertical lines"
+```
+
+---
+
+## Chunk 2: Feature 2 — Follow/Unfollow Button
+
+### Task 3: Add isFollowing query to FollowDao
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/db/dao/FollowDao.kt`
+
+- [ ] **Step 1: Add reactive isFollowing query**
+
+Add to `FollowDao`:
+
+```kotlin
+/** Reactive check: does this pubkey exist in the follows table? */
+@Query("SELECT COUNT(*) > 0 FROM follows WHERE pubkey = :pubkey")
+abstract fun isFollowingFlow(pubkey: String): Flow<Boolean>
+
+@Insert(onConflict = OnConflictStrategy.REPLACE)
+abstract suspend fun insert(follow: FollowEntity)
+
+@Query("DELETE FROM follows WHERE pubkey = :pubkey")
+abstract suspend fun delete(pubkey: String)
+```
+
+### Task 4: Add publishToRelays() to RelayPool
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/relay/RelayPool.kt`
+
+- [ ] **Step 1: Add targeted publish method**
+
+Add below the existing `publish()` method:
+
+```kotlin
+/**
+ * Publish an event to specific relay URLs. Connects if not already connected.
+ * Used for replaceable events (kind 0, 3, 10002) that target write + indexer relays.
+ */
+fun publishToRelays(eventJson: String, relayUrls: List<String>) {
+    val cmd = buildJsonArray {
+        add(JsonPrimitive("EVENT"))
+        add(NostrJson.parseToJsonElement(eventJson))
+    }.toString()
+
+    for (url in relayUrls) {
+        val conn = connections[url]
+        if (conn != null) {
+            conn.send(cmd)
+        } else {
+            // Connect and send once ready
+            scope.launch {
+                val newConn = connectSingle(url)
+                newConn?.send(cmd)
+            }
+        }
+    }
+    Log.d(TAG, "Published event to ${relayUrls.size} targeted relay(s)")
+}
+```
+
+Note: If `connectSingle` doesn't exist as a private method, use the existing `connect()` pattern — connect to the URL list first, then send. Adjust based on actual RelayPool internals. An alternative simpler approach:
+
+```kotlin
+fun publishToRelays(eventJson: String, relayUrls: List<String>) {
+    val cmd = buildJsonArray {
+        add(JsonPrimitive("EVENT"))
+        add(NostrJson.parseToJsonElement(eventJson))
+    }.toString()
+
+    // Send to already-connected relays immediately
+    val sent = mutableSetOf<String>()
+    for (url in relayUrls) {
+        connections[url]?.let { it.send(cmd); sent.add(url) }
+    }
+
+    // Connect to remaining relays and send
+    val remaining = relayUrls.filter { it !in sent }
+    if (remaining.isNotEmpty()) {
+        scope.launch {
+            connect(remaining)
+            delay(2_000) // Allow connections to establish
+            for (url in remaining) {
+                connections[url]?.send(cmd)
+            }
+        }
+    }
+
+    Log.d(TAG, "Published event to ${sent.size} connected + ${remaining.size} pending relay(s)")
+}
+```
+
+### Task 5: Add follow/unfollow logic to UserProfileViewModel
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileViewModel.kt`
+
+- [ ] **Step 1: Add dependencies to constructor**
+
+Add to constructor:
+
+```kotlin
+private val keyManager: KeyManager,
+private val signingManager: SigningManager,
+private val followDao: FollowDao,
+private val relayListDao: RelayListDao,
+```
+
+Add imports:
+
+```kotlin
+import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.RelayListDao
+import com.unsilence.app.data.db.entity.FollowEntity
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
+import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+```
+
+- [ ] **Step 2: Add isFollowing flow and follow/unfollow methods**
+
+Add to the class body:
+
+```kotlin
+/** Whether the logged-in user follows the viewed pubkey. */
+@OptIn(ExperimentalCoroutinesApi::class)
+val isFollowing: Flow<Boolean> = _pubkeyHex
+    .filterNotNull()
+    .flatMapLatest { followDao.isFollowingFlow(it) }
+
+val followLoading = MutableStateFlow(false)
+
+private val myPubkey: String? = keyManager.getPublicKeyHex()
+
+fun toggleFollow() {
+    val targetPubkey = _pubkeyHex.value ?: return
+    if (myPubkey == null) return
+    if (followLoading.value) return
+    followLoading.value = true
+
+    viewModelScope.launch(Dispatchers.IO) {
+        try {
+            val currentFollows = followDao.allPubkeys()
+            val nowFollowing = targetPubkey in currentFollows
+            val newFollowList = if (nowFollowing) {
+                currentFollows.filter { it != targetPubkey }
+            } else {
+                currentFollows + targetPubkey
+            }
+
+            // Build kind-3 event with all p-tags
+            val nowSeconds = System.currentTimeMillis() / 1000L
+            val tags = newFollowList.map { arrayOf("p", it) }.toTypedArray()
+            val template = EventTemplate<Event>(
+                createdAt = nowSeconds,
+                kind      = 3,
+                tags      = tags,
+                content   = "",
+            )
+            val signed = signingManager.sign(template) ?: return@launch
+
+            // Publish to write relays + indexer relays
+            val writeUrls = getWriteRelayUrls(myPubkey)
+            val targetUrls = (writeUrls + INDEXER_RELAY_URLS).distinct()
+            relayPool.publishToRelays(toEventJson(signed), targetUrls)
+
+            // Update local follows table
+            if (nowFollowing) {
+                followDao.delete(targetPubkey)
+            } else {
+                followDao.insert(FollowEntity(pubkey = targetPubkey, followedAt = nowSeconds))
+            }
+        } finally {
+            followLoading.value = false
+        }
+    }
+}
+
+private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
+    val relayList = relayListDao.getByPubkey(pubkey) ?: return GLOBAL_RELAY_URLS
+    return runCatching {
+        Json.decodeFromString<List<String>>(relayList.writeRelays)
+    }.getOrDefault(GLOBAL_RELAY_URLS)
+}
+
+private fun toEventJson(event: Event): String = buildJsonObject {
+    put("id",         event.id)
+    put("pubkey",     event.pubKey)
+    put("created_at", event.createdAt)
+    put("kind",       event.kind)
+    put("tags",       buildJsonArray {
+        event.tags.forEach { row ->
+            add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
+        }
+    })
+    put("content",    event.content)
+    put("sig",        event.sig)
+}.toString()
+
+companion object {
+    private val INDEXER_RELAY_URLS = listOf(
+        "wss://purplepag.es",
+        "wss://user.kindpag.es",
+        "wss://indexer.coracle.social",
+        "wss://antiprimal.net",
+    )
+    private val GLOBAL_RELAY_URLS = listOf(
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://nostr.mom",
+        "wss://relay.nostr.net",
+        "wss://relay.primal.net",
+    )
+}
+```
+
+### Task 6: Add Follow/Unfollow button to UserProfileScreen
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileScreen.kt`
+
+- [ ] **Step 1: Add imports and collect state**
+
+Add imports:
+
+```kotlin
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
+```
+
+In the composable body, after existing state collectors:
+
+```kotlin
+val isFollowing    by viewModel.isFollowing.collectAsStateWithLifecycle(initialValue = false)
+val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
+```
+
+- [ ] **Step 2: Add Follow button after the about/bio section**
+
+After the `about` block (after `Spacer(Modifier.height(Spacing.small))` at ~line 250), before `Spacer(Modifier.height(Spacing.large))`:
+
+```kotlin
+// Follow/Unfollow button
+Row(
+    modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = Spacing.medium),
+    horizontalArrangement = Arrangement.Center,
+) {
+    if (followLoading) {
+        CircularProgressIndicator(
+            color    = Cyan,
+            modifier = Modifier.size(24.dp),
+            strokeWidth = 2.dp,
+        )
+    } else if (isFollowing) {
+        OutlinedButton(
+            onClick = { viewModel.toggleFollow() },
+            border  = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
+                brush = androidx.compose.ui.graphics.SolidColor(Cyan),
+            ),
+            modifier = Modifier.widthIn(min = 120.dp),
+        ) {
+            Text("Following", color = Cyan, fontSize = 14.sp)
+        }
+    } else {
+        Button(
+            onClick  = { viewModel.toggleFollow() },
+            colors   = ButtonDefaults.buttonColors(containerColor = Cyan),
+            modifier = Modifier.widthIn(min = 120.dp),
+        ) {
+            Text("Follow", color = Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Build and verify**
+
+Run: `./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-17-openjdk assembleDebug 2>&1 | grep -E "^e:|BUILD"`
+Expected: BUILD SUCCESSFUL
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/src/main/kotlin/com/unsilence/app/data/db/dao/FollowDao.kt \
+       app/src/main/kotlin/com/unsilence/app/data/relay/RelayPool.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileViewModel.kt \
+       app/src/main/kotlin/com/unsilence/app/ui/profile/UserProfileScreen.kt
+git commit -m "feat: follow/unfollow button with kind-3 publishing to write+indexer relays"
+```
+
+---
+
+## Chunk 3: Feature 3 — Publish Replaceable Kinds
+
+### Task 7: Feature 3A — Edit Profile publishes kind-0 to network
+
+**Files:**
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/profile/ProfileViewModel.kt`
+
+The existing `saveProfile()` already builds kind-0 and calls `relayPool.publish()` which broadcasts to all connected relays. This needs to ALSO publish to indexer relays to ensure discovery.
+
+- [ ] **Step 1: Add relayListDao dependency and targeted publishing**
+
+Add to ProfileViewModel constructor:
+
+```kotlin
+private val relayListDao: RelayListDao,
+```
+
+Add import:
+
+```kotlin
+import com.unsilence.app.data.db.dao.RelayListDao
+```
+
+- [ ] **Step 2: Update saveProfile to publish to write + indexer relays**
+
+In `saveProfile()`, after the existing `relayPool.publish(toEventJson(signed))` line, add targeted publishing:
+
+```kotlin
+relayPool.publish(toEventJson(signed))
+
+// Also publish to indexer relays for discoverability
+val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
+val indexerUrls = listOf(
+    "wss://purplepag.es",
+    "wss://user.kindpag.es",
+    "wss://indexer.coracle.social",
+    "wss://antiprimal.net",
+)
+val targetUrls = (writeUrls + indexerUrls).distinct()
+relayPool.publishToRelays(toEventJson(signed), targetUrls)
+```
+
+Add the helper:
+
+```kotlin
+private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
+    val relayList = relayListDao.getByPubkey(pubkey) ?: return emptyList()
+    return runCatching {
+        kotlinx.serialization.json.Json.decodeFromString<List<String>>(relayList.writeRelays)
+    }.getOrDefault(emptyList())
+}
+```
+
+### Task 8: Feature 3B — Relay Management Screen
+
+**Files:**
+- Create: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/relays/RelayManagementScreen.kt`
+- Create: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/relays/RelayManagementViewModel.kt`
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/ui/profile/SettingsScreen.kt`
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/db/entity/RelayListEntity.kt`
+- Modify: `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/db/dao/RelayListDao.kt`
+
+This is the largest task. The relay management screen shows the user's NIP-65 relay list (kind 10002) and allows adding/removing relays and changing read/write markers.
+
+- [ ] **Step 1: Extend RelayListEntity to store full relay data (read+write markers)**
+
+The current entity only stores write relays as a JSON list. For full NIP-65 management we need to store all relays with their markers. Add a new entity for the user's OWN relay config (separate from the outbox-routing entity that tracks OTHER users' write relays):
+
+Create `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/db/entity/OwnRelayEntity.kt`:
+
+```kotlin
+package com.unsilence.app.data.db.entity
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * A single relay in the logged-in user's NIP-65 relay list (kind 10002).
+ * Each relay has a URL and read/write markers.
+ */
+@Entity(tableName = "own_relays")
+data class OwnRelayEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "url")
+    val url: String,
+
+    @ColumnInfo(name = "read")
+    val read: Boolean = true,
+
+    @ColumnInfo(name = "write")
+    val write: Boolean = true,
+)
+```
+
+- [ ] **Step 2: Create OwnRelayDao**
+
+Create `/home/aivii/projects/unsilence/app/src/main/kotlin/com/unsilence/app/data/db/dao/OwnRelayDao.kt`:
+
+```kotlin
+package com.unsilence.app.data.db.dao
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import com.unsilence.app.data.db.entity.OwnRelayEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+abstract class OwnRelayDao {
+
+    @Query("SELECT * FROM own_relays ORDER BY url ASC")
+    abstract fun allFlow(): Flow<List<OwnRelayEntity>>
+
+    @Query("SELECT * FROM own_relays ORDER BY url ASC")
+    abstract suspend fun getAll(): List<OwnRelayEntity>
+
+    @Query("SELECT url FROM own_relays WHERE `write` = 1")
+    abstract suspend fun writeRelayUrls(): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun upsert(relay: OwnRelayEntity)
+
+    @Query("DELETE FROM own_relays WHERE url = :url")
+    abstract suspend fun delete(url: String)
+
+    @Transaction
+    open suspend fun replaceAll(relays: List<OwnRelayEntity>) {
+        clearAll()
+        relays.forEach { upsert(it) }
+    }
+
+    @Query("DELETE FROM own_relays")
+    abstract suspend fun clearAll()
+}
+```
+
+- [ ] **Step 3: Add OwnRelayEntity to AppDatabase and create migration**
+
+Modify the `@Database` annotation in AppDatabase to include `OwnRelayEntity::class` in `entities`, bump version, and add migration:
+
+```kotlin
+// In Migrations.kt, add:
+val MIGRATION_N_NEXT = object : Migration(currentVersion, currentVersion + 1) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS own_relays (
+                url TEXT NOT NULL PRIMARY KEY,
+                `read` INTEGER NOT NULL DEFAULT 1,
+                `write` INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+    }
+}
+```
+
+Add `ownRelayDao()` abstract method to AppDatabase.
+
+Provide `OwnRelayDao` in DatabaseModule:
+
+```kotlin
+@Provides
+fun provideOwnRelayDao(db: AppDatabase): OwnRelayDao = db.ownRelayDao()
+```
+
+- [ ] **Step 4: Create RelayManagementViewModel**
+
+```kotlin
+package com.unsilence.app.ui.relays
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.db.dao.OwnRelayDao
+import com.unsilence.app.data.db.entity.OwnRelayEntity
+import com.unsilence.app.data.relay.RelayPool
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import javax.inject.Inject
+
+@HiltViewModel
+class RelayManagementViewModel @Inject constructor(
+    private val ownRelayDao: OwnRelayDao,
+    private val relayPool: RelayPool,
+    private val keyManager: KeyManager,
+    private val signingManager: SigningManager,
+) : ViewModel() {
+
+    val relays: Flow<List<OwnRelayEntity>> = ownRelayDao.allFlow()
+    val publishing = MutableStateFlow(false)
+
+    fun addRelay(url: String) {
+        val normalizedUrl = url.trim().removeSuffix("/")
+        if (normalizedUrl.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            ownRelayDao.upsert(OwnRelayEntity(url = normalizedUrl))
+            publishKind10002()
+        }
+    }
+
+    fun removeRelay(url: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ownRelayDao.delete(url)
+            publishKind10002()
+        }
+    }
+
+    fun toggleRead(relay: OwnRelayEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ownRelayDao.upsert(relay.copy(read = !relay.read))
+            publishKind10002()
+        }
+    }
+
+    fun toggleWrite(relay: OwnRelayEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ownRelayDao.upsert(relay.copy(write = !relay.write))
+            publishKind10002()
+        }
+    }
+
+    private suspend fun publishKind10002() {
+        publishing.value = true
+        try {
+            val allRelays = ownRelayDao.getAll()
+            val tags = allRelays.map { relay ->
+                when {
+                    relay.read && relay.write -> arrayOf("r", relay.url)
+                    relay.read               -> arrayOf("r", relay.url, "read")
+                    relay.write              -> arrayOf("r", relay.url, "write")
+                    else                     -> return@map null
+                }
+            }.filterNotNull().toTypedArray()
+
+            val template = EventTemplate<Event>(
+                createdAt = System.currentTimeMillis() / 1000L,
+                kind      = 10002,
+                tags      = tags,
+                content   = "",
+            )
+            val signed = signingManager.sign(template) ?: return
+
+            val eventJson = toEventJson(signed)
+            val writeUrls = allRelays.filter { it.write }.map { it.url }
+            val indexerUrls = listOf(
+                "wss://purplepag.es",
+                "wss://user.kindpag.es",
+                "wss://indexer.coracle.social",
+                "wss://antiprimal.net",
+            )
+            relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
+        } finally {
+            publishing.value = false
+        }
+    }
+
+    private fun toEventJson(event: Event): String = buildJsonObject {
+        put("id",         event.id)
+        put("pubkey",     event.pubKey)
+        put("created_at", event.createdAt)
+        put("kind",       event.kind)
+        put("tags",       buildJsonArray {
+            event.tags.forEach { row ->
+                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
+            }
+        })
+        put("content",    event.content)
+        put("sig",        event.sig)
+    }.toString()
+}
+```
+
+- [ ] **Step 5: Create RelayManagementScreen**
+
+```kotlin
+package com.unsilence.app.ui.relays
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.data.db.entity.OwnRelayEntity
+import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Sizing
+import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.TextSecondary
+
+@Composable
+fun RelayManagementScreen(
+    onDismiss: () -> Unit,
+    viewModel: RelayManagementViewModel = hiltViewModel(),
+) {
+    BackHandler(onBack = onDismiss)
+    val relays by viewModel.relays.collectAsStateWithLifecycle(initialValue = emptyList())
+    var newRelayUrl by remember { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(Black),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Black)
+                    .statusBarsPadding()
+                    .height(Sizing.topBarHeight)
+                    .padding(horizontal = Spacing.small),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                }
+                Text("Relays", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+            // Add relay input
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicTextField(
+                    value         = newRelayUrl,
+                    onValueChange = { newRelayUrl = it },
+                    textStyle     = TextStyle(color = Color.White, fontSize = 14.sp),
+                    cursorBrush   = SolidColor(Cyan),
+                    singleLine    = true,
+                    modifier      = Modifier.weight(1f),
+                    decorationBox = { inner ->
+                        Box {
+                            if (newRelayUrl.isEmpty()) {
+                                Text("wss://relay.example.com", color = TextSecondary, fontSize = 14.sp)
+                            }
+                            inner()
+                        }
+                    },
+                )
+                Spacer(Modifier.width(Spacing.small))
+                IconButton(
+                    onClick = {
+                        if (newRelayUrl.isNotBlank()) {
+                            viewModel.addRelay(newRelayUrl)
+                            newRelayUrl = ""
+                        }
+                    },
+                ) {
+                    Icon(Icons.Filled.Add, "Add relay", tint = Cyan)
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
+
+            // Relay list
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(relays, key = { it.url }) { relay ->
+                    RelayRow(
+                        relay        = relay,
+                        onToggleRead  = { viewModel.toggleRead(relay) },
+                        onToggleWrite = { viewModel.toggleWrite(relay) },
+                        onDelete      = { viewModel.removeRelay(relay.url) },
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        thickness = 0.5.dp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelayRow(
+    relay: OwnRelayEntity,
+    onToggleRead: () -> Unit,
+    onToggleWrite: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text     = relay.url.removePrefix("wss://"),
+                color    = Color.White,
+                fontSize = 14.sp,
+                maxLines = 1,
+            )
+            Row {
+                MarkerChip(label = "Read", active = relay.read, onClick = onToggleRead)
+                Spacer(Modifier.width(6.dp))
+                MarkerChip(label = "Write", active = relay.write, onClick = onToggleWrite)
+            }
+        }
+        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Filled.Delete, "Remove relay", tint = Color(0xFFCF6679), modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@Composable
+private fun MarkerChip(label: String, active: Boolean, onClick: () -> Unit) {
+    Text(
+        text     = label,
+        color    = if (active) Cyan else TextSecondary,
+        fontSize = 11.sp,
+        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .background(
+                if (active) Cyan.copy(alpha = 0.1f) else Color.Transparent,
+                RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
+}
+```
+
+- [ ] **Step 6: Wire SettingsScreen "Relays" item to RelayManagementScreen**
+
+In `SettingsScreen.kt`, add state and navigation:
+
+Add import:
+```kotlin
+import com.unsilence.app.ui.relays.RelayManagementScreen
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Dns
+```
+
+Add state var in the composable:
+```kotlin
+var showRelays by remember { mutableStateOf(false) }
+```
+
+Add a "Relays" menu item (before the Wallet item):
+```kotlin
+SettingsItem(icon = Icons.Filled.Dns, label = "Relays", onClick = { showRelays = true })
+```
+
+At the end of the composable, add the overlay:
+```kotlin
+if (showRelays) {
+    RelayManagementScreen(onDismiss = { showRelays = false })
+}
+```
+
+- [ ] **Step 7: Seed own_relays from kind-10002 on bootstrap**
+
+In `OutboxRouter.handleKind10002()`, when the event is for the logged-in user, also populate `own_relays`:
+
+Add `OwnRelayDao` to OutboxRouter constructor:
+```kotlin
+private val ownRelayDao: OwnRelayDao,
+```
+
+In `handleKind10002()`, after the existing `relayListDao.upsert(...)`:
+
+```kotlin
+// If this is our own relay list, populate own_relays table
+if (pubkey == keyManager.getPublicKeyHex()) {
+    val ownRelays = tags
+        .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "r" }
+        .mapNotNull { tag ->
+            val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val marker = tag.jsonArray.getOrNull(2)?.jsonPrimitive?.content
+            OwnRelayEntity(
+                url   = url,
+                read  = marker == null || marker.isBlank() || marker == "read",
+                write = marker == null || marker.isBlank() || marker == "write",
+            )
+        }
+    if (ownRelays.isNotEmpty()) {
+        ownRelayDao.replaceAll(ownRelays)
+        Log.d(TAG, "Seeded ${ownRelays.size} own relays from kind 10002")
+    }
+}
+```
+
+Add import:
+```kotlin
+import com.unsilence.app.data.db.dao.OwnRelayDao
+import com.unsilence.app.data.db.entity.OwnRelayEntity
+```
+
+- [ ] **Step 8: Build and verify**
+
+Run: `./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-17-openjdk assembleDebug 2>&1 | grep -E "^e:|BUILD"`
+Expected: BUILD SUCCESSFUL
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "feat: publish replaceable events (kind-0 profile, kind-3 follows, kind-10002 relays) to write+indexer relays"
+```
+
+---
+
+## Summary of Files
+
+| Action | File |
+|--------|------|
+| Modify | `app/.../ui/thread/ThreadViewModel.kt` |
+| Modify | `app/.../ui/thread/ThreadScreen.kt` |
+| Modify | `app/.../data/db/dao/FollowDao.kt` |
+| Modify | `app/.../data/relay/RelayPool.kt` |
+| Modify | `app/.../ui/profile/UserProfileViewModel.kt` |
+| Modify | `app/.../ui/profile/UserProfileScreen.kt` |
+| Modify | `app/.../ui/profile/ProfileViewModel.kt` |
+| Modify | `app/.../ui/profile/SettingsScreen.kt` |
+| Modify | `app/.../data/relay/OutboxRouter.kt` |
+| Modify | `app/.../data/db/AppDatabase.kt` |
+| Modify | `app/.../data/db/Migrations.kt` |
+| Modify | `app/.../di/DatabaseModule.kt` |
+| Create | `app/.../data/db/entity/OwnRelayEntity.kt` |
+| Create | `app/.../data/db/dao/OwnRelayDao.kt` |
+| Create | `app/.../ui/relays/RelayManagementViewModel.kt` |
+| Create | `app/.../ui/relays/RelayManagementScreen.kt` |
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-13-sprint18-foundation-fixes-design.md =====
+
+# Sprint 18: Foundation Fixes — Design Spec
+
+> **Scope:** Tasks 1-4 only. Resolves bugs A1, A2, A9, A10.
+> Sprints 19-20 (A3-A8) are separate.
+
+---
+
+## Codebase Constraints
+
+- **DI:** Hilt only (KSP, not kapt)
+- **Events:** Quartz library types, `EventTemplate` constructor pattern
+- **Build:** Never run `./gradlew` while Android Studio is open
+- **Git:** Operations from `aivii` user terminal
+- **Room migrations:** Non-destructive only
+- **Versions:** Kotlin 2.3.0, KSP 2.3.0, Hilt 2.58, Room 2.7.1, AGP 8.9.1, compileSdk/targetSdk 36
+
+---
+
+## Task 1: RelayConnection + RelayPool Health (Resolves A9, A10)
+
+### 1a. RelayConnection — State Tracking
+
+**File:** `data/relay/RelayConnection.kt`
+
+**State tracking:**
+- Add `RelayState` enum: `CONNECTING`, `CONNECTED`, `DISCONNECTED`, `FAILED`
+- Expose `val state: StateFlow<RelayState>`
+- Update state in: `connect()` → CONNECTING, `onOpen` → CONNECTED, `onFailure` → FAILED, `onClosing`/`close()` → DISCONNECTED
+
+**No `reconnect()` method on RelayConnection.** The `_messages` Channel is closed on failure/disconnect, and a closed Kotlin Channel cannot be reopened. Reconnection must create a new `RelayConnection` instance — this is already the pattern used by `RelayPool`. Backoff logic lives in `RelayPool` (see 1b).
+
+**Zombie detection:**
+- OkHttp already has `pingInterval(25s)` in `AppModule`. Ping failure triggers `onFailure`, which triggers backoff reconnect at the `RelayPool` level. No custom ping/pong needed.
+
+### 1b. RelayPool — Orchestration & Backoff
+
+**File:** `data/relay/RelayPool.kt`
+
+**Backoff reconnection (owned by RelayPool, not RelayConnection):**
+- On `RelayConnection.onFailure` (detected via state flow or callback): create a new `RelayConnection` instance for that relay URL with exponential backoff delays: 1s, 2s, 4s, 8s, ..., max 30s
+- Reset backoff counter to 0 on successful connect (`CONNECTED` state)
+- `AtomicBoolean` guard per relay URL — `compareAndSet(false, true)` before launching reconnect, reset on success or max retries exhausted
+- Replace the old connection in the `connections` map with the new instance
+- Re-launch `listenForEvents()` coroutine for the new connection
+
+**Persistent subscription tracking:**
+- Add `persistentSubs: ConcurrentHashMap<String, PersistentSub>` where `PersistentSub` holds subscription ID, filters, and `lastEventTime: Long` (Unix seconds)
+- Register persistent subs when created: `feed-*`, `follows-*`, `notifs-*`
+- Update `lastEventTime` when events arrive for a subscription
+- Clear map on teardown
+
+**Lifecycle reconnection (enhance existing `reconnectAll()`):**
+- `MainActivity` already calls `reconnectAll()` on `ON_START` — keep that hook
+- `reconnectAll()` iterates connections, creates new instances only for those with state `DISCONNECTED` or `FAILED`
+- After successful reconnect: replay persistent subs with updated `since` = `max(lastEventTime - 30, 0)` (30s buffer for clock skew, Unix seconds), fallback to `now - 5 minutes` if no events received yet
+- **Known limitation:** Disconnections longer than 5 minutes may miss events. Acceptable for v1.
+
+**Fix A9 — notifications subscription:**
+- `notifs-` is already absent from `isOneShotSubscription()` — notifications survive EOSE correctly
+- Fix the stale comment on line 130 that lists `notifs-` as one-shot (it is not)
+- Register `notifs-` subscriptions in `persistentSubs` so they're **re-subscribed on reconnect** — this is the actual A9 fix
+- Ensure `fetchNotifications()` is called again after reconnect via persistent sub replay
+
+**Aggregate state exposure:**
+- Expose `val connectionStates: StateFlow<Map<String, RelayState>>` derived from individual `RelayConnection.state` flows
+- No UI work this sprint — just expose for future use
+
+**Thread safety:**
+- `connections` map and `persistentSubs` map both accessed from multiple threads (reconnection, lifecycle, message processing) — use `ConcurrentHashMap` for both
+
+---
+
+## Task 2: AppBootstrapper Gaps (Resolves A1, A2)
+
+**File:** `data/AppBootstrapper.kt`
+
+### 2a. Verify Amber Login Bootstrap (may be a no-op)
+
+- The Amber callback in `OnboardingScreen.kt` (line 61-62) calls `saveAmberLogin(pubkey)` then `onComplete()`
+- `onComplete` is wired to `RootViewModel.onOnboardingComplete()` (via `RootScreen.kt` line 16)
+- `onOnboardingComplete()` calls `bootstrapper.bootstrap(pubkey)` (line 24)
+- **This path already works.** Verify on real device with Amber. If confirmed working, mark A1 as resolved with no code changes
+- If bootstrap fails on real device despite this wiring, investigate deeper (timing, lifecycle, etc.)
+
+### 2b. Comprehensive Teardown
+
+Current `teardown()` does: disconnect relays, clear KeyManager, clear Room tables.
+
+New teardown, in this order:
+
+1. **Cancel persistent subscriptions** — clear `RelayPool.persistentSubs`, send CLOSE messages to relays
+2. **Disconnect all WebSockets** — already done
+3. **Clear all Room tables** — already done
+4. **Clear SharedPreferences** — project uses `EncryptedSharedPreferences` (not DataStore). Any cached prefs beyond KeyManager (if any) should be cleared here. Relay set selections are in Room and already cleared in step 3
+5. **Clear KeyManager** — already done
+6. **Cancel child scopes** — call `OutboxRouter.stop()`, `EventProcessor.stop()` to cancel their internal coroutines. **Do NOT cancel AppBootstrapper's own scope** — it must survive for next login
+7. **Reset in-memory state** — `EventProcessor.seenIds.clear()`, clear `RelayPool` connection map
+8. **Navigate to onboarding screen**
+
+`OutboxRouter` and `EventProcessor` each get `stop()` and `start()` methods:
+- `stop()` cancels a child `Job` (not the injected scope itself) and clears in-memory state
+- `start()` relaunches internal coroutines (drainers, routing pipeline) under a new child `Job`
+- `AppBootstrapper.teardown()` calls `stop()`, `AppBootstrapper.bootstrap()` calls `start()`
+
+---
+
+## Task 3: Database Index (MIGRATION_3_4)
+
+**Files:** `data/db/Migrations.kt`, `data/db/AppDatabase.kt`, `di/DatabaseModule.kt`
+
+**One index:**
+```sql
+CREATE INDEX idx_events_root_id_created_at ON events(root_id, created_at)
+```
+
+- Bump database version from 3 to 4
+- Add `MIGRATION_3_4` to `DatabaseModule` builder's migration list
+- Non-destructive, additive only
+- Supports thread queries that sort by time (existing `(root_id, kind)` index doesn't cover time ordering)
+
+No speculative indexes. If slow queries surface during other tasks, add indexes then.
+
+---
+
+## Task 4: Database Maintenance Job (FIFO Pruning)
+
+**New file:** `data/db/DatabaseMaintenanceJob.kt`
+
+**Class:** `DatabaseMaintenanceJob` — Hilt `@Singleton`, injected with `EventDao` and `CoroutineScope`
+
+**Single periodic coroutine, every 5 minutes:**
+
+1. **FIFO prune (800K row cap):**
+   ```kotlin
+   val count = eventDao.count()
+   var excess = count - 800_000
+   while (excess > 0) {
+       val batch = minOf(excess, 10_000)
+       eventDao.deleteOldest(batch)
+       excess -= batch
+       delay(50) // avoid long DB lock
+   }
+   ```
+   - New DAO method: `deleteOldest(limit)` — `DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at ASC LIMIT :limit)`
+   - Uses existing `(created_at)` index from MIGRATION_2_3
+
+2. **Expiration prune (NIP-40):**
+   - Call `eventDao.pruneExpired(nowSeconds)` — existing logic, moved here
+
+**Insert path cleanup:**
+- Check if `pruneExpired()` is called from the insert path — if so, remove that call
+
+**Lifecycle:**
+- `start()` launches the periodic coroutine, holds `Job` reference
+- `stop()` cancels the job
+- Started by `AppBootstrapper.bootstrap()`, stopped by `AppBootstrapper.teardown()`
+
+---
+
+## Bugs Resolved
+
+| Bug | Fix | Task |
+|-----|-----|------|
+| A1 | Verify Amber callback already reaches `bootstrap()` — likely no code change needed | Task 2a |
+| A2 | Comprehensive `teardown()` | Task 2b |
+| A9 | Register `notifs-` as persistent sub for reconnect replay (already survives EOSE) | Task 1b |
+| A10 | State tracking + backoff reconnect + lifecycle replay | Task 1a, 1b |
+
+## Files Modified
+
+| File | Changes |
+|------|---------|
+| `data/relay/RelayConnection.kt` | State enum, StateFlow (no reconnect method — Channel can't be reused) |
+| `data/relay/RelayPool.kt` | Backoff reconnect (new instances), persistent sub tracking, `since` timestamps, notifs- persistent registration, fix stale comment, aggregate state, ConcurrentHashMap for thread safety |
+| `data/AppBootstrapper.kt` | Comprehensive teardown with ordered steps, start/stop lifecycle for child components |
+| `data/relay/EventProcessor.kt` | Add `stop()`/`start()` methods (child Job pattern, clear seenIds) |
+| `data/relay/OutboxRouter.kt` | Add `stop()`/`start()` methods (child Job pattern) |
+| `data/db/Migrations.kt` | Add MIGRATION_3_4 |
+| `data/db/AppDatabase.kt` | Bump version to 4 |
+| `di/DatabaseModule.kt` | Add MIGRATION_3_4 to builder |
+| `data/db/dao/EventDao.kt` | Add `deleteOldest(limit)` query |
+| `data/db/DatabaseMaintenanceJob.kt` | **New file** — periodic FIFO + expiration pruning |
+| `ui/onboarding/OnboardingScreen.kt` | Verify only — Amber path already calls `onComplete()` → `bootstrap()` |
+| `data/relay/RelayPool.kt` (comment) | Fix stale comment on line 130 listing `notifs-` as one-shot |
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-13-sprint19-profile-feed-reactivity-design.md =====
+
+# Sprint 19: Profile & Feed Reactivity — Design Spec
+
+## Goal
+
+Fix repost author profiles (A3), add NIP-65 outbox fetching + pagination to user profiles (A4), and add profile staleness TTL.
+
+## Scope
+
+| ID | Summary | Status |
+|----|---------|--------|
+| A3 | Repost author profile pictures/names missing | In scope |
+| A4 | User profiles show few posts, no outbox, no pagination | In scope |
+| Profile TTL | Stale profiles never re-fetched | In scope |
+| A5 | Zap UI animation | Deferred — can't test on emulator |
+
+## Architecture Rule
+
+Relay → EventProcessor → Room → Flow/StateFlow → Compose UI. UI never waits on WebSocket.
+
+---
+
+## A3: Repost Author Profile Fix
+
+### Root Cause
+
+NoteCard renders kind-6 reposts by parsing the embedded JSON for the original event's content, pubkey, and timestamp. However:
+
+1. **FeedRow SQL JOIN** (`EventDao.kt`) joins `users` on `e.pubkey` — the reposter's pubkey. The original author's profile is never joined.
+2. **NoteCard avatar** hardcodes `picture = null` for reposts: `if (boostedJson == null) row.authorPicture else null`.
+3. **NoteCard name** always shows truncated hex for the original author: `"${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"`.
+
+The profile fetch code in FeedViewModel correctly extracts both the reposter and original author pubkeys and requests missing profiles. The profiles likely exist in Room — the UI just never reads them.
+
+### Fix
+
+**Approach:** Compose-level profile lookup via FeedViewModel. No schema changes, no migration.
+
+1. **FeedViewModel** exposes `fun profileFlow(pubkey: String): Flow<UserEntity?>` — delegates to `userRepository.userFlow(pubkey)` (UserRepository already wraps `userDao.userFlow()`). To prevent duplicate Room subscriptions for the same pubkey across multiple visible items, cache flows in the ViewModel:
+   ```kotlin
+   private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
+   fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+       profileCache.getOrPut(pubkey) {
+           userRepository.userFlow(pubkey)
+               .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+       }
+   ```
+
+2. **LazyColumn item** (in the feed screen composable) collects `profileFlow(effectivePubkey)` via `collectAsState()` for kind-6 rows and passes the resulting `UserEntity?` down to NoteCard as a parameter (e.g., `originalAuthorProfile: UserEntity? = null`).
+
+3. **NoteCard** uses `originalAuthorProfile` for reposts:
+   - Avatar: `if (boostedJson == null) row.authorPicture else originalAuthorProfile?.picture`
+   - Name: `originalAuthorProfile?.displayName ?: originalAuthorProfile?.name ?: "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"`
+
+4. **NoteCard stays stateless** — it receives all data as parameters. The Flow collection happens one level up.
+
+### Files Modified
+
+- `FeedViewModel.kt` — Add `profileFlow(pubkey)` method with caching
+- Feed screen composable (LazyColumn) — Collect profile flow for kind-6 items
+- `NoteCard.kt` — Add `originalAuthorProfile` parameter, use it for avatar + name
+
+---
+
+## A4: User Profile Outbox Fetching + Pagination
+
+### Root Cause
+
+`UserProfileViewModel` calls `relayPool.fetchUserPosts(pubkey)` which only queries currently-connected relays with a fixed limit. Users who post from niche relays show few or no posts. No scroll-to-load-more exists.
+
+### Fix — Three Parts
+
+#### Part 1: Outbox Relay Lookup
+
+When `UserProfileViewModel.loadProfile(pubkey)` is called:
+
+1. Check Room for the user's kind-10002 relay list via a new `relayListDao.getByPubkey(pubkey)` query (**new method** — `RelayListDao` currently only has `upsert()`, `allFlow()`, and `getAll()`).
+2. If not in Room, fetch kind-10002 from indexer relays (`purplepag.es`, `user.kindpag.es`, `indexer.coracle.social`). Wait for it to arrive in Room with a ~5s timeout.
+3. Parse write relay URLs from the relay list entity.
+4. Connect to those relays via `relayPool.connect()`, respecting the 25-connection soft cap.
+5. Fetch user posts from all connected relays (including newly-added outbox ones).
+
+**Connection cap:** `RelayPool.connect()` checks `connections.size >= 25` before adding new relays. If at cap, skip the connect and log which outbox relay URLs were skipped (debug-level). The fetch still proceeds against whatever relays are already connected — the user may see fewer posts, which is acceptable degradation.
+
+Connections opened for profile viewing stay open for the rest of the session. `AppBootstrapper.teardown()` cleans them up on logout. This is acceptable because most Nostr users cluster around 5-10 popular relays, so connection growth is bounded in practice.
+
+**DI for relay list access:** `UserProfileViewModel` needs access to relay list data. Add a method to `UserRepository`: `suspend fun getRelayList(pubkey: String): RelayListEntity?` that delegates to `relayListDao.getByPubkey(pubkey)`. This requires adding `RelayListDao` to `UserRepository`'s constructor injection. This keeps the existing pattern of ViewModels going through repositories, not DAOs directly.
+
+#### Part 2: Growing Query Window
+
+`userPostsFlow(pubkey)` currently has `LIMIT 100`. Change to accept a dynamic limit parameter:
+
+- `fun userPostsFlow(pubkey: String, limit: Int): Flow<List<FeedRow>>`
+- ViewModel tracks `displayLimit` as a `MutableStateFlow<Int>(200)`
+- Each scroll-to-bottom increases `displayLimit` by 200
+- DAO query uses the passed limit
+- `postsFlow` re-subscribes reactively when limit changes:
+  ```kotlin
+  private val _displayLimit = MutableStateFlow(200)
+  val postsFlow: Flow<List<FeedRow>> =
+      combine(_pubkeyHex.filterNotNull(), _displayLimit) { pk, limit -> pk to limit }
+          .flatMapLatest { (pk, limit) -> eventRepository.userPostsFlow(pk, limit) }
+  ```
+
+This keeps the Flow bounded while allowing growth as the user scrolls. Prevents memory issues for power users with tens of thousands of posts in Room.
+
+#### Part 3: Scroll-to-Bottom Relay Fetch
+
+- ViewModel tracks `oldestTimestamp` from the current result set
+- When user scrolls near bottom, calls a new `relayPool.fetchOlderPosts(pubkey, untilTimestamp)` method
+- This sends a one-shot REQ scoped to one author with `until = oldestTimestamp`
+- Posts arrive via EventProcessor → Room → `userPostsFlow` Flow re-emits automatically
+- Guard against duplicate fetches with a `fetching` boolean flag (same pattern as FeedViewModel)
+
+### New Method
+
+`RelayPool.fetchOlderPosts(pubkey: String, untilTimestamp: Long)` — sends a one-shot REQ with:
+- `kinds: [1, 6]`
+- `authors: [pubkey]`
+- `until: untilTimestamp`
+- `limit: 200`
+
+Subscription ID prefix: `older-user-` (starts with `older-`, matching the existing `isOneShotSubscription` check so EOSE closes it correctly).
+
+### Files Modified
+
+- `RelayPool.kt` — Add connection cap in `connect()`, add `fetchOlderPosts()` method
+- `UserProfileViewModel.kt` — Add outbox relay lookup, `_displayLimit` StateFlow, scroll-to-bottom pagination
+- `EventDao.kt` — Add `limit` parameter to `userPostsFlow()` query
+- `EventRepository.kt` — Thread `limit` parameter through to DAO
+- `RelayListDao.kt` — Add `suspend fun getByPubkey(pubkey: String): RelayListEntity?`
+- `UserRepository.kt` — Add `suspend fun getRelayList(pubkey: String): RelayListEntity?`
+
+---
+
+## Profile Staleness TTL
+
+### Root Cause
+
+`UserRepository.fetchMissingProfiles()` checks if a pubkey exists in Room via `allPubkeys()`. If it exists — even with `picture = null` and `name = null` — it's considered "cached" and never re-fetched. Profiles that change (avatar, display name) are never updated.
+
+### Fix
+
+Change `fetchMissingProfiles()` to fetch profiles that are either missing OR stale (older than 6 hours).
+
+1. **UserDao** — Add `suspend fun stalePubkeys(olderThan: Long): List<String>` returning pubkeys where `updated_at < olderThan`.
+
+2. **UserRepository.fetchMissingProfiles()** — Change logic:
+   ```
+   val cached = userDao.allPubkeys().toSet()
+   val staleThreshold = System.currentTimeMillis() / 1000 - (6 * 3600)
+   val stale = userDao.stalePubkeys(staleThreshold).toSet()
+   val toFetch = pubkeys.filter { it !in cached || it in stale }
+   ```
+   Two queries is intentional for clarity — `allPubkeys()` is needed for the "missing" check and `stalePubkeys()` for the "stale" check. For a client app with <10K users in Room, this is negligible overhead.
+
+3. When kind-0 arrives, the existing `upsert` overwrites the row and sets `updatedAt = nowSeconds`, resetting the TTL.
+
+**Why 6 hours:** Profiles change infrequently. 1 hour wastes relay bandwidth on every feed load. 6 hours balances freshness with efficiency.
+
+**No migration needed** — `updated_at` column already exists on `users` table.
+
+### Files Modified
+
+- `UserDao.kt` — Add `stalePubkeys()` query
+- `UserRepository.kt` — Update `fetchMissingProfiles()` logic
+
+---
+
+## What This Sprint Does NOT Change
+
+- Thread view queries (stay as-is)
+- Notification queries (stay as-is)
+- Search queries (stay as-is)
+- Global/Following feed queries (already Flow-based, working correctly)
+- Zap animations (deferred — A5)
+- EventProcessor pipeline (no changes)
+- Room schema / migrations (no new columns or tables)
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-13-sprint20-media-content-fixes-design.md =====
+
+# Sprint 20: Media & Content Fixes — Design Spec
+
+> **Scope:** A8 (imeta video/image parsing) and A7 (article markdown rendering).
+> A6 (status bar fix) was already shipped in a prior commit — dropped from this sprint.
+
+---
+
+## A8: ImetaParser Utility (NIP-92)
+
+### Problem
+
+NoteCard has inline imeta parsing (lines 187-202) that extracts video URLs from `imeta` tags. It works for the basic video case but:
+
+1. **Only extracts videos** — ignores `image/*` entries. Images delivered via imeta-only posts (no URL in content) don't display.
+2. **No dimension support** — video thumbnails use hardcoded 180dp height; images use hardcoded 200dp `defaultMinSize`. The `dim` field (`WxH`) in imeta tags is ignored.
+3. **Inline, not reusable** — the parsing logic is embedded in NoteCard's composable body.
+
+### Design
+
+**New file:** `app/src/main/kotlin/com/unsilence/app/data/relay/ImetaParser.kt`
+
+**Data model:**
+
+```kotlin
+data class ImetaMedia(
+    val url: String,
+    val mimeType: String?,   // "video/mp4", "image/jpeg", etc.
+    val width: Int?,          // from "dim" field, e.g. 1920 from "1920x1080"
+    val height: Int?,         // from "dim" field, e.g. 1080 from "1920x1080"
+)
+```
+
+**Parser:**
+
+```kotlin
+object ImetaParser {
+    /** Parse all imeta tags into structured media entries. */
+    fun parse(tagsJson: String): List<ImetaMedia>
+
+    /** Convenience: only video/* entries. */
+    fun videos(tagsJson: String): List<ImetaMedia> =
+        parse(tagsJson).filter { it.mimeType?.startsWith("video/") == true }
+
+    /** Convenience: only image/* entries. */
+    fun images(tagsJson: String): List<ImetaMedia> =
+        parse(tagsJson).filter { it.mimeType?.startsWith("image/") == true }
+}
+```
+
+Parsing logic mirrors the existing inline code: iterate JSON tag array, filter elements where index 0 is `"imeta"`, build key-value map from space-delimited entries (`"key value"`), extract `url`, `m`, and parse `dim` as `WxH` split on `x`.
+
+**NoteCard integration:**
+
+- Replace inline imeta block (lines 187-202) with `ImetaParser.videos(row.tags).map { it.url }`.
+- Add imeta image extraction: `ImetaParser.images(row.tags).map { it.url }`.
+- Merge imeta images with regex-extracted images: `val imageUrls = (regexImageUrls + imetaImageUrls).distinct()`.
+- Video merge stays the same pattern: `val videoUrls = (regexVideoUrls + imetaVideoUrls).distinct()`.
+
+**Dimension-based placeholder sizing:**
+
+- `VideoThumbnailCard`: if the first video imeta entry has non-null `width`/`height`, compute aspect ratio and derive height from `fillMaxWidth()`. Cap at 300dp max, floor at 120dp min. Fall back to 180dp if no dimensions.
+- Image `SubcomposeAsyncImage`: same approach — use imeta dimensions for `defaultMinSize` height instead of hardcoded 200dp.
+
+**Blurhash:** Skipped — no blurhash library in the project; adding one is out of scope.
+
+### Files touched
+
+| File | Change |
+|------|--------|
+| `data/relay/ImetaParser.kt` | **Create** — data class + parser object |
+| `ui/feed/NoteCard.kt` | Replace inline imeta block with `ImetaParser` calls; merge imeta images; dimension-based sizing for video + image placeholders |
+
+---
+
+## A7: Markdown Rendering for NIP-23 Articles
+
+### Problem
+
+`ArticleReaderScreen` renders article body through a custom `parseMarkdown()` function that only supports `##` headers and `**bold**`. No links, images, code blocks, lists, blockquotes, italic, or other heading levels. Content displays as near-plain text.
+
+### Design
+
+**Dependency:** `com.mikepenz:multiplatform-markdown-renderer-m3` (Compose-native, Material 3). Also `multiplatform-markdown-renderer-coil3` for inline image rendering via existing Coil setup.
+
+**Dependency additions:**
+
+- `gradle/libs.versions.toml`: add version `markdown-renderer = "0.39.2"`, library entries for `multiplatform-markdown-renderer-m3` and `multiplatform-markdown-renderer-coil3`.
+- `app/build.gradle.kts`: add `implementation` lines for both.
+
+**ArticleReaderScreen changes:**
+
+Replace `Text(text = parseMarkdown(row.content), ...)` (lines 123-133) with:
+
+```kotlin
+Markdown(
+    content          = row.content,
+    imageTransformer = Coil3ImageTransformerImpl,
+    modifier         = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = Spacing.medium)
+        .padding(bottom = Spacing.xl),
+    colors     = markdownColor(
+        text                = Color.White,
+        codeBackground      = Color(0xFF1A1A1A),
+        inlineCodeBackground = Color(0xFF1A1A1A),
+        dividerColor        = MaterialTheme.colorScheme.surfaceVariant,
+    ),
+    typography = markdownTypography(
+        h1 = MaterialTheme.typography.headlineLarge.copy(color = Color.White),
+        h2 = MaterialTheme.typography.headlineMedium.copy(color = Color.White),
+        h3 = MaterialTheme.typography.headlineSmall.copy(color = Color.White),
+        paragraph = MaterialTheme.typography.bodyLarge.copy(color = Color.White, lineHeight = 24.sp),
+        code = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace),
+        textLink = TextLinkStyles(style = SpanStyle(color = Cyan)),
+    ),
+)
+```
+
+The `Coil3ImageTransformerImpl` (from `multiplatform-markdown-renderer-coil3`) enables inline image rendering via the existing Coil setup. Without it, images in article markdown content would silently not render.
+
+**Link click handling:** The library uses `LocalUriHandler` by default, which opens links in the system browser. `nostr:` URIs within article content will open the browser and fail — this is a known limitation, acceptable for Sprint 20. Internal routing for `nostr:` links is a follow-up.
+
+**Delete:** `parseMarkdown()` function (lines 148-174) and its unused imports (`AnnotatedString`, `SpanStyle`, `buildAnnotatedString`, `withStyle`).
+
+**Not touched:** Banner image rendering, title extraction from tags, top bar, dialog structure, `articleTagValue()` helper — all remain as-is.
+
+### Supported markdown elements (provided by library)
+
+Headings (all levels), bold, italic, strikethrough, links (clickable), inline code, fenced code blocks, images, blockquotes, ordered/unordered lists, horizontal rules, tables.
+
+### Files touched
+
+| File | Change |
+|------|--------|
+| `gradle/libs.versions.toml` | Add markdown-renderer version + library entries |
+| `app/build.gradle.kts` | Add implementation dependencies |
+| `ui/feed/ArticleReaderScreen.kt` | Replace `Text(parseMarkdown(...))` with `Markdown()` composable; delete `parseMarkdown()` function; add theming config; remove unused imports |
+
+---
+
+## Priority order
+
+1. **A8 first** — ImetaParser utility, NoteCard integration (videos are broken for users now)
+2. **A7 second** — markdown rendering (articles are less common but visually broken)
+
+## Out of scope
+
+- A6 status bar fix (already shipped)
+- Blurhash placeholders (would require new dependency)
+- Video player improvements (ExoPlayer works, just needs correct URLs)
+- Article feed card changes (ArticleCard.kt is fine as-is)
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-13-sprint21-inline-video-autoplay-design.md =====
+
+# Sprint 21: Inline Video Autoplay — Design Spec
+
+> **For Claude Code:** Read this spec before implementing. Check actual source files
+> before making changes.
+
+---
+
+## Goal
+
+Implement inline video autoplay in FeedScreen with a single shared ExoPlayer,
+scroll-based activation, global mute toggle, fullscreen dialog, and fix the
+double-rendering bug where video URLs render in multiple components.
+
+---
+
+## Scope
+
+- **In scope:** FeedScreen only. Double-rendering fix (applies globally in NoteCard).
+- **Out of scope:** UserProfileScreen video autoplay (future sprint, same pattern).
+
+---
+
+## Codebase Constraints
+
+- Hilt DI only (KSP, not kapt)
+- Kotlin 2.3.0, Media3 1.5.1, Compose BOM 2025.05.00, compileSdk/targetSdk 36
+- Never run `./gradlew` from terminal while Android Studio is open
+- Git operations from `aivii` user terminal only
+- Architecture: Relay → EventProcessor → Room → Flow/StateFlow → Compose UI
+
+---
+
+## 1. Double-Rendering Fix & Media Deduplication
+
+**Problem:** Video URLs render in multiple components — primarily as a link card
+(from `LINK_URL_REGEX`) AND as VideoThumbnailCard. Imeta image/video sets are
+already disjoint by mime type, so the real overlap is between regex-matched
+video URLs and link URLs. The `imageUrls` dedup is defensive.
+
+**Fix:** In NoteCard's `MediaExtraction` `remember` block, after all URL
+extraction (regex + imeta merge):
+
+1. Collect final `videoUrls` set
+2. Remove all `videoUrls` from `imageUrls` (defensive — unlikely overlap)
+3. Remove all `videoUrls` from `linkUrls` (primary fix)
+4. Each URL renders in exactly one component
+
+This is a `removeAll` at the end of the extraction block. No new classes needed.
+
+---
+
+## 2. Shared ExoPlayer & Scroll-Based Activation
+
+### FeedScreen Owns
+
+- `exoPlayer: ExoPlayer` — single instance via `remember` using
+  `LocalContext.current`, released in
+  `DisposableEffect(Unit) { onDispose { exoPlayer.release() } }`.
+  `repeatMode = ExoPlayer.REPEAT_MODE_ALL` for looping.
+- `activeVideoNoteId: String?` — ID of the note whose video is currently playing
+- `isMuted: Boolean` — global mute state, default `true`. Once user unmutes,
+  all subsequent videos play with sound until they mute again.
+- `showFullscreenVideo: Boolean` — whether fullscreen dialog is showing
+- `preFullscreenMuted: Boolean` — saved mute state before entering fullscreen,
+  restored on dismiss
+
+### Video-Item Precomputation
+
+A `remember(feedItems)` block scans feed items to build a `Set<String>` of note
+IDs that have video:
+
+```kotlin
+val noteIdsWithVideo = remember(feedItems) {
+    feedItems.filter { row ->
+        row.kind != 30023 &&  // exclude articles (ArticleCard, not NoteCard)
+        (ImetaParser.videos(row.tags).isNotEmpty() ||
+            VIDEO_URL_REGEX.containsMatchIn(row.content))
+    }.map { it.id }.toSet()
+}
+```
+
+This set is used by scroll detection to identify which visible items are video
+candidates. Kind-30023 articles are excluded since they render as ArticleCard,
+not NoteCard, and would never display InlineAutoPlayVideo.
+
+### Scroll Detection
+
+`LaunchedEffect` with `snapshotFlow` on `listState.layoutInfo.visibleItemsInfo`:
+
+- Match visible items to notes via the `key` property of `LazyListItemInfo`
+  (FeedScreen uses `key = { it.id }` for list items)
+- Filter to items whose key is in `noteIdsWithVideo`
+- Find the video item closest to viewport center
+- Update `activeVideoNoteId` via `distinctUntilChanged`
+- If no video items are visible, set `activeVideoNoteId = null` (stops playback)
+- When `showFullscreenVideo` is true, skip detection (don't change active video
+  while watching fullscreen)
+
+### NoteCard Parameters (new)
+
+```kotlin
+exoPlayer: ExoPlayer?        // null when video not supported
+isActiveVideo: Boolean        // this note's video is the active one
+isMuted: Boolean              // global mute state
+onToggleMute: () -> Unit      // toggle global mute
+onOpenFullscreen: () -> Unit  // request fullscreen for this video
+```
+
+NoteCard renders `InlineAutoPlayVideo` when `isActiveVideo == true`, or
+`VideoThumbnailCard` when `isActiveVideo == false` (for notes that have video).
+
+**Multiple videos per note:** Only the first video URL is used for autoplay.
+`videoUrls.firstOrNull()` is the autoplay candidate. Remaining video URLs render
+as VideoThumbnailCards below (existing behavior).
+
+---
+
+## 3. InlineAutoPlayVideo Composable
+
+New file: `app/src/main/kotlin/com/unsilence/app/ui/feed/InlineAutoPlayVideo.kt`
+
+### Parameters
+
+```kotlin
+fun InlineAutoPlayVideo(
+    exoPlayer: ExoPlayer,
+    videoUrl: String,
+    aspectRatio: Float?,       // from imeta dim, null = 16:9 default
+    isMuted: Boolean,
+    onToggleMute: () -> Unit,
+    onOpenFullscreen: () -> Unit,
+    modifier: Modifier = Modifier,
+)
+```
+
+### Behavior
+
+- `LaunchedEffect(videoUrl)` — sets media item, prepares, plays. Re-entry after
+  scrolling away and back is handled automatically: NoteCard removes
+  InlineAutoPlayVideo from composition when inactive and re-adds it when active
+  again, which re-triggers the LaunchedEffect.
+- Apply mute: `LaunchedEffect(isMuted) { exoPlayer.volume = if (isMuted) 0f else 1f }`
+- Render via `AndroidView` wrapping Media3 `PlayerView` with
+  `useController = false`
+- Aspect ratio from imeta `dim` if available, else 16:9
+- Min height 120dp, max height 300dp
+
+### Overlay
+
+- Mute/unmute icon button — top-right corner, semi-transparent background
+- Tap anywhere else → `onOpenFullscreen()`
+
+---
+
+## 4. VideoThumbnailCard Improvements
+
+Existing composable in NoteCard.kt. Changes:
+
+- **Poster frame:** If imeta has an image URL associated with the video (or a
+  `thumb` field in imeta), show that image as the thumbnail instead of black
+- **Fallback:** Dark placeholder with centered play icon (current behavior)
+- **Sizing:** Keep existing dim-based aspect ratio + 120-300dp height capping
+- **Tap:** Calls `onOpenFullscreen()` — FeedScreen makes the video active and
+  opens fullscreen
+
+---
+
+## 5. FullScreenVideoDialog
+
+Can live in NoteCard.kt or a separate file.
+
+### Parameters
+
+```kotlin
+fun FullScreenVideoDialog(
+    exoPlayer: ExoPlayer,
+    onDismiss: () -> Unit,
+)
+```
+
+### Behavior
+
+- `Dialog` with `usePlatformDefaultWidth = false`, full-screen black background
+- `PlayerView` with `useController = true` (progress bar, play/pause, seek)
+- **Unmuted in fullscreen** — FeedScreen saves `preFullscreenMuted` state before
+  opening, sets volume to 1f. On dismiss, restores the saved mute state.
+- **No volume controls in PlayerView** — hide Media3's default volume button to
+  prevent player/app mute state desync. Use
+  `playerView.setShowVolumeButton(false)`.
+- Close button top-left (same pattern as ArticleReaderScreen)
+- On dismiss: playback continues inline at same position (same ExoPlayer
+  instance, no seek needed)
+
+---
+
+## 6. Integration Flow
+
+```
+User scrolls feed
+  → snapshotFlow detects video note closest to center
+  → activeVideoNoteId updated
+  → NoteCard with matching ID receives isActiveVideo=true
+  → InlineAutoPlayVideo sets media item, prepares, plays muted
+  → Previous active video's NoteCard gets isActiveVideo=false
+  → That NoteCard switches to VideoThumbnailCard
+
+User taps mute toggle
+  → isMuted flipped globally
+  → All future videos play with new mute state
+
+User taps video
+  → FeedScreen saves preFullscreenMuted, unmutes, shows FullScreenVideoDialog
+  → Same ExoPlayer, same position, now with controls + sound
+
+User dismisses fullscreen
+  → Restores mute to preFullscreenMuted
+  → Playback continues inline at same timestamp
+```
+
+---
+
+## Files Modified
+
+- `NoteCard.kt` — deduplication in MediaExtraction, new params (exoPlayer,
+  isActiveVideo, isMuted, onToggleMute, onOpenFullscreen), conditional rendering
+  of InlineAutoPlayVideo vs VideoThumbnailCard, poster frame in
+  VideoThumbnailCard, FullScreenVideoDialog
+- `FeedScreen.kt` — shared ExoPlayer, activeVideoNoteId, isMuted,
+  preFullscreenMuted, showFullscreenVideo, video-item precomputation, scroll
+  detection, pass new params to NoteCard
+- **New:** `InlineAutoPlayVideo.kt` — autoplay composable with PlayerView
+
+---
+
+## Key Risks
+
+1. **Scroll performance:** Use `distinctUntilChanged` on active video ID, not
+   full layout info. Only compare indexes of video items.
+2. **ExoPlayer lifecycle:** Must release on screen dispose. Single instance only.
+3. **Video URL detection accuracy:** Use both ImetaParser.videos() and regex for
+   precomputation to catch all cases.
+4. **Config changes:** ExoPlayer in `remember` survives recomposition but not
+   activity recreation. Acceptable for v1.
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-14-sprint22-amber-signing-feed-pagination-design.md =====
+
+# Sprint 22: Amber Signing, Follow List Feed, Feed Pagination
+
+**Date:** 2026-03-14
+**Status:** Approved
+
+---
+
+## Overview
+
+Three interconnected improvements sharing the signing → follow list → feed pipeline:
+
+1. **SigningManager** — centralized signing abstraction for nsec and Amber login modes
+2. **Feed pagination** — growing SQL window (`_displayLimit`) layered on existing `loadMore()` guards
+3. **Default feed selection** — Following feed when follows exist in Room, Global otherwise
+
+Pre-sprint hotfix: downgrade `markdown-renderer` from `0.39.2` to `0.27.0` (Compose BOM 2025.05.00 compatibility).
+
+---
+
+## 1. SigningManager
+
+### Problem
+
+Six signing locations call `keyManager.getPrivateKeyHex()` directly. When logged in via Amber, private key is null → all signing silently fails.
+
+### Design
+
+**New file:** `data/auth/SigningManager.kt` — Hilt `@Singleton`
+
+**Public API:**
+
+```kotlin
+@Singleton
+class SigningManager @Inject constructor(
+    private val keyManager: KeyManager
+) {
+    private val _pendingRequests = MutableSharedFlow<SignRequest>(extraBufferCapacity = 1)
+
+    suspend fun sign(template: EventTemplate<*>): Event?
+    fun pendingSignRequest(): SharedFlow<SignRequest>
+    fun completeAmberSign(signature: String)
+    fun cancelAmberSign()
+}
+```
+
+**SignRequest:**
+
+```kotlin
+data class SignRequest(
+    val unsignedEventJson: String,
+    val pubkeyHex: String,
+    val deferred: CompletableDeferred<String?>
+)
+```
+
+**`sign()` flow:**
+
+- If `!keyManager.isAmberMode`: build `NostrSignerInternal(KeyPair(privKey))`, sign locally via `withContext(Dispatchers.Default)` (crypto is blocking), return result.
+- If `keyManager.isAmberMode`:
+  1. Serialize unsigned event to JSON
+  2. Create `CompletableDeferred<String?>`
+  3. Wrap in `SignRequest`, emit on `_pendingRequests`
+  4. `withTimeoutOrNull(30_000) { deferred.await() }` — 30-second timeout, returns null on expiry or user dismissal
+  5. If signature received, attach to event and return signed event
+  6. If null (timeout/cancel), return null
+
+**Activity-side collector** (top-level composable in `MainActivity`):
+
+- Collect `signingManager.pendingSignRequest()`
+- On emission: build Amber intent (`type=sign_event`, `event=json`, `current_user=pubkey`)
+- Launch via `ActivityResultLauncher`
+- On result: call `completeAmberSign(signature)` or `cancelAmberSign()`
+
+### Refactor Touchpoints
+
+Replace `buildSigner()` / inline signing in:
+
+| Location | Current | After |
+|----------|---------|-------|
+| `ComposeViewModel.publishNote()` | `NostrSignerInternal` + `keyManager.getPrivateKeyHex()` | `signingManager.sign(template)` |
+| `NoteActionsViewModel.react()` | `buildSigner()` helper | `signingManager.sign(template)` |
+| `NoteActionsViewModel.repost()` | `buildSigner()` helper | `signingManager.sign(template)` |
+| `ZapRepository.zap()` | `buildSigner()` inline | `signingManager.sign(template)` |
+| `ThreadViewModel.publishReply()` | `NostrSignerInternal` inline | `signingManager.sign(template)` |
+| `ProfileViewModel.saveProfile()` | `NostrSignerInternal` inline | `signingManager.sign(template)` |
+
+Each location drops ~5 lines of key-fetching boilerplate and gains Amber support. The `buildSigner()` helpers are deleted.
+
+**Not in scope:** `NwcManager.payInvoice()` signs with the NWC connection's own secret key, not the user's key — left unchanged.
+
+### Key Files
+
+- **New:** `app/.../data/auth/SigningManager.kt`
+- **Modified:** `AmberSigner.kt` — add `createSigningIntent(unsignedEventJson, pubkeyHex): Intent` and `parseSigningResult(data: Intent?): String?`
+- **Modified:** `ComposeViewModel.kt`, `NoteActionsViewModel.kt`, `ZapRepository.kt`, `ThreadViewModel.kt`, `ProfileViewModel.kt`
+- **Modified:** `RootScreen` composable (top-level in `MainActivity`) — Amber signing intent collector via `rememberLauncherForActivityResult`
+- **Unchanged:** `KeyManager.kt`
+
+### Concurrency Note
+
+Signing requests serialize naturally: each `sign()` call suspends on its own `CompletableDeferred`. The Activity collector processes one Amber intent at a time. If multiple signing requests queue (e.g., rapid tap on react + repost), they execute sequentially through the `SharedFlow` with `extraBufferCapacity = 1`.
+
+---
+
+## 2. Feed Pagination
+
+### Problem
+
+Both `feedFlow()` and `followingFeedFlow()` use a hard `LIMIT 300` in SQL. The `loadMore()` method fetches older events from relays but the query window never grows — events beyond 300 are fetched but invisible.
+
+### Design
+
+**Layer `_displayLimit` on top of existing guards.** Do not rewrite `loadMore()`.
+
+**FeedViewModel changes:**
+
+```kotlin
+private val _displayLimit = MutableStateFlow(200)
+```
+
+- Wire into feed flow: `combine(_feedType, _displayLimit, ...).flatMapLatest { ... }`
+- In `loadMore()`: add `_displayLimit.value += 200` before the relay fetch call
+- On feed type switch or filter change: reset `_displayLimit.value = 200`
+- Keep existing `lastOldestTimestamp` guard and 2-second cooldown unchanged
+
+**EventDao changes:**
+
+- `feedFlow(limit: Int)` — parameterize `LIMIT :limit` (was `LIMIT 300`)
+- `followingFeedFlow(limit: Int)` — same
+
+**FeedScreen:** No changes. Existing scroll detection at 50% triggers `loadMore()` which now also grows the window.
+
+**Following feed pagination note:** When on the Following feed, `currentRelayUrls` is empty (outbox routing handles relay connections separately). `_displayLimit` growth still reveals already-cached events beyond the initial 200. Relay-side pagination for Following uses the outbox relay connections managed by `OutboxRouter`.
+
+### Net Change
+
+~15 lines in `FeedViewModel`, ~2 lines per DAO query, `FollowDao` added as new `FeedViewModel` dependency. No UI changes.
+
+---
+
+## 3. Default Feed Selection
+
+### Problem
+
+Need to default to Following feed when the user has follows, Global when they don't. Must handle cold start (follows not yet fetched from relays) without timing games.
+
+### Design
+
+**FeedViewModel init block:**
+
+```kotlin
+init {
+    viewModelScope.launch {
+        val hasFollows = followDao.count() > 0
+        _feedType.value = if (hasFollows) FeedType.Following else FeedType.Global
+    }
+}
+```
+
+Check Room synchronously at launch. If follows exist from a previous session, show Following. If empty (fresh install or first Amber login), show Global. After bootstrap fetches kind-3 and populates the follows table, next app launch defaults to Following.
+
+No timers, no auto-switching, no loading states. One check, one assignment, ~5 lines.
+
+**Note:** `FollowDao` is a new dependency for `FeedViewModel`. The `_feedType` starts as `Global` and may briefly emit before the coroutine switches to `Following` — this causes one redundant `flatMapLatest` re-emission on cold start, which is acceptable (sub-frame).
+
+---
+
+## Execution Order
+
+1. ~~**Hotfix:** markdown-renderer downgrade (done)~~
+2. **SigningManager** — new singleton + refactor 6 signing locations + Activity collector
+3. **Feed pagination** — `_displayLimit` in FeedViewModel + parameterize DAO queries
+4. **Default feed selection** — init block check in FeedViewModel
+
+---
+
+## Constraints
+
+- Hilt DI only, KSP not kapt
+- Quartz `EventTemplate` constructor for JVM 17 compat
+- Room migration index naming: `index_tablename_col1_col2` (no new migrations needed for this sprint)
+- Git operations from `aivii` user terminal
+- Never run `./gradlew` while Android Studio is open
+
+
+
+===== FILE: docs/superpowers/specs/2026-03-14-sprint23-profile-zaps-polish-design.md =====
+
+# Sprint 23: Profile & Zaps Polish — Design Spec
+
+> **For Claude Code:** Read this spec and CLAUDE.md before implementing. Check actual source files before making changes.
+
+**Goal:** Six changes that transform the app from "work in progress" to "looks finished": zap total sats display, profile tabs, following/followers count, own-profile repost names fix, and startup frame skip investigation.
+
+**Architecture:** All changes follow the existing Relay → EventProcessor → Room → Flow/StateFlow → Compose UI pipeline. No new architectural patterns introduced.
+
+---
+
+## Task 6: Startup Frame Skip Investigation
+
+**Priority:** First — affects every launch.
+
+**Problem:** `Choreographer: Skipped 81 frames!` seen in logcat on cold launch with Amber login. Sprint context suggests relay connections blocking main thread, but `AppBootstrapper.bootstrap()` already runs on `Dispatchers.IO`.
+
+**Investigation targets:**
+1. `RootViewModel` init block — any `viewModelScope.launch {}` without explicit dispatcher defaults to `Dispatchers.Main`
+2. `FeedViewModel.init` — the combine/flatMapLatest chain collects StateFlows on Main
+3. Any `LaunchedEffect` in root composables doing heavy work
+4. Compose initial composition overhead (not fixable)
+
+**Fix pattern:** If `viewModelScope.launch` calls are found doing heavy work on Main, wrap in `withContext(Dispatchers.IO)` or use `viewModelScope.launch(Dispatchers.IO)`.
+
+**Bail-out:** If the skipped frames come from Compose initial composition/layout, that's framework overhead — skip this task. Document findings.
+
+---
+
+## Task 5: Own-Profile Repost Names Fix
+
+**Priority:** Second — one init block addition.
+
+**Problem:** `ProfileViewModel` doesn't call `fetchMissingProfiles` for repost original authors. Reposted notes on own profile show truncated hex pubkeys instead of display names. `UserProfileViewModel` already has this fix (lines 81-95).
+
+**Fix:**
+Add to `ProfileViewModel`:
+```kotlin
+private val fetchedProfilePubkeys = mutableSetOf<String>()
+
+init {
+    viewModelScope.launch {
+        postsFlow.collectLatest { rows ->
+            val pubkeys = rows.flatMap { row ->
+                val embedded = if (row.kind == 6) {
+                    extractRepostAuthorPubkey(row.content, row.tags)
+                } else null
+                listOfNotNull(row.pubkey, embedded)
+            }.distinct()
+            val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
+            if (newPubkeys.isNotEmpty()) {
+                fetchedProfilePubkeys.addAll(newPubkeys)
+                userRepository.fetchMissingProfiles(newPubkeys)
+            }
+        }
+    }
+}
+```
+
+**Files modified:** `ProfileViewModel.kt` only.
+
+**Import needed:** `extractRepostAuthorPubkey` — verify import path from `UserProfileViewModel`.
+
+---
+
+## Task 1: Zap Total Sats Display
+
+**Priority:** Third — Room migration + pipeline + UI.
+
+### 1a. Room Migration (v4 → v5)
+
+**EventEntity** — add column:
+```kotlin
+@ColumnInfo(name = "zap_total_sats") val zapTotalSats: Long = 0,
+```
+
+**Migration:**
+```kotlin
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE events ADD COLUMN zap_total_sats INTEGER NOT NULL DEFAULT 0")
+    }
+}
+```
+
+**AppDatabase:** Bump version to 5, add `MIGRATION_4_5` to migrations list.
+
+No new indexes needed — `zap_total_sats` is never used in WHERE/ORDER clauses.
+
+### 1b. extractZapSats() Utility
+
+Needs a private `tagValue()` helper since `EventEntity.tags` is a JSON string (not parsed). The existing `articleTagValue()` in `ArticleReaderScreen.kt` is private and inaccessible.
+
+```kotlin
+/** Extract a tag value from a JSON-serialized tags array: [["key","value"],...] */
+private fun tagValue(tagsJson: String, key: String): String? = runCatching {
+    Json.parseToJsonElement(tagsJson).jsonArray
+        .firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == key }
+        ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+}.getOrNull()
+
+/**
+ * Extract sats from a kind-9735 zap receipt.
+ * Primary: parse bolt11 invoice via Quartz's LnInvoiceUtil.
+ * Fallback: read "amount" tag from embedded zap request (millisats).
+ */
+private fun extractZapSats(tagsJson: String): Long {
+    // Primary: parse bolt11 tag via Quartz's LnInvoiceUtil
+    val bolt11 = tagValue(tagsJson, "bolt11")
+    if (bolt11 != null) {
+        try {
+            val sats = LnInvoiceUtil.getAmountInSats(bolt11)
+            if (sats > BigDecimal.ZERO) return sats.toLong()
+        } catch (_: Exception) {}
+    }
+
+    // Fallback: read "amount" tag from embedded zap request (millisats)
+    val descriptionJson = tagValue(tagsJson, "description") ?: return 0L
+    return try {
+        val zapRequest = Json.decodeFromString<JsonObject>(descriptionJson)
+        val tags = zapRequest["tags"]?.jsonArray
+        val amountTag = tags?.firstOrNull { tag ->
+            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "amount"
+        }
+        val msats = amountTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()
+        (msats ?: 0L) / 1_000L
+    } catch (_: Exception) { 0L }
+}
+```
+
+**Location:** Private functions in `EventProcessor.kt` — the only consumer.
+
+**Dependency:** `com.vitorpamplona.quartz.lightning.LnInvoiceUtil` — available via `quartz-android` dependency. Verify import path exists in Quartz 1.05.1 during implementation; if not, skip bolt11 parsing and use amount-tag-only path.
+
+### 1c. toCompactSats() Formatter
+
+```kotlin
+fun Long.toCompactSats(): String = when {
+    this >= 1_000_000 -> {
+        val s = String.format("%.1fM", this / 1_000_000.0)
+        if (s.endsWith(".0M")) s.dropLast(3) + "M" else s
+    }
+    this >= 1_000 -> {
+        val s = String.format("%.1fk", this / 1_000.0)
+        if (s.endsWith(".0k")) s.dropLast(3) + "k" else s
+    }
+    else -> this.toString()
+}
+```
+
+**Location:** In `NoteCard.kt` alongside the existing `formatCount()` function.
+
+### 1d. EventProcessor — Aggregate Zap Sats
+
+Kind-9735 zap receipts flow through the COLD lane: `process()` → `buildContentEvent()` → `coldChannel` → `drainCold()` → `flushBatch()`.
+
+**Where to add sats aggregation:** Inside `flushBatch()`, after the batch `insertOrIgnoreBatch()` call. Iterate over the batch, filter kind-9735 events, extract sats, and call `addZapSats()`:
+
+```kotlin
+// Inside flushBatch(), after insertOrIgnoreBatch(batch):
+batch.filter { it.kind == 9735 && it.rootId != null }.forEach { receipt ->
+    val sats = extractZapSats(receipt.tags)
+    if (sats > 0) {
+        eventDao.addZapSats(receipt.rootId!!, sats)
+    }
+}
+```
+
+The `rootId` on `EventEntity` is already parsed from NIP-10 `e` tags by `parseNip10Threading()` — it contains the zapped event's ID.
+
+**Dedup note:** `seenIds` already deduplicates by event ID before processing. Kind-9735 receipts with the same ID won't be processed twice. No additional dedup needed.
+
+**New DAO method:**
+```kotlin
+@Query("UPDATE events SET zap_total_sats = zap_total_sats + :sats WHERE id = :eventId")
+suspend fun addZapSats(eventId: String, sats: Long)
+```
+
+### 1e. FeedRow — Add zapTotalSats
+
+**FeedRow data class** — add field:
+```kotlin
+@ColumnInfo(name = "zap_total_sats") val zapTotalSats: Long,
+```
+
+**All existing FeedRow SQL queries must add `e.zap_total_sats` to their SELECT.** Room requires every non-default `@ColumnInfo` field to be present in every query returning `FeedRow`. The complete list of queries to update:
+
+1. `feedFlow()` — global feed query
+2. `followingFeedFlow()` — following feed query
+3. `userPostsFlow()` — existing user posts (kept for backward compat)
+4. `threadFlow()` — thread detail query
+5. `searchNotesFlow()` — NIP-50 search results (if it returns `FeedRow`)
+
+Add to each SELECT clause:
+```sql
+e.zap_total_sats,
+```
+
+Keep `zap_count` in FeedRow — removing it requires touching every query and the zap count JOIN. The UI will use `zapTotalSats` instead of `zapCount` for display.
+
+### 1f. UI — Display Sats Instead of Count
+
+**ZapButton changes:**
+- Change parameter from `count: Int` to `sats: Long`
+- Display `sats.toCompactSats()` instead of `formatCount(count)`
+- Amber color `#FFAB00` (`ZapAmber`) for both icon and amount — already implemented for zapped state, extend to always-amber for the zap display
+
+**NoteCard usage:**
+```kotlin
+ZapButton(
+    sats = row.zapTotalSats,
+    hasZapped = hasZapped,
+    onTap = { ... },
+    onLongPress = { ... },
+)
+```
+
+---
+
+## Task 3: Following Count
+
+**Priority:** Fourth — trivial, bundle with profile UI work.
+
+**Own profile only.** Other users' following count deferred to a future sprint.
+
+**Changes:**
+
+**ProfileViewModel:**
+```kotlin
+@Inject constructor(
+    ...
+    private val followDao: FollowDao,  // add injection
+) {
+    val followingCount: StateFlow<Int> = followDao.countFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+}
+```
+
+**Note:** `FollowDao.count()` is a suspend fun. Need to check if there's a `countFlow()` or add one:
+```kotlin
+@Query("SELECT COUNT(*) FROM follows")
+fun countFlow(): Flow<Int>
+```
+
+**ProfileScreen:**
+Change `StatLabel(label = "Following", value = viewModel.following)` to use `viewModel.followingCount.collectAsState()`.
+
+**Remove:** The hardcoded `val following: Int? = null` from `ProfileViewModel`.
+
+---
+
+## Task 2: Profile Tabs (Notes / Replies / Longform)
+
+**Priority:** Fifth — UI work.
+
+### Tab Enum
+
+```kotlin
+enum class ProfileTab { NOTES, REPLIES, LONGFORM }
+```
+
+### New DAO Queries (additive — do NOT modify existing userPostsFlow)
+
+Three new methods on `EventDao`:
+
+**Important:** Use explicit column enumeration matching the existing `feedFlow`/`userPostsFlow` pattern. Do NOT use `SELECT e.*` — Room will fail because `e.*` includes columns (e.g., `sig`) that `FeedRow` does not map.
+
+```kotlin
+@Query("""
+    SELECT
+        e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+        e.relay_url, e.reply_to_id, e.root_id,
+        e.has_content_warning, e.content_warning_reason, e.cached_at,
+        e.zap_total_sats,
+        u.name            AS author_name,
+        u.display_name    AS author_display_name,
+        u.picture         AS author_picture,
+        u.nip05           AS author_nip05,
+        COUNT(DISTINCT r.event_id)  AS reaction_count,
+        COUNT(DISTINCT rep.id)      AS reply_count,
+        COUNT(DISTINCT rp.id)       AS repost_count,
+        COUNT(DISTINCT z.id)        AS zap_count
+    FROM events e
+    LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+    LEFT JOIN reactions r   ON r.target_event_id = e.id
+    LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+    LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+    LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
+    WHERE e.pubkey = :pubkey AND e.kind = 1
+      AND e.reply_to_id IS NULL AND e.root_id IS NULL
+    GROUP BY e.id
+    ORDER BY e.created_at DESC
+    LIMIT :limit
+""")
+fun userNotesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+
+@Query("""
+    SELECT
+        e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+        e.relay_url, e.reply_to_id, e.root_id,
+        e.has_content_warning, e.content_warning_reason, e.cached_at,
+        e.zap_total_sats,
+        u.name            AS author_name,
+        u.display_name    AS author_display_name,
+        u.picture         AS author_picture,
+        u.nip05           AS author_nip05,
+        COUNT(DISTINCT r.event_id)  AS reaction_count,
+        COUNT(DISTINCT rep.id)      AS reply_count,
+        COUNT(DISTINCT rp.id)       AS repost_count,
+        COUNT(DISTINCT z.id)        AS zap_count
+    FROM events e
+    LEFT JOIN users     u   ON u.pubkey          = e.pubkey
+    LEFT JOIN reactions r   ON r.target_event_id = e.id
+    LEFT JOIN events    rep ON rep.reply_to_id   = e.id AND rep.kind = 1
+    LEFT JOIN events    rp  ON rp.root_id        = e.id AND rp.kind  = 6
+    LEFT JOIN events    z   ON z.root_id         = e.id AND z.kind  = 9735
+    WHERE e.pubkey = :pubkey AND e.kind = 1
+      AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL)
+    GROUP BY e.id
+    ORDER BY e.created_at DESC
+    LIMIT :limit
+""")
+fun userRepliesFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+
+@Query("""
+    SELECT
+        e.id, e.pubkey, e.kind, e.content, e.created_at, e.tags,
+        e.relay_url, e.reply_to_id, e.root_id,
+        e.has_content_warning, e.content_warning_reason, e.cached_at,
+        e.zap_total_sats,
+        u.name            AS author_name,
+        u.display_name    AS author_display_name,
+        u.picture         AS author_picture,
+        u.nip05           AS author_nip05,
+        0 AS reaction_count, 0 AS reply_count, 0 AS repost_count, 0 AS zap_count
+    FROM events e
+    LEFT JOIN users u ON u.pubkey = e.pubkey
+    WHERE e.pubkey = :pubkey AND e.kind = 30023
+    GROUP BY e.id
+    ORDER BY e.created_at DESC
+    LIMIT :limit
+""")
+fun userLongformFlow(pubkey: String, limit: Int = 200): Flow<List<FeedRow>>
+```
+
+**Note:** Longform query skips engagement JOINs (articles don't typically have reactions/replies in this app). If needed later, add them.
+
+**Note:** Notes query removes the `OR e.kind = 6` (reposts) from the original `userPostsFlow`. The Notes tab shows only original kind-1 posts. Reposts could be added as a 4th tab later.
+
+### ViewModel Changes
+
+**Both ProfileViewModel and UserProfileViewModel:**
+```kotlin
+val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+
+val tabPostsFlow: Flow<List<FeedRow>> = selectedTab.flatMapLatest { tab ->
+    when (tab) {
+        ProfileTab.NOTES    -> eventRepository.userNotesFlow(pubkey)
+        ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pubkey)
+        ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pubkey)
+    }
+}
+```
+
+**EventRepository:** Add pass-through methods for the three new DAO queries.
+
+### Shared Composable
+
+```kotlin
+@Composable
+fun ProfileTabRow(
+    selectedTab: ProfileTab,
+    onTabSelected: (ProfileTab) -> Unit,
+) {
+    TabRow(
+        selectedTabIndex = selectedTab.ordinal,
+        containerColor = Black,
+        contentColor = Color.White,
+        indicator = { tabPositions ->
+            TabRowDefaults.SecondaryIndicator(
+                modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab.ordinal]),
+                color = Cyan,
+            )
+        },
+    ) {
+        ProfileTab.entries.forEach { tab ->
+            Tab(
+                selected = selectedTab == tab,
+                onClick = { onTabSelected(tab) },
+                text = {
+                    Text(
+                        text = when (tab) {
+                            ProfileTab.NOTES    -> "Notes"
+                            ProfileTab.REPLIES  -> "Replies"
+                            ProfileTab.LONGFORM -> "Longform"
+                        },
+                        color = if (selectedTab == tab) Color.White else TextSecondary,
+                    )
+                },
+            )
+        }
+    }
+}
+```
+
+**Location:** New file `ui/profile/ProfileTab.kt` — shared between both profile screens.
+
+**Both ProfileScreen and UserProfileScreen:**
+- Add `ProfileTabRow` between profile header and posts list
+- Switch from `postsFlow` / `userPostsFlow` to `tabPostsFlow` for the LazyColumn
+- Add empty state text per tab
+
+**Longform tap:** Kind-30023 items open `ArticleReaderScreen` (already built).
+
+---
+
+## Task 4: Followers Count (NIP-45 COUNT)
+
+**Priority:** Last — with bail-out option.
+
+**Scope:** Minimal. Single relay, cached result.
+
+### RelayPool.sendCount()
+
+```kotlin
+suspend fun sendCount(
+    relayUrl: String,
+    filter: JsonObject,
+): Long? = withContext(Dispatchers.IO) {
+    // 1. Open temporary WebSocket to relayUrl (or reuse existing connection)
+    // 2. Send: ["COUNT", "<sub-id>", filter]
+    // 3. Wait for: ["COUNT", "<sub-id>", {"count": N}]
+    // 4. Close subscription, return N
+    // 5. Timeout after 10 seconds → return null
+}
+```
+
+**Filter for followers:**
+```json
+{"kinds": [3], "#p": ["<target_pubkey>"]}
+```
+
+**Implementation:** Use existing `RelayConnection` if one is open to the relay, otherwise open a temporary connection. Parse the COUNT response as a one-shot — don't route through EventProcessor.
+
+### Caching
+
+**UserEntity** — add column:
+```kotlin
+@ColumnInfo(name = "follower_count") val followerCount: Long? = null,
+@ColumnInfo(name = "follower_count_updated_at") val followerCountUpdatedAt: Long? = null,
+```
+
+**Migration (v5 → v6):** Two ALTER TABLE statements on users table.
+
+**Refresh policy:** If `followerCountUpdatedAt` is null or older than 24 hours, re-fetch.
+
+### ViewModel
+
+**ProfileViewModel:**
+```kotlin
+val followerCount = MutableStateFlow<Long?>(null)
+
+init {
+    viewModelScope.launch(Dispatchers.IO) {
+        val cached = userDao.getFollowerCount(pubkeyHex)
+        if (cached != null && !isStale(cached.updatedAt)) {
+            followerCount.value = cached.count
+            return@launch
+        }
+        val count = relayPool.sendCount(
+            relayUrl = "wss://purplepag.es",
+            filter = buildJsonObject {
+                put("kinds", buildJsonArray { add(3) })
+                put("#p", buildJsonArray { add(pubkeyHex) })
+            },
+        )
+        if (count != null) {
+            followerCount.value = count
+            userDao.updateFollowerCount(pubkeyHex, count, System.currentTimeMillis() / 1000)
+        }
+    }
+}
+```
+
+### UI
+
+**ProfileScreen** — change `StatLabel(label = "Followers", value = viewModel.followers)`:
+```kotlin
+val followerCount by viewModel.followerCount.collectAsState()
+StatLabel(
+    label = "followers",
+    value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+)
+```
+
+**Note:** `StatLabel` may need to accept `String` instead of `Int?` to support the `~` prefix and `—` fallback.
+
+### Bail-out
+
+If `sendCount()` implementation gets complicated (WebSocket message routing, response parsing edge cases), skip this task entirely. Show `—` for followers, ship following count only. Followers can come in Sprint 24.
+
+---
+
+## Execution Order
+
+1. **Task 6** — Startup frame skip (investigate, fix or skip)
+2. **Task 5** — Own-profile repost names (one init block)
+3. **Task 1** — Zap total sats (migration v4→v5 + pipeline + UI)
+4. **Task 3** — Following count (expose existing DAO on profile)
+5. **Task 2** — Profile tabs (shared composable, 3 DAO queries)
+6. **Task 4** — Followers NIP-45 COUNT (last, bail-out available)
+
+**Migration strategy:** Task 1 creates `MIGRATION_4_5` (adds `zap_total_sats` to events table). If Task 4 proceeds, it creates `MIGRATION_5_6` (adds `follower_count` + `follower_count_updated_at` to users table). They are separate migrations — Task 4 has a bail-out option, so its migration must not be bundled with Task 1's.
+
+---
+
+## Files Modified
+
+| File | Changes |
+|------|---------|
+| `EventEntity.kt` | Add `zapTotalSats` column |
+| `EventDao.kt` | Add `addZapSats()`, `userNotesFlow()`, `userRepliesFlow()`, `userLongformFlow()`, add `zap_total_sats` to all FeedRow queries |
+| `FeedRow` (in EventDao.kt) | Add `zapTotalSats: Long` field |
+| `EventProcessor.kt` | Add `tagValue()`, `extractZapSats()`, call `addZapSats()` in `flushBatch()` after kind-9735 insert |
+| `Migrations.kt` | Add `MIGRATION_4_5` (and `MIGRATION_5_6` if Task 4 proceeds) |
+| `AppDatabase.kt` | Bump version to 5 (or 6), register migration(s) |
+| `DatabaseModule.kt` | Add `MIGRATION_4_5` (and `MIGRATION_5_6`) to `.addMigrations()` call |
+| `EventRepository.kt` | Add pass-through methods for tab queries |
+| `FollowDao.kt` | Add `countFlow(): Flow<Int>` method |
+| `ProfileViewModel.kt` | Add `fetchMissingProfiles` collectLatest, `followingCount`, `selectedTab`, `tabPostsFlow`, `followerCount` |
+| `UserProfileViewModel.kt` | Add `selectedTab`, `tabPostsFlow` |
+| `ProfileScreen.kt` | Add tab row, use `tabPostsFlow`, show following/followers counts |
+| `UserProfileScreen.kt` | Add tab row, use `tabPostsFlow` |
+| `NoteCard.kt` | Change ZapButton to use `sats: Long` + `toCompactSats()` |
+| `RelayPool.kt` | Add `sendCount()` method (if Task 4 proceeds) |
+| `UserEntity.kt` | Add `followerCount`, `followerCountUpdatedAt` columns (if Task 4 proceeds) |
+
+## New Files
+
+| File | Purpose |
+|------|---------|
+| `ui/profile/ProfileTab.kt` | `ProfileTab` enum + `ProfileTabRow` composable |
+
+
+
+===== FILE: docs/unsilence-architecture-v2.md =====
+
+# unSilence — Architecture Vision
+
+**Core mission:** The fastest, most efficient Android-native Nostr client. Less is more. Every millisecond of latency, every byte of RAM, every unnecessary network call is the enemy. The user should feel like they're browsing a local database that happens to sync with the world.
+
+---
+
+## Guiding Principles
+
+1. **Room is the only read source.** UI never waits on a WebSocket. Every screen renders from Room immediately, then updates reactively as fresh data arrives.
+
+2. **Network fills gaps, not screens.** Fetches are driven by what's *missing*, not by what the user clicked. If Room has it, show it. If Room doesn't, fetch it in the background while showing honest loading states.
+
+3. **Honest UI states over fake emptiness.** Never show "No posts yet" when the real state is "haven't asked yet." The user deserves to know: loaded, loading, partial, failed, empty.
+
+4. **Scoped relay sets, not broadcast.** Profiles go to indexer relays. Feed goes to the user's outbox model. Search goes to NIP-50 relays. Global goes to high-throughput public relays. Never ask every relay for everything.
+
+5. **Dedup before parse, prune without breaking.** The `seenIds` cache eliminates ~80% of duplicate processing before JSON parsing. Pruning never deletes events that are still visible or referenced.
+
+6. **Sequential where it matters, parallel where it's safe.** Bootstrap is sequential (connect → fetch follows → fetch profiles → open feed). Feed rendering is parallel (Room Flows update independently). Never race when correctness depends on order.
+
+7. **Native performance is the feature.** No WebView. No Flutter bridge. No React Native. Kotlin + Compose + Room + OkHttp WebSockets. The stack is the competitive advantage.
+
+---
+
+## Current Architecture (v1 — Sprints 1-23)
+
+```
+Relay (WebSocket)
+    ↓ raw JSON strings
+EventProcessor (dedup → parse → route by kind)
+    ↓ ProcessedEvent entities
+Room (events, users, follows, reactions, relay_lists)
+    ↓ Flow<List<FeedRow>> / Flow<UserEntity> / etc.
+ViewModel (StateFlow, mapping, pagination)
+    ↓ Compose state
+UI (Jetpack Compose, Material 3, AMOLED black theme)
+```
+
+**What works well:**
+- seenIds dedup before JSON parsing (~80% reduction)
+- Composite DB indexes on events table (eliminated "Long db operation")
+- One-shot vs persistent subscription lifecycle
+- engagementId pattern (rootId ?: id) for correct repost reaction state
+- Sequential bootstrap (connect indexers → fetch kind-3 → fetch profiles → connect global)
+- FIFO pruning at 800K rows
+
+**What's missing:**
+- No knowledge of what's been fetched vs what hasn't (fake emptiness)
+- Offset-based pagination in some places (fragile)
+- No fetch deduplication (same profile requested 10x from 10 screens)
+- Pruning can delete events still visible in UI
+- No relay health tracking (dead relays stay in rotation)
+
+---
+
+## v2 Architecture — The Coverage Ledger
+
+The single architectural upgrade that makes everything coherent: **track what you've fetched, not just what you have.**
+
+### The Problem
+
+Room tells you what events you own. It doesn't tell you:
+- Have I asked relay X for this user's posts?
+- Did that request complete (EOSE) or timeout?
+- Is this empty profile tab genuinely empty, or have I just never fetched?
+- Did I fetch posts from 2 hours ago but not from yesterday?
+
+Without this knowledge, every "No posts yet" is a lie. Every scroll-to-load-more is a guess. Every app restart refetches everything from scratch.
+
+### The Solution: Coverage Table
+
+```kotlin
+@Entity(tableName = "coverage")
+data class CoverageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    
+    // What was fetched
+    val scopeType: String,      // "home", "user_posts", "thread", "profile_meta", "reactions", "search"
+    val scopeKey: String,       // pubkey, note id, or hashed filter — stable key
+    
+    // Time window covered
+    val sinceTs: Long,          // Nostr filter `since` value
+    val untilTs: Long,          // Nostr filter `until` value
+    
+    // Relay context
+    val relaySetId: String,     // "indexers", "global", "outbox:pubkey", "search"
+    
+    // Fetch state
+    val status: String,         // "pending", "partial", "complete", "failed"
+    val eoseCount: Int,         // how many relays sent EOSE
+    val expectedRelays: Int,    // how many relays were queried
+    
+    // Pagination cursors
+    val oldestSeenTs: Long,     // oldest event.created_at in this window
+    val newestSeenTs: Long,     // newest event.created_at in this window
+    val nextCursor: Long,       // usually oldestSeenTs - 1 for backward pagination
+    
+    // Freshness
+    val lastAttemptAt: Long,
+    val lastSuccessAt: Long,
+    val staleAfterMs: Long,     // how long before this coverage is considered stale
+)
+```
+
+### Fetch Contract
+
+Every screen asks for *coverage*, not *network*:
+
+```kotlin
+// Instead of: relayPool.fetchUserPosts(pubkey)
+// Do:         repository.ensureCoverage(UserPosts(pubkey, until=now, limit=50))
+
+sealed class CoverageIntent {
+    data class HomeWindow(val until: Long = now(), val limit: Int = 50) : CoverageIntent()
+    data class UserPosts(val pubkey: String, val until: Long = now(), val limit: Int = 50) : CoverageIntent()
+    data class Thread(val rootId: String) : CoverageIntent()
+    data class Profiles(val pubkeys: List<String>) : CoverageIntent()
+    data class Reactions(val eventId: String) : CoverageIntent()
+}
+```
+
+The repository then:
+1. Looks up coverage for that scope
+2. If window is missing or stale → enqueue fetch for just the missing interval
+3. Merge events idempotently into Room
+4. Mark interval as complete only after EOSE from the relay set
+
+### Gap-Free Pagination
+
+Never page by offset. Page by time boundaries:
+
+```
+cursor = oldest_loaded_created_at - 1
+next_filter = { kinds: [1], authors: [...], until: cursor, limit: 50 }
+```
+
+Overlap slightly (10-20 events or a few seconds) because relay ordering is messy and equal timestamps happen. Dedup by event ID on insert.
+
+Mark each window:
+- `complete` → EOSE received, all expected relays responded
+- `partial` → fewer than `limit` events returned, no EOSE yet
+- `failed` → timeout, all relays errored
+
+### Honest UI States
+
+Every screen reads coverage + data together:
+
+```kotlin
+data class FeedState(
+    val posts: List<FeedRow>,
+    val coverage: CoverageStatus,  // LOADING, PARTIAL, COMPLETE, STALE, FAILED
+    val canLoadMore: Boolean,      // true if nextCursor exists and coverage != COMPLETE for older window
+)
+```
+
+The UI renders:
+- `LOADING` + empty → shimmer/skeleton
+- `PARTIAL` + some posts → show posts + "Loading more..." at bottom
+- `COMPLETE` + empty → "No posts" (genuinely empty)
+- `STALE` + cached posts → show cached + refresh indicator
+- `FAILED` → "Couldn't connect. Tap to retry."
+
+No more fake emptiness. No more guessing.
+
+### Scoped Relay Sets
+
+Formalize what we already do informally:
+
+```kotlin
+enum class RelaySet {
+    INDEXERS,       // purplepag.es, user.kindpag.es, indexer.coracle.social, antiprimal.net
+    GLOBAL,         // relay.damus.io, nos.lol, nostr.mom, relay.nostr.net, relay.primal.net, relay.ditto.pub
+    SEARCH,         // relay.noswhere.com, search.nos.today, antiprimal.net
+    OUTBOX,         // per-user write relays from kind-10002
+    USER_DECLARED,  // relays the user manually added
+}
+```
+
+Coverage becomes "complete relative to relay set X" — a sane, measurable definition.
+
+### Pruning Without Breaking
+
+Never prune if:
+- The event is inside an active coverage window
+- A materialized row (feed, thread, profile) references it
+- It's newer than the preserved cursor horizon for its scope
+
+Prune only:
+- Events outside all active coverage windows
+- Events older than the oldest cursor in their scope
+- Events with no referencing materialized rows
+
+### Relay Health Tracking
+
+```kotlin
+@Entity(tableName = "relay_health")
+data class RelayHealthEntity(
+    @PrimaryKey val url: String,
+    val lastConnectAttempt: Long,
+    val lastSuccessfulConnect: Long,
+    val lastEoseReceived: Long,
+    val consecutiveFailures: Int,
+    val averageLatencyMs: Long,
+    val eventsReceived: Long,       // lifetime counter
+    val status: String,             // "healthy", "degraded", "dead"
+)
+```
+
+Dead relays get deprioritized. Healthy relays get more traffic. The user sees connection quality in relay management UI.
+
+### Profile Fetch Deduplication
+
+```kotlin
+class ProfileFetchTracker {
+    private val inFlight = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+    
+    suspend fun ensureProfile(pubkey: String) {
+        inFlight.getOrPut(pubkey) {
+            CompletableDeferred<Unit>().also { deferred ->
+                scope.launch {
+                    relayPool.fetchProfiles(listOf(pubkey))
+                    // Wait for Room to have the profile or timeout
+                    withTimeoutOrNull(5_000) {
+                        userDao.userFlow(pubkey).filterNotNull().first()
+                    }
+                    deferred.complete(Unit)
+                    inFlight.remove(pubkey)
+                }
+            }
+        }.await()
+    }
+}
+```
+
+10 screens requesting the same profile → 1 relay request. The rest await the same deferred.
+
+---
+
+## Implementation Phases
+
+### Phase 1 — Immediate (no schema changes)
+- Honest UI states: shimmer while fetching, "Couldn't connect" on failure
+- Cursor-based pagination everywhere (replace offset-based)
+- Profile fetch deduplication (in-memory tracker)
+- Safe pruning (check references before delete)
+
+### Phase 2 — Coverage Ledger (Room migration)
+- Add `coverage` table
+- Refactor repositories to use CoverageIntent pattern
+- Wire UI states to coverage status
+- Add relay health table
+
+### Phase 3 — Materialized Views
+- Precomputed feed rows (denormalized for instant rendering)
+- Thread materialization (tree built on insert, not on read)
+- Profile completeness tracking
+
+### Phase 4 — Intelligence
+- Relay scoring (route requests to fastest/most-complete relays)
+- Predictive prefetch (prefetch profiles for visible feed items)
+- Adaptive pruning (keep more data for active users, less for dormant)
+- NIP-85 Web of Trust integration via antiprimal.net
+
+---
+
+## The North Star
+
+When a user opens unSilence:
+- **0ms:** Cached feed renders from Room. Instantly.
+- **<500ms:** Fresh events start appearing (relay connections restored, persistent subs active).
+- **<2s:** All visible profiles resolved, avatars loaded.
+- **Scroll:** Infinite, gap-free, no "Loading..." spinners mid-feed.
+- **Profile tap:** Instant render from cache, background refresh if stale.
+- **Thread tap:** Full tree renders from Room, missing branches fetched silently.
+- **Background → foreground:** Feed picks up exactly where it left off. No re-fetch. No stale data.
+
+That's the bar. Every architectural decision serves this experience. If a feature makes the app slower, it doesn't ship. If an abstraction adds latency, it gets flattened. Speed is the product.
+
+---
+
+*This document is the architectural north star for unSilence v2. It should be updated as we learn from real-world usage and as the Nostr protocol evolves.*
+
+
+
+===== FILE: gradle/wrapper/gradle-wrapper.properties =====
+
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+
+
+
+===== FILE: gradle.properties =====
+
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+android.nonTransitiveRClass=true
+org.gradle.java.home=/home/aivii/.local/share/JetBrains/Toolbox/apps/android-studio/jbr
+
+
+
+===== FILE: gradlew =====
+
+#!/bin/sh
+
+#
+# Copyright © 2015 the original authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+##############################################################################
+#
+#   Gradle start up script for POSIX generated by Gradle.
+#
+#   Important for running:
+#
+#   (1) You need a POSIX-compliant shell to run this script. If your /bin/sh is
+#       noncompliant, but you have some other compliant shell such as ksh or
+#       bash, then to run this script, type that shell name before the whole
+#       command line, like:
+#
+#           ksh Gradle
+#
+#       Busybox and similar reduced shells will NOT work, because this script
+#       requires all of these POSIX shell features:
+#         * functions;
+#         * expansions «$var», «${var}», «${var:-default}», «${var+SET}»,
+#           «${var#prefix}», «${var%suffix}», and «$( cmd )»;
+#         * compound commands having a testable exit status, especially «case»;
+#         * various built-in commands including «command», «set», and «ulimit».
+#
+#   Important for patching:
+#
+#   (2) This script targets any POSIX shell, so it avoids extensions provided
+#       by Bash, Ksh, etc; in particular arrays are avoided.
+#
+#       The "traditional" practice of packing multiple parameters into a
+#       space-separated string is a well documented source of bugs and security
+#       problems, so this is (mostly) avoided, by progressively accumulating
+#       options in "$@", and eventually passing that to Java.
+#
+#       Where the inherited environment variables (DEFAULT_JVM_OPTS, JAVA_OPTS,
+#       and GRADLE_OPTS) rely on word-splitting, this is performed explicitly;
+#       see the in-line comments for details.
+#
+#       There are tweaks for specific operating systems such as AIX, CygWin,
+#       Darwin, MinGW, and NonStop.
+#
+#   (3) This script is generated from the Groovy template
+#       https://github.com/gradle/gradle/blob/HEAD/platforms/jvm/plugins-application/src/main/resources/org/gradle/api/internal/plugins/unixStartScript.txt
+#       within the Gradle project.
+#
+#       You can find Gradle at https://github.com/gradle/gradle/.
+#
+##############################################################################
+
+# Attempt to set APP_HOME
+
+# Resolve links: $0 may be a link
+app_path=$0
+
+# Need this for daisy-chained symlinks.
+while
+    APP_HOME=${app_path%"${app_path##*/}"}  # leaves a trailing /; empty if no leading path
+    [ -h "$app_path" ]
+do
+    ls=$( ls -ld "$app_path" )
+    link=${ls#*' -> '}
+    case $link in             #(
+      /*)   app_path=$link ;; #(
+      *)    app_path=$APP_HOME$link ;;
+    esac
+done
+
+# This is normally unused
+# shellcheck disable=SC2034
+APP_BASE_NAME=${0##*/}
+# Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
+APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
+
+# Use the maximum available, or set MAX_FD != -1 to use that value.
+MAX_FD=maximum
+
+warn () {
+    echo "$*"
+} >&2
+
+die () {
+    echo
+    echo "$*"
+    echo
+    exit 1
+} >&2
+
+# OS specific support (must be 'true' or 'false').
+cygwin=false
+msys=false
+darwin=false
+nonstop=false
+case "$( uname )" in                #(
+  CYGWIN* )         cygwin=true  ;; #(
+  Darwin* )         darwin=true  ;; #(
+  MSYS* | MINGW* )  msys=true    ;; #(
+  NONSTOP* )        nonstop=true ;;
+esac
+
+CLASSPATH="\\\"\\\""
+
+
+# Determine the Java command to use to start the JVM.
+if [ -n "$JAVA_HOME" ] ; then
+    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+        # IBM's JDK on AIX uses strange locations for the executables
+        JAVACMD=$JAVA_HOME/jre/sh/java
+    else
+        JAVACMD=$JAVA_HOME/bin/java
+    fi
+    if [ ! -x "$JAVACMD" ] ; then
+        die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+else
+    JAVACMD=java
+    if ! command -v java >/dev/null 2>&1
+    then
+        die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+fi
+
+# Increase the maximum file descriptors if we can.
+if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
+    case $MAX_FD in #(
+      max*)
+        # In POSIX sh, ulimit -H is undefined. That's why the result is checked to see if it worked.
+        # shellcheck disable=SC2039,SC3045
+        MAX_FD=$( ulimit -H -n ) ||
+            warn "Could not query maximum file descriptor limit"
+    esac
+    case $MAX_FD in  #(
+      '' | soft) :;; #(
+      *)
+        # In POSIX sh, ulimit -n is undefined. That's why the result is checked to see if it worked.
+        # shellcheck disable=SC2039,SC3045
+        ulimit -n "$MAX_FD" ||
+            warn "Could not set maximum file descriptor limit to $MAX_FD"
+    esac
+fi
+
+# Collect all arguments for the java command, stacking in reverse order:
+#   * args from the command line
+#   * the main class name
+#   * -classpath
+#   * -D...appname settings
+#   * --module-path (only if needed)
+#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and GRADLE_OPTS environment variables.
+
+# For Cygwin or MSYS, switch paths to Windows format before running java
+if "$cygwin" || "$msys" ; then
+    APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
+    CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
+
+    JAVACMD=$( cygpath --unix "$JAVACMD" )
+
+    # Now convert the arguments - kludge to limit ourselves to /bin/sh
+    for arg do
+        if
+            case $arg in                                #(
+              -*)   false ;;                            # don't mess with options #(
+              /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
+                    [ -e "$t" ] ;;                      #(
+              *)    false ;;
+            esac
+        then
+            arg=$( cygpath --path --ignore --mixed "$arg" )
+        fi
+        # Roll the args list around exactly as many times as the number of
+        # args, so each arg winds up back in the position where it started, but
+        # possibly modified.
+        #
+        # NB: a `for` loop captures its iteration list before it begins, so
+        # changing the positional parameters here affects neither the number of
+        # iterations, nor the values presented in `arg`.
+        shift                   # remove old arg
+        set -- "$@" "$arg"      # push replacement arg
+    done
+fi
+
+
+# Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+
+# Collect all arguments for the java command:
+#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,
+#     and any embedded shellness will be escaped.
+#   * For example: A user cannot expect ${Hostname} to be expanded, as it is an environment variable and will be
+#     treated as '${Hostname}' itself on the command line.
+
+set -- \
+        "-Dorg.gradle.appname=$APP_BASE_NAME" \
+        -classpath "$CLASSPATH" \
+        -jar "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \
+        "$@"
+
+# Stop when "xargs" is not available.
+if ! command -v xargs >/dev/null 2>&1
+then
+    die "xargs is not available"
+fi
+
+# Use "xargs" to parse quoted args.
+#
+# With -n1 it outputs one arg per line, with the quotes and backslashes removed.
+#
+# In Bash we could simply go:
+#
+#   readarray ARGS < <( xargs -n1 <<<"$var" ) &&
+#   set -- "${ARGS[@]}" "$@"
+#
+# but POSIX shell has neither arrays nor command substitution, so instead we
+# post-process each arg (as a line of input to sed) to backslash-escape any
+# character that might be a shell metacharacter, then use eval to reverse
+# that process (while maintaining the separation between arguments), and wrap
+# the whole thing up as a single "set" statement.
+#
+# This will of course break if any of these variables contains a newline or
+# an unmatched quote.
+#
+
+eval "set -- $(
+        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
+        xargs -n1 |
+        sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
+        tr '\n' ' '
+    )" '"$@"'
+
+exec "$JAVACMD" "$@"
+
+
+
+
+===== FILE: gradlew.bat =====
+
+@rem
+@rem Copyright 2015 the original author or authors.
+@rem
+@rem Licensed under the Apache License, Version 2.0 (the "License");
+@rem you may not use this file except in compliance with the License.
+@rem You may obtain a copy of the License at
+@rem
+@rem      https://www.apache.org/licenses/LICENSE-2.0
+@rem
+@rem Unless required by applicable law or agreed to in writing, software
+@rem distributed under the License is distributed on an "AS IS" BASIS,
+@rem WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@rem See the License for the specific language governing permissions and
+@rem limitations under the License.
+@rem
+@rem SPDX-License-Identifier: Apache-2.0
+@rem
+
+@if "%DEBUG%"=="" @echo off
+@rem ##########################################################################
+@rem
+@rem  Gradle startup script for Windows
+@rem
+@rem ##########################################################################
+
+@rem Set local scope for the variables with windows NT shell
+if "%OS%"=="Windows_NT" setlocal
+
+set DIRNAME=%~dp0
+if "%DIRNAME%"=="" set DIRNAME=.
+@rem This is normally unused
+set APP_BASE_NAME=%~n0
+set APP_HOME=%DIRNAME%
+
+@rem Resolve any "." and ".." in APP_HOME to make it shorter.
+for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
+
+@rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
+
+@rem Find java.exe
+if defined JAVA_HOME goto findJavaFromJavaHome
+
+set JAVA_EXE=java.exe
+%JAVA_EXE% -version >NUL 2>&1
+if %ERRORLEVEL% equ 0 goto execute
+
+echo. 1>&2
+echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH. 1>&2
+echo. 1>&2
+echo Please set the JAVA_HOME variable in your environment to match the 1>&2
+echo location of your Java installation. 1>&2
+
+goto fail
+
+:findJavaFromJavaHome
+set JAVA_HOME=%JAVA_HOME:"=%
+set JAVA_EXE=%JAVA_HOME%/bin/java.exe
+
+if exist "%JAVA_EXE%" goto execute
+
+echo. 1>&2
+echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME% 1>&2
+echo. 1>&2
+echo Please set the JAVA_HOME variable in your environment to match the 1>&2
+echo location of your Java installation. 1>&2
+
+goto fail
+
+:execute
+@rem Setup the command line
+
+set CLASSPATH=
+
+
+@rem Execute Gradle
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" -jar "%APP_HOME%\gradle\wrapper\gradle-wrapper.jar" %*
+
+:end
+@rem End local scope for the variables with windows NT shell
+if %ERRORLEVEL% equ 0 goto mainEnd
+
+:fail
+rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
+rem the _cmd.exe /c_ return code!
+set EXIT_CODE=%ERRORLEVEL%
+if %EXIT_CODE% equ 0 set EXIT_CODE=1
+if not ""=="%GRADLE_EXIT_CONSOLE%" exit %EXIT_CODE%
+exit /b %EXIT_CODE%
+
+:mainEnd
+if "%OS%"=="Windows_NT" endlocal
+
+:omega
+
+
+
+
+===== FILE: local.properties =====
+
+## This file must *NOT* be checked into Version Control Systems,
+# as it contains information specific to your local configuration.
+#
+# Location of the SDK. This is only used by Gradle.
+# For customization when using a Version Control System, please read the
+# header note.
+#Tue Mar 03 16:17:45 MSK 2026
+sdk.dir=/home/aivii/Android/Sdk
+
+
+
+===== FILE: unsilence-stabilization-sprint.md =====
+
+# unSilence Stabilization Sprint — Complete Bug & Issue List
+
+> **For Claude Code:** This is the MASTER list. Read CLAUDE.md too.
+> Fix bugs in the order listed. Do NOT start new features until
+> all CRITICAL and HIGH items are verified working on real device.
+> 23 sprints complete. DB at version 6.
+
+---
+
+## Codebase Constraints (non-negotiable)
+
+- **DI:** Hilt only. KSP, not kapt.
+- **Events:** Quartz library types. `EventTemplate` constructor for JVM 17 compat.
+- **Room migrations:** Index names MUST use `index_tablename_col1_col2` with backticks. Vararg @Index syntax.
+- **Versions:** Kotlin 2.3.0, KSP 2.3.0, Hilt 2.58, Room 2.7.1, AGP 8.9.1, Gradle 8.11.1, Compose BOM 2025.05.00, markdown-renderer 0.28.0, compileSdk/targetSdk 36.
+- **Build:** Never run `./gradlew` from terminal while Android Studio is open.
+- **Git:** Operations from `aivii` user terminal, not `android-dev`.
+- **Architecture:** Relay → EventProcessor → Room → Flow/StateFlow → Compose UI.
+- **Theme:** AMOLED black #000000, cyan #00E5FF, zap amber #FFAB00.
+- **SigningManager:** Quartz NostrSignerExternal (Amber) / NostrSignerInternal (nsec). All 6 signing locations refactored in Sprint 22.
+
+---
+
+## CRITICAL — Blocks daily use
+
+### 1. AMBER LOGIN BROKEN
+**Symptom:** Sign in with Amber → app opens on empty Following feed. Profile empty (no picture, banner, name — just hex/npub). No follows loaded. No feed subscriptions created.
+**Logs show:** `AppBootstrapper: Bootstrapped for npub...` fires. Kind-3 and kind-10002 fetch requests sent. BUT zero `follows-*` or `feed-*` persistent subscriptions appear. Profiles fetch (one-shot) but follows/feed never start.
+**Root cause:** Bootstrap sends relay requests but the responses either: (a) never arrive back to EventProcessor, (b) arrive but kind-3 isn't parsed into follows table, or (c) follows are parsed but OutboxRouter/feed subscriptions never start.
+**Debug approach:** Add logging at EACH step: EventProcessor receiving kind-0/3/10002 → DAO inserts → follows table population → OutboxRouter activation → feed subscription creation. Test with Amber specifically. Don't guess — trace the actual data path.
+**Verify:** Amber login → profile shows picture/banner/name → follows populate → Following feed shows posts.
+
+### 2. MARKDOWN RENDERER BROKEN (v0.28.0)
+**Symptom:** ArticleReaderScreen shows raw `###` headers, `**bold**`, `***` rules as literal text. Not rendered as formatted markdown.
+**Screenshot:** Image 7 shows raw markdown source displayed as plain text.
+**Root cause:** The 0.28.0 API's `Markdown()` composable either needs different parameters than what we're passing, or the content needs preprocessing. The downgrade from 0.39.2 changed the API surface.
+**Fix:** Check the 0.28.0 `Markdown()` composable signature. The `content` param might need to be passed differently. Or try version 0.29.0-0.33.0 range for Compose BOM 2025.05.00 compatibility.
+**Verify:** Open a kind-30023 article → headings render large, bold renders bold, links are clickable, code blocks are formatted.
+
+---
+
+## HIGH — Visible user-facing bugs (from real device screenshots)
+
+### 3. ACTION BAR SHOWS ZERO COUNTS
+**Symptom:** Global feed posts show action bar icons (💬🔁🤙⚡) but engagement numbers appear to be zero/missing on most posts. Zap sats (⚡ 100, ⚡ 42) work on some posts but replies/reposts/reactions show nothing.
+**Screenshot:** Images 1-6 show posts with no reply/repost/reaction counts.
+**Root cause:** Sprint 23 added `zap_total_sats` to FeedRow and all SQL queries. Possible that the query changes broke existing engagement JOINs, or the `e.zap_total_sats` addition changed column ordering and broke Room mapping.
+**Fix:** Check all FeedRow SQL queries — verify reaction_count, reply_count, repost_count JOINs are still correct after Sprint 23 changes. Run a query manually in debug to see if counts return non-zero.
+
+### 4. VIDEOS RENDER TOO SMALL / WRONG ASPECT RATIO
+**Symptom:** Videos from imeta render at their native small dimensions instead of filling card width. Some show cropped with black bars on the left.
+**Screenshot:** Images 1, 3, 5 show videos not filling card width.
+**Root cause:** The width constraint on InlineAutoPlayVideo or VideoThumbnailCard is probably using imeta `dim` dimensions directly instead of scaling to `fillMaxWidth()` with calculated height from aspect ratio.
+**Fix:** Video width should ALWAYS be `fillMaxWidth()` (with card padding). Height = width × (dimHeight / dimWidth). If no dim available, use 16:9 default. Never use raw pixel dimensions from imeta as dp.
+
+### 5. INVISIBLE IMAGES (HUGE BLANK SPACES)
+**Symptom:** Some posts show massive blank areas where images should be. Space is reserved (from imeta dimensions) but images don't load — no error state shown, just blank space.
+**Screenshot:** Image 2 shows two Cyph3rp9nk posts with large empty areas.
+**Root cause:** Image URLs from imeta might be failing to load (CORS, 404, unsupported format), but Coil has no error/fallback state configured. The space is reserved by the aspect ratio calculation but never filled.
+**Fix:** Add Coil error/placeholder handling. If image fails to load, either show a broken-image icon or collapse the reserved space. Also check if the image URLs are actually valid.
+
+### 6. REPOSTS (KIND-6) MISSING FROM FEEDS AND PROFILE TABS
+**Symptom:** Reposts (boosted posts) don't appear in the feed or profile Notes tab.
+**Screenshot:** Image showing user profile with only original posts, no reposts visible.
+**Root cause:** Sprint 23's `userNotesFlow()` query filters `WHERE kind = 1 AND reply_to_id IS NULL AND root_id IS NULL` — this excludes kind-6 reposts entirely. The old `userPostsFlow()` included kind 6.
+**Fix:** Notes tab query should be: `WHERE (kind = 1 AND reply_to_id IS NULL AND root_id IS NULL) OR kind = 6`. Also verify `feedFlow()` and `followingFeedFlow()` still include kind 6.
+
+### 7. NOSTR MENTIONS SHOW RAW HEX
+**Symptom:** `nostr:npub1...` references in post content render as cyan pills with truncated hex like `@e090a89...` instead of resolved display names.
+**Screenshot:** Image 4 shows two cyan pills with hex at the top.
+**Root cause:** The nostr: URI parser extracts the pubkey but doesn't look up the display name from the users table in Room. It just shows the raw hex.
+**Fix:** When rendering `nostr:npub1...`, decode the bech32 to get the pubkey hex, look up `users` table for display name, show `@displayName` or `@name` instead of truncated hex. If no profile found, show truncated npub (not hex).
+
+### 8. QUOTED POSTS SHOW "QUOTED POST" PLACEHOLDER
+**Symptom:** Posts containing `nostr:note1...` or `nostr:nevent1...` show a grey "Quoted post" box instead of an inline embedded card with the quoted content.
+**Screenshot:** Images 3 and throughout show grey "Quoted post" placeholders.
+**Root cause:** NIP-19 embedded quote cards not implemented yet. The parser detects the reference but only renders a placeholder.
+**Fix:** When encountering `nostr:note1...` or `nostr:nevent1...` in content: decode bech32 → get event ID → look up in Room → render as an inline NoteCard (compact version: author avatar + name + truncated content + timestamp). If event not in Room, fetch it from relays.
+
+### 9. FILTERED FEED TOO FEW RESULTS
+**Symptom:** Global feed filtered by zaps shows only ~15 posts spanning 4 hours. Repost/timeframe filters show even fewer.
+**Screenshot:** Image showing very few posts when filtered by zaps.
+**Root cause:** Room only has ~200 events total. Filtering narrows that further. Not a filter bug — a data availability issue.
+**Fix:** Either: (A) increase initial fetch from 200 to 500+ for Global feed, or (B) when filtered results < 50, automatically trigger fetchOlderEvents to get more data that might match the filter, or (C) both. Also consider showing a "Load more" button or "Fetching more posts..." indicator when filter results are sparse.
+
+---
+
+## MEDIUM — Profile & interaction issues
+
+### 10. OTHER PROFILES — NO FOLLOWERS/FOLLOWING COUNTS
+**Symptom:** Other users' profiles show no follower or following count. Only own profile shows these.
+**Screenshot:** Seth's profile shows Notes/Replies/Longform tabs but no stats.
+**Root cause:** Sprint 23 only wired follower/following counts to ProfileViewModel (own profile). UserProfileViewModel has no equivalent.
+**Fix:**
+- **Followers:** Wire same NIP-45 sendCount() pattern from ProfileViewModel into UserProfileViewModel
+- **Following:** Can't use followDao.count() (that's YOUR follows). Need to count p-tags from the viewed user's kind-3 event. If kind-3 not stored, skip for now.
+
+### 11. NO FOLLOW/UNFOLLOW BUTTON ON PROFILES
+**Symptom:** No way to follow or unfollow users from their profile.
+**Root cause:** Never built.
+**Fix:** Add Follow/Unfollow button on UserProfileScreen. On tap: read current kind-3 event → add/remove p-tag → sign via SigningManager → publish updated kind-3 → update local follows table.
+
+### 12. AMBER POSTING UNTESTED
+**Symptom:** Sprint 22 added SigningManager with Amber support for all 6 signing locations, but it's never been tested on real device.
+**Fix:** Test: compose a post with Amber login → does Amber signing prompt appear? → does the signed post publish to relays? Also test reactions, reposts.
+
+---
+
+## LOW — Polish & UX from CLAUDE.md spec
+
+### 13. THREAD VIEW UX CLEANUP
+- Remove cyan line on OP
+- Use subtle grey opacity for focused reply
+- Filter kind 6/7/9735 from replies (kind 1 only)
+- Fix reply_count
+- Add depth indentation
+
+### 14. NIP-36 SENSITIVE CONTENT
+- Blur overlay on content-warning posts
+- Tap to reveal
+- Settings toggle
+- Per CLAUDE.md spec
+
+### 15. CUSTOM EMOJI (NIP-30)
+- Parse `:shortcode:` → inline images from `emoji` tags
+- Applies to kind 0, 1, 7
+
+### 16. NIP-09 EVENT DELETION
+- Long-press own note → delete
+- Publish kind 5 with e-tag
+- Remove from local Room
+
+### 17. POST COUNTDOWN PREVIEW
+- 5-second preview after hitting Post
+- Cancel/Send Now buttons
+- Per CLAUDE.md spec
+
+### 18. LINK PREVIEW CARDS (OpenGraph)
+- Non-media URLs → fetch OpenGraph title/description/thumbnail
+- Render as card below text
+
+### 19. IMAGE FULLSCREEN VIEWER
+- Tap image → fullscreen with pinch-zoom
+
+### 20. DEAD SETTINGS TABS
+- Wallet, Drafts, Keys, Safety, Social Graph, Custom Emojis, Console
+- All are empty shells since Sprint 17
+- At minimum: Wallet (NWC setup) and Keys (nsec export) should work
+
+### 21. BLOSSOM MEDIA UPLOAD
+- Image/GIF upload via Blossom server
+- NIP-92 imeta tags on published events
+
+### 22. GIF PICKER
+- Tenor API integration in compose toolbar
+
+### 23. SEARCH FROM SEARCH RELAYS
+- Search currently only queries Room
+- Should also query NIP-50 search relays (relay.noswhere.com, search.nos.today)
+
+---
+
+## FEATURE QUEUE (after stabilization)
+
+### Sprint 24: Language Filter
+- ML Kit language detection in EventProcessor pipeline
+- `language` column on events table + Room migration
+- Feed query modification with WHERE clause
+- LanguageFilterRow chips below feed top bar
+- DataStore preference for selected languages
+- OR semantics: WHERE languagesSize=0 OR language IN langs
+
+### Sprint 25: NIP-19 Inline Quote Cards
+- Decode nostr:note1/nevent1 → event ID → fetch from Room/relay → render inline compact NoteCard
+- Decode nostr:npub1 → pubkey → resolve display name → render as @name chip
+
+### Sprint 26: Engagement Drawer (Amethyst-style)
+- No names, avatar-only with IdentIcon fallback
+- Zaps: avatars with sats amount, optional zap message
+- Reposts: horizontal LazyRow of tiny avatars
+- Reactions: grouped by emoji, each emoji gets its own row
+- Summary bar at top with aggregate counts
+
+### Sprint 27: Polish Batch
+- Video poster frame thumbnails
+- Follow/Unfollow button
+- First-launch loading screen
+- Deep linking
+- Haptic zaps
+- EXIF strip on uploads
+- Share sheet
+
+---
+
+## EXECUTION ORDER FOR STABILIZATION
+
+**Phase 1 — Critical (do first, in this order):**
+1. Amber login bootstrap trace + fix (#1)
+2. Reposts missing from feeds/profiles (#6)
+3. Action bar zero counts (#3)
+
+**Phase 2 — High impact visual:**
+4. Videos too small (#4)
+5. Invisible images (#5)
+6. Markdown broken (#2)
+
+**Phase 3 — Interaction:**
+7. Nostr mentions raw hex (#7)
+8. Quoted posts placeholder (#8)
+9. Filtered feed sparse results (#9)
+10. Other profile counts (#10)
+11. Follow/Unfollow button (#11)
+12. Test Amber posting (#12)
+
+**Then:** Language Filter (Sprint 24)
+
