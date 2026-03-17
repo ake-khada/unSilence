@@ -1164,20 +1164,13 @@ private fun VideoThumbnailCard(
                 modifier = Modifier.matchParentSize(),
             )
         } else {
-            // Static placeholder — no remote video frame extraction in lists.
-            // VideoFrameDecoder downloads the video to extract a frame, which
-            // is too expensive during scroll and causes overheating.
-            Box(
-                modifier = Modifier.matchParentSize().background(MediaPlaceholder),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.3f),
-                    modifier = Modifier.size(36.dp),
-                )
-            }
+            // No imeta poster — extract first frame via VideoFrameDecoder
+            AsyncImage(
+                model = videoFrameRequest(url),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.matchParentSize(),
+            )
         }
         Icon(
             imageVector        = Icons.Filled.PlayArrow,

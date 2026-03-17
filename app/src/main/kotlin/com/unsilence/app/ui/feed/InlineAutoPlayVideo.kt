@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
@@ -35,15 +36,35 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Dimension
+import coil3.size.Size
+import coil3.video.VideoFrameDecoder
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
 
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
 /**
- * Pure Compose video preview — poster image or dark placeholder at the
+ * Build a Coil [ImageRequest] that extracts the first video frame as a thumbnail.
+ * Uses [VideoFrameDecoder] with a capped decode size to limit bandwidth.
+ * Only used when imeta provides no poster URL.
+ */
+@Composable
+internal fun videoFrameRequest(videoUrl: String): ImageRequest =
+    ImageRequest.Builder(LocalContext.current)
+        .data(videoUrl)
+        .decoderFactory(VideoFrameDecoder.Factory())
+        .size(Size(Dimension(480), Dimension(270)))   // cap decode resolution
+        .memoryCacheKey("vframe:$videoUrl")
+        .build()
+
+/**
+ * Pure Compose video preview — poster image or first-frame thumbnail at the
  * correct aspect ratio with a centered play icon. No AndroidView, no
  * SurfaceView, no player. Used for ALL inactive video cards.
+ *
+ * Poster fallback chain: imeta thumb → VideoFrameDecoder first-frame → dark placeholder.
  */
 @Composable
 fun VideoPreviewCard(
@@ -66,6 +87,14 @@ fun VideoPreviewCard(
         if (!model.posterUrl.isNullOrBlank()) {
             AsyncImage(
                 model = model.posterUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.matchParentSize(),
+            )
+        } else {
+            // No imeta poster — extract first frame via VideoFrameDecoder
+            AsyncImage(
+                model = videoFrameRequest(model.videoUrl),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.matchParentSize(),
@@ -135,24 +164,21 @@ fun InlineVideoPlayer(
         contentAlignment = Alignment.Center,
     ) {
         // Poster underneath — visible until first frame renders
-        if (!isFirstFrameRendered && !model.posterUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = model.posterUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
-        } else if (!isFirstFrameRendered) {
-            // Dark placeholder when no poster and no frame yet
-            Box(
-                modifier = Modifier.matchParentSize().background(MediaPlaceholder),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
+        if (!isFirstFrameRendered) {
+            if (!model.posterUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = model.posterUrl,
                     contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.3f),
-                    modifier = Modifier.size(48.dp),
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.matchParentSize(),
+                )
+            } else {
+                // No imeta poster — extract first frame via VideoFrameDecoder
+                AsyncImage(
+                    model = videoFrameRequest(model.videoUrl),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.matchParentSize(),
                 )
             }
         }
