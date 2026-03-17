@@ -80,6 +80,7 @@ import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.OgMetadata
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.relay.extractRepostTargetId
 import com.unsilence.app.ui.common.IdentIcon
@@ -187,6 +188,7 @@ fun NoteCard(
     onToggleMute: () -> Unit = {},
     isActiveVideo: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
+    videoRenderModels: List<VideoRenderModel> = emptyList(),
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -428,6 +430,7 @@ fun NoteCard(
             VideoGrid(
                 videoUrls         = videoUrls,
                 imetaMedia        = imetaMedia,
+                videoRenderModels = videoRenderModels,
                 isActiveVideo     = isActiveVideo,
                 onOpenFullscreen  = onOpenFullscreen,
                 exoPlayer         = exoPlayer,
@@ -891,7 +894,7 @@ private fun MediaGrid(
 
 // ── Video grid composable ────────────────────────────────────────────────
 
-/** Helper to resolve video aspect ratio and poster from imeta tags. */
+/** Helper to resolve video aspect ratio and poster from imeta tags (fallback for non-modeled URLs). */
 private data class VideoMeta(val aspectRatio: Float?, val posterUrl: String?)
 
 private fun resolveVideoMeta(url: String, imetaMedia: List<ImetaMedia>): VideoMeta {
@@ -906,26 +909,48 @@ private fun resolveVideoMeta(url: String, imetaMedia: List<ImetaMedia>): VideoMe
 private fun VideoGridCell(
     url: String,
     imetaMedia: List<ImetaMedia>,
+    videoRenderModels: List<VideoRenderModel>,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
 ) {
-    val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
-    VideoThumbnailCard(
-        url         = url,
-        onPlay      = onPlay,
-        aspectRatio = aspectRatio,
-        posterUrl   = posterUrl,
-        forceSquare = forceSquare,
-        modifier    = modifier,
-    )
+    // Use pre-computed VideoRenderModel if available, otherwise fall back to imeta parse
+    val model = videoRenderModels.firstOrNull { it.videoUrl == url }
+    if (model != null) {
+        VideoThumbnailCard(
+            url         = url,
+            onPlay      = onPlay,
+            aspectRatio = model.aspectRatio,
+            posterUrl   = model.posterUrl,
+            forceSquare = forceSquare,
+            modifier    = modifier,
+        )
+    } else {
+        val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
+        VideoThumbnailCard(
+            url         = url,
+            onPlay      = onPlay,
+            aspectRatio = aspectRatio,
+            posterUrl   = posterUrl,
+            forceSquare = forceSquare,
+            modifier    = modifier,
+        )
+    }
 }
 
-/** Renders videos in a grid: 1=full (autoplay), 2=side-by-side, 3=1+2, 4+=2x2 with +N overlay. */
+/**
+ * Renders videos in a grid: 1=full (autoplay), 2=side-by-side, 3=1+2, 4+=2x2 with +N overlay.
+ *
+ * The first video is the "primary" cell: when this card is the active video,
+ * it renders [InlineVideoPlayer] (one AndroidView); otherwise it renders
+ * [VideoPreviewCard] (pure Compose, no SurfaceView). All secondary cells
+ * are always static thumbnails.
+ */
 @Composable
 private fun VideoGrid(
     videoUrls: List<String>,
     imetaMedia: List<ImetaMedia>,
+    videoRenderModels: List<VideoRenderModel>,
     isActiveVideo: Boolean,
     onOpenFullscreen: () -> Unit,
     exoPlayer: ExoPlayer?,
@@ -941,44 +966,57 @@ private fun VideoGrid(
         else runCatching { uriHandler.openUri(url) }
     }
 
-    /** Renders the first video as inline autoplay thumbnail when eligible, otherwise as static thumbnail. */
+    /**
+     * Primary video cell: active → InlineVideoPlayer (one AndroidView),
+     * inactive → VideoPreviewCard (pure Compose, zero SurfaceView).
+     */
     @Composable
-    fun ActiveVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
-        if (isDirectVideoUrl(url) && exoPlayer != null) {
-            val (aspectRatio, posterUrl) = resolveVideoMeta(url, imetaMedia)
-            InlineAutoPlayVideo(
-                exoPlayer        = exoPlayer,
-                videoUrl         = url,
-                aspectRatio      = aspectRatio,
-                isMuted          = isMuted,
-                onToggleMute     = onToggleMute,
-                onOpenFullscreen = onOpenFullscreen,
-                isActive         = isActiveVideo,
-                thumbnailUrl     = posterUrl,
-                forceSquare      = forceSquare,
-                modifier         = cellModifier,
-            )
+    fun PrimaryVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
+        val model = videoRenderModels.firstOrNull { it.videoUrl == url }
+        if (model != null && isDirectVideoUrl(url)) {
+            if (isActiveVideo && exoPlayer != null) {
+                // ONE AndroidView — only for the active video
+                InlineVideoPlayer(
+                    model            = model,
+                    exoPlayer        = exoPlayer,
+                    isMuted          = isMuted,
+                    onToggleMute     = onToggleMute,
+                    onOpenFullscreen = onOpenFullscreen,
+                    forceSquare      = forceSquare,
+                    modifier         = cellModifier,
+                )
+            } else {
+                // Pure Compose — no AndroidView, no SurfaceView
+                VideoPreviewCard(
+                    model            = model,
+                    onOpenFullscreen = onOpenFullscreen,
+                    forceSquare      = forceSquare,
+                    modifier         = cellModifier,
+                )
+            }
         } else {
+            // No VideoRenderModel or not a direct video URL — static thumbnail
             VideoGridCell(
-                url         = url,
-                imetaMedia  = imetaMedia,
-                onPlay      = { openVideo(url) },
-                modifier    = cellModifier,
-                forceSquare = forceSquare,
+                url              = url,
+                imetaMedia       = imetaMedia,
+                videoRenderModels = videoRenderModels,
+                onPlay           = { openVideo(url) },
+                modifier         = cellModifier,
+                forceSquare      = forceSquare,
             )
         }
     }
 
     when {
         count == 1 -> {
-            ActiveVideoCell(url = videoUrls[0], cellModifier = modifier)
+            PrimaryVideoCell(url = videoUrls[0], cellModifier = modifier)
         }
         count == 2 -> {
             Row(
                 modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                ActiveVideoCell(
+                PrimaryVideoCell(
                     url = videoUrls[0],
                     cellModifier = Modifier.weight(1f),
                     forceSquare = true,
@@ -986,6 +1024,7 @@ private fun VideoGrid(
                 VideoGridCell(
                     url = videoUrls[1],
                     imetaMedia = imetaMedia,
+                    videoRenderModels = videoRenderModels,
                     onPlay = { openVideo(videoUrls[1]) },
                     modifier = Modifier.weight(1f),
                     forceSquare = true,
@@ -997,7 +1036,7 @@ private fun VideoGrid(
                 modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                ActiveVideoCell(
+                PrimaryVideoCell(
                     url = videoUrls[0],
                     cellModifier = Modifier.fillMaxWidth(),
                 )
@@ -1008,6 +1047,7 @@ private fun VideoGrid(
                     VideoGridCell(
                         url = videoUrls[1],
                         imetaMedia = imetaMedia,
+                        videoRenderModels = videoRenderModels,
                         onPlay = { openVideo(videoUrls[1]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1015,6 +1055,7 @@ private fun VideoGrid(
                     VideoGridCell(
                         url = videoUrls[2],
                         imetaMedia = imetaMedia,
+                        videoRenderModels = videoRenderModels,
                         onPlay = { openVideo(videoUrls[2]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1034,7 +1075,7 @@ private fun VideoGrid(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    ActiveVideoCell(
+                    PrimaryVideoCell(
                         url = gridVideos[0],
                         cellModifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1042,6 +1083,7 @@ private fun VideoGrid(
                     VideoGridCell(
                         url = gridVideos[1],
                         imetaMedia = imetaMedia,
+                        videoRenderModels = videoRenderModels,
                         onPlay = { openVideo(gridVideos[1]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1054,6 +1096,7 @@ private fun VideoGrid(
                     VideoGridCell(
                         url = gridVideos[2],
                         imetaMedia = imetaMedia,
+                        videoRenderModels = videoRenderModels,
                         onPlay = { openVideo(gridVideos[2]) },
                         modifier = Modifier.weight(1f),
                         forceSquare = true,
@@ -1062,6 +1105,7 @@ private fun VideoGrid(
                         VideoGridCell(
                             url = gridVideos[3],
                             imetaMedia = imetaMedia,
+                            videoRenderModels = videoRenderModels,
                             onPlay = { openVideo(gridVideos[3]) },
                             modifier = Modifier.fillMaxWidth(),
                             forceSquare = true,
@@ -1116,7 +1160,7 @@ private fun VideoThumbnailCard(
             AsyncImage(
                 model = posterUrl,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.matchParentSize(),
             )
         } else {
