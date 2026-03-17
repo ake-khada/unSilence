@@ -28,15 +28,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,55 +47,35 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.requiredHeight
-import androidx.compose.foundation.layout.requiredWidth
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
-import kotlin.math.roundToInt
-import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
+import com.unsilence.app.ui.feed.ActiveVideoDetection
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NoteCard
-import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
+import com.unsilence.app.ui.feed.VideoOverlay
+import com.unsilence.app.ui.feed.VideoPlaybackTransitions
 import com.unsilence.app.ui.feed.engagementId
-import com.unsilence.app.ui.feed.extractVideoUrl
+import com.unsilence.app.ui.feed.rememberNoteIdsWithVideo
+import com.unsilence.app.ui.feed.rememberVideoPlaybackState
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlin.math.abs
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 
 private val BANNER_HEIGHT       = 150.dp
 private val PROFILE_AVATAR_SIZE = 85.dp
 
-@OptIn(kotlinx.coroutines.FlowPreview::class)
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun ProfileScreen(
     onLogout: () -> Unit = {},
@@ -125,109 +102,10 @@ fun ProfileScreen(
     var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
     val listState = rememberLazyListState()
 
-    // ── Video autoplay state ─────────────────────────────────────────────────
-    val holder = actionsViewModel.sharedPlayerHolder
-    val ownerId = "profile"
-    val exoPlayer = holder.player
-    DisposableEffect(Unit) { onDispose { holder.releaseOwnership(ownerId) } }
-
-    var activeVideoNoteId by remember { mutableStateOf<String?>(null) }
-    var isMuted by remember { mutableStateOf(true) }
-    var showFullscreenVideo by remember { mutableStateOf(false) }
-    var preFullscreenMuted by remember { mutableStateOf(true) }
-
-    // ── Overlay positioning state ─────────────────────────────────────────
-    var feedBoxCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    var overlayOffset by remember { mutableStateOf(Offset.Zero) }
-    var overlayWidth by remember { mutableStateOf(0) }
-    var overlayHeight by remember { mutableStateOf(0) }
-    var overlayVisible by remember { mutableStateOf(false) }
-
-    LaunchedEffect(activeVideoNoteId) {
-        if (activeVideoNoteId == null) overlayVisible = false
-    }
-
-    // Pause playback when app goes to background, resume when foregrounded
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE  -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (activeVideoNoteId != null) exoPlayer.playWhenReady = true
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Sync mute state reactively
-    LaunchedEffect(isMuted) {
-        exoPlayer.volume = if (isMuted) 0f else 1f
-    }
-
-    // ── Single-owner playback transitions ─────────────────────────────────────
-    val activeVideoUrl = remember(activeVideoNoteId, posts) {
-        activeVideoNoteId?.let { noteId ->
-            posts.firstOrNull { it.id == noteId }?.let { extractVideoUrl(it) }
-        }
-    }
-
-    LaunchedEffect(activeVideoUrl) {
-        if (activeVideoUrl != null) {
-            holder.claim(ownerId)
-            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (currentUrl != activeVideoUrl) {
-                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
-                exoPlayer.prepare()
-            }
-            exoPlayer.playWhenReady = true
-        } else {
-            if (holder.isOwner(ownerId)) {
-                exoPlayer.stop()
-            }
-        }
-    }
-
-    // Precompute which notes have video for scroll detection
-    val noteIdsWithVideo = remember(posts) {
-        posts.filter { row ->
-            row.kind != 30023 &&
-            (ImetaParser.videos(row.tags).isNotEmpty() ||
-                VIDEO_URL_REGEX.containsMatchIn(row.content))
-        }.map { it.id }.toSet()
-    }
-
-    val noteIdsWithVideoState = rememberUpdatedState(noteIdsWithVideo)
-    val showFullscreenVideoState = rememberUpdatedState(showFullscreenVideo)
-
-    // Active video detection: find video note closest to viewport center
-    LaunchedEffect(Unit) {
-        snapshotFlow { listState.layoutInfo }
-            .map { layoutInfo ->
-                if (showFullscreenVideoState.value) return@map activeVideoNoteId
-                val currentIds = noteIdsWithVideoState.value
-                val viewportCenter = (layoutInfo.viewportStartOffset +
-                    layoutInfo.viewportEndOffset) / 2
-                layoutInfo.visibleItemsInfo
-                    .filter { (it.key as? String) in currentIds }
-                    .minByOrNull {
-                        val itemCenter = it.offset + it.size / 2
-                        abs(itemCenter - viewportCenter)
-                    }
-                    ?.key as? String
-            }
-            .debounce(300)
-            .distinctUntilChanged()
-            .collect { newActiveId ->
-                if (activeVideoNoteId != newActiveId) {
-                    activeVideoNoteId = newActiveId
-                    if (newActiveId == null) {
-                        exoPlayer.playWhenReady = false
-                    }
-                }
-            }
-    }
+    // ── Video playback (shared composables) ───────────────────────────────────
+    val videoState = rememberVideoPlaybackState(actionsViewModel.sharedPlayerHolder, "profile")
+    VideoPlaybackTransitions(videoState, posts)
+    val noteIdsWithVideo = rememberNoteIdsWithVideo(posts)
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
@@ -243,7 +121,7 @@ fun ProfileScreen(
             .fillMaxSize()
             .background(Black)
             .clipToBounds()
-            .onGloballyPositioned { feedBoxCoords = it },
+            .onGloballyPositioned { videoState.feedBoxCoords = it },
     ) {
         // ── Scrollable content ────────────────────────────────────────────────
         LazyColumn(
@@ -454,23 +332,9 @@ fun ProfileScreen(
                             onRepost               = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
                             onZap                  = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
                             onSaveNwcUri           = { uri -> actionsViewModel.saveNwcUri(uri) },
-                            isActiveVideo          = row.id == activeVideoNoteId,
-                            onOpenFullscreen       = {
-                                activeVideoNoteId = row.id
-                                preFullscreenMuted = isMuted
-                                isMuted = false
-                                showFullscreenVideo = true
-                            },
-                            onVideoPositioned      = if (row.id == activeVideoNoteId) { coords ->
-                                val box = feedBoxCoords
-                                if (box != null && coords.isAttached && box.isAttached) {
-                                    val pos = box.localPositionOf(coords, Offset.Zero)
-                                    overlayOffset = pos
-                                    overlayWidth = coords.size.width
-                                    overlayHeight = coords.size.height
-                                    overlayVisible = true
-                                }
-                            } else null,
+                            isActiveVideo          = row.id == videoState.activeVideoNoteId,
+                            onOpenFullscreen       = { videoState.openFullscreen(row.id) },
+                            onVideoPositioned      = videoState.onVideoPositionedFor(row.id),
                             lookupProfile          = actionsViewModel::lookupProfile,
                             lookupEvent            = actionsViewModel::lookupEvent,
                             fetchOgMetadata        = actionsViewModel::fetchOgMetadata,
@@ -481,6 +345,9 @@ fun ProfileScreen(
 
             item { Spacer(Modifier.height(Spacing.xl)) }
         }
+
+        // Active video detection
+        ActiveVideoDetection(videoState, listState, noteIdsWithVideo)
 
         // ── Own top bar overlay ───────────────────────────────────────────────
         Box(
@@ -525,44 +392,8 @@ fun ProfileScreen(
             }
         }
 
-        // ── Video overlay: single PlayerView positioned over active cell ────
-        val density = LocalDensity.current
-        if (overlayVisible && activeVideoNoteId != null && overlayWidth > 0) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        player = exoPlayer
-                        useController = false
-                        setEnableComposeSurfaceSyncWorkaround(true)
-                    }
-                },
-                update = { view -> view.player = exoPlayer },
-                modifier = Modifier
-                    .offset { IntOffset(overlayOffset.x.roundToInt(), overlayOffset.y.roundToInt()) }
-                    .requiredWidth(with(density) { overlayWidth.toDp() })
-                    .requiredHeight(with(density) { overlayHeight.toDp() }),
-            )
-
-            IconButton(
-                onClick = { isMuted = !isMuted },
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            (overlayOffset.x + overlayWidth - with(density) { 44.dp.toPx() }).roundToInt(),
-                            (overlayOffset.y + with(density) { 8.dp.toPx() }).roundToInt(),
-                        )
-                    }
-                    .size(36.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape),
-            ) {
-                Icon(
-                    imageVector = if (isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
+        // Video overlay
+        VideoOverlay(videoState)
     }
 
     // ── Overlays ──────────────────────────────────────────────────────────────
@@ -593,13 +424,10 @@ fun ProfileScreen(
         )
     }
 
-    if (showFullscreenVideo) {
+    if (videoState.showFullscreenVideo) {
         FullScreenVideoDialog(
-            exoPlayer = exoPlayer,
-            onDismiss = {
-                showFullscreenVideo = false
-                isMuted = preFullscreenMuted
-            },
+            exoPlayer = videoState.exoPlayer,
+            onDismiss = { videoState.closeFullscreen() },
         )
     }
 }
