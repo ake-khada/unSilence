@@ -90,8 +90,9 @@ dependencies {
     // Markdown → HTML for NIP-23 long-form articles (rendered in WebView)
     implementation(libs.jetbrains.markdown)
 
-    // Media (ExoPlayer — kind 21 tap-to-play only in v1)
+    // Media (ExoPlayer — inline autoplay + fullscreen)
     implementation(libs.media3.exoplayer)
+    implementation(libs.media3.exoplayer.hls)   // HLS (.m3u8) — needed by DefaultMediaSourceFactory
     implementation(libs.media3.ui)
 
     // Other
