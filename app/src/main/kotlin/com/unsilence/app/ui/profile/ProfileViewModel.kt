@@ -9,6 +9,7 @@ import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -29,7 +30,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -47,6 +47,7 @@ class ProfileViewModel @Inject constructor(
     private val followDao: FollowDao,
     private val userDao: UserDao,
     private val relayListDao: RelayListDao,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -96,8 +97,6 @@ class ProfileViewModel @Inject constructor(
 
     val isLoadingPosts = MutableStateFlow(true)
 
-    // Tracks which pubkeys we've already requested profiles for — prevents hot loop
-    private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
 
     init {
@@ -133,22 +132,13 @@ class ProfileViewModel @Inject constructor(
                 }
             }
         }
-        // Fetch missing profiles for repost original authors as posts arrive
+        // Unified card hydration + engagement fetch as posts arrive
         viewModelScope.launch {
             tabPostsFlow.collectLatest { rows ->
                 isLoadingPosts.value = false
 
-                val pubkeys = rows.flatMap { row ->
-                    val embedded = if (row.kind == 6) {
-                        extractRepostAuthorPubkey(row.content, row.tags)
-                    } else null
-                    listOfNotNull(row.pubkey, embedded)
-                }.distinct()
-                val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
-                if (newPubkeys.isNotEmpty()) {
-                    fetchedProfilePubkeys.addAll(newPubkeys)
-                    userRepository.fetchMissingProfiles(newPubkeys)
-                }
+                // Hydrate profiles + referenced events
+                cardHydrator.hydrateVisibleCards(rows.take(20))
 
                 // Capped engagement fetch — one batch of 20 max, debounced
                 val newEventIds = rows

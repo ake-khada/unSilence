@@ -8,11 +8,11 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.entity.RelaySetEntity
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.repository.CoverageRepository
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.RelaySetRepository
@@ -57,6 +57,7 @@ class FeedViewModel @Inject constructor(
     private val outboxRouter: OutboxRouter,
     private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -94,7 +95,6 @@ class FeedViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-    private val fetchedProfilePubkeys = mutableSetOf<String>()
     private val engagementFetchedIds = mutableSetOf<String>()
 
     /**
@@ -106,6 +106,12 @@ class FeedViewModel @Inject constructor(
         if (newIds.isEmpty()) return
         engagementFetchedIds.addAll(newIds)
         relayPool.fetchEngagementBatch(newIds.take(20))
+    }
+
+    fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            cardHydrator.hydrateVisibleCards(visibleEvents)
+        }
     }
 
     /**
@@ -175,8 +181,8 @@ class FeedViewModel @Inject constructor(
                     hasNewTopPost       = false
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
-                    fetchedProfilePubkeys.clear()
                     engagementFetchedIds.clear()
+                    cardHydrator.clearCache()
 
                     // Check coverage before deciding whether to fetch
                     val intent = CoverageIntent.HomeFeed()
@@ -240,17 +246,8 @@ class FeedViewModel @Inject constructor(
                         coverageStatus = status,
                     )
 
-                    val pubkeys = rows.flatMap { row ->
-                        val embedded = if (row.kind == 6) {
-                            extractRepostAuthorPubkey(row.content, row.tags)
-                        } else null
-                        listOfNotNull(row.pubkey, embedded)
-                    }.distinct()
-                    val newPubkeys = pubkeys.filter { it !in fetchedProfilePubkeys }
-                    if (newPubkeys.isNotEmpty()) {
-                        fetchedProfilePubkeys.addAll(newPubkeys)
-                        userRepository.fetchMissingProfiles(newPubkeys)
-                    }
+                    // Hydrate first batch of cards (profiles + referenced events)
+                    cardHydrator.hydrateVisibleCards(rows.take(20))
                 }
         }
     }
