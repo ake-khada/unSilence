@@ -49,6 +49,9 @@ class RelayManagementViewModel @Inject constructor(
     /** Kind 10012 favorite relays. */
     val favoriteRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getFavoriteRelays()
 
+    /** Kind 99 (local-only) indexer relays. */
+    val indexerRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getIndexerRelays()
+
     /** Kind 30002 relay sets. */
     val relaySets: Flow<List<NostrRelaySetEntity>> =
         ownerPubkey?.let { nostrRelaySetDao.getAllSets(it) } ?: emptyFlow()
@@ -169,6 +172,23 @@ class RelayManagementViewModel @Inject constructor(
         }
     }
 
+    // ── Kind 99: Indexer relays (local-only, never published) ───────────────
+
+    fun addIndexerRelay(url: String) {
+        val normalized = normalizeRelayUrl(url) ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            relayConfigDao.insert(
+                RelayConfigEntity(kind = 99, relayUrl = normalized)
+            )
+        }
+    }
+
+    fun removeIndexerRelay(url: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            relayConfigDao.deleteRelay(99, url)
+        }
+    }
+
     // ── Kind 30002: Relay sets ────────────────────────────────────────────────
 
     fun createRelaySet(name: String, relays: List<String>) {
@@ -281,12 +301,7 @@ class RelayManagementViewModel @Inject constructor(
 
             val eventJson = toEventJson(signed)
             val writeUrls = configs.filter { it.marker == null || it.marker == "write" }.map { it.relayUrl }
-            val indexerUrls = listOf(
-                "wss://purplepag.es",
-                "wss://user.kindpag.es",
-                "wss://indexer.coracle.social",
-                "wss://antiprimal.net",
-            )
+            val indexerUrls = relayConfigDao.getIndexerRelayUrls()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
         } finally {
             publishing.value = false
@@ -316,12 +331,7 @@ class RelayManagementViewModel @Inject constructor(
             val eventJson = toEventJson(signed)
             val configs = relayConfigDao.getAllReadWriteRelays()
             val writeUrls = configs.filter { it.marker == null || it.marker == "write" }.map { it.relayUrl }
-            val indexerUrls = listOf(
-                "wss://purplepag.es",
-                "wss://user.kindpag.es",
-                "wss://indexer.coracle.social",
-                "wss://antiprimal.net",
-            )
+            val indexerUrls = relayConfigDao.getIndexerRelayUrls()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
         } finally {
             publishing.value = false
