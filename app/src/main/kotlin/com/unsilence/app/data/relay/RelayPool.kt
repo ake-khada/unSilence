@@ -26,6 +26,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -77,6 +79,15 @@ class RelayPool @Inject constructor(
 
     /** Global event-by-ID dedup — prevents duplicate fetchEventById calls (30s TTL). */
     private val eventFetchInFlight = ConcurrentHashMap<String, Long>()
+
+    /** Relays that have completed NIP-42 auth successfully. */
+    private val authenticatedRelays = ConcurrentHashMap.newKeySet<String>()
+
+    /** Relays currently waiting for an auth response (prevents duplicate auth attempts). */
+    private val authInFlight = ConcurrentHashMap.newKeySet<String>()
+
+    /** Last challenge received per relay — needed for CLOSED auth-required flow. */
+    private val pendingChallenges = ConcurrentHashMap<String, String>()
 
     // Evict stale entries every 5 minutes to prevent unbounded growth.
     init {
