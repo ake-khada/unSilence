@@ -440,10 +440,10 @@ private fun FeedPickerPopup(
     ) {
         Column(
             modifier = Modifier
-                .width(160.dp)
+                .widthIn(min = 90.dp)
                 .background(Color(0xFF111111), RoundedCornerShape(8.dp))
                 .padding(vertical = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+            horizontalAlignment = Alignment.End,
         ) {
             data class FeedItem(val type: FeedType?, val label: String, val isDivider: Boolean = false, val dTag: String? = null)
 
@@ -471,19 +471,18 @@ private fun FeedPickerPopup(
             val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
             val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
 
-            val itemHeight = 36.dp
+            val itemHeight = 32.dp
             val spinnerHeight = itemHeight * 3
 
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
                     .height(spinnerHeight),
             ) {
                 LazyColumn(
                     state = spinnerState,
                     flingBehavior = flingBehavior,
                     modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    horizontalAlignment = Alignment.End,
                 ) {
                     item { Spacer(Modifier.height(itemHeight)) }
 
@@ -517,13 +516,14 @@ private fun FeedPickerPopup(
                                             if (item.dTag != null) confirmDeleteDTag = item.dTag
                                         },
                                     ),
-                                contentAlignment = Alignment.Center,
+                                contentAlignment = Alignment.CenterEnd,
                             ) {
                                 Text(
                                     text       = item.label,
                                     color      = if (isCenter) Cyan else TextSecondary,
-                                    fontSize   = if (isCenter) 14.sp else 12.sp,
+                                    fontSize   = if (isCenter) 13.sp else 11.sp,
                                     fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
+                                    modifier   = Modifier.padding(end = 8.dp),
                                 )
                             }
                         }
@@ -533,25 +533,23 @@ private fun FeedPickerPopup(
                 }
             }
 
-            HorizontalDivider(color = Color(0xFF222222), modifier = Modifier.padding(vertical = 4.dp))
+            HorizontalDivider(color = Color(0xFF222222), modifier = Modifier.padding(vertical = 2.dp))
 
             Text(
-                text     = "+ New Relay Set",
+                text     = "+ New Set",
                 color    = Cyan,
-                fontSize = 13.sp,
+                fontSize = 11.sp,
                 modifier = Modifier
-                    .fillMaxWidth()
                     .clickable { onNewRelaySet() }
-                    .padding(horizontal = Spacing.medium, vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
             )
             Text(
-                text     = "⚙ Relay Settings",
+                text     = "⚙ Settings",
                 color    = TextSecondary,
-                fontSize = 13.sp,
+                fontSize = 11.sp,
                 modifier = Modifier
-                    .fillMaxWidth()
                     .clickable { onRelaySettings() }
-                    .padding(horizontal = Spacing.medium, vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
             )
         }
     }
