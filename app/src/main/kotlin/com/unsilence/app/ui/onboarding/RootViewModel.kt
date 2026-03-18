@@ -20,6 +20,18 @@ class RootViewModel @Inject constructor(
     var isLoggedIn by mutableStateOf(keyManager.hasKey())
         private set
 
+    init {
+        // Bootstrap on app restart when user is already logged in.
+        // Without this, no indexer connections, no kind-10002 refresh,
+        // and FeedViewModel uses stale relay data from previous sessions.
+        if (isLoggedIn) {
+            val pubkey = keyManager.getPublicKeyHex()
+            if (pubkey != null) {
+                viewModelScope.launch { bootstrapper.bootstrap(pubkey) }
+            }
+        }
+    }
+
     fun onOnboardingComplete() {
         isLoggedIn = true
         val pubkey = keyManager.getPublicKeyHex() ?: return
