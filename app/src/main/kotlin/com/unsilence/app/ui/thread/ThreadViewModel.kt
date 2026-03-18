@@ -11,6 +11,7 @@ import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -110,7 +111,7 @@ class ThreadViewModel @Inject constructor(
         viewModelScope.launch {
             val readRelays = relayConfigDao.getAllReadWriteRelays()
                 .filter { it.marker == null || it.marker == "read" }
-                .map { it.relayUrl }
+                .mapNotNull { normalizeRelayUrl(it.relayUrl) }
             val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
             relayPool.fetchThread(urls, eventId)
         }

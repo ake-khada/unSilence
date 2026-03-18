@@ -152,8 +152,9 @@ class OutboxRouter @Inject constructor(
                 arr.getOrNull(0)?.jsonPrimitive?.content == "relay"
             }
             .mapNotNull { tag ->
-                val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
+                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
                     ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
                 RelayConfigEntity(kind = kind, relayUrl = url)
             }
 
@@ -177,8 +178,9 @@ class OutboxRouter @Inject constructor(
             val tagName = arr.getOrNull(0)?.jsonPrimitive?.content ?: return@mapNotNull null
             when (tagName) {
                 "relay" -> {
-                    val url = arr.getOrNull(1)?.jsonPrimitive?.content
+                    val raw = arr.getOrNull(1)?.jsonPrimitive?.content
                         ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
                     RelayConfigEntity(kind = 10012, relayUrl = url)
                 }
                 "a" -> {
@@ -224,8 +226,9 @@ class OutboxRouter @Inject constructor(
         val members = tags
             .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "relay" }
             .mapNotNull { tag ->
-                val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
+                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
                     ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
                 NostrRelaySetMemberEntity(setDTag = dTag, ownerPubkey = pubkey, relayUrl = url)
             }
 
@@ -273,7 +276,10 @@ class OutboxRouter @Inject constructor(
                 val marker = arr.getOrNull(2)?.jsonPrimitive?.content
                 type == "r" && (marker == null || marker.isBlank() || marker == "write")
             }
-            .mapNotNull { tag -> tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } }
+            .mapNotNull { tag ->
+                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                normalizeRelayUrl(raw)
+            }
 
         if (writeRelays.isEmpty()) return
 
@@ -297,7 +303,8 @@ class OutboxRouter @Inject constructor(
             val ownRelays = tags
                 .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "r" }
                 .mapNotNull { tag ->
-                    val url = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
                     val marker = tag.jsonArray.getOrNull(2)?.jsonPrimitive?.content
                     RelayConfigEntity(
                         kind   = 10002,

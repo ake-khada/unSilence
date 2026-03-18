@@ -20,6 +20,7 @@ import com.unsilence.app.data.repository.CoverageRepository
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.domain.model.FeedFilter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -195,7 +196,7 @@ class FeedViewModel @Inject constructor(
     private suspend fun resolveGlobalUrls(): List<String> {
         val readRelays = relayConfigDao.getAllReadWriteRelays()
             .filter { it.marker == null || it.marker == "read" }
-            .map { it.relayUrl }
+            .mapNotNull { normalizeRelayUrl(it.relayUrl) }
         return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
     }
 
@@ -260,7 +261,8 @@ class FeedViewModel @Inject constructor(
                         is FeedType.RelaySet  -> {
                             val ownerPk = keyManager.getPublicKeyHex() ?: ""
                             val members = nostrRelaySetDao.getSetMembersSnapshot(type.dTag, ownerPk)
-                            val setUrls = members.map { it.relayUrl }.ifEmpty { resolveGlobalUrls() }
+                            val setUrls = members.mapNotNull { normalizeRelayUrl(it.relayUrl) }
+                                .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
                             relayPool.startGlobalFeed(setUrls)
                             relayPool.connect(setUrls)
@@ -269,7 +271,7 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                         is FeedType.SingleRelay -> {
-                            val singleUrl = listOf(type.url)
+                            val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
                             currentRelayUrls = singleUrl
                             relayPool.startGlobalFeed(singleUrl)
                             relayPool.connect(singleUrl)
