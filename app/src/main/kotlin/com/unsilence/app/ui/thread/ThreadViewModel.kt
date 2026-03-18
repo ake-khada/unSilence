@@ -13,6 +13,7 @@ import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
+import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -21,8 +22,11 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -46,6 +50,7 @@ class ThreadViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
+    private val userRepository: UserRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ThreadUiState())
@@ -54,6 +59,12 @@ class ThreadViewModel @Inject constructor(
     private val eventIdFlow = MutableStateFlow<String?>(null)
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
+
+    val userAvatarUrl: StateFlow<String?> = pubkeyHex?.let { pk ->
+        userRepository.userFlow(pk)
+            .map { it?.picture }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    } ?: MutableStateFlow(null)
 
     var published by mutableStateOf(false)
         private set
