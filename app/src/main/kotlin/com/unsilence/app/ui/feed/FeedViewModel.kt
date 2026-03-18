@@ -43,6 +43,7 @@ sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
+    data class  SingleRelay(val url: String, val label: String) : FeedType()
 }
 
 data class FeedUiState(
@@ -142,7 +143,8 @@ class FeedViewModel @Inject constructor(
     val feedTypeLabel: String get() = when (val t = _feedType.value) {
         is FeedType.Global    -> "Global"
         is FeedType.Following -> "Following"
-        is FeedType.RelaySet  -> t.name
+        is FeedType.RelaySet    -> t.name
+        is FeedType.SingleRelay -> t.label
     }
 
     fun setFeedType(type: FeedType) { _feedType.value = type }
@@ -235,6 +237,14 @@ class FeedViewModel @Inject constructor(
                             relayPool.connect(setUrls)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit)
+                            }
+                        }
+                        is FeedType.SingleRelay -> {
+                            val singleUrl = listOf(type.url)
+                            currentRelayUrls = singleUrl
+                            relayPool.connect(singleUrl)
+                            _displayLimit.flatMapLatest { limit ->
+                                eventRepository.feedFlow(singleUrl, filter, limit)
                             }
                         }
                     }
