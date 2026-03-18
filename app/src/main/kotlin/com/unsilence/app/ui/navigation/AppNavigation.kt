@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Tune
@@ -39,6 +40,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.width
@@ -48,14 +50,13 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -135,6 +136,7 @@ fun AppNavigation(onLogout: () -> Unit) {
     val relayManagementVm: RelayManagementViewModel = hiltViewModel()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
+    val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
 
@@ -238,42 +240,41 @@ fun AppNavigation(onLogout: () -> Unit) {
 
                     Spacer(Modifier.weight(1f))
 
+                    if (showFeedDropdown) {
+                        FeedPickerInline(
+                            feedType        = feedType,
+                            userSets        = userSets,
+                            pinnedRelays    = pinnedRelays,
+                            onFeedChanged   = { type -> feedViewModel.setFeedType(type) },
+                            onNewRelaySet   = { showFeedDropdown = false; showCreateRelaySet = true },
+                            onRelaySettings = { showFeedDropdown = false; showRelaySettings = true },
+                            onDeleteSet     = { dTag ->
+                                relayManagementVm.deleteRelaySet(dTag)
+                                if (feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == dTag) {
+                                    feedViewModel.setFeedType(FeedType.Global)
+                                }
+                            },
+                            onDismiss       = { showFeedDropdown = false },
+                        )
+                    } else {
+                        Text(
+                            text     = "◂ ${feedViewModel.feedTypeLabel}",
+                            color    = Cyan,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 120.dp)
+                                .clickable { showFeedDropdown = true },
+                        )
+                    }
+
+                    Spacer(Modifier.weight(1f))
+
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(20.dp),
                         verticalAlignment     = Alignment.CenterVertically,
                     ) {
-                        Box {
-                            Text(
-                                text     = "${feedViewModel.feedTypeLabel} ▾",
-                                color    = Cyan,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .widthIn(max = 120.dp)
-                                    .clickable { showFeedDropdown = !showFeedDropdown },
-                            )
-
-                            if (showFeedDropdown) {
-                                FeedPickerPopup(
-                                    feedType       = feedType,
-                                    userSets       = userSets,
-                                    onSelect       = { type ->
-                                        feedViewModel.setFeedType(type)
-                                        showFeedDropdown = false
-                                    },
-                                    onNewRelaySet  = { showFeedDropdown = false; showCreateRelaySet = true },
-                                    onRelaySettings = { showFeedDropdown = false; showRelaySettings = true },
-                                    onDeleteSet    = { dTag ->
-                                        relayManagementVm.deleteRelaySet(dTag)
-                                        if (feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == dTag) {
-                                            feedViewModel.setFeedType(FeedType.Global)
-                                        }
-                                    },
-                                    onDismiss      = { showFeedDropdown = false },
-                                )
-                            }
-                        }
                         Icon(
                             imageVector        = Icons.Filled.Tune,
                             contentDescription = "Filter",
@@ -377,8 +378,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                 RelayManagementScreen(
                     onDismiss    = { showRelaySettings = false },
                     onStartFeed  = { url, label ->
-                        feedViewModel.setFeedType(FeedType.SingleRelay(url, label))
-                        showRelaySettings = false
+                        feedViewModel.addPinnedRelay(url, label)
                     },
                 )
             }
@@ -421,10 +421,11 @@ fun AppNavigation(onLogout: () -> Unit) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FeedPickerPopup(
+private fun FeedPickerInline(
     feedType: FeedType,
     userSets: List<NostrRelaySetEntity>,
-    onSelect: (FeedType) -> Unit,
+    pinnedRelays: List<FeedType.SingleRelay>,
+    onFeedChanged: (FeedType) -> Unit,
     onNewRelaySet: () -> Unit,
     onRelaySettings: () -> Unit,
     onDeleteSet: (String) -> Unit,
@@ -432,126 +433,121 @@ private fun FeedPickerPopup(
 ) {
     var confirmDeleteDTag by remember { mutableStateOf<String?>(null) }
 
-    Popup(
-        alignment = Alignment.TopEnd,
-        offset    = IntOffset(0, 0),
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true),
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(min = 90.dp)
-                .background(Color(0xFF111111), RoundedCornerShape(8.dp))
-                .padding(vertical = 4.dp),
-            horizontalAlignment = Alignment.End,
-        ) {
-            data class FeedItem(val type: FeedType?, val label: String, val isDivider: Boolean = false, val dTag: String? = null)
+    BackHandler { onDismiss() }
 
-            val items = buildList {
-                add(FeedItem(FeedType.Global, "Global"))
-                add(FeedItem(FeedType.Following, "Following"))
-                if (userSets.isNotEmpty()) {
-                    add(FeedItem(null, "", isDivider = true))
-                    userSets.forEach { set ->
-                        add(FeedItem(FeedType.RelaySet(set.dTag, set.title ?: set.dTag), set.title ?: set.dTag, dTag = set.dTag))
-                    }
-                }
-            }
+    data class FeedItem(val type: FeedType?, val label: String, val dTag: String? = null)
 
-            val currentIndex = items.indexOfFirst { item ->
-                item.type != null && when {
-                    item.type is FeedType.Global && feedType is FeedType.Global -> true
-                    item.type is FeedType.Following && feedType is FeedType.Following -> true
-                    item.type is FeedType.RelaySet && feedType is FeedType.RelaySet ->
-                        item.type.dTag == feedType.dTag
-                    else -> false
-                }
-            }.coerceAtLeast(0)
-
-            val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
-            val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
-
-            val itemHeight = 32.dp
-            val spinnerHeight = itemHeight * 3
-
-            Box(
-                modifier = Modifier
-                    .height(spinnerHeight),
-            ) {
-                LazyColumn(
-                    state = spinnerState,
-                    flingBehavior = flingBehavior,
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    item { Spacer(Modifier.height(itemHeight)) }
-
-                    itemsIndexed(items) { index, item ->
-                        if (item.isDivider) {
-                            HorizontalDivider(
-                                color = Color(0xFF333333),
-                                modifier = Modifier
-                                    .height(itemHeight)
-                                    .padding(vertical = 14.dp)
-                                    .fillMaxWidth(0.5f),
-                            )
-                        } else {
-                            val centerIndex by remember {
-                                derivedStateOf {
-                                    val layoutInfo = spinnerState.layoutInfo
-                                    val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.height / 2
-                                    layoutInfo.visibleItemsInfo.minByOrNull {
-                                        kotlin.math.abs((it.offset + it.size / 2) - center)
-                                    }?.index?.minus(1) ?: 0
-                                }
-                            }
-                            val isCenter = index == centerIndex
-                            Box(
-                                modifier = Modifier
-                                    .height(itemHeight)
-                                    .fillMaxWidth()
-                                    .combinedClickable(
-                                        onClick = { item.type?.let { onSelect(it) } },
-                                        onLongClick = {
-                                            if (item.dTag != null) confirmDeleteDTag = item.dTag
-                                        },
-                                    ),
-                                contentAlignment = Alignment.CenterEnd,
-                            ) {
-                                Text(
-                                    text       = item.label,
-                                    color      = if (isCenter) Cyan else TextSecondary,
-                                    fontSize   = if (isCenter) 13.sp else 11.sp,
-                                    fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
-                                    modifier   = Modifier.padding(end = 8.dp),
-                                )
-                            }
-                        }
-                    }
-
-                    item { Spacer(Modifier.height(itemHeight)) }
-                }
-            }
-
-            HorizontalDivider(color = Color(0xFF222222), modifier = Modifier.padding(vertical = 2.dp))
-
-            Text(
-                text     = "+ New Set",
-                color    = Cyan,
-                fontSize = 11.sp,
-                modifier = Modifier
-                    .clickable { onNewRelaySet() }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-            Text(
-                text     = "⚙ Settings",
-                color    = TextSecondary,
-                fontSize = 11.sp,
-                modifier = Modifier
-                    .clickable { onRelaySettings() }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            )
+    val items = buildList {
+        add(FeedItem(FeedType.Global, "Global"))
+        add(FeedItem(FeedType.Following, "Following"))
+        userSets.forEach { set ->
+            add(FeedItem(FeedType.RelaySet(set.dTag, set.title ?: set.dTag), set.title ?: set.dTag, dTag = set.dTag))
         }
+        pinnedRelays.forEach { relay ->
+            add(FeedItem(relay, relay.label))
+        }
+    }
+
+    val currentIndex = items.indexOfFirst { item ->
+        item.type != null && when {
+            item.type is FeedType.Global && feedType is FeedType.Global -> true
+            item.type is FeedType.Following && feedType is FeedType.Following -> true
+            item.type is FeedType.RelaySet && feedType is FeedType.RelaySet ->
+                item.type.dTag == feedType.dTag
+            item.type is FeedType.SingleRelay && feedType is FeedType.SingleRelay ->
+                item.type.url == feedType.url
+            else -> false
+        }
+    }.coerceAtLeast(0)
+
+    val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = currentIndex)
+    val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
+
+    val itemWidth = 70.dp
+    val spinnerWidth = itemWidth * 3
+
+    // Auto-select feed when spinner settles; dismiss after user scroll
+    var hasScrolled by remember { mutableStateOf(false) }
+    LaunchedEffect(spinnerState) {
+        snapshotFlow { spinnerState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling) {
+                    hasScrolled = true
+                } else if (hasScrolled) {
+                    val layoutInfo = spinnerState.layoutInfo
+                    val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.width / 2
+                    val settledIndex = (layoutInfo.visibleItemsInfo.minByOrNull {
+                        kotlin.math.abs((it.offset + it.size / 2) - center)
+                    }?.index ?: 1) - 1
+                    if (settledIndex in items.indices) {
+                        items[settledIndex].type?.let { onFeedChanged(it) }
+                    }
+                    onDismiss()
+                }
+            }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        LazyRow(
+            state = spinnerState,
+            flingBehavior = flingBehavior,
+            modifier = Modifier.width(spinnerWidth),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            item { Spacer(Modifier.width(itemWidth)) }
+
+            itemsIndexed(items) { index, item ->
+                val centerIndex by remember {
+                    derivedStateOf {
+                        val layoutInfo = spinnerState.layoutInfo
+                        val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.width / 2
+                        layoutInfo.visibleItemsInfo.minByOrNull {
+                            kotlin.math.abs((it.offset + it.size / 2) - center)
+                        }?.index?.minus(1) ?: 0
+                    }
+                }
+                val isCenter = index == centerIndex
+                Box(
+                    modifier = Modifier
+                        .width(itemWidth)
+                        .combinedClickable(
+                            onClick = { },
+                            onLongClick = {
+                                if (item.dTag != null) confirmDeleteDTag = item.dTag
+                            },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text       = item.label,
+                        color      = if (isCenter) Cyan else TextSecondary,
+                        fontSize   = if (isCenter) 13.sp else 11.sp,
+                        fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines   = 1,
+                        overflow   = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            item { Spacer(Modifier.width(itemWidth)) }
+        }
+
+        Text(
+            text     = "+",
+            color    = Cyan,
+            fontSize = 13.sp,
+            modifier = Modifier
+                .clickable { onNewRelaySet() }
+                .padding(horizontal = 6.dp),
+        )
+        Text(
+            text     = "⚙",
+            color    = TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier
+                .clickable { onRelaySettings() }
+                .padding(start = 2.dp, end = 6.dp),
+        )
     }
 
     confirmDeleteDTag?.let { dTag ->
