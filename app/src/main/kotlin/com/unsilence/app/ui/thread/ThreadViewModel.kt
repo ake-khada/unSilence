@@ -92,6 +92,7 @@ class ThreadViewModel @Inject constructor(
     }
 
     fun loadThread(eventId: String) {
+        published = false  // Always reset so LaunchedEffect won't auto-dismiss
         if (eventIdFlow.value == eventId) return
         eventIdFlow.value = eventId
         _uiState.value = ThreadUiState(loading = true)
