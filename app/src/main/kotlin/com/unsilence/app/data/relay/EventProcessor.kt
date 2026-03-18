@@ -157,9 +157,10 @@ class EventProcessor @Inject constructor(
      *   3. seenIds cache hit    — ConcurrentHashMap lookup, returns immediately for dups
      *   4. JSON parse + route   — only for novel EVENT messages
      */
-    suspend fun process(raw: String, relayUrl: String) {
+    suspend fun process(raw: String, rawRelayUrl: String) {
         // ── Fix: early return for non-EVENT messages before ANY JSON work ──────
         if (!raw.startsWith("[\"EVENT\"")) return
+        val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: rawRelayUrl
 
         // ── Fix 1: dedup by event ID, extracted without JSON parsing ──────────
         val eventId = extractEventId(raw) ?: return
