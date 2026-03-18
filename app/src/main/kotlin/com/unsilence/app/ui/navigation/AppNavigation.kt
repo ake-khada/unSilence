@@ -13,6 +13,7 @@ import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -34,9 +35,20 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.ui.relays.RelayManagementViewModel
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -223,42 +235,16 @@ fun AppNavigation(onLogout: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(20.dp),
                         verticalAlignment     = Alignment.CenterVertically,
                     ) {
-                        Box {
-                            Text(
-                                text     = "${feedViewModel.feedTypeLabel} ▾",
-                                color    = Cyan,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .widthIn(max = 120.dp)
-                                    .clickable { showFeedDropdown = true },
-                            )
-                            DropdownMenu(
-                                expanded         = showFeedDropdown,
-                                onDismissRequest = { showFeedDropdown = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text    = { Text("Global",    color = if (feedType is FeedType.Global)    Cyan else Color.White, fontSize = 14.sp) },
-                                    onClick = { feedViewModel.setFeedType(FeedType.Global);    showFeedDropdown = false },
-                                )
-                                DropdownMenuItem(
-                                    text    = { Text("Following", color = if (feedType is FeedType.Following) Cyan else Color.White, fontSize = 14.sp) },
-                                    onClick = { feedViewModel.setFeedType(FeedType.Following); showFeedDropdown = false },
-                                )
-                                userSets.forEach { set ->
-                                    val isActive = feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == set.dTag
-                                    DropdownMenuItem(
-                                        text    = { Text(set.title ?: set.dTag, color = if (isActive) Cyan else Color.White, fontSize = 14.sp) },
-                                        onClick = { feedViewModel.setFeedType(FeedType.RelaySet(set.dTag, set.title ?: set.dTag)); showFeedDropdown = false },
-                                    )
-                                }
-                                DropdownMenuItem(
-                                    text    = { Text("+ Add Relay Set", color = Cyan, fontSize = 14.sp) },
-                                    onClick = { showFeedDropdown = false; showCreateRelaySet = true },
-                                )
-                            }
-                        }
+                        Text(
+                            text     = "${feedViewModel.feedTypeLabel} ▾",
+                            color    = Cyan,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 120.dp)
+                                .clickable { showFeedDropdown = true },
+                        )
                         Icon(
                             imageVector        = Icons.Filled.Tune,
                             contentDescription = "Filter",
@@ -357,6 +343,29 @@ fun AppNavigation(onLogout: () -> Unit) {
                 CreateRelaySetScreen(onDismiss = { showCreateRelaySet = false })
             }
 
+            // ── Feed picker bottom sheet ────────────────────────────────────
+            if (showFeedDropdown) {
+                val relayManagementVm: RelayManagementViewModel = hiltViewModel()
+                FeedPickerSheet(
+                    feedType       = feedType,
+                    userSets       = userSets,
+                    onSelect       = { type ->
+                        feedViewModel.setFeedType(type)
+                        showFeedDropdown = false
+                    },
+                    onNewRelaySet  = { showFeedDropdown = false; showCreateRelaySet = true },
+                    onRelaySettings = { showFeedDropdown = false },
+                    onDeleteSet    = { dTag ->
+                        relayManagementVm.deleteRelaySet(dTag)
+                        val currentFeedType = feedType
+                        if (currentFeedType is FeedType.RelaySet && currentFeedType.dTag == dTag) {
+                            feedViewModel.setFeedType(FeedType.Global)
+                        }
+                    },
+                    onDismiss      = { showFeedDropdown = false },
+                )
+            }
+
             // ── Compose overlay ───────────────────────────────────────────────
             if (showCompose) {
                 ComposeScreen(onDismiss = { showCompose = false })
@@ -391,6 +400,176 @@ fun AppNavigation(onLogout: () -> Unit) {
                 )
             }
         }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FeedPickerSheet(
+    feedType: FeedType,
+    userSets: List<NostrRelaySetEntity>,
+    onSelect: (FeedType) -> Unit,
+    onNewRelaySet: () -> Unit,
+    onRelaySettings: () -> Unit,
+    onDeleteSet: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var confirmDeleteDTag by remember { mutableStateOf<String?>(null) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0A0A0A))
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onDismiss() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { /* consume */ },
+            ) {
+                // Build feed list: Global, Following, divider marker, then user sets
+                data class FeedItem(val type: FeedType?, val label: String, val isDivider: Boolean = false, val dTag: String? = null)
+
+                val items = buildList {
+                    add(FeedItem(FeedType.Global, "Global"))
+                    add(FeedItem(FeedType.Following, "Following"))
+                    if (userSets.isNotEmpty()) {
+                        add(FeedItem(null, "", isDivider = true))
+                        userSets.forEach { set ->
+                            add(FeedItem(FeedType.RelaySet(set.dTag, set.title ?: set.dTag), set.title ?: set.dTag, dTag = set.dTag))
+                        }
+                    }
+                }
+
+                // Find current selection index
+                val currentIndex = items.indexOfFirst { item ->
+                    item.type != null && when {
+                        item.type is FeedType.Global && feedType is FeedType.Global -> true
+                        item.type is FeedType.Following && feedType is FeedType.Following -> true
+                        item.type is FeedType.RelaySet && feedType is FeedType.RelaySet ->
+                            item.type.dTag == feedType.dTag
+                        else -> false
+                    }
+                }.coerceAtLeast(0)
+
+                val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
+                val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
+
+                // Spinner window: 3 items visible (156dp)
+                val itemHeight = 52.dp
+                val spinnerHeight = itemHeight * 3
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.7f)
+                        .height(spinnerHeight),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LazyColumn(
+                        state = spinnerState,
+                        flingBehavior = flingBehavior,
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        // Padding items for snap alignment
+                        item { Spacer(Modifier.height(itemHeight)) }
+
+                        itemsIndexed(items) { index, item ->
+                            if (item.isDivider) {
+                                HorizontalDivider(
+                                    color = Color(0xFF333333),
+                                    modifier = Modifier
+                                        .height(itemHeight)
+                                        .padding(vertical = 20.dp)
+                                        .fillMaxWidth(0.5f),
+                                )
+                            } else {
+                                val centerIndex by remember {
+                                    derivedStateOf {
+                                        val layoutInfo = spinnerState.layoutInfo
+                                        val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.height / 2
+                                        layoutInfo.visibleItemsInfo.minByOrNull {
+                                            kotlin.math.abs((it.offset + it.size / 2) - center)
+                                        }?.index?.minus(1) ?: 0  // -1 for padding item
+                                    }
+                                }
+                                val isCenter = index == centerIndex
+                                Box(
+                                    modifier = Modifier
+                                        .height(itemHeight)
+                                        .fillMaxWidth()
+                                        .combinedClickable(
+                                            onClick = { item.type?.let { onSelect(it) } },
+                                            onLongClick = {
+                                                // Long-press on custom sets shows delete confirmation
+                                                if (item.dTag != null) confirmDeleteDTag = item.dTag
+                                            },
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text       = item.label,
+                                        color      = if (isCenter) Cyan else TextSecondary,
+                                        fontSize   = if (isCenter) 18.sp else 15.sp,
+                                        fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
+                                        modifier   = Modifier.padding(horizontal = Spacing.medium),
+                                    )
+                                }
+                            }
+                        }
+
+                        // Padding items for snap alignment
+                        item { Spacer(Modifier.height(itemHeight)) }
+                    }
+                }
+
+                Spacer(Modifier.height(Spacing.large))
+
+                // Action buttons below spinner
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.medium),
+                ) {
+                    Text(
+                        text     = "+ New Relay Set",
+                        color    = Cyan,
+                        fontSize = 14.sp,
+                        modifier = Modifier.clickable { onNewRelaySet() },
+                    )
+                    Text(
+                        text     = "⚙ Relay Settings",
+                        color    = TextSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.clickable { onRelaySettings() },
+                    )
+                }
+            }
+        }
+    }
+
+    // Delete confirmation dialog
+    confirmDeleteDTag?.let { dTag ->
+        val setName = userSets.firstOrNull { it.dTag == dTag }?.title ?: dTag
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmDeleteDTag = null },
+            title = { Text("Delete Relay Set", color = Color.White) },
+            text = { Text("Delete \"$setName\"? This cannot be undone.", color = TextSecondary) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    onDeleteSet(dTag)
+                    confirmDeleteDTag = null
+                }) { Text("Delete", color = Color(0xFFFF6B6B)) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmDeleteDTag = null }) {
+                    Text("Cancel", color = Cyan)
+                }
+            },
+            containerColor = Color(0xFF1A1A1A),
+        )
+    }
 }
 
 @Composable
