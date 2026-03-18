@@ -62,6 +62,7 @@ private val TabNames = listOf("Inbox/Outbox", "Index", "Search")
 @Composable
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
+    onStartFeed: ((url: String, label: String) -> Unit)? = null,
     viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
