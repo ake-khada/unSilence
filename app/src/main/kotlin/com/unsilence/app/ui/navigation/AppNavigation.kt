@@ -29,11 +29,11 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -85,10 +85,10 @@ private val NavUnselected = Color(0xFF555555)
 private data class NavTab(val icon: ImageVector, val contentDescription: String)
 
 private val TABS = listOf(
-    NavTab(Icons.Filled.Home,          "Home"),
-    NavTab(Icons.Filled.Search,        "Search"),
-    NavTab(Icons.Filled.Notifications, "Notifications"),
-    NavTab(Icons.Filled.Person,        "Profile"),
+    NavTab(Icons.Outlined.Home,          "Home"),
+    NavTab(Icons.Outlined.Search,        "Search"),
+    NavTab(Icons.Outlined.Notifications, "Notifications"),
+    NavTab(Icons.Outlined.Person,        "Profile"),
 )
 
 private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutSlowInEasing)
@@ -267,31 +267,14 @@ fun AppNavigation(onLogout: () -> Unit) {
                                 .size(Sizing.navIcon)
                                 .clickable { showFilter = true },
                         )
-                        if (userAvatarUrl != null) {
-                            Box(
-                                modifier = Modifier
-                                    .size(Sizing.navIcon)
-                                    .border(1.5.dp, Cyan, CircleShape)
-                                    .clip(CircleShape)
-                                    .clickable { showCompose = true },
-                            ) {
-                                AsyncImage(
-                                    model = userAvatarUrl,
-                                    contentDescription = "New post",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            }
-                        } else {
-                            Icon(
-                                imageVector        = Icons.Filled.Edit,
-                                contentDescription = "New post",
-                                tint               = Cyan,
-                                modifier           = Modifier
-                                    .size(Sizing.navIcon)
-                                    .clickable { showCompose = true },
-                            )
-                        }
+                        Icon(
+                            imageVector        = Icons.Filled.Edit,
+                            contentDescription = "New post",
+                            tint               = Cyan,
+                            modifier           = Modifier
+                                .size(Sizing.navIcon)
+                                .clickable { showCompose = true },
+                        )
                     }
                 }
             }
@@ -310,6 +293,9 @@ fun AppNavigation(onLogout: () -> Unit) {
                 verticalAlignment     = Alignment.CenterVertically,
             ) {
                 TABS.forEachIndexed { index, tab ->
+                    val isSelected = index == selectedTab
+                    val iconSize   = if (isSelected) Sizing.navIconSelected else Sizing.navIcon
+
                     IconButton(onClick = {
                         if (index == 0 && selectedTab == 0) {
                             scrollToTopTrigger++
@@ -317,21 +303,21 @@ fun AppNavigation(onLogout: () -> Unit) {
                         }
                         selectedTab = index
                     }) {
-                        Box {
-                            if (index == 0 && userAvatarUrl != null) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (index == 3 && userAvatarUrl != null) {
+                                // Profile tab — show user avatar
                                 Box(
                                     modifier = Modifier
-                                        .size(Sizing.navIcon)
+                                        .size(iconSize)
                                         .then(
-                                            if (index == selectedTab)
-                                                Modifier.border(1.5.dp, Cyan, CircleShape)
+                                            if (isSelected) Modifier.border(1.5.dp, Cyan, CircleShape)
                                             else Modifier
                                         )
                                         .clip(CircleShape),
                                 ) {
                                     AsyncImage(
                                         model = userAvatarUrl,
-                                        contentDescription = "Home",
+                                        contentDescription = "Profile",
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),
                                     )
@@ -340,8 +326,8 @@ fun AppNavigation(onLogout: () -> Unit) {
                                 Icon(
                                     imageVector        = tab.icon,
                                     contentDescription = tab.contentDescription,
-                                    tint               = if (index == selectedTab) Cyan else NavUnselected,
-                                    modifier           = Modifier.size(Sizing.navIcon),
+                                    tint               = if (isSelected) Cyan else NavUnselected,
+                                    modifier           = Modifier.size(iconSize),
                                 )
                             }
                             if (index == 0 && feedViewModel.hasNewTopPost) {
