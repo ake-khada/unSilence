@@ -164,7 +164,8 @@ class RelayPool @Inject constructor(
      */
     suspend fun connectAndAwait(relayUrls: List<String>, timeoutMs: Long = 5_000): Int {
         val newConns = mutableListOf<RelayConnection>()
-        for (url in relayUrls) {
+        for (rawUrl in relayUrls) {
+            val url = normalizeRelayUrl(rawUrl) ?: continue
             if (connections.containsKey(url)) continue
             if (connections.size >= 25) {
                 Log.d(TAG, "Connection cap (25) reached — skipping $url")
@@ -616,8 +617,9 @@ class RelayPool @Inject constructor(
      * If the relay is already connected (e.g. it's also a global relay), we just send
      * an additional subscription; the existing listenForEvents coroutine picks it up.
      */
-    fun connectForAuthors(relayUrl: String, authorPubkeys: List<String>) {
+    fun connectForAuthors(rawRelayUrl: String, authorPubkeys: List<String>) {
         if (authorPubkeys.isEmpty()) return
+        val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: return
         val req = buildAuthorsReq(relayUrl, authorPubkeys)
         val subId = "follows-${relayUrl.hashCode()}"
         registerPersistentSub(subId, req)
@@ -698,8 +700,9 @@ class RelayPool @Inject constructor(
      *  - kind 0 (profiles) — drives the People tab
      *  - kind 1/30023 (notes + articles) — drives the Notes tab
      */
-    fun searchNotes(searchRelayUrls: List<String>, query: String, token: Long) {
+    fun searchNotes(rawSearchRelayUrls: List<String>, query: String, token: Long) {
         if (query.isBlank()) return
+        val searchRelayUrls = rawSearchRelayUrls.mapNotNull { normalizeRelayUrl(it) }
 
         val profileReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -1246,6 +1249,55 @@ class RelayPool @Inject constructor(
                 })
             }
         }.toString()
+    }
+
+    /**
+     * Send persistent unfiltered global subscriptions to the specified relays.
+     * Used when viewing a relay-set or single-relay feed — these subs have NO
+     * authors filter so the feed shows everything the relay has.
+     *
+     * Closes any existing relay-global-* subs first, then opens new ones.
+     * The subs are registered as persistent so they replay after NIP-42 AUTH
+     * and after reconnection.
+     */
+    fun startGlobalFeed(relayUrls: List<String>) {
+        stopGlobalFeed()
+        for (url in relayUrls) {
+            val conn = connections[url] ?: continue
+            val hash = url.hashCode()
+            val subId = "relay-global-$hash"
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray {
+                        add(JsonPrimitive(1))
+                        add(JsonPrimitive(6))
+                        add(JsonPrimitive(20))
+                        add(JsonPrimitive(21))
+                        add(JsonPrimitive(30023))
+                    })
+                    put("limit", JsonPrimitive(300))
+                })
+            }.toString()
+            registerPersistentSub(subId, req)
+            conn.send(req)
+        }
+        Log.d(TAG, "Started global feed on ${relayUrls.size} relay(s)")
+    }
+
+    /**
+     * Close all relay-global-* subscriptions and remove from persistent tracking.
+     * Called when switching away from a relay-set / single-relay feed.
+     */
+    fun stopGlobalFeed() {
+        val globalSubIds = persistentSubs.keys.filter { it.startsWith("relay-global-") }
+        if (globalSubIds.isEmpty()) return
+        for (subId in globalSubIds) {
+            connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
+            persistentSubs.remove(subId)
+        }
+        Log.d(TAG, "Stopped ${globalSubIds.size} global feed sub(s)")
     }
 
     fun disconnectAll() {
