@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -445,16 +446,15 @@ private fun FavoriteRelayRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (onStartFeed != null) {
+            IconButton(onClick = onStartFeed, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Add, contentDescription = "Add to Feed", tint = Cyan, modifier = Modifier.size(18.dp))
+            }
+        }
         IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
         }
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            if (onStartFeed != null) {
-                DropdownMenuItem(
-                    text = { Text("Start Feed", color = Color.White, fontSize = 14.sp) },
-                    onClick = { showMenu = false; onStartFeed() },
-                )
-            }
             if (relaySets.isNotEmpty()) {
                 DropdownMenuItem(
                     text = { Text("Add to Set", color = Color.White, fontSize = 14.sp) },

@@ -80,6 +80,19 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
+    /** Favorite relays pinned to the feed picker. */
+    private val _pinnedRelays = MutableStateFlow<List<FeedType.SingleRelay>>(emptyList())
+    val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> = _pinnedRelays.asStateFlow()
+
+    fun addPinnedRelay(url: String, label: String) {
+        val entry = FeedType.SingleRelay(url, label)
+        _pinnedRelays.value = (_pinnedRelays.value + entry).distinctBy { it.url }
+    }
+
+    fun removePinnedRelay(url: String) {
+        _pinnedRelays.value = _pinnedRelays.value.filter { it.url != url }
+    }
+
     private val _filter = MutableStateFlow(FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
 
