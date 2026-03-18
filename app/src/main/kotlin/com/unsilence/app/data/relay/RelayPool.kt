@@ -59,6 +59,7 @@ class RelayPool @Inject constructor(
     private val relayConfigDao: dagger.Lazy<com.unsilence.app.data.db.dao.RelayConfigDao>,
     private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
     private val coverageRepository: dagger.Lazy<com.unsilence.app.data.repository.CoverageRepository>,
+    private val signingManager: com.unsilence.app.data.auth.SigningManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -329,6 +330,12 @@ class RelayPool @Inject constructor(
                 if (raw.startsWith("[\"NOTICE\"")) {
                     val notice = raw.substringAfter("\"NOTICE\",\"", "").substringBefore("\"")
                     Log.w(TAG, "Relay NOTICE ${conn.url}: $notice")
+                    return@consumeEach
+                }
+                // NIP-42 AUTH challenge — structural preparation (stub: log and ignore)
+                if (raw.startsWith("[\"AUTH\"")) {
+                    val challenge = raw.substringAfter("[\"AUTH\",\"", "").substringBefore("\"")
+                    Log.d(TAG, "AUTH challenge from ${conn.url}: ${challenge.take(20)}… (not yet implemented)")
                     return@consumeEach
                 }
                 // Update lastEventTime for persistent sub tracking
