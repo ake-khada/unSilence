@@ -596,7 +596,8 @@ class RelayPool @Inject constructor(
      * Sent to the specified indexer relays. These are replaceable/parameterized
      * replaceable events, so we only need the latest for the logged-in user.
      */
-    fun fetchRelayEcosystem(pubkeyHex: String, indexerRelayUrls: List<String>) {
+    fun fetchRelayEcosystem(pubkeyHex: String, rawIndexerRelayUrls: List<String>) {
+        val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }
         val subId = "relay-ecosystem-${System.nanoTime()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -829,7 +830,8 @@ class RelayPool @Inject constructor(
      * Publish an event to specific relay URLs. Connects if not already connected.
      * Used for replaceable events (kind 0, 3, 10002) that target write + indexer relays.
      */
-    fun publishToRelays(eventJson: String, relayUrls: List<String>) {
+    fun publishToRelays(eventJson: String, rawRelayUrls: List<String>) {
+        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }
         val cmd = buildJsonArray {
             add(JsonPrimitive("EVENT"))
             add(NostrJson.parseToJsonElement(eventJson))
@@ -860,7 +862,8 @@ class RelayPool @Inject constructor(
      * Fetch a thread: the event itself, replies, reactions, and zaps.
      * Separate REQs so each kind gets its own limit and they don't compete.
      */
-    fun fetchThread(relayUrls: List<String>, eventId: String) {
+    fun fetchThread(rawRelayUrls: List<String>, eventId: String) {
+        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }
         val ts = System.currentTimeMillis()
 
         // The event itself
