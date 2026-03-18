@@ -1143,6 +1143,58 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * NIP-42: Sign and send an AUTH response for the given relay challenge.
+     * After successful auth, replays all persistent subscriptions on this relay.
+     */
+    private fun handleAuthChallenge(conn: RelayConnection, challenge: String) {
+        val url = conn.url
+        pendingChallenges[url] = challenge
+
+        // Skip if already authenticated or auth is in flight
+        if (url in authenticatedRelays) {
+            Log.d(TAG, "AUTH: already authenticated to $url, skipping")
+            return
+        }
+        if (!authInFlight.add(url)) {
+            Log.d(TAG, "AUTH: already in flight for $url, skipping")
+            return
+        }
+
+        scope.launch {
+            try {
+                val normalizedUrl = NormalizedRelayUrl(url)
+                val template = RelayAuthEvent.build(normalizedUrl, challenge)
+                val signed = signingManager.sign(template)
+
+                if (signed == null) {
+                    Log.w(TAG, "AUTH: signing failed for $url (signer returned null)")
+                    authInFlight.remove(url)
+                    return@launch
+                }
+
+                // Send ["AUTH", {signed event JSON}]
+                val authJson = """["AUTH",${signed.toJson()}]"""
+                val sent = conn.send(authJson)
+
+                if (sent) {
+                    // TODO: NIP-42 specifies relay responds with ["OK",...] —
+                    // for now we optimistically mark as authenticated after send.
+                    authenticatedRelays.add(url)
+                    Log.d(TAG, "AUTH: sent auth response to $url")
+                    // Replay all persistent subs now that we're authenticated
+                    replayPersistentSubs(conn)
+                } else {
+                    Log.w(TAG, "AUTH: failed to send auth to $url (connection closed?)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "AUTH: error authenticating to $url", e)
+            } finally {
+                authInFlight.remove(url)
+            }
+        }
+    }
+
+    /**
      * Inject a "since" field into a REQ JSON filter object.
      */
     private fun injectSince(reqJson: String, since: Long): String {
