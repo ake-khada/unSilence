@@ -70,6 +70,25 @@ class RelayPool @Inject constructor(
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
+    /** Global engagement dedup — event IDs already fetched (60s TTL). */
+    private val engagementFetched = ConcurrentHashMap<String, Long>()
+
+    /** Global event-by-ID dedup — prevents duplicate fetchEventById calls (30s TTL). */
+    private val eventFetchInFlight = ConcurrentHashMap<String, Long>()
+
+    // Evict stale entries every 5 minutes to prevent unbounded growth.
+    init {
+        scope.launch {
+            while (true) {
+                delay(300_000)
+                val cutoff = System.currentTimeMillis() - 300_000
+                engagementFetched.entries.removeIf { it.value < cutoff }
+                eventFetchInFlight.entries.removeIf { it.value < cutoff }
+                profileFetchAttempted.entries.removeIf { it.value < cutoff }
+            }
+        }
+    }
+
     private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
     val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
 
@@ -712,20 +731,31 @@ class RelayPool @Inject constructor(
      * [eventJson] must be the raw JSON object string for the event
      * (not the full ["EVENT", ...] array — this method wraps it).
      */
-    /** One-shot REQ to fetch a single event by ID from all connected relays. */
-    fun fetchEventById(eventId: String) {
-        val subId = "quote-$eventId"
+    /** Batch fetch events by ID. Deduped against in-flight tracker (30s TTL). */
+    fun fetchEventsByIds(eventIds: List<String>) {
+        if (eventIds.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val novel = eventIds.filter { id ->
+            val last = eventFetchInFlight[id]
+            last == null || (now - last) > 30_000
+        }
+        if (novel.isEmpty()) return
+        novel.forEach { eventFetchInFlight[it] = now }
+        val subId = "batch-events-${System.nanoTime()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
             add(buildJsonObject {
-                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
-                put("limit", JsonPrimitive(1))
+                put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
-        connections.values.take(6).forEach { it.send(req) }
-        Log.d(TAG, "fetchEventById: $eventId → ${minOf(connections.size, 6)} relay(s)")
+        connections.values.take(3).forEach { it.send(req) }
+        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${minOf(connections.size, 3)} relay(s)")
     }
+
+    /** Single-ID overload — delegates to batch. */
+    fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
 
     fun publish(eventJson: String) {
         val cmd = buildJsonArray {
@@ -905,7 +935,17 @@ class RelayPool @Inject constructor(
      */
     fun fetchEngagementBatch(eventIds: List<String>) {
         if (eventIds.isEmpty()) return
-        val ts = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        val novel = eventIds.filter { id ->
+            val last = engagementFetched[id]
+            last == null || (now - last) > 60_000
+        }
+        if (novel.isEmpty()) {
+            Log.d(TAG, "fetchEngagementBatch: all ${eventIds.size} IDs already in-flight, skipping")
+            return
+        }
+        novel.forEach { engagementFetched[it] = now }
+        val ts = now
 
         val repliesSubId = "engagement-replies-$ts"
         val reactionsSubId = "engagement-reactions-$ts"
@@ -917,7 +957,7 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(repliesSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
-                put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("limit", JsonPrimitive(500))
             })
         }.toString()
@@ -928,7 +968,7 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(reactionsSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
-                put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("limit", JsonPrimitive(500))
             })
         }.toString()
@@ -939,7 +979,7 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(zapsSubId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
-                put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("limit", JsonPrimitive(200))
             })
         }.toString()
@@ -953,7 +993,7 @@ class RelayPool @Inject constructor(
             lanes.add(Lane(reactionsSubId, conn.url))
             lanes.add(Lane(zapsSubId, conn.url))
         }
-        val scopeKeyHash = eventIds.sorted().joinToString(",")
+        val scopeKeyHash = novel.sorted().joinToString(",")
             .let {
                 java.security.MessageDigest.getInstance("SHA-256")
                     .digest(it.toByteArray())
@@ -972,7 +1012,7 @@ class RelayPool @Inject constructor(
             conn.send(reactionsReq)
             conn.send(zapsReq)
         }
-        Log.d(TAG, "Fetching engagement for ${eventIds.size} events from ${targets.size} relay(s) (${lanes.size} lanes)")
+        Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s) (${lanes.size} lanes, ${eventIds.size - novel.size} deduped)")
     }
 
     /**

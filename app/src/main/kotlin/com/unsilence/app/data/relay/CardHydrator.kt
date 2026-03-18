@@ -40,64 +40,37 @@ class CardHydrator @Inject constructor(
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         val newEvents = events.filter { it.id !in hydratedIds }
         if (newEvents.isEmpty()) return
-        Log.d(TAG, "hydrateVisibleCards count=${events.size} new=${newEvents.size} ids=${newEvents.map { it.id.take(8) }}")
         hydratedIds.addAll(newEvents.map { it.id })
 
-        // 1. Collect all pubkeys needing profiles (authors + repost original authors)
+        // 1. Collect all pubkeys and referenced event IDs
         val pubkeys = mutableSetOf<String>()
         val referencedIds = mutableSetOf<String>()
 
         for (event in newEvents) {
             pubkeys.add(event.pubkey)
-
             if (event.kind == 6) {
-                Log.d(TAG, "Kind-6 repost ${event.id.take(12)}: tags.class=${event.tags::class.simpleName} tags=${event.tags.take(300)}")
-                // Repost: extract original author pubkey from p-tag
-                val repostPubkey = extractRepostAuthorPubkey(event.content, event.tags)
-                Log.d(TAG, "  repostAuthorPubkey=${repostPubkey?.take(12)}")
-                repostPubkey?.let { pubkeys.add(it) }
-                // Repost: extract target event ID from e-tag
-                val targetId = extractRepostTargetId(event.tags)
-                Log.d(TAG, "  repostTargetId=${targetId?.take(12)}")
-                targetId?.let { referencedIds.add(it) }
+                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
+                extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
             }
-
-            // Quote: nostr:nevent1... or nostr:note1... in content
-            val quotedIds = extractQuotedEventIds(event.content)
-            if (quotedIds.isNotEmpty()) {
-                Log.d(TAG, "Quoted refs in ${event.id.take(12)}: ${quotedIds.map { it.take(12) }}")
-            }
-            quotedIds.forEach { referencedIds.add(it) }
+            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
         }
 
-        // 2. Fetch missing profiles
-        if (pubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(pubkeys.toList())
-        }
-
-        // 3. Fetch missing referenced events
-        for (id in referencedIds) {
-            val found = eventDao.getEventById(id) != null
-            Log.d(TAG, "Ref ${id.take(12)} inRoom=$found")
-        }
+        // 2. Fetch missing referenced events (batched, deduped in RelayPool)
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
-        Log.d(TAG, "Referenced IDs: ${referencedIds.size} total, ${missingRefs.size} missing from Room")
-        if (referencedIds.isNotEmpty()) {
-            Log.d(TAG, "Ref IDs: ${referencedIds.map { it.take(12) }}")
-            Log.d(TAG, "Missing: ${missingRefs.map { it.take(12) }}")
-        }
-        for (id in missingRefs) {
-            Log.d(TAG, "Fetching missing ref: ${id.take(12)}")
-            relayPool.fetchEventById(id)
+        if (missingRefs.isNotEmpty()) {
+            relayPool.fetchEventsByIds(missingRefs.toList())
         }
 
-        // 4. After referenced events arrive, fetch their authors' profiles
+        // 3. After ref events arrive, collect their authors too
         if (missingRefs.isNotEmpty()) {
             delay(1500)
-            val refPubkeys = missingRefs.mapNotNull { eventDao.getEventById(it)?.pubkey }
-            if (refPubkeys.isNotEmpty()) {
-                userRepository.fetchMissingProfiles(refPubkeys)
-            }
+            missingRefs.mapNotNull { eventDao.getEventById(it)?.pubkey }
+                .forEach { pubkeys.add(it) }
+        }
+
+        // 4. Single profile fetch for ALL pubkeys (authors + repost authors + ref authors)
+        if (pubkeys.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(pubkeys.toList())
         }
 
         Log.d(TAG, "Hydrated ${newEvents.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing)")
