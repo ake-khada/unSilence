@@ -36,9 +36,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -52,7 +55,8 @@ fun ComposeScreen(
     initialText: String = "",
     viewModel: ComposeViewModel = hiltViewModel(),
 ) {
-    val pubkeyHex    = viewModel.pubkeyHex
+    val pubkeyHex      = viewModel.pubkeyHex
+    val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
     // Cursor at position 0 so the user types above a pre-filled quote link.
     var textValue    by remember { mutableStateOf(TextFieldValue(initialText, TextRange(0))) }
     val focusRequester = remember { FocusRequester() }
@@ -130,6 +134,14 @@ fun ComposeScreen(
                         IdentIcon(pubkey = pubkeyHex, modifier = Modifier.size(Sizing.avatar))
                     } else {
                         Box(modifier = Modifier.size(Sizing.avatar).background(Color(0xFF333333)))
+                    }
+                    if (!userAvatarUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model              = userAvatarUrl,
+                            contentDescription = null,
+                            contentScale       = ContentScale.Crop,
+                            modifier           = Modifier.fillMaxSize(),
+                        )
                     }
                 }
 

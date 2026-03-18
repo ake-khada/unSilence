@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -73,7 +74,7 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.distinctUntilChanged
 
-private val BANNER_HEIGHT       = 150.dp
+private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
 
 @Composable
@@ -225,7 +226,7 @@ fun UserProfileScreen(
                     }
                 }
 
-                Spacer(Modifier.height(Spacing.medium))
+                Spacer(Modifier.height(Spacing.small))
 
                 if (displayName != null) {
                     Text(
@@ -238,32 +239,43 @@ fun UserProfileScreen(
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    Spacer(Modifier.height(Spacing.small))
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
+                // npub — tappable row with copy icon
                 if (npubShort != null) {
-                    Text(
-                        text      = npubShort,
-                        color     = TextSecondary,
-                        fontSize  = 13.sp,
-                        textAlign = TextAlign.Center,
-                        modifier  = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium)
+                    Row(
+                        modifier = Modifier
                             .clickable {
                                 viewModel.npub?.let { full ->
                                     clipboard.setText(AnnotatedString(full))
                                 }
-                            },
-                    )
-                    Spacer(Modifier.height(Spacing.small))
+                            }
+                            .padding(horizontal = Spacing.medium, vertical = 2.dp),
+                        verticalAlignment     = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            text     = npubShort,
+                            color    = TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector        = Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy npub",
+                            tint               = TextSecondary,
+                            modifier           = Modifier.size(14.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
                 val nip05 = user?.nip05?.takeIf { it.isNotBlank() }
                 if (nip05 != null) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier          = Modifier.padding(bottom = Spacing.small),
+                        modifier          = Modifier.padding(bottom = Spacing.micro),
                     ) {
                         Icon(
                             imageVector        = Icons.Filled.Verified,
@@ -293,7 +305,7 @@ fun UserProfileScreen(
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    Spacer(Modifier.height(Spacing.small))
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
                 // Follow/Unfollow button
@@ -330,7 +342,7 @@ fun UserProfileScreen(
                     }
                 }
 
-                Spacer(Modifier.height(Spacing.large))
+                Spacer(Modifier.height(Spacing.medium))
             }
 
             // ── Profile tabs ──────────────────────────────────────────────────

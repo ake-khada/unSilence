@@ -10,6 +10,12 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
+import com.unsilence.app.data.repository.UserRepository
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.stateIn
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -27,10 +33,18 @@ class ComposeViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
+    private val userRepository: UserRepository,
 ) : ViewModel() {
 
     /** Pubkey for the avatar in the compose UI. */
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
+
+    /** Signed-in user's avatar URL, for the compose avatar. */
+    val userAvatarUrl: StateFlow<String?> = pubkeyHex?.let { pk ->
+        userRepository.userFlow(pk)
+            .map { it?.picture }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    } ?: MutableStateFlow(null)
 
     /** True once the note has been signed, published, and inserted into Room. */
     var published by mutableStateOf(false)

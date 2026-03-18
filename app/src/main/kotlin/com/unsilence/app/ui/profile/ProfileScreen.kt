@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
@@ -66,7 +67,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
-private val BANNER_HEIGHT       = 150.dp
+private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
 
 @Composable
@@ -193,7 +194,7 @@ fun ProfileScreen(
                     )
                 }
 
-                Spacer(Modifier.height(Spacing.medium))
+                Spacer(Modifier.height(Spacing.small))
 
                 // Display name
                 if (displayName != null) {
@@ -207,26 +208,36 @@ fun ProfileScreen(
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    Spacer(Modifier.height(Spacing.small))
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
-                // npub — tappable to copy full npub
+                // npub — tappable row with copy icon
                 if (npubShort != null) {
-                    Text(
-                        text      = npubShort,
-                        color     = TextSecondary,
-                        fontSize  = 13.sp,
-                        textAlign = TextAlign.Center,
-                        modifier  = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium)
+                    Row(
+                        modifier = Modifier
                             .clickable {
                                 viewModel.npub?.let { full ->
                                     clipboard.setText(AnnotatedString(full))
                                 }
-                            },
-                    )
-                    Spacer(Modifier.height(Spacing.small))
+                            }
+                            .padding(horizontal = Spacing.medium, vertical = 2.dp),
+                        verticalAlignment     = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            text     = npubShort,
+                            color    = TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector        = Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy npub",
+                            tint               = TextSecondary,
+                            modifier           = Modifier.size(14.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
                 // NIP-05 badge
@@ -234,7 +245,7 @@ fun ProfileScreen(
                 if (nip05 != null) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier          = Modifier.padding(bottom = Spacing.small),
+                        modifier          = Modifier.padding(bottom = Spacing.micro),
                     ) {
                         Icon(
                             imageVector        = Icons.Filled.Verified,
@@ -265,7 +276,7 @@ fun ProfileScreen(
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    Spacer(Modifier.height(Spacing.small))
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
                 // Following / Followers stats row
@@ -276,14 +287,14 @@ fun ProfileScreen(
                     horizontalArrangement = Arrangement.Center,
                 ) {
                     StatLabel(label = "Following", value = "$followingCount")
-                    Spacer(Modifier.size(20.dp))
+                    Spacer(Modifier.size(Spacing.large))
                     StatLabel(
                         label = "Followers",
                         value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
                     )
                 }
 
-                Spacer(Modifier.height(Spacing.large))
+                Spacer(Modifier.height(Spacing.medium))
             }
 
             // ── Profile tabs ──────────────────────────────────────────────────
