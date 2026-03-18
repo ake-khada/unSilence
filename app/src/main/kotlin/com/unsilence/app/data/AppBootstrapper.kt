@@ -12,7 +12,7 @@ import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull

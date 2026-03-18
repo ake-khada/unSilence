@@ -50,7 +50,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun CreateRelaySetScreen(
     onDismiss: () -> Unit,
-    viewModel: CreateRelaySetViewModel = hiltViewModel(),
+    viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
     var name by remember { mutableStateOf("") }
@@ -89,7 +89,8 @@ fun CreateRelaySetScreen(
                 TextButton(
                     onClick  = {
                         if (name.isNotBlank() && relayUrls.isNotEmpty()) {
-                            viewModel.create(name, relayUrls.toList()) { onDismiss() }
+                            viewModel.createRelaySet(name.trim(), relayUrls.toList())
+                            onDismiss()
                         }
                     },
                     enabled  = name.isNotBlank() && relayUrls.isNotEmpty(),

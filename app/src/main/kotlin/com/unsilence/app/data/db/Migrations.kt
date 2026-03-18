@@ -25,6 +25,65 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *            nostr_relay_set_members) + coverage ledger table. Migrate own_relays
  *            data into relay_configs (kind 10002).
  */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ── Step 1: Migrate non-built-in relay sets to NIP-51 nostr_relay_sets ──
+        val cursor = db.query("SELECT id, name, relay_urls FROM relay_sets WHERE is_built_in = 0")
+        try {
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(1) ?: continue
+                val relayUrlsJson = cursor.getString(2) ?: continue
+
+                // Derive d-tag from name
+                var dTag = name.lowercase().replace(Regex("[^a-z0-9-]"), "-")
+
+                // Handle collision: check if dTag already exists
+                var suffix = 1
+                while (true) {
+                    val checkCursor = db.query(
+                        "SELECT COUNT(*) FROM nostr_relay_sets WHERE d_tag = ?",
+                        arrayOf(dTag)
+                    )
+                    val exists = checkCursor.use { c ->
+                        c.moveToFirst() && c.getInt(0) > 0
+                    }
+                    if (!exists) break
+                    suffix++
+                    dTag = "${name.lowercase().replace(Regex("[^a-z0-9-]"), "-")}-$suffix"
+                }
+
+                val now = System.currentTimeMillis() / 1000L
+
+                db.execSQL(
+                    "INSERT OR IGNORE INTO nostr_relay_sets (d_tag, owner_pubkey, title, event_created_at) VALUES (?, '', ?, ?)",
+                    arrayOf<Any>(dTag, name, now)
+                )
+
+                // Parse relay URLs, normalize, and insert members
+                try {
+                    val urls = org.json.JSONArray(relayUrlsJson)
+                    for (i in 0 until urls.length()) {
+                        var url = urls.optString(i) ?: continue
+                        url = url.trim().removeSuffix("/")
+                        if (url.isBlank()) continue
+                        url = url.removePrefix("https://").removePrefix("http://")
+                        if (!url.startsWith("wss://") && !url.startsWith("ws://")) url = "wss://$url"
+                        db.execSQL(
+                            "INSERT OR IGNORE INTO nostr_relay_set_members (set_d_tag, owner_pubkey, relay_url) VALUES (?, '', ?)",
+                            arrayOf(dTag, url)
+                        )
+                    }
+                } catch (_: Exception) { }
+            }
+        } finally {
+            cursor.close()
+        }
+
+        // ── Step 2: Drop relay_sets table ──
+        db.execSQL("DROP TABLE IF EXISTS relay_sets")
+    }
+}
+
 val MIGRATION_9_10 = object : Migration(9, 10) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── relay_configs: unified relay storage for kinds 10002/10006/10007/10012 ──
