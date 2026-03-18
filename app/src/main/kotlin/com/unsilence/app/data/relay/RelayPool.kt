@@ -365,11 +365,15 @@ class RelayPool @Inject constructor(
                             if (challenge != null && conn.url !in authenticatedRelays) {
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
-                                // Already authed — just replay the specific closed sub
+                                // Already authed — just replay the specific closed sub with since
                                 persistentSubs[closedSubId]?.let { sub ->
-                                    conn.send(sub.reqJson)
-                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url}")
+                                    val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
+                                                else System.currentTimeMillis() / 1000L - 300
+                                    conn.send(injectSince(sub.reqJson, since))
+                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
                                 }
+                            } else {
+                                Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached")
                             }
                         } else {
                             Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
@@ -1199,7 +1203,6 @@ class RelayPool @Inject constructor(
 
                 if (signed == null) {
                     Log.w(TAG, "AUTH: signing failed for $url (signer returned null)")
-                    authInFlight.remove(url)
                     return@launch
                 }
 
