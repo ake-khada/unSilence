@@ -226,9 +226,10 @@ class RelayPool @Inject constructor(
     }
 
     fun connect(relayUrls: List<String>, isHomeFeed: Boolean = false) {
+        val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
         // Collect URLs that will actually be connected
         val newUrls = mutableListOf<String>()
-        for (url in relayUrls) {
+        for (url in normalizedUrls) {
             if (url in blockedUrls) {
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
