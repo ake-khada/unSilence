@@ -127,6 +127,7 @@ fun ComposeScreen(
             ) {
                 Box(
                     modifier = Modifier
+                        .padding(top = 2.dp)
                         .size(Sizing.avatar)
                         .clip(CircleShape),
                 ) {
