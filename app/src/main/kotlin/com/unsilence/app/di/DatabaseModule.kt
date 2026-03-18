@@ -12,6 +12,7 @@ import com.unsilence.app.data.db.MIGRATION_6_7
 import com.unsilence.app.data.db.MIGRATION_7_8
 import com.unsilence.app.data.db.MIGRATION_8_9
 import com.unsilence.app.data.db.MIGRATION_9_10
+import com.unsilence.app.data.db.MIGRATION_10_11
 import com.unsilence.app.data.db.dao.CoverageDao
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
@@ -22,7 +23,6 @@ import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.dao.RelaySetDao
 import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import androidx.room.RoomDatabase
@@ -45,13 +45,12 @@ object DatabaseModule {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10,
+                MIGRATION_9_10, MIGRATION_10_11,
             )
             .build()
 
     @Provides fun provideEventDao(db: AppDatabase): EventDao = db.eventDao()
     @Provides fun provideUserDao(db: AppDatabase): UserDao = db.userDao()
-    @Provides fun provideRelaySetDao(db: AppDatabase): RelaySetDao = db.relaySetDao()
     @Provides fun provideReactionDao(db: AppDatabase): ReactionDao = db.reactionDao()
     @Provides fun provideFollowDao(db: AppDatabase): FollowDao = db.followDao()
     @Provides fun provideRelayListDao(db: AppDatabase): RelayListDao = db.relayListDao()

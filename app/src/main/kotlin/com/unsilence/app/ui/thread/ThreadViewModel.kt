@@ -9,9 +9,10 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
-import com.unsilence.app.data.repository.RelaySetRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -41,7 +42,7 @@ data class ThreadUiState(
 @HiltViewModel
 class ThreadViewModel @Inject constructor(
     private val eventRepository: EventRepository,
-    private val relaySetRepository: RelaySetRepository,
+    private val relayConfigDao: RelayConfigDao,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
@@ -95,8 +96,10 @@ class ThreadViewModel @Inject constructor(
         eventIdFlow.value = eventId
         _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
-            val set  = relaySetRepository.defaultSet() ?: return@launch
-            val urls = relaySetRepository.decodeUrls(set)
+            val readRelays = relayConfigDao.getAllReadWriteRelays()
+                .filter { it.marker == null || it.marker == "read" }
+                .map { it.relayUrl }
+            val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
             relayPool.fetchThread(urls, eventId)
         }
     }

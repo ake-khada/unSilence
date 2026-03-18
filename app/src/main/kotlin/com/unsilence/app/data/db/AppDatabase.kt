@@ -12,7 +12,6 @@ import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.dao.RelaySetDao
 import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.CoverageEntity
@@ -26,7 +25,6 @@ import com.unsilence.app.data.db.entity.OwnRelayEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.db.entity.RelayListEntity
-import com.unsilence.app.data.db.entity.RelaySetEntity
 import com.unsilence.app.data.db.entity.TagEntity
 import com.unsilence.app.data.db.entity.UserEntity
 
@@ -34,7 +32,6 @@ import com.unsilence.app.data.db.entity.UserEntity
     entities = [
         EventEntity::class,
         UserEntity::class,
-        RelaySetEntity::class,
         ReactionEntity::class,
         FollowEntity::class,
         RelayListEntity::class,
@@ -47,13 +44,12 @@ import com.unsilence.app.data.db.entity.UserEntity
         NostrRelaySetMemberEntity::class,
         CoverageEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun eventDao(): EventDao
     abstract fun userDao(): UserDao
-    abstract fun relaySetDao(): RelaySetDao
     abstract fun reactionDao(): ReactionDao
     abstract fun followDao(): FollowDao
     abstract fun relayListDao(): RelayListDao

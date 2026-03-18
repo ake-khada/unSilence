@@ -246,11 +246,11 @@ fun AppNavigation(onLogout: () -> Unit) {
                                     text    = { Text("Following", color = if (feedType is FeedType.Following) Cyan else Color.White, fontSize = 14.sp) },
                                     onClick = { feedViewModel.setFeedType(FeedType.Following); showFeedDropdown = false },
                                 )
-                                userSets.filter { !it.isBuiltIn }.forEach { set ->
-                                    val isActive = feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).id == set.id
+                                userSets.forEach { set ->
+                                    val isActive = feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == set.dTag
                                     DropdownMenuItem(
-                                        text    = { Text(set.name, color = if (isActive) Cyan else Color.White, fontSize = 14.sp) },
-                                        onClick = { feedViewModel.setFeedType(FeedType.RelaySet(set.id, set.name)); showFeedDropdown = false },
+                                        text    = { Text(set.title ?: set.dTag, color = if (isActive) Cyan else Color.White, fontSize = 14.sp) },
+                                        onClick = { feedViewModel.setFeedType(FeedType.RelaySet(set.dTag, set.title ?: set.dTag)); showFeedDropdown = false },
                                     )
                                 }
                                 DropdownMenuItem(

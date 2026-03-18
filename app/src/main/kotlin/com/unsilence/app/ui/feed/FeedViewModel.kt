@@ -7,7 +7,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.entity.RelaySetEntity
+import com.unsilence.app.data.db.dao.NostrRelaySetDao
+import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.CoverageIntent
@@ -16,8 +18,8 @@ import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.CoverageRepository
 import com.unsilence.app.data.repository.EventRepository
-import com.unsilence.app.data.repository.RelaySetRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.domain.model.FeedFilter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -40,7 +42,7 @@ import javax.inject.Inject
 sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
-    data class  RelaySet(val id: String, val name: String) : FeedType()
+    data class  RelaySet(val dTag: String, val name: String) : FeedType()
 }
 
 data class FeedUiState(
@@ -52,7 +54,6 @@ data class FeedUiState(
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class FeedViewModel @Inject constructor(
-    private val relaySetRepository: RelaySetRepository,
     private val eventRepository: EventRepository,
     private val userRepository: UserRepository,
     private val relayPool: RelayPool,
@@ -61,6 +62,8 @@ class FeedViewModel @Inject constructor(
     private val coverageRepository: CoverageRepository,
     private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
+    private val relayConfigDao: RelayConfigDao,
+    private val nostrRelaySetDao: NostrRelaySetDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -69,9 +72,12 @@ class FeedViewModel @Inject constructor(
     private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
-    /** All relay sets (built-in + user) for the dropdown. */
-    val userSetsFlow: StateFlow<List<RelaySetEntity>> = relaySetRepository.allSetsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** All relay sets (NIP-51 kind 30002) for the dropdown. */
+    val userSetsFlow: StateFlow<List<NostrRelaySetEntity>> =
+        keyManager.getPublicKeyHex()?.let { pk ->
+            nostrRelaySetDao.getAllSets(pk)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        } ?: MutableStateFlow(emptyList())
 
     private val _filter = MutableStateFlow(FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
@@ -175,12 +181,12 @@ class FeedViewModel @Inject constructor(
             val hasFollows = followDao.count() > 0
             if (hasFollows) _feedType.value = FeedType.Following
 
-            relaySetRepository.seedDefaults()
+            val readRelays = relayConfigDao.getAllReadWriteRelays()
+                .filter { it.marker == null || it.marker == "read" }
+                .map { it.relayUrl }
+            val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
 
-            val set  = relaySetRepository.defaultSet() ?: return@launch
-            val urls = relaySetRepository.decodeUrls(set)
-
-            relayPool.connect(urls)
+            relayPool.connect(globalUrls)
 
             combine(_feedType, _filter) { type, filter -> type to filter }
                 .flatMapLatest { (type, filter) ->
@@ -209,9 +215,9 @@ class FeedViewModel @Inject constructor(
 
                     when (type) {
                         is FeedType.Global    -> {
-                            currentRelayUrls = urls
+                            currentRelayUrls = globalUrls
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(urls, filter, limit)
+                                eventRepository.feedFlow(globalUrls, filter, limit)
                             }
                         }
                         is FeedType.Following -> {
@@ -222,8 +228,9 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                         is FeedType.RelaySet  -> {
-                            val setEntity = relaySetRepository.getById(type.id)
-                            val setUrls   = setEntity?.let { relaySetRepository.decodeUrls(it) } ?: urls
+                            val ownerPk = keyManager.getPublicKeyHex() ?: ""
+                            val members = nostrRelaySetDao.getSetMembersSnapshot(type.dTag, ownerPk)
+                            val setUrls = members.map { it.relayUrl }.ifEmpty { globalUrls }
                             currentRelayUrls = setUrls
                             relayPool.connect(setUrls)
                             _displayLimit.flatMapLatest { limit ->
