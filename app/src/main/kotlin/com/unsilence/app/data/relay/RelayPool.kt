@@ -44,6 +44,8 @@ data class PersistentSub(
     val subId: String,
     val reqJson: String,
     val lastEventTime: Long = 0L,
+    /** When non-null, this sub is only sent to this specific relay URL. */
+    val targetRelayUrl: String? = null,
 )
 
 /** A search result correlated with the token of the search session that produced it. */
@@ -110,8 +112,8 @@ class RelayPool @Inject constructor(
     val searchResults: SharedFlow<SearchResult> = _searchResults.asSharedFlow()
 
     /** Register a subscription as persistent so it's replayed after reconnect. */
-    private fun registerPersistentSub(subId: String, reqJson: String) {
-        persistentSubs[subId] = PersistentSub(subId = subId, reqJson = reqJson)
+    private fun registerPersistentSub(subId: String, reqJson: String, targetRelayUrl: String? = null) {
+        persistentSubs[subId] = PersistentSub(subId = subId, reqJson = reqJson, targetRelayUrl = targetRelayUrl)
     }
 
     /**
@@ -1175,6 +1177,8 @@ class RelayPool @Inject constructor(
     private fun replayPersistentSubs(conn: RelayConnection) {
         val nowSeconds = System.currentTimeMillis() / 1000L
         for ((_, sub) in persistentSubs) {
+            // Skip subs targeted at a different relay
+            if (sub.targetRelayUrl != null && sub.targetRelayUrl != conn.url) continue
             // Global browse subs always replay the full limit — no since filter.
             if (sub.subId.startsWith("relay-global-")) {
                 conn.send(sub.reqJson)
@@ -1293,7 +1297,8 @@ class RelayPool @Inject constructor(
             }.toString()
             // Always register so replayPersistentSubs picks it up after
             // connect/AUTH even if the connection doesn't exist yet.
-            registerPersistentSub(subId, req)
+            // Scoped to this relay — won't replay on other relays.
+            registerPersistentSub(subId, req, targetRelayUrl = url)
             // Send immediately if already connected
             connections[url]?.send(req)
         }
@@ -1305,13 +1310,19 @@ class RelayPool @Inject constructor(
      * Called when switching away from a relay-set / single-relay feed.
      */
     fun stopGlobalFeed() {
-        val globalSubIds = persistentSubs.keys.filter { it.startsWith("relay-global-") }
-        if (globalSubIds.isEmpty()) return
-        for (subId in globalSubIds) {
-            connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
+        val globalSubs = persistentSubs.entries.filter { it.key.startsWith("relay-global-") }
+        if (globalSubs.isEmpty()) return
+        for ((subId, sub) in globalSubs) {
+            val closeMsg = """["CLOSE","$subId"]"""
+            val target = sub.targetRelayUrl
+            if (target != null) {
+                connections[target]?.send(closeMsg)
+            } else {
+                connections.values.forEach { it.send(closeMsg) }
+            }
             persistentSubs.remove(subId)
         }
-        Log.d(TAG, "Stopped ${globalSubIds.size} global feed sub(s)")
+        Log.d(TAG, "Stopped ${globalSubs.size} global feed sub(s)")
     }
 
     fun disconnectAll() {
