@@ -50,7 +50,8 @@ class RelayManagementViewModel @Inject constructor(
     val favoriteRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getFavoriteRelays()
 
     /** Kind 30002 relay sets. */
-    val relaySets: Flow<List<NostrRelaySetEntity>> = nostrRelaySetDao.getAllSets()
+    val relaySets: Flow<List<NostrRelaySetEntity>> =
+        ownerPubkey?.let { nostrRelaySetDao.getAllSets(it) } ?: emptyFlow()
 
     val publishing = MutableStateFlow(false)
     private val publishMutex = Mutex()
