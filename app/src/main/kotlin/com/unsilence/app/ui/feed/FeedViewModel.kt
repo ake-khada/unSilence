@@ -191,17 +191,24 @@ class FeedViewModel @Inject constructor(
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
     }
 
+    /** Read kind-10002 read relays from Room, falling back to hardcoded defaults. */
+    private suspend fun resolveGlobalUrls(): List<String> {
+        val readRelays = relayConfigDao.getAllReadWriteRelays()
+            .filter { it.marker == null || it.marker == "read" }
+            .map { it.relayUrl }
+        return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+    }
+
     init {
         viewModelScope.launch {
             val hasFollows = followDao.count() > 0
             if (hasFollows) _feedType.value = FeedType.Following
 
-            val readRelays = relayConfigDao.getAllReadWriteRelays()
-                .filter { it.marker == null || it.marker == "read" }
-                .map { it.relayUrl }
-            val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
-
-            relayPool.connect(globalUrls)
+            // Initial relay connection with isHomeFeed=true so feed subscriptions
+            // are sent. Bootstrap may update kind-10002 later, which flatMapLatest
+            // picks up on next feed type emission.
+            val initialUrls = resolveGlobalUrls()
+            relayPool.connect(initialUrls, isHomeFeed = true)
 
             combine(_feedType, _filter) { type, filter -> type to filter }
                 .flatMapLatest { (type, filter) ->
@@ -230,7 +237,11 @@ class FeedViewModel @Inject constructor(
 
                     when (type) {
                         is FeedType.Global    -> {
+                            // Re-read kind-10002 each time Global feed is selected —
+                            // bootstrap may have refreshed the relay list since init.
+                            val globalUrls = resolveGlobalUrls()
                             currentRelayUrls = globalUrls
+                            relayPool.connect(globalUrls, isHomeFeed = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(globalUrls, filter, limit)
                             }
@@ -245,7 +256,7 @@ class FeedViewModel @Inject constructor(
                         is FeedType.RelaySet  -> {
                             val ownerPk = keyManager.getPublicKeyHex() ?: ""
                             val members = nostrRelaySetDao.getSetMembersSnapshot(type.dTag, ownerPk)
-                            val setUrls = members.map { it.relayUrl }.ifEmpty { globalUrls }
+                            val setUrls = members.map { it.relayUrl }.ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
                             relayPool.connect(setUrls)
                             _displayLimit.flatMapLatest { limit ->
