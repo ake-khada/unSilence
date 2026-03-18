@@ -433,16 +433,16 @@ private fun FeedPickerPopup(
     var confirmDeleteDTag by remember { mutableStateOf<String?>(null) }
 
     Popup(
-        alignment = Alignment.TopStart,
+        alignment = Alignment.TopEnd,
         offset    = IntOffset(0, 0),
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
         Column(
             modifier = Modifier
-                .width(200.dp)
-                .background(Color(0xFF0A0A0A), RoundedCornerShape(12.dp))
-                .padding(vertical = Spacing.small),
+                .width(160.dp)
+                .background(Color(0xFF111111), RoundedCornerShape(8.dp))
+                .padding(vertical = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             data class FeedItem(val type: FeedType?, val label: String, val isDivider: Boolean = false, val dTag: String? = null)
@@ -471,7 +471,7 @@ private fun FeedPickerPopup(
             val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
             val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
 
-            val itemHeight = 52.dp
+            val itemHeight = 36.dp
             val spinnerHeight = itemHeight * 3
 
             Box(
@@ -493,7 +493,7 @@ private fun FeedPickerPopup(
                                 color = Color(0xFF333333),
                                 modifier = Modifier
                                     .height(itemHeight)
-                                    .padding(vertical = 20.dp)
+                                    .padding(vertical = 14.dp)
                                     .fillMaxWidth(0.5f),
                             )
                         } else {
@@ -522,7 +522,7 @@ private fun FeedPickerPopup(
                                 Text(
                                     text       = item.label,
                                     color      = if (isCenter) Cyan else TextSecondary,
-                                    fontSize   = if (isCenter) 18.sp else 15.sp,
+                                    fontSize   = if (isCenter) 14.sp else 12.sp,
                                     fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
                                 )
                             }
