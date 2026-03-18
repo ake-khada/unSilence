@@ -192,9 +192,17 @@ class RelayManagementViewModel @Inject constructor(
     // ── Kind 30002: Relay sets ────────────────────────────────────────────────
 
     fun createRelaySet(name: String, relays: List<String>) {
-        val dTag = name.lowercase().replace(Regex("[^a-z0-9-]"), "-")
+        val baseDTag = name.lowercase().replace(Regex("[^a-z0-9-]"), "-")
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            // Handle d-tag collision: append numeric suffix if needed
+            var dTag = baseDTag
+            var suffix = 1
+            while (nostrRelaySetDao.maxCreatedAt(dTag, pk) != null) {
+                suffix++
+                dTag = "$baseDTag-$suffix"
+            }
+
             val members = relays.mapNotNull { normalizeRelayUrl(it) }
                 .map { NostrRelaySetMemberEntity(setDTag = dTag, ownerPubkey = pk, relayUrl = it) }
             nostrRelaySetDao.replaceSet(
