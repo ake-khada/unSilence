@@ -353,6 +353,32 @@ class RelayPool @Inject constructor(
                     }
                     return@consumeEach
                 }
+                // NIP-42 CLOSED with auth-required — authenticate then replay the sub
+                if (raw.startsWith("[\"CLOSED\"")) {
+                    try {
+                        val arr = NostrJson.parseToJsonElement(raw).jsonArray
+                        val closedSubId = arr[1].jsonPrimitive.content
+                        val reason = arr.getOrNull(2)?.jsonPrimitive?.content ?: ""
+                        if (reason.startsWith("auth-required")) {
+                            Log.d(TAG, "CLOSED auth-required for sub '$closedSubId' on ${conn.url}: $reason")
+                            val challenge = pendingChallenges[conn.url]
+                            if (challenge != null && conn.url !in authenticatedRelays) {
+                                handleAuthChallenge(conn, challenge)
+                            } else if (conn.url in authenticatedRelays) {
+                                // Already authed — just replay the specific closed sub
+                                persistentSubs[closedSubId]?.let { sub ->
+                                    conn.send(sub.reqJson)
+                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url}")
+                                }
+                            }
+                        } else {
+                            Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse CLOSED message: ${e.message}")
+                    }
+                    return@consumeEach
+                }
                 // Update lastEventTime for persistent sub tracking
                 val subId = extractEventSubId(raw)
                 if (subId != null) {
@@ -1092,6 +1118,8 @@ class RelayPool @Inject constructor(
                 }
 
                 connections[url]?.close()
+                authenticatedRelays.remove(url)
+                pendingChallenges.remove(url)
                 val conn = RelayConnection(url, okHttpClient)
                 connections[url] = conn
                 conn.connect()
@@ -1221,5 +1249,8 @@ class RelayPool @Inject constructor(
         connections.values.forEach { it.close() }
         connections.clear()
         profileFetchAttempted.clear()
+        authenticatedRelays.clear()
+        authInFlight.clear()
+        pendingChallenges.clear()
     }
 }
