@@ -5,8 +5,10 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.FollowDao
+import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.UserDao
+import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
@@ -23,12 +25,18 @@ import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
 
-/** Indexer relays that specialise in kind 0/3/10002 metadata. */
-private val INDEXER_RELAY_URLS = listOf(
+/** Default indexer relays — only used for first-launch seeding. */
+private val DEFAULT_INDEXER_URLS = listOf(
     "wss://purplepag.es",
     "wss://user.kindpag.es",
     "wss://indexer.coracle.social",
     "wss://antiprimal.net",
+)
+
+/** Default search relays — seeded if none found after bootstrap fetch. */
+private val DEFAULT_SEARCH_URLS = listOf(
+    "wss://relay.nostr.band",
+    "wss://search.nos.today",
 )
 
 @Singleton
@@ -45,6 +53,7 @@ class AppBootstrapper @Inject constructor(
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
     private val cardHydrator: CardHydrator,
+    private val nostrRelaySetDao: NostrRelaySetDao,
 ) {
     /**
      * Sequential bootstrap for the logged-in user.
@@ -62,8 +71,22 @@ class AppBootstrapper @Inject constructor(
         // no registration race. Just start OutboxRouter's internal flows.
         outboxRouter.start()
 
+        // ── Claim orphaned relay sets from migration (owner_pubkey = "") ─
+        nostrRelaySetDao.claimOrphaned(pubkeyHex)
+
+        // ── Seed kind 99 indexer relays if none exist ───────────────────
+        val existingIndexers = relayConfigDao.getIndexerRelayUrls()
+        if (existingIndexers.isEmpty()) {
+            relayConfigDao.insertAll(
+                DEFAULT_INDEXER_URLS.map { url ->
+                    RelayConfigEntity(kind = 99, relayUrl = url)
+                }
+            )
+        }
+
         // ── Step 1: Connect to indexer relays ───────────────────────────────
-        val ready = relayPool.connectAndAwait(INDEXER_RELAY_URLS, timeoutMs = 5_000)
+        val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+        val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Step 1: $ready indexer relay(s) connected")
 
         // ── Step 2: Fetch kind-3, wait for follows ──────────────────────────
@@ -95,7 +118,7 @@ class AppBootstrapper @Inject constructor(
         // ── Step 4b: Fetch NIP-51 relay ecosystem kinds ─────────────────────
         // One-shot: blocked relays, search relays, favorites, relay sets.
         // EventProcessor routes these through OutboxRouter handlers.
-        relayPool.fetchRelayEcosystem(pubkeyHex, INDEXER_RELAY_URLS)
+        relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Step 4b: NIP-51 relay kinds (10006/10007/10012/30002) requested")
 
         // ── Step 4c: Pre-load blocked relays before opening global connections ──
@@ -103,8 +126,22 @@ class AppBootstrapper @Inject constructor(
         Log.d(TAG, "Step 4c: blocked relay snapshot loaded")
 
         // ── Step 5: Connect to global relays (feed subscriptions) ───────────
-        relayPool.connect(GLOBAL_RELAY_URLS, isHomeFeed = true)
-        Log.d(TAG, "Step 5: global relays connecting")
+        val readRelays = relayConfigDao.getAllReadWriteRelays()
+            .filter { it.marker == null || it.marker == "read" }
+            .map { it.relayUrl }
+        val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+        relayPool.connect(globalUrls, isHomeFeed = true)
+        Log.d(TAG, "Step 5: global relays connecting (${globalUrls.size} URLs)")
+
+        // ── Seed kind 10007 search relays if none exist after fetch ─────
+        val existingSearch = relayConfigDao.searchRelayUrls()
+        if (existingSearch.isEmpty()) {
+            relayConfigDao.insertAll(
+                DEFAULT_SEARCH_URLS.map { url ->
+                    RelayConfigEntity(kind = 10007, relayUrl = url)
+                }
+            )
+        }
 
         maintenanceJob.start()
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
@@ -129,6 +166,8 @@ class AppBootstrapper @Inject constructor(
         // 3. Clear only user-specific tables — events/users/reactions are reusable cache
         followDao.clearAll()
         relayConfigDao.clearAll()
+        nostrRelaySetDao.clearAllSets()
+        nostrRelaySetDao.clearAllMembers()
 
         // 4. Clear credentials and cached signer
         keyManager.clear()

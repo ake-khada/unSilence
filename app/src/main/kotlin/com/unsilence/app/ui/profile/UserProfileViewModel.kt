@@ -7,10 +7,12 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -53,6 +55,7 @@ class UserProfileViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
+    private val relayConfigDao: RelayConfigDao,
     private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
@@ -174,7 +177,8 @@ class UserProfileViewModel @Inject constructor(
 
                 // Publish to write relays + indexer relays
                 val writeUrls = getWriteRelayUrls(myPubkey)
-                val targetUrls = (writeUrls + INDEXER_RELAY_URLS).distinct()
+                val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+                val targetUrls = (writeUrls + indexerUrls).distinct()
                 relayPool.publishToRelays(toEventJson(signed), targetUrls)
 
                 // Update local follows table
@@ -209,22 +213,6 @@ class UserProfileViewModel @Inject constructor(
         put("content",    event.content)
         put("sig",        event.sig)
     }.toString()
-
-    companion object {
-        private val INDEXER_RELAY_URLS = listOf(
-            "wss://purplepag.es",
-            "wss://user.kindpag.es",
-            "wss://indexer.coracle.social",
-            "wss://antiprimal.net",
-        )
-        private val GLOBAL_RELAY_URLS = listOf(
-            "wss://relay.damus.io",
-            "wss://nos.lol",
-            "wss://nostr.mom",
-            "wss://relay.nostr.net",
-            "wss://relay.primal.net",
-        )
-    }
 
     fun loadProfile(pubkey: String) {
         if (_pubkeyHex.value == pubkey) return
