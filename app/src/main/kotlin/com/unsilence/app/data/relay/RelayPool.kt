@@ -1278,7 +1278,8 @@ class RelayPool @Inject constructor(
      */
     fun startGlobalFeed(relayUrls: List<String>) {
         stopGlobalFeed()
-        for (url in relayUrls) {
+        for (rawUrl in relayUrls) {
+            val url = normalizeRelayUrl(rawUrl) ?: continue
             val hash = url.hashCode()
             val subId = "relay-global-$hash"
             val req = buildJsonArray {
