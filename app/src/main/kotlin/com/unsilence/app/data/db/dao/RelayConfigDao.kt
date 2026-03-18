@@ -52,6 +52,14 @@ abstract class RelayConfigDao {
     @Query("SELECT * FROM relay_configs WHERE kind = 10012 ORDER BY relay_url ASC")
     abstract suspend fun getAllFavoriteRelays(): List<RelayConfigEntity>
 
+    /** Kind 99 (local-only): indexer relays for metadata resolution. */
+    @Query("SELECT * FROM relay_configs WHERE kind = 99 ORDER BY relay_url ASC")
+    abstract fun getIndexerRelays(): Flow<List<RelayConfigEntity>>
+
+    /** Kind 99 snapshot (non-reactive, for publishing targets). */
+    @Query("SELECT relay_url FROM relay_configs WHERE kind = 99")
+    abstract suspend fun getIndexerRelayUrls(): List<String>
+
     /** Max event_created_at for a given kind (replaceable event semantics). */
     @Query("SELECT MAX(event_created_at) FROM relay_configs WHERE kind = :kind")
     abstract suspend fun maxCreatedAt(kind: Int): Long?
