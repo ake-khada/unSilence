@@ -19,7 +19,7 @@ object AppModule {
     @Singleton
     fun provideOkHttpClient(): OkHttpClient =
         OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)    // WebSocket: no read timeout
             .writeTimeout(30, TimeUnit.SECONDS)
             .pingInterval(25, TimeUnit.SECONDS)  // keep-alive

@@ -19,7 +19,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.buildVideoRenderModels
-import android.util.Log
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlin.math.abs
 import kotlinx.coroutines.flow.debounce
@@ -165,7 +164,6 @@ fun rememberVideoPlaybackScope(
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (scope.activeVideoNoteId != newActiveId) {
-                    Log.d("VIDEO_DEBUG", "ACTIVE changed to $newActiveId")
                     scope.activeVideoNoteId = newActiveId
                     if (newActiveId == null) {
                         exoPlayer.playWhenReady = false

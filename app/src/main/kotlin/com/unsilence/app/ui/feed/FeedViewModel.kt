@@ -239,6 +239,7 @@ class FeedViewModel @Inject constructor(
                         is FeedType.Global    -> {
                             // Re-read kind-10002 each time Global feed is selected —
                             // bootstrap may have refreshed the relay list since init.
+                            relayPool.stopGlobalFeed()
                             val globalUrls = resolveGlobalUrls()
                             currentRelayUrls = globalUrls
                             relayPool.connect(globalUrls, isHomeFeed = true)
@@ -247,6 +248,7 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                         is FeedType.Following -> {
+                            relayPool.stopGlobalFeed()
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
                             _displayLimit.flatMapLatest { limit ->
@@ -259,6 +261,7 @@ class FeedViewModel @Inject constructor(
                             val setUrls = members.map { it.relayUrl }.ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
                             relayPool.connect(setUrls)
+                            relayPool.startGlobalFeed(setUrls)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit)
                             }
@@ -267,6 +270,7 @@ class FeedViewModel @Inject constructor(
                             val singleUrl = listOf(type.url)
                             currentRelayUrls = singleUrl
                             relayPool.connect(singleUrl)
+                            relayPool.startGlobalFeed(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(singleUrl, filter, limit)
                             }

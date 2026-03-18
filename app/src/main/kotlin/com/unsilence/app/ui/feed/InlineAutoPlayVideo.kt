@@ -37,7 +37,6 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import android.util.Log
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
@@ -116,8 +115,6 @@ fun VideoPreviewCard(
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
 
-    Log.d("VIDEO_DEBUG", "PREVIEW ${model.videoUrl.takeLast(20)} aspect=$displayAspect")
-
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -183,8 +180,6 @@ fun InlineVideoPlayer(
         feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
-
-    Log.d("VIDEO_DEBUG", "PLAYER ${model.videoUrl.takeLast(20)} resolvedRatio=$resolvedRatio baseAspect=$baseAspect displayAspect=$displayAspect")
 
     var isFirstFrameRendered by remember { mutableStateOf(false) }
 
