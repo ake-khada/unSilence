@@ -2,8 +2,6 @@ package com.unsilence.app.ui.relays
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -30,25 +29,27 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.data.db.entity.NostrRelaySetMemberEntity
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -56,432 +57,210 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
+private val TabNames = listOf("Inbox/Outbox", "Index", "Search")
+
 @Composable
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
     viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
+    var selectedTab by remember { mutableIntStateOf(0) }
 
-    val readWrite by viewModel.readWriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
-    val blocked by viewModel.blockedRelays.collectAsStateWithLifecycle(initialValue = emptyList())
-    val search by viewModel.searchRelays.collectAsStateWithLifecycle(initialValue = emptyList())
-    val favorites by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
-    val relaySets by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
-
-    var rwExpanded by rememberSaveable { mutableStateOf(true) }
-    var searchExpanded by rememberSaveable { mutableStateOf(true) }
-    var blockedExpanded by rememberSaveable { mutableStateOf(true) }
-    var setsExpanded by rememberSaveable { mutableStateOf(true) }
-    var favoritesExpanded by rememberSaveable { mutableStateOf(true) }
+    val readWriteRelays by viewModel.readWriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val indexerRelays   by viewModel.indexerRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val searchRelays    by viewModel.searchRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val blockedRelays   by viewModel.blockedRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoriteRelays  by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val relaySets       by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
 
     Box(
-        modifier = Modifier.fillMaxSize().background(Black),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Black),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar
+            // ── Top bar ─────────────────────────────────────────────────────
+            Box(modifier = Modifier.fillMaxWidth().statusBarsPadding()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(Sizing.topBarHeight)
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint               = Color.White,
+                        )
+                    }
+                    Text(
+                        text       = "Relay Settings",
+                        color      = Color.White,
+                        fontSize   = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
+            // ── Tab row ─────────────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Black)
-                    .statusBarsPadding()
-                    .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.small),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
-                }
-                Text("Relays", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                // ── 1. READ/WRITE (kind 10002) ──────────────────────────────
-                item {
-                    RelaySection(
-                        title = "Read / Write",
-                        count = readWrite.size,
-                        expanded = rwExpanded,
-                        onToggle = { rwExpanded = !rwExpanded },
-                    )
-                    AnimatedVisibility(
-                        visible = rwExpanded,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        Column {
-                            readWrite.forEach { relay ->
-                                ReadWriteRelayRow(
-                                    relay = relay,
-                                    onToggleMarker = { viewModel.toggleMarker(relay) },
-                                    onDelete = { viewModel.removeReadWriteRelay(relay.relayUrl) },
-                                )
-                            }
-                            AddRelayInput(
-                                placeholder = "wss://relay.example.com",
-                                onAdd = { viewModel.addReadWriteRelay(it) },
-                            )
-                        }
-                    }
-                    SectionDivider()
-                }
-
-                // ── 2. SEARCH (kind 10007) ──────────────────────────────────
-                item {
-                    RelaySection(
-                        title = "Search",
-                        count = search.size,
-                        expanded = searchExpanded,
-                        onToggle = { searchExpanded = !searchExpanded },
-                    )
-                    AnimatedVisibility(
-                        visible = searchExpanded,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        Column {
-                            search.forEach { relay ->
-                                SimpleRelayRow(
-                                    url = relay.relayUrl,
-                                    onDelete = { viewModel.removeSearchRelay(relay.relayUrl) },
-                                )
-                            }
-                            AddRelayInput(
-                                placeholder = "wss://search.relay.com",
-                                onAdd = { viewModel.addSearchRelay(it) },
-                            )
-                        }
-                    }
-                    SectionDivider()
-                }
-
-                // ── 3. BLOCKED (kind 10006) ─────────────────────────────────
-                item {
-                    RelaySection(
-                        title = "Blocked",
-                        count = blocked.size,
-                        expanded = blockedExpanded,
-                        onToggle = { blockedExpanded = !blockedExpanded },
-                    )
-                    AnimatedVisibility(
-                        visible = blockedExpanded,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        Column {
-                            blocked.forEach { relay ->
-                                SimpleRelayRow(
-                                    url = relay.relayUrl,
-                                    onDelete = { viewModel.removeBlockedRelay(relay.relayUrl) },
-                                )
-                            }
-                            AddRelayInput(
-                                placeholder = "wss://spam.relay.com",
-                                onAdd = { viewModel.addBlockedRelay(it) },
-                            )
-                        }
-                    }
-                    SectionDivider()
-                }
-
-                // ── 4. RELAY SETS (kind 30002) ──────────────────────────────
-                item {
-                    RelaySection(
-                        title = "Relay Sets",
-                        count = relaySets.size,
-                        expanded = setsExpanded,
-                        onToggle = { setsExpanded = !setsExpanded },
-                    )
-                    AnimatedVisibility(
-                        visible = setsExpanded,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        Column {
-                            relaySets.forEach { set ->
-                                ExpandableRelaySetRow(
-                                    set = set,
-                                    viewModel = viewModel,
-                                    onDelete = { viewModel.deleteRelaySet(set.dTag) },
-                                )
-                            }
-                        }
-                    }
-                    SectionDivider()
-                }
-
-                // ── 5. FAVORITES (kind 10012) ───────────────────────────────
-                item {
-                    RelaySection(
-                        title = "Favorites",
-                        count = favorites.size,
-                        expanded = favoritesExpanded,
-                        onToggle = { favoritesExpanded = !favoritesExpanded },
-                    )
-                    AnimatedVisibility(
-                        visible = favoritesExpanded,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        Column {
-                            favorites.forEach { relay ->
-                                SimpleRelayRow(
-                                    url = relay.setRef ?: relay.relayUrl,
-                                    onDelete = {
-                                        val ref = relay.setRef
-                                        if (ref != null) {
-                                            viewModel.removeFavoriteSetRef(ref)
-                                        } else {
-                                            viewModel.removeFavoriteRelay(relay.relayUrl)
-                                        }
-                                    },
-                                )
-                            }
-                            AddRelayInput(
-                                placeholder = "wss://favorite.relay.com",
-                                onAdd = { viewModel.addFavoriteRelay(it) },
-                            )
-                            // Relay set picker — add existing sets as favorites
-                            val pk = viewModel.ownerPubkey
-                            if (pk != null && relaySets.isNotEmpty()) {
-                                val unfavorited = relaySets.filter { set ->
-                                    val ref = "30002:$pk:${set.dTag}"
-                                    favorites.none { it.setRef == ref }
-                                }
-                                if (unfavorited.isNotEmpty()) {
-                                    Text(
-                                        text = "Add relay set to favorites",
-                                        color = TextSecondary,
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.padding(
-                                            start = Spacing.medium,
-                                            top = 8.dp,
-                                            bottom = 4.dp,
-                                        ),
-                                    )
-                                    unfavorited.forEach { set ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    viewModel.addFavoriteSetRef("30002:$pk:${set.dTag}")
-                                                }
-                                                .padding(horizontal = Spacing.medium, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Add,
-                                                contentDescription = "Add",
-                                                tint = Cyan,
-                                                modifier = Modifier.size(18.dp),
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(
-                                                text = set.title ?: set.dTag,
-                                                color = Color.White,
-                                                fontSize = 14.sp,
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item { Spacer(Modifier.height(32.dp)) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RelaySection(
-    title: String,
-    count: Int,
-    expanded: Boolean,
-    onToggle: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(horizontal = Spacing.medium, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = title,
-            color = Cyan,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = "$count",
-            color = TextSecondary,
-            fontSize = 12.sp,
-        )
-        Spacer(Modifier.width(4.dp))
-        Icon(
-            imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-            contentDescription = if (expanded) "Collapse" else "Expand",
-            tint = TextSecondary,
-            modifier = Modifier.size(18.dp),
-        )
-    }
-}
-
-@Composable
-private fun ReadWriteRelayRow(
-    relay: RelayConfigEntity,
-    onToggleMarker: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = relay.relayUrl.removePrefix("wss://"),
-                color = Color.White,
-                fontSize = 14.sp,
-                maxLines = 1,
-            )
-            Row {
-                val isRead = relay.marker == null || relay.marker == "read"
-                val isWrite = relay.marker == null || relay.marker == "write"
-                MarkerChip(label = "Read", active = isRead, onClick = onToggleMarker)
-                Spacer(Modifier.width(6.dp))
-                MarkerChip(label = "Write", active = isWrite, onClick = onToggleMarker)
-            }
-        }
-        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFFCF6679), modifier = Modifier.size(18.dp))
-        }
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
-}
-
-@Composable
-private fun SimpleRelayRow(url: String, onDelete: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.medium, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = url.removePrefix("wss://"),
-            color = Color.White,
-            fontSize = 14.sp,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-        )
-        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFFCF6679), modifier = Modifier.size(18.dp))
-        }
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
-}
-
-@Composable
-private fun ExpandableRelaySetRow(
-    set: com.unsilence.app.data.db.entity.NostrRelaySetEntity,
-    viewModel: RelayManagementViewModel,
-    onDelete: () -> Unit,
-) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = Spacing.medium, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = set.title ?: set.dTag,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                if (set.description != null) {
-                    Text(
-                        text = set.description,
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                    )
-                }
-            }
-            Icon(
-                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "Collapse" else "Expand",
-                tint = TextSecondary,
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFFCF6679), modifier = Modifier.size(18.dp))
-            }
-        }
-
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically(),
-            exit = shrinkVertically(),
-        ) {
-            val members by viewModel.getSetMembers(set.dTag)
-                .collectAsState(initial = emptyList())
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 32.dp),
-            ) {
-                for (member in members) {
-                    Row(
+                TabNames.forEachIndexed { index, name ->
+                    val isSelected = index == selectedTab
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp, horizontal = Spacing.medium),
-                        verticalAlignment = Alignment.CenterVertically,
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) Cyan.copy(alpha = 0.15f) else Color.Transparent)
+                            .clickable { selectedTab = index }
+                            .padding(vertical = Spacing.small),
+                        contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = member.relayUrl.removePrefix("wss://"),
-                            color = TextSecondary,
-                            fontSize = 13.sp,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1,
+                            text       = name,
+                            color      = if (isSelected) Cyan else TextSecondary,
+                            fontSize   = 13.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                         )
-                        IconButton(
-                            onClick = { viewModel.removeRelayFromSet(set.dTag, member.relayUrl) },
-                            modifier = Modifier.size(28.dp),
-                        ) {
-                            Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFFCF6679), modifier = Modifier.size(14.dp))
+                    }
+                }
+            }
+
+            HorizontalDivider(color = Color(0xFF222222))
+
+            // ── Scrollable content ──────────────────────────────────────────
+            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                // ── Tab content ─────────────────────────────────────────────
+                when (selectedTab) {
+                    0 -> {
+                        // Inbox/Outbox (kind 10002)
+                        item {
+                            AddRelayInput(placeholder = "wss://relay.example.com") { url ->
+                                viewModel.addReadWriteRelay(url)
+                            }
+                        }
+                        items(readWriteRelays, key = { it.id }) { relay ->
+                            ReadWriteRelayRow(
+                                relay         = relay,
+                                onToggleMarker = { viewModel.toggleMarker(relay) },
+                                onRemove       = { viewModel.removeReadWriteRelay(relay.relayUrl) },
+                            )
+                        }
+                    }
+                    1 -> {
+                        // Index (kind 99, local-only)
+                        item {
+                            AddRelayInput(placeholder = "wss://indexer.example.com") { url ->
+                                viewModel.addIndexerRelay(url)
+                            }
+                        }
+                        if (indexerRelays.isEmpty()) {
+                            item {
+                                Text(
+                                    text     = "No indexer relays configured. Profile and follow list resolution will not work.",
+                                    color    = Color(0xFFFF6B6B),
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(Spacing.medium),
+                                )
+                            }
+                        }
+                        items(indexerRelays, key = { it.id }) { relay ->
+                            SimpleRelayRow(
+                                url      = relay.relayUrl,
+                                onRemove = { viewModel.removeIndexerRelay(relay.relayUrl) },
+                            )
+                        }
+                    }
+                    2 -> {
+                        // Search (kind 10007)
+                        item {
+                            AddRelayInput(placeholder = "wss://search.example.com") { url ->
+                                viewModel.addSearchRelay(url)
+                            }
+                        }
+                        items(searchRelays, key = { it.id }) { relay ->
+                            SimpleRelayRow(
+                                url      = relay.relayUrl,
+                                onRemove = { viewModel.removeSearchRelay(relay.relayUrl) },
+                            )
                         }
                     }
                 }
-                AddRelayInput(
-                    placeholder = "wss://relay.example.com",
-                    onAdd = { viewModel.addRelayToSet(set.dTag, it) },
-                )
+
+                // ── Divider between tabs and sections ───────────────────────
+                item { Spacer(Modifier.height(Spacing.medium)) }
+                item { HorizontalDivider(color = Color(0xFF222222)) }
+
+                // ── Collapsible: Relay Sets (kind 30002) ────────────────────
+                item {
+                    CollapsibleSection(
+                        title = "Relay Sets",
+                        count = relaySets.size,
+                    ) {
+                        relaySets.forEach { set ->
+                            RelaySetRow(
+                                set       = set,
+                                viewModel = viewModel,
+                                onDelete  = { viewModel.deleteRelaySet(set.dTag) },
+                            )
+                        }
+                    }
+                }
+
+                // ── Collapsible: Favorites (kind 10012) ─────────────────────
+                item {
+                    CollapsibleSection(
+                        title = "Favorites",
+                        count = favoriteRelays.size,
+                    ) {
+                        AddRelayInput(placeholder = "wss://favorite.example.com") { url ->
+                            viewModel.addFavoriteRelay(url)
+                        }
+                        favoriteRelays.filter { it.setRef == null }.forEach { relay ->
+                            SimpleRelayRow(
+                                url      = relay.relayUrl,
+                                onRemove = { viewModel.removeFavoriteRelay(relay.relayUrl) },
+                            )
+                        }
+                    }
+                }
+
+                // ── Collapsible: Blocked (kind 10006) ───────────────────────
+                item {
+                    CollapsibleSection(
+                        title = "Blocked",
+                        count = blockedRelays.size,
+                    ) {
+                        AddRelayInput(placeholder = "wss://blocked.example.com") { url ->
+                            viewModel.addBlockedRelay(url)
+                        }
+                        blockedRelays.forEach { relay ->
+                            SimpleRelayRow(
+                                url      = relay.relayUrl,
+                                onRemove = { viewModel.removeBlockedRelay(relay.relayUrl) },
+                            )
+                        }
+                    }
+                }
+
+                item { Spacer(Modifier.height(Spacing.xl)) }
             }
         }
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
     }
 }
+
+// ── Sub-composables ─────────────────────────────────────────────────────────
 
 @Composable
 private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
+    var input by remember { mutableStateOf("") }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -489,55 +268,199 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BasicTextField(
-            value = text,
-            onValueChange = { text = it },
-            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
-            cursorBrush = SolidColor(Cyan),
-            singleLine = true,
-            modifier = Modifier.weight(1f),
+            value         = input,
+            onValueChange = { input = it },
+            textStyle     = TextStyle(color = Color.White, fontSize = 14.sp),
+            cursorBrush   = SolidColor(Cyan),
+            singleLine    = true,
             decorationBox = { inner ->
-                Box {
-                    if (text.isEmpty()) {
+                Box(modifier = Modifier.weight(1f)) {
+                    if (input.isEmpty()) {
                         Text(placeholder, color = TextSecondary, fontSize = 14.sp)
                     }
                     inner()
                 }
             },
+            modifier = Modifier.weight(1f),
         )
-        Spacer(Modifier.width(Spacing.small))
+        Spacer(Modifier.width(8.dp))
         IconButton(
             onClick = {
-                if (text.isNotBlank()) {
-                    onAdd(text)
-                    text = ""
+                if (input.isNotBlank()) {
+                    onAdd(input.trim())
+                    input = ""
                 }
             },
+            modifier = Modifier.size(36.dp),
         ) {
-            Icon(Icons.Filled.Add, "Add relay", tint = Cyan)
+            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Cyan)
+        }
+    }
+}
+
+/** Display URL without wss:// prefix for compactness. */
+private fun displayUrl(url: String): String =
+    url.removePrefix("wss://").removePrefix("ws://")
+
+@Composable
+private fun SimpleRelayRow(url: String, onRemove: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.medium, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text     = displayUrl(url),
+            color    = Color.White,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
         }
     }
 }
 
 @Composable
-private fun MarkerChip(label: String, active: Boolean, onClick: () -> Unit) {
-    Text(
-        text = label,
-        color = if (active) Cyan else TextSecondary,
-        fontSize = 11.sp,
-        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+private fun ReadWriteRelayRow(
+    relay: RelayConfigEntity,
+    onToggleMarker: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Row(
         modifier = Modifier
-            .clickable(onClick = onClick)
-            .background(
-                if (active) Cyan.copy(alpha = 0.1f) else Color.Transparent,
-                RoundedCornerShape(4.dp),
-            )
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.medium, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text     = displayUrl(relay.relayUrl),
+            color    = Color.White,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        // R/W marker chip
+        val markerLabel = when (relay.marker) {
+            "read"  -> "R"
+            "write" -> "W"
+            else    -> "R/W"
+        }
+        Text(
+            text     = markerLabel,
+            color    = Cyan,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Cyan.copy(alpha = 0.15f))
+                .clickable { onToggleMarker() }
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
+        }
+    }
 }
 
 @Composable
-private fun SectionDivider() {
-    Spacer(Modifier.height(4.dp))
-    HorizontalDivider(color = Cyan.copy(alpha = 0.2f), thickness = 1.dp)
-    Spacer(Modifier.height(4.dp))
+private fun CollapsibleSection(
+    title: String,
+    count: Int,
+    content: @Composable () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(true) }
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text       = title,
+                color      = Color.White,
+                fontSize   = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier   = Modifier.weight(1f),
+            )
+            Text(
+                text     = "$count",
+                color    = TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column { content() }
+        }
+    }
+}
+
+@Composable
+private fun RelaySetRow(
+    set: NostrRelaySetEntity,
+    viewModel: RelayManagementViewModel,
+    onDelete: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val members by viewModel.getSetMembers(set.dTag).collectAsStateWithLifecycle(initialValue = emptyList())
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+            .padding(horizontal = Spacing.medium, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text     = set.title ?: set.dTag,
+                color    = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text  = "${members.size} relays",
+                color = TextSecondary,
+                fontSize = 11.sp,
+            )
+            Spacer(Modifier.width(4.dp))
+            IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Delete, contentDescription = "Delete set", tint = TextSecondary, modifier = Modifier.size(16.dp))
+            }
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(modifier = Modifier.padding(start = Spacing.medium)) {
+                members.forEach { member ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(displayUrl(member.relayUrl), color = TextSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        IconButton(
+                            onClick = { viewModel.removeRelayFromSet(set.dTag, member.relayUrl) },
+                            modifier = Modifier.size(24.dp),
+                        ) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                }
+                AddRelayInput(placeholder = "Add relay to set") { url ->
+                    viewModel.addRelayToSet(set.dTag, url)
+                }
+            }
+        }
+    }
 }
