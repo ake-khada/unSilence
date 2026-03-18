@@ -5,8 +5,12 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil3.compose.AsyncImage
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -113,6 +117,7 @@ fun AppNavigation(onLogout: () -> Unit) {
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
+    val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
 
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
@@ -262,14 +267,31 @@ fun AppNavigation(onLogout: () -> Unit) {
                                 .size(Sizing.navIcon)
                                 .clickable { showFilter = true },
                         )
-                        Icon(
-                            imageVector        = Icons.Filled.Edit,
-                            contentDescription = "New post",
-                            tint               = Cyan,
-                            modifier           = Modifier
-                                .size(Sizing.navIcon)
-                                .clickable { showCompose = true },
-                        )
+                        if (userAvatarUrl != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(Sizing.navIcon)
+                                    .border(1.5.dp, Cyan, CircleShape)
+                                    .clip(CircleShape)
+                                    .clickable { showCompose = true },
+                            ) {
+                                AsyncImage(
+                                    model = userAvatarUrl,
+                                    contentDescription = "New post",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        } else {
+                            Icon(
+                                imageVector        = Icons.Filled.Edit,
+                                contentDescription = "New post",
+                                tint               = Cyan,
+                                modifier           = Modifier
+                                    .size(Sizing.navIcon)
+                                    .clickable { showCompose = true },
+                            )
+                        }
                     }
                 }
             }
@@ -296,12 +318,32 @@ fun AppNavigation(onLogout: () -> Unit) {
                         selectedTab = index
                     }) {
                         Box {
-                            Icon(
-                                imageVector        = tab.icon,
-                                contentDescription = tab.contentDescription,
-                                tint               = if (index == selectedTab) Cyan else NavUnselected,
-                                modifier           = Modifier.size(Sizing.navIcon),
-                            )
+                            if (index == 0 && userAvatarUrl != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(Sizing.navIcon)
+                                        .then(
+                                            if (index == selectedTab)
+                                                Modifier.border(1.5.dp, Cyan, CircleShape)
+                                            else Modifier
+                                        )
+                                        .clip(CircleShape),
+                                ) {
+                                    AsyncImage(
+                                        model = userAvatarUrl,
+                                        contentDescription = "Home",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
+                            } else {
+                                Icon(
+                                    imageVector        = tab.icon,
+                                    contentDescription = tab.contentDescription,
+                                    tint               = if (index == selectedTab) Cyan else NavUnselected,
+                                    modifier           = Modifier.size(Sizing.navIcon),
+                                )
+                            }
                             if (index == 0 && feedViewModel.hasNewTopPost) {
                                 Box(
                                     modifier = Modifier

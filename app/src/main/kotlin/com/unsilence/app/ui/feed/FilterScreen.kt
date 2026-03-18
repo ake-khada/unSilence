@@ -61,6 +61,11 @@ fun FilterScreen(
     var requireReactions by remember { mutableStateOf(currentFilter.requireReactions) }
     var requireReplies   by remember { mutableStateOf(currentFilter.requireReplies) }
     var requireZaps      by remember { mutableStateOf(currentFilter.requireZaps) }
+    var showKind1        by remember { mutableStateOf(currentFilter.showKind1) }
+    var showKind6        by remember { mutableStateOf(currentFilter.showKind6) }
+    var showKind20       by remember { mutableStateOf(currentFilter.showKind20) }
+    var showKind21       by remember { mutableStateOf(currentFilter.showKind21) }
+    var showKind30023    by remember { mutableStateOf(currentFilter.showKind30023) }
 
     Box(
         modifier = Modifier
@@ -101,6 +106,11 @@ fun FilterScreen(
                     requireReactions = false
                     requireReplies   = false
                     requireZaps      = false
+                    showKind1        = true
+                    showKind6        = true
+                    showKind20       = true
+                    showKind21       = true
+                    showKind30023    = true
                 }) {
                     Text("Reset", color = Cyan, fontSize = 14.sp)
                 }
@@ -156,6 +166,30 @@ fun FilterScreen(
                 FilterChip("Zaps",      requireZaps)      { requireZaps      = !requireZaps }
             }
 
+            HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
+
+            // ── Content types ───────────────────────────────────────────────
+            Text(
+                text     = "Content types",
+                color    = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
+            FlowRow(
+                modifier              = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.medium),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement   = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip("Notes",    showKind1)     { showKind1     = !showKind1 }
+                FilterChip("Reposts",  showKind6)     { showKind6     = !showKind6 }
+                FilterChip("Pictures", showKind20)    { showKind20    = !showKind20 }
+                FilterChip("Videos",   showKind21)    { showKind21    = !showKind21 }
+                FilterChip("Articles", showKind30023) { showKind30023 = !showKind30023 }
+            }
+
             // ── Apply button ──────────────────────────────────────────────────
             Box(
                 modifier = Modifier
@@ -167,6 +201,11 @@ fun FilterScreen(
                     onClick = {
                         onApply(
                             FeedFilter(
+                                showKind1        = showKind1,
+                                showKind6        = showKind6,
+                                showKind20       = showKind20,
+                                showKind21       = showKind21,
+                                showKind30023    = showKind30023,
                                 sinceHours       = sinceHours,
                                 requireReposts   = requireReposts,
                                 requireReactions = requireReactions,
