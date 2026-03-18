@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.relays
 
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -153,9 +154,9 @@ fun CreateRelaySetScreen(
                 Spacer(Modifier.width(8.dp))
                 IconButton(
                     onClick  = {
-                        val trimmed = newRelayUrl.trim()
-                        if (trimmed.isNotBlank() && !relayUrls.contains(trimmed)) {
-                            relayUrls.add(trimmed)
+                        val normalized = normalizeRelayUrl(newRelayUrl)
+                        if (normalized != null && !relayUrls.contains(normalized)) {
+                            relayUrls.add(normalized)
                             newRelayUrl = ""
                         }
                     },

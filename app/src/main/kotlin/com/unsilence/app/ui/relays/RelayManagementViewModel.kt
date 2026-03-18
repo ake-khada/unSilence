@@ -344,17 +344,8 @@ class RelayManagementViewModel @Inject constructor(
     }.toString()
 
     companion object {
-        /** Normalize relay URL: ensure wss:// prefix, trim, strip trailing slash. */
-        internal fun normalizeRelayUrl(raw: String): String? {
-            var url = raw.trim().removeSuffix("/")
-            if (url.isBlank()) return null
-            url = url.removePrefix("https://").removePrefix("http://")
-            if (!url.startsWith("wss://") && !url.startsWith("ws://")) {
-                url = "wss://$url"
-            }
-            val host = url.removePrefix("wss://").removePrefix("ws://").split("/").firstOrNull() ?: return null
-            if (!host.contains(".")) return null
-            return url
-        }
+        /** @deprecated Use top-level normalizeRelayUrl() from RelayUrlUtil.kt */
+        internal fun normalizeRelayUrl(raw: String): String? =
+            com.unsilence.app.data.relay.normalizeRelayUrl(raw)
     }
 }
