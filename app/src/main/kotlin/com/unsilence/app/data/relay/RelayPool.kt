@@ -344,10 +344,13 @@ class RelayPool @Inject constructor(
                     Log.w(TAG, "Relay NOTICE ${conn.url}: $notice")
                     return@consumeEach
                 }
-                // NIP-42 AUTH challenge — structural preparation (stub: log and ignore)
+                // NIP-42 AUTH challenge — sign and respond automatically
                 if (raw.startsWith("[\"AUTH\"")) {
                     val challenge = raw.substringAfter("[\"AUTH\",\"", "").substringBefore("\"")
-                    Log.d(TAG, "AUTH challenge from ${conn.url}: ${challenge.take(20)}… (not yet implemented)")
+                    if (challenge.isNotEmpty()) {
+                        Log.d(TAG, "AUTH challenge from ${conn.url}: ${challenge.take(20)}…")
+                        handleAuthChallenge(conn, challenge)
+                    }
                     return@consumeEach
                 }
                 // Update lastEventTime for persistent sub tracking
