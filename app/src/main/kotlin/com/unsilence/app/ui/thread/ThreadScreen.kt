@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
@@ -239,7 +240,8 @@ fun ThreadScreen(
                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Sender avatar
+                // Sender avatar — real picture with IdentIcon fallback
+                val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
                 Box(
                     modifier = Modifier
                         .size(Sizing.avatar)
@@ -247,6 +249,14 @@ fun ThreadScreen(
                 ) {
                     viewModel.pubkeyHex?.let { pubkey ->
                         IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
+                    }
+                    if (!userAvatarUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model              = userAvatarUrl,
+                            contentDescription = null,
+                            contentScale       = ContentScale.Crop,
+                            modifier           = Modifier.fillMaxSize(),
+                        )
                     }
                 }
 
