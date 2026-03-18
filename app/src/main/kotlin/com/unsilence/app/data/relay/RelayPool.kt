@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -632,12 +633,7 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val indexerUrls = listOf(
-            "wss://purplepag.es",
-            "wss://user.kindpag.es",
-            "wss://indexer.coracle.social",
-            "wss://antiprimal.net",
-        )
+        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
         val indexerConns = indexerUrls.mapNotNull { connections[it] }
         // Always aim for at least 3 targets: supplement with general relays if needed
         val targets = if (indexerConns.size >= 3) {
