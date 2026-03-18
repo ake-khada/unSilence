@@ -12,8 +12,8 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 abstract class NostrRelaySetDao {
 
-    @Query("SELECT * FROM nostr_relay_sets ORDER BY title ASC")
-    abstract fun getAllSets(): Flow<List<NostrRelaySetEntity>>
+    @Query("SELECT * FROM nostr_relay_sets WHERE owner_pubkey = :ownerPubkey ORDER BY title ASC")
+    abstract fun getAllSets(ownerPubkey: String): Flow<List<NostrRelaySetEntity>>
 
     @Query("SELECT * FROM nostr_relay_set_members WHERE set_d_tag = :dTag AND owner_pubkey = :ownerPubkey ORDER BY relay_url ASC")
     abstract fun getSetMembers(dTag: String, ownerPubkey: String): Flow<List<NostrRelaySetMemberEntity>>
@@ -44,6 +44,19 @@ abstract class NostrRelaySetDao {
 
     @Query("DELETE FROM nostr_relay_set_members")
     abstract suspend fun clearAllMembers()
+
+    /** Claim orphaned relay sets (from migration with empty owner_pubkey) for the current user. */
+    @Query("UPDATE nostr_relay_sets SET owner_pubkey = :ownerPubkey WHERE owner_pubkey = ''")
+    abstract suspend fun claimOrphanedSets(ownerPubkey: String)
+
+    @Query("UPDATE nostr_relay_set_members SET owner_pubkey = :ownerPubkey WHERE owner_pubkey = ''")
+    abstract suspend fun claimOrphanedMembers(ownerPubkey: String)
+
+    @Transaction
+    open suspend fun claimOrphaned(ownerPubkey: String) {
+        claimOrphanedSets(ownerPubkey)
+        claimOrphanedMembers(ownerPubkey)
+    }
 
     /**
      * Replace a relay set, but ONLY if the incoming event is newer
