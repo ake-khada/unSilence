@@ -103,7 +103,7 @@ interface EventDao {
     ): Flow<List<FeedRow>>
 
     /**
-     * Following feed: top-level kind 1/6/20/21 events from followed pubkeys only.
+     * Following feed: top-level events from followed pubkeys, with filter support.
      */
     @Query("""
         SELECT
@@ -132,12 +132,26 @@ interface EventDao {
         INNER JOIN follows     f ON f.pubkey   = e.pubkey
         LEFT JOIN  users       u ON u.pubkey   = e.pubkey
         LEFT JOIN  event_stats s ON s.event_id = e.id
-        WHERE e.kind IN (1, 6, 20, 21, 30023)
+        WHERE e.kind IN (:kinds)
           AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
+          AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
+          AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
+               OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
+               OR (:requireReactions = 1 AND COALESCE(s.reaction_count, 0) >= 1)
+               OR (:requireReplies   = 1 AND COALESCE(s.reply_count, 0)    >= 1)
+               OR (:requireZaps      = 1 AND COALESCE(s.zap_count, 0)      >= 1))
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
-    fun followingFeedFlow(limit: Int = 300): Flow<List<FeedRow>>
+    fun followingFeedFlow(
+        kinds: List<Int>,
+        sinceTimestamp: Long,
+        requireReposts: Int,
+        requireReactions: Int,
+        requireReplies: Int,
+        requireZaps: Int,
+        limit: Int = 300,
+    ): Flow<List<FeedRow>>
 
     /** Top-level posts by a single author, newest-first. Used by the profile screen. */
     @Query("""

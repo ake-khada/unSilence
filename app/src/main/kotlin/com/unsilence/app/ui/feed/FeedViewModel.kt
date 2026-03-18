@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.entity.RelaySetEntity
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -58,6 +60,7 @@ class FeedViewModel @Inject constructor(
     private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
     private val cardHydrator: CardHydrator,
+    private val keyManager: KeyManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -72,6 +75,13 @@ class FeedViewModel @Inject constructor(
 
     private val _filter = MutableStateFlow(FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
+
+    /** Signed-in user's avatar URL, for nav icons. */
+    val userAvatarUrl: StateFlow<String?> = keyManager.getPublicKeyHex()?.let { pubkey ->
+        userRepository.userFlow(pubkey)
+            .map { it?.picture }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    } ?: MutableStateFlow(null)
 
     private val _displayLimit = MutableStateFlow(200)
 
@@ -95,17 +105,14 @@ class FeedViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-    private val engagementFetchedIds = mutableSetOf<String>()
 
     /**
      * Fetch engagement only for currently visible items. Called from
      * FeedScreen via a debounced snapshotFlow on visible item keys.
+     * Dedup now lives in RelayPool.engagementFetched (global, survives VM recreation).
      */
     fun fetchEngagementForVisible(visibleIds: Set<String>) {
-        val newIds = visibleIds.filter { it !in engagementFetchedIds }
-        if (newIds.isEmpty()) return
-        engagementFetchedIds.addAll(newIds)
-        relayPool.fetchEngagementBatch(newIds.take(20))
+        relayPool.fetchEngagementBatch(visibleIds.toList().take(20))
     }
 
     fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
@@ -182,7 +189,6 @@ class FeedViewModel @Inject constructor(
                     hasNewTopPost       = false
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
-                    engagementFetchedIds.clear()
                     cardHydrator.clearCache()
 
                     // Check coverage before deciding whether to fetch
@@ -212,7 +218,7 @@ class FeedViewModel @Inject constructor(
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.followingFeedFlow(limit)
+                                eventRepository.followingFeedFlow(filter, limit)
                             }
                         }
                         is FeedType.RelaySet  -> {

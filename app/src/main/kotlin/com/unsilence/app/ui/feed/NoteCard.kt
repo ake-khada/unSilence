@@ -72,6 +72,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
@@ -707,7 +708,7 @@ internal fun ZapButton(
 
 // ── BUG #4 FIX: Media grid composable ─────────────────────────────────────────
 
-/** Single image cell with proper portrait aspect ratio handling (Bug #5). */
+/** Single image cell — always constrained by aspect ratio (4:3 fallback, updated on load). */
 @Composable
 private fun MediaImage(
     url: String,
@@ -716,41 +717,24 @@ private fun MediaImage(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
 ) {
-    // imeta dim gives us the true aspect ratio; null when dimensions are unknown.
     val imetaAspect = imetaMedia
         .firstOrNull { it.url == url && it.width != null && it.height != null }
         ?.let { it.width!!.toFloat() / it.height!! }
 
-    // Grid cells: forced square with crop to fill uniformly.
-    // Single images: use the image's true aspect ratio — no crop, no padding.
-    val imageModifier = if (forceSquare) {
-        modifier
-            .fillMaxWidth()
-            .aspectRatio(1f, matchHeightConstraintsFirst = false)
-            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(MediaPlaceholder)
-            .clickable { onImageClick(url) }
-    } else if (imetaAspect != null) {
-        // Known dimensions: pre-size the container at the true aspect ratio (no layout jump).
-        modifier
-            .fillMaxWidth()
-            .aspectRatio(imetaAspect, matchHeightConstraintsFirst = false)
-            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(MediaPlaceholder)
-            .clickable { onImageClick(url) }
-    } else {
-        // Unknown dimensions: no aspect ratio constraint — Coil sizes naturally once loaded.
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(MediaPlaceholder)
-            .clickable { onImageClick(url) }
+    var displayAspect by remember(url, forceSquare) {
+        mutableStateOf(feedImageAspectRatio(imetaAspect, forceSquare))
     }
+
+    val imageModifier = modifier
+        .fillMaxWidth()
+        .aspectRatio(displayAspect, matchHeightConstraintsFirst = false)
+        .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+        .background(MediaPlaceholder)
+        .clickable { onImageClick(url) }
 
     SubcomposeAsyncImage(
         model              = url,
         contentDescription = null,
-        contentScale       = if (forceSquare) ContentScale.Crop else ContentScale.Fit,
         loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
         error              = {
             Box(
@@ -765,7 +749,21 @@ private fun MediaImage(
                 )
             }
         },
-        modifier           = imageModifier,
+        success = {
+            // Coil 3: read painter intrinsic size to update container aspect ratio
+            val size = painter.intrinsicSize
+            if (!forceSquare && size.width > 0f && size.height > 0f) {
+                val trueAspect = feedImageAspectRatio(size.width / size.height, false)
+                LaunchedEffect(trueAspect) { displayAspect = trueAspect }
+            }
+            Image(
+                painter            = painter,
+                contentDescription = null,
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier.fillMaxSize(),
+            )
+        },
+        modifier = imageModifier,
     )
 }
 
