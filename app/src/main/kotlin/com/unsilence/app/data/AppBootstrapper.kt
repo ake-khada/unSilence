@@ -19,6 +19,8 @@ import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -55,6 +57,8 @@ class AppBootstrapper @Inject constructor(
     private val cardHydrator: CardHydrator,
     private val nostrRelaySetDao: NostrRelaySetDao,
 ) {
+    private val bootstrapMutex = Mutex()
+
     /**
      * Sequential bootstrap for the logged-in user.
      *
@@ -62,11 +66,14 @@ class AppBootstrapper @Inject constructor(
      * 1. Connect to indexer relays → wait for at least one connection
      * 2. Fetch kind-3 (contact list) → wait for follows to appear in Room
      * 3. Fetch kind-0 (own profile) → wait for profile to appear in Room
-     * 4. Fetch kind-10002 (relay list) → fire and let OutboxRouter handle reactively
+     * 4. Fetch kind-10002 (relay list) → wait for response (5s timeout)
      * 4b. Fetch NIP-51 relay kinds (10006, 10007, 10012, 30002)
      * 5. Connect to global relays → opens persistent feed subscriptions
+     *
+     * Guarded by a Mutex so concurrent calls (e.g. config change + init)
+     * don't interleave steps.
      */
-    suspend fun bootstrap(pubkeyHex: String) {
+    suspend fun bootstrap(pubkeyHex: String) = bootstrapMutex.withLock {
         // EventProcessor drainers start in init{} with immutable kindHandlers —
         // no registration race. Just start OutboxRouter's internal flows.
         outboxRouter.start()
@@ -109,11 +116,27 @@ class AppBootstrapper @Inject constructor(
         }
         Log.d(TAG, "Step 3: profile ${if (profile != null) "loaded" else "timeout"}")
 
-        // ── Step 4: Fetch kind-10002 (relay list) ───────────────────────────
-        // OutboxRouter reactively observes relayListDao and connects to write
-        // relays when kind-10002 data arrives. No need to block here.
+        // ── Step 4: Fetch kind-10002 (relay list) — wait for response ────────
+        // Record what we had before so we can detect when fresh data arrives.
+        val relaysBefore = relayConfigDao.getAllReadWriteRelays()
         relayPool.fetchRelayLists(listOf(pubkeyHex))
-        Log.d(TAG, "Step 4: kind-10002 requested")
+        Log.d(TAG, "Step 4: kind-10002 requested (had ${relaysBefore.size} existing)")
+
+        // Wait up to 5s for kind-10002 to land in Room (new or updated data).
+        val freshRelays = withTimeoutOrNull(5_000L) {
+            if (relaysBefore.isEmpty()) {
+                // No existing data — wait for first non-empty emission
+                relayConfigDao.getReadWriteRelays()
+                    .filter { it.isNotEmpty() }
+                    .first()
+            } else {
+                // Have existing data — wait for any change (new event overwrites)
+                relayConfigDao.getReadWriteRelays()
+                    .filter { it != relaysBefore }
+                    .first()
+            }
+        }
+        Log.d(TAG, "Step 4: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"}")
 
         // ── Step 4b: Fetch NIP-51 relay ecosystem kinds ─────────────────────
         // One-shot: blocked relays, search relays, favorites, relay sets.
@@ -126,7 +149,7 @@ class AppBootstrapper @Inject constructor(
         Log.d(TAG, "Step 4c: blocked relay snapshot loaded")
 
         // ── Step 5: Connect to global relays (feed subscriptions) ───────────
-        val readRelays = relayConfigDao.getAllReadWriteRelays()
+        val readRelays = (freshRelays ?: relayConfigDao.getAllReadWriteRelays())
             .filter { it.marker == null || it.marker == "read" }
             .map { it.relayUrl }
         val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
