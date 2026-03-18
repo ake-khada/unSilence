@@ -366,12 +366,18 @@ class RelayPool @Inject constructor(
                             if (challenge != null && conn.url !in authenticatedRelays) {
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
-                                // Already authed — just replay the specific closed sub with since
+                                // Already authed — just replay the specific closed sub
                                 persistentSubs[closedSubId]?.let { sub ->
-                                    val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
-                                                else System.currentTimeMillis() / 1000L - 300
-                                    conn.send(injectSince(sub.reqJson, since))
-                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
+                                    if (closedSubId.startsWith("relay-global-")) {
+                                        // Global browse subs replay the full limit — no since filter
+                                        conn.send(sub.reqJson)
+                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (full, no since)")
+                                    } else {
+                                        val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
+                                                    else System.currentTimeMillis() / 1000L - 300
+                                        conn.send(injectSince(sub.reqJson, since))
+                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
+                                    }
                                 }
                             } else {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached")
@@ -1169,6 +1175,12 @@ class RelayPool @Inject constructor(
     private fun replayPersistentSubs(conn: RelayConnection) {
         val nowSeconds = System.currentTimeMillis() / 1000L
         for ((_, sub) in persistentSubs) {
+            // Global browse subs always replay the full limit — no since filter.
+            if (sub.subId.startsWith("relay-global-")) {
+                conn.send(sub.reqJson)
+                Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (full, no since)")
+                continue
+            }
             val since = if (sub.lastEventTime > 0) {
                 maxOf(sub.lastEventTime - 30, 0)
             } else {
@@ -1263,7 +1275,6 @@ class RelayPool @Inject constructor(
     fun startGlobalFeed(relayUrls: List<String>) {
         stopGlobalFeed()
         for (url in relayUrls) {
-            val conn = connections[url] ?: continue
             val hash = url.hashCode()
             val subId = "relay-global-$hash"
             val req = buildJsonArray {
@@ -1280,8 +1291,11 @@ class RelayPool @Inject constructor(
                     put("limit", JsonPrimitive(300))
                 })
             }.toString()
+            // Always register so replayPersistentSubs picks it up after
+            // connect/AUTH even if the connection doesn't exist yet.
             registerPersistentSub(subId, req)
-            conn.send(req)
+            // Send immediately if already connected
+            connections[url]?.send(req)
         }
         Log.d(TAG, "Started global feed on ${relayUrls.size} relay(s)")
     }

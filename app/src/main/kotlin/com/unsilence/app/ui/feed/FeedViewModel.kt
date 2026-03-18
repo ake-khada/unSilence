@@ -239,9 +239,11 @@ class FeedViewModel @Inject constructor(
                         is FeedType.Global    -> {
                             // Re-read kind-10002 each time Global feed is selected —
                             // bootstrap may have refreshed the relay list since init.
-                            relayPool.stopGlobalFeed()
                             val globalUrls = resolveGlobalUrls()
                             currentRelayUrls = globalUrls
+                            // Register global subs BEFORE connect so they're in
+                            // persistentSubs when subscribeAfterConnect replays them.
+                            relayPool.startGlobalFeed(globalUrls)
                             relayPool.connect(globalUrls, isHomeFeed = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(globalUrls, filter, limit)
@@ -260,8 +262,8 @@ class FeedViewModel @Inject constructor(
                             val members = nostrRelaySetDao.getSetMembersSnapshot(type.dTag, ownerPk)
                             val setUrls = members.map { it.relayUrl }.ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
-                            relayPool.connect(setUrls)
                             relayPool.startGlobalFeed(setUrls)
+                            relayPool.connect(setUrls)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit)
                             }
@@ -269,8 +271,8 @@ class FeedViewModel @Inject constructor(
                         is FeedType.SingleRelay -> {
                             val singleUrl = listOf(type.url)
                             currentRelayUrls = singleUrl
-                            relayPool.connect(singleUrl)
                             relayPool.startGlobalFeed(singleUrl)
+                            relayPool.connect(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(singleUrl, filter, limit)
                             }
