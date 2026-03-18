@@ -229,6 +229,57 @@ fun RelayManagementScreen(
                                 onRemove = { viewModel.removeFavoriteRelay(relay.relayUrl) },
                             )
                         }
+                        // Display existing set-reference favorites
+                        favoriteRelays.mapNotNull { it.setRef }.forEach { ref ->
+                            SimpleRelayRow(
+                                url      = ref,
+                                onRemove = { viewModel.removeFavoriteSetRef(ref) },
+                            )
+                        }
+                        // Set picker — add existing relay sets as favorites
+                        val pk = viewModel.ownerPubkey
+                        if (pk != null && relaySets.isNotEmpty()) {
+                            val unfavorited = relaySets.filter { set ->
+                                val ref = "30002:$pk:${set.dTag}"
+                                favoriteRelays.none { it.setRef == ref }
+                            }
+                            if (unfavorited.isNotEmpty()) {
+                                Text(
+                                    text     = "Add relay set to favorites",
+                                    color    = TextSecondary,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(
+                                        start = Spacing.medium,
+                                        top = 8.dp,
+                                        bottom = 4.dp,
+                                    ),
+                                )
+                                unfavorited.forEach { set ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                viewModel.addFavoriteSetRef("30002:$pk:${set.dTag}")
+                                            }
+                                            .padding(horizontal = Spacing.medium, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Add,
+                                            contentDescription = "Add",
+                                            tint = Cyan,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text     = set.title ?: set.dTag,
+                                            color    = Color.White,
+                                            fontSize = 14.sp,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
