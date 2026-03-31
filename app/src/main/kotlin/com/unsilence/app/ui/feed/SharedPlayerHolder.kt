@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import android.content.Context
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -13,13 +14,24 @@ class SharedPlayerHolder @Inject constructor(
     private var _player: ExoPlayer? = null
     private var _currentOwner: String? = null
 
+    private val loadControl = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(
+            5_000,   // minBufferMs
+            30_000,  // maxBufferMs
+            500,     // bufferForPlaybackMs — start playing after 500ms (default 2500)
+            1_000,   // bufferForPlaybackAfterRebufferMs
+        )
+        .build()
+
     val player: ExoPlayer
         get() {
             if (_player == null) {
-                _player = ExoPlayer.Builder(context).build().apply {
-                    volume = 0f
-                    repeatMode = ExoPlayer.REPEAT_MODE_ALL
-                }
+                _player = ExoPlayer.Builder(context)
+                    .setLoadControl(loadControl)
+                    .build().apply {
+                        volume = 0f
+                        repeatMode = ExoPlayer.REPEAT_MODE_ALL
+                    }
             }
             return _player!!
         }
