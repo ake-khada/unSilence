@@ -164,7 +164,20 @@ class EventProcessor @Inject constructor(
 
         // ── Fix 1: dedup by event ID, extracted without JSON parsing ──────────
         val eventId = extractEventId(raw) ?: return
-        if (seenIds.putIfAbsent(eventId, Unit) != null) return   // already seen — zero cost
+        if (seenIds.putIfAbsent(eventId, Unit) != null) {
+            // Already processed — still record this relay as a source so
+            // relay-specific feeds (browse mode) include the event.
+            scope.launch {
+                eventRelayDao.insertOrIgnore(
+                    EventRelayEntity(
+                        eventId  = eventId,
+                        relayUrl = relayUrl,
+                        seenAt   = System.currentTimeMillis() / 1000L,
+                    )
+                )
+            }
+            return
+        }
         trimDedupCacheIfNeeded()
 
         // Only novel EVENT messages reach here (~20 % of total messages).
