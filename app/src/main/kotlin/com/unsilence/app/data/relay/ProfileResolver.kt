@@ -55,6 +55,7 @@ class ProfileResolver @Inject constructor(
         startInternal()
     }
 
+    @Synchronized
     private fun startInternal() {
         if (drainJob?.isActive == true) return
         drainJob = scope.launch { drainLoop() }
@@ -79,6 +80,7 @@ class ProfileResolver @Inject constructor(
     }
 
     /** Cancel work, drain queued requests, clear caches. Called on logout. */
+    @Synchronized
     fun clear() {
         drainJob?.cancel()
         drainJob = null
