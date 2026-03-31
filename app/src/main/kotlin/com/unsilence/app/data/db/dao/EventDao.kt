@@ -87,7 +87,14 @@ interface EventDao {
           AND e.kind      IN (:kinds)
           AND ((:contentFilter = 0)
               OR (:contentFilter = 1 AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6))
-              OR (:contentFilter = 2 AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL) AND e.kind != 6))
+              OR (:contentFilter = 2 AND (
+                  ((e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL) AND e.kind != 6)
+                  OR e.id IN (
+                      SELECT e2.reply_to_id FROM events e2
+                      WHERE e2.reply_to_id IS NOT NULL
+                      AND e2.id IN (SELECT er2.event_id FROM event_relays er2 WHERE er2.relay_url IN (:relayUrls))
+                  )
+              )))
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
           AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
               OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
@@ -136,13 +143,22 @@ interface EventDao {
             COALESCE(s.repost_count, 0)   AS repost_count,
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        INNER JOIN follows     f ON f.pubkey   = e.pubkey
+        LEFT JOIN  follows     f ON f.pubkey   = e.pubkey
         LEFT JOIN  users       u ON u.pubkey   = e.pubkey
         LEFT JOIN  event_stats s ON s.event_id = e.id
         WHERE e.kind IN (:kinds)
-          AND ((:contentFilter = 0)
-              OR (:contentFilter = 1 AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6))
-              OR (:contentFilter = 2 AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL) AND e.kind != 6))
+          AND (
+              (f.pubkey IS NOT NULL AND (
+                  (:contentFilter = 0)
+                  OR (:contentFilter = 1 AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6))
+                  OR (:contentFilter = 2 AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL) AND e.kind != 6)
+              ))
+              OR (:contentFilter = 2 AND e.id IN (
+                  SELECT e2.reply_to_id FROM events e2
+                  INNER JOIN follows f2 ON f2.pubkey = e2.pubkey
+                  WHERE e2.reply_to_id IS NOT NULL
+              ))
+          )
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
           AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
                OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
