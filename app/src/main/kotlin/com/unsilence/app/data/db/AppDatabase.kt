@@ -3,6 +3,7 @@ package com.unsilence.app.data.db
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.unsilence.app.data.db.dao.CoverageDao
+import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.EventRelayDao
@@ -15,6 +16,7 @@ import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.CoverageEntity
+import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.EventRelayEntity
 import com.unsilence.app.data.db.entity.EventStatsEntity
@@ -43,8 +45,9 @@ import com.unsilence.app.data.db.entity.UserEntity
         NostrRelaySetEntity::class,
         NostrRelaySetMemberEntity::class,
         CoverageEntity::class,
+        PinnedRelayEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -60,4 +63,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun relayConfigDao(): RelayConfigDao
     abstract fun nostrRelaySetDao(): NostrRelaySetDao
     abstract fun coverageDao(): CoverageDao
+    abstract fun pinnedRelayDao(): PinnedRelayDao
 }

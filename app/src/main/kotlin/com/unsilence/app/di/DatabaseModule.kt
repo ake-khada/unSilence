@@ -15,7 +15,9 @@ import com.unsilence.app.data.db.MIGRATION_9_10
 import com.unsilence.app.data.db.MIGRATION_10_11
 import com.unsilence.app.data.db.MIGRATION_11_12
 import com.unsilence.app.data.db.MIGRATION_12_13
+import com.unsilence.app.data.db.MIGRATION_13_14
 import com.unsilence.app.data.db.dao.CoverageDao
+import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.EventRelayDao
@@ -48,6 +50,7 @@ object DatabaseModule {
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
                 MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
+                MIGRATION_13_14,
             )
             .build()
 
@@ -63,4 +66,5 @@ object DatabaseModule {
     @Provides fun provideRelayConfigDao(db: AppDatabase): RelayConfigDao = db.relayConfigDao()
     @Provides fun provideNostrRelaySetDao(db: AppDatabase): NostrRelaySetDao = db.nostrRelaySetDao()
     @Provides fun provideCoverageDao(db: AppDatabase): CoverageDao = db.coverageDao()
+    @Provides fun providePinnedRelayDao(db: AppDatabase): PinnedRelayDao = db.pinnedRelayDao()
 }
