@@ -345,6 +345,7 @@ class OutboxRouter @Inject constructor(
 
         Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} relay lists)")
         for ((url, authors) in top) {
+            normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.OUTBOX) }
             relayPool.connectForAuthors(url, authors)
         }
     }
