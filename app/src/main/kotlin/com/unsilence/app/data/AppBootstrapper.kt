@@ -10,6 +10,7 @@ import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
+import com.unsilence.app.data.media.MediaPreconnect
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
@@ -19,12 +20,14 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -60,6 +63,7 @@ class AppBootstrapper @Inject constructor(
     private val cardHydrator: CardHydrator,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val profileResolver: ProfileResolver,
+    private val okHttpClient: OkHttpClient,
 ) {
     private val bootstrapMutex = Mutex()
 
@@ -176,6 +180,10 @@ class AppBootstrapper @Inject constructor(
         }
 
         maintenanceJob.start()
+
+        // Warm up DNS + TLS connection pools for common media CDNs (fire-and-forget)
+        MediaPreconnect.warmUp(okHttpClient)
+
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
     }
 
