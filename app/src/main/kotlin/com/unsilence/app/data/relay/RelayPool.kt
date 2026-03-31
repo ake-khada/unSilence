@@ -407,7 +407,7 @@ class RelayPool @Inject constructor(
                             if (challenge != null && conn.url !in authenticatedRelays) {
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
-                                // Already authed — replay the specific closed sub (only on PERSISTENT relays)
+                                // Already authed — replay the specific closed sub
                                 if (hasPurpose(conn.url, ConnectionPurpose.PERSISTENT)) {
                                     persistentSubs[closedSubId]?.let { sub ->
                                         val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
@@ -415,8 +415,12 @@ class RelayPool @Inject constructor(
                                         conn.send(injectSince(sub.reqJson, since))
                                         Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
                                     }
-                                } else {
-                                    Log.d(TAG, "Skipping CLOSED replay '$closedSubId' on non-PERSISTENT ${conn.url} (purposes=${connectionPurposes[conn.url] ?: "none"})")
+                                }
+                                // Browse subs aren't in persistentSubs — notify the
+                                // browse session so it can resend its own REQ.
+                                if (closedSubId.startsWith("browse-")) {
+                                    onRelayReconnected?.invoke(conn.url)
+                                    Log.d(TAG, "Notified browse session to resend closed sub '$closedSubId' on ${conn.url}")
                                 }
                             } else if (conn.url !in authFailedRelays) {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached (suppressing future warnings)")
