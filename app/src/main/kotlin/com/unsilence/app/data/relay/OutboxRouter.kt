@@ -58,6 +58,9 @@ class OutboxRouter @Inject constructor(
     private val started = AtomicBoolean(false)
     private var routingJob: Job? = null
 
+    /** URLs currently tagged OUTBOX — tracked so we can remove stale purposes on set change. */
+    private var currentOutboxUrls: Set<String> = emptySet()
+
     /**
      * Idempotent entry point. Called when the user switches to the Following feed.
      * Registers handlers and kicks off the relay fetch pipeline.
@@ -110,6 +113,12 @@ class OutboxRouter @Inject constructor(
         routingJob?.cancel()
         routingJob = null
         started.set(false)
+        // Remove OUTBOX purposes for relays we were routing to.
+        // disconnectAll() also clears the purpose map, but this keeps bookkeeping clean.
+        for (url in currentOutboxUrls) {
+            relayPool.removePurpose(url, ConnectionPurpose.OUTBOX)
+        }
+        currentOutboxUrls = emptySet()
         Log.d(TAG, "Stopped")
     }
 
@@ -343,7 +352,15 @@ class OutboxRouter @Inject constructor(
             .sortedByDescending { it.value.size }
             .take(15)
 
-        Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} relay lists)")
+        // Remove OUTBOX purpose from relays no longer in the top set
+        val newOutboxUrls = top.mapNotNull { (url, _) -> normalizeRelayUrl(url) }.toSet()
+        val removed = currentOutboxUrls - newOutboxUrls
+        for (url in removed) {
+            relayPool.removePurpose(url, ConnectionPurpose.OUTBOX)
+        }
+        currentOutboxUrls = newOutboxUrls
+
+        Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} relay lists, ${removed.size} removed)")
         for ((url, authors) in top) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.OUTBOX) }
             relayPool.connectForAuthors(url, authors)
