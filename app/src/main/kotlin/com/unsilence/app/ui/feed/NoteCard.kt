@@ -292,7 +292,7 @@ fun NoteCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xFF1A1A1A).copy(alpha = flashAlpha.value))
+            .background(Color.White.copy(alpha = flashAlpha.value * 0.05f))
             .clickable { onNoteClick(navigateId) },
     ) {
 
