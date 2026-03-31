@@ -45,6 +45,13 @@ class RelayBrowseSession @Inject constructor(
         val normalized = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct().take(3)
         if (normalized.isEmpty()) return
 
+        // Mark browse-only BEFORE connect so subscribeAfterConnect/replayPersistentSubs
+        // are skipped for these URLs. Only mark URLs that are genuinely new — if a URL
+        // is already connected (as a persistent relay), connect() will skip it anyway,
+        // and we must NOT suppress its persistent subs.
+        relayPool.browseOnlyUrls.addAll(normalized)
+        Log.d(TAG, "Marked ${normalized.size} URL(s) as browse-only")
+
         // Ensure sockets exist (reuses already-open connections).
         relayPool.connect(normalized)
 
@@ -71,6 +78,9 @@ class RelayBrowseSession @Inject constructor(
         }
         // Clear engagement routing.
         relayPool.browseEngagementTargets = emptyList()
+        // Unmark browse-only so these URLs can serve persistent subs again.
+        relayPool.browseOnlyUrls.removeAll(activeTarget.toSet())
+        Log.d(TAG, "Cleared browse-only for ${activeTarget.size} URL(s)")
         for (url in activeTarget) {
             relayPool.releaseIfUnused(url)
         }

@@ -73,6 +73,14 @@ class RelayPool @Inject constructor(
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
+    /**
+     * URLs currently owned exclusively by browse mode.
+     * Connections in this set skip: subscribeAfterConnect, replayPersistentSubs,
+     * AUTH persistent replay, and CLOSED persistent replay.
+     * Populated by [RelayBrowseSession.start], cleared by [RelayBrowseSession.stop].
+     */
+    val browseOnlyUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
@@ -269,7 +277,11 @@ class RelayPool @Inject constructor(
             connections[url] = conn
             scope.launch {
                 conn.connect()
-                subscribeAfterConnect(conn)
+                if (url in browseOnlyUrls) {
+                    Log.d(TAG, "BrowseIsolation url=$url purpose=BROWSE skipSubscribeAfterConnect=true")
+                } else {
+                    subscribeAfterConnect(conn)
+                }
                 listenForEvents(conn)
             }
         }
@@ -368,12 +380,16 @@ class RelayPool @Inject constructor(
                             if (challenge != null && conn.url !in authenticatedRelays) {
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
-                                // Already authed — just replay the specific closed sub
-                                persistentSubs[closedSubId]?.let { sub ->
-                                    val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
-                                                else System.currentTimeMillis() / 1000L - 300
-                                    conn.send(injectSince(sub.reqJson, since))
-                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
+                                // Already authed — replay the specific closed sub (not on browse-only)
+                                if (conn.url !in browseOnlyUrls) {
+                                    persistentSubs[closedSubId]?.let { sub ->
+                                        val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
+                                                    else System.currentTimeMillis() / 1000L - 300
+                                        conn.send(injectSince(sub.reqJson, since))
+                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
+                                    }
+                                } else {
+                                    Log.d(TAG, "BrowseIsolation skip CLOSED replay '$closedSubId' on browse-only ${conn.url}")
                                 }
                             } else {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached")
@@ -1179,7 +1195,12 @@ class RelayPool @Inject constructor(
      * Updates the `since` filter to avoid re-fetching old events.
      */
     private fun replayPersistentSubs(conn: RelayConnection) {
+        if (conn.url in browseOnlyUrls) {
+            Log.d(TAG, "BrowseIsolation url=${conn.url} purpose=BROWSE skipPersistentReplay=true")
+            return
+        }
         val nowSeconds = System.currentTimeMillis() / 1000L
+        var replayCount = 0
         for ((_, sub) in persistentSubs) {
             // Skip subs targeted at a different relay
             if (sub.targetRelayUrl != null && sub.targetRelayUrl != conn.url) continue
@@ -1190,8 +1211,10 @@ class RelayPool @Inject constructor(
             }
             val updatedReq = injectSince(sub.reqJson, since)
             conn.send(updatedReq)
+            replayCount++
             Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (since=$since)")
         }
+        Log.d(TAG, "BrowseIsolation url=${conn.url} purpose=PERSISTENT replayPersistent=true count=$replayCount")
     }
 
     /**
@@ -1232,8 +1255,14 @@ class RelayPool @Inject constructor(
                     // for now we optimistically mark as authenticated after send.
                     authenticatedRelays.add(url)
                     Log.d(TAG, "AUTH: sent auth response to $url")
-                    // Replay all persistent subs now that we're authenticated
-                    replayPersistentSubs(conn)
+                    // Replay persistent subs — but not on browse-only relays.
+                    // Browse session handles its own resend via onRelayReconnected.
+                    if (url !in browseOnlyUrls) {
+                        replayPersistentSubs(conn)
+                    } else {
+                        Log.d(TAG, "AUTH: skip persistent replay on browse-only $url")
+                        onRelayReconnected?.invoke(url)
+                    }
                 } else {
                     Log.w(TAG, "AUTH: failed to send auth to $url (connection closed?)")
                 }
@@ -1288,6 +1317,7 @@ class RelayPool @Inject constructor(
     fun disconnectAll() {
         connections.values.forEach { it.close() }
         connections.clear()
+        browseOnlyUrls.clear()
         profileFetchAttempted.clear()
         authenticatedRelays.clear()
         authInFlight.clear()

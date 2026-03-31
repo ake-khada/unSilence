@@ -4,7 +4,7 @@ import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayListEntity
 import com.unsilence.app.data.db.entity.UserEntity
-import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.ProfileResolver
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -13,7 +13,7 @@ import javax.inject.Singleton
 class UserRepository @Inject constructor(
     private val userDao: UserDao,
     private val relayListDao: RelayListDao,
-    private val relayPool: RelayPool,
+    private val profileResolver: ProfileResolver,
 ) {
     fun userFlow(pubkey: String): Flow<UserEntity?> = userDao.userFlow(pubkey)
 
@@ -32,15 +32,9 @@ class UserRepository @Inject constructor(
 
     /**
      * Requests profiles for pubkeys not yet cached OR stale (>6 hours).
-     * The fetched kind-0 events will arrive via EventProcessor → Room.
+     * Delegates to [ProfileResolver] for in-flight dedup, batching, and staleness checks.
      */
-    suspend fun fetchMissingProfiles(pubkeys: List<String>) {
-        val cached = userDao.allPubkeys().toSet()
-        val staleThreshold = System.currentTimeMillis() / 1000 - (6 * 3600)
-        val stale = userDao.stalePubkeys(staleThreshold).toSet()
-        val toFetch = pubkeys.filter { it !in cached || it in stale }
-        if (toFetch.isNotEmpty()) {
-            relayPool.fetchProfiles(toFetch)
-        }
+    fun fetchMissingProfiles(pubkeys: List<String>) {
+        profileResolver.request(pubkeys)
     }
 }

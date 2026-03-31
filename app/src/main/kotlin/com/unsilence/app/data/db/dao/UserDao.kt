@@ -14,19 +14,24 @@ abstract class UserDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract suspend fun insertOrIgnore(user: UserEntity)
 
+    /**
+     * Merge-safe profile update: COALESCE preserves existing non-null fields when
+     * the incoming value is null, and created_at guard rejects older kind-0 events.
+     */
     @Query("""
         UPDATE users SET
-            name = :name,
-            display_name = :displayName,
-            about = :about,
-            picture = :picture,
-            banner = :banner,
-            nip05 = :nip05,
-            lud16 = :lud16,
-            updated_at = :updatedAt
-        WHERE pubkey = :pubkey
+            name         = COALESCE(:name,        name),
+            display_name = COALESCE(:displayName,  display_name),
+            about        = COALESCE(:about,        about),
+            picture      = COALESCE(:picture,      picture),
+            banner       = COALESCE(:banner,       banner),
+            nip05        = COALESCE(:nip05,        nip05),
+            lud16        = COALESCE(:lud16,        lud16),
+            created_at   = :createdAt,
+            updated_at   = :updatedAt
+        WHERE pubkey = :pubkey AND :createdAt >= created_at
     """)
-    abstract suspend fun updateProfile(
+    abstract suspend fun updateProfileSafe(
         pubkey: String,
         name: String?,
         displayName: String?,
@@ -35,13 +40,14 @@ abstract class UserDao {
         banner: String?,
         nip05: String?,
         lud16: String?,
+        createdAt: Long,
         updatedAt: Long,
     )
 
     @Transaction
     open suspend fun upsert(user: UserEntity) {
         insertOrIgnore(user)
-        updateProfile(
+        updateProfileSafe(
             pubkey = user.pubkey,
             name = user.name,
             displayName = user.displayName,
@@ -50,6 +56,7 @@ abstract class UserDao {
             banner = user.banner,
             nip05 = user.nip05,
             lud16 = user.lud16,
+            createdAt = user.createdAt,
             updatedAt = user.updatedAt,
         )
     }
@@ -66,6 +73,9 @@ abstract class UserDao {
 
     @Query("SELECT * FROM users WHERE pubkey = :pubkey")
     abstract fun userFlow(pubkey: String): Flow<UserEntity?>
+
+    @Query("SELECT * FROM users WHERE pubkey IN (:pubkeys)")
+    abstract suspend fun getUsersByPubkeys(pubkeys: List<String>): List<UserEntity>
 
     @Query("SELECT pubkey FROM users")
     abstract suspend fun allPubkeys(): List<String>
