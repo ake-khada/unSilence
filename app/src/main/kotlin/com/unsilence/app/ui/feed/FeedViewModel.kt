@@ -15,6 +15,7 @@ import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
+import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.CoverageRepository
 import com.unsilence.app.data.repository.EventRepository
@@ -60,6 +61,7 @@ class FeedViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,
+    private val browseSession: RelayBrowseSession,
     private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
     private val cardHydrator: CardHydrator,
@@ -238,20 +240,16 @@ class FeedViewModel @Inject constructor(
 
                     when (type) {
                         is FeedType.Global    -> {
-                            // Re-read kind-10002 each time Global feed is selected —
-                            // bootstrap may have refreshed the relay list since init.
+                            browseSession.stop()
                             val globalUrls = resolveGlobalUrls()
                             currentRelayUrls = globalUrls
-                            // Register global subs BEFORE connect so they're in
-                            // persistentSubs when subscribeAfterConnect replays them.
-                            relayPool.startGlobalFeed(globalUrls)
                             relayPool.connect(globalUrls, isHomeFeed = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(globalUrls, filter, limit)
                             }
                         }
                         is FeedType.Following -> {
-                            relayPool.stopGlobalFeed()
+                            browseSession.stop()
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
                             _displayLimit.flatMapLatest { limit ->
@@ -264,8 +262,7 @@ class FeedViewModel @Inject constructor(
                             val setUrls = members.mapNotNull { normalizeRelayUrl(it.relayUrl) }
                                 .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
-                            relayPool.startGlobalFeed(setUrls)
-                            relayPool.connect(setUrls)
+                            browseSession.start(setUrls)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit, includeReplies = true)
                             }
@@ -273,8 +270,7 @@ class FeedViewModel @Inject constructor(
                         is FeedType.SingleRelay -> {
                             val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
                             currentRelayUrls = singleUrl
-                            relayPool.startGlobalFeed(singleUrl)
-                            relayPool.connect(singleUrl)
+                            browseSession.start(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(singleUrl, filter, limit, includeReplies = true)
                             }
