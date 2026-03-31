@@ -52,8 +52,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -89,6 +95,7 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
+import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -132,6 +139,12 @@ private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 // Matches nostr: URIs (bech32-encoded entities).
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
+// Matches only event-type nostr: URIs for stripping (note/nevent).
+private val NOSTR_EVENT_URI_REGEX = Regex("nostr:n(?:ote|event)1[a-z0-9]+", RegexOption.IGNORE_CASE)
+
+// Matches profile-type nostr: URIs for inline mention rendering.
+private val NOSTR_PROFILE_URI_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", RegexOption.IGNORE_CASE)
+
 private sealed class NostrRef {
     data class EventRef(val eventId: String) : NostrRef()
     data class ProfileRef(val pubkeyHex: String) : NostrRef()
@@ -141,8 +154,9 @@ private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
         is NEvent -> NostrRef.EventRef(entity.hex)
         is NNote  -> NostrRef.EventRef(entity.hex)
-        is NPub   -> NostrRef.ProfileRef(entity.hex)
-        else      -> null
+        is NPub      -> NostrRef.ProfileRef(entity.hex)
+        is NProfile  -> NostrRef.ProfileRef(entity.hex)
+        else         -> null
     }
 }.getOrNull()
 
@@ -229,7 +243,7 @@ fun NoteCard(
     val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
         .mapNotNull { decodeNostrRef(it.value) }
         .toList()
-    val contentNoNostr = NOSTR_URI_REGEX.replace(effectiveContent, "").trim()
+    val contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim()
 
     // ── Media extraction: regex from content + imeta from tags ────────────────
     // Wrapped in remember to avoid re-parsing JSON on every recomposition.
@@ -387,16 +401,15 @@ fun NoteCard(
             val isLong = textContent.length > 300
             var expanded by remember { mutableStateOf(false) }
 
-            Text(
-                text       = textContent,
-                color      = MaterialTheme.colorScheme.onSurface,
-                fontSize   = 15.sp,
-                lineHeight = 22.sp,
-                maxLines   = if (isLong && !expanded) 8 else Int.MAX_VALUE,
-                overflow   = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
-                modifier   = Modifier
+            NostrRichText(
+                content       = textContent,
+                lookupProfile = lookupProfile,
+                onAuthorClick = onAuthorClick,
+                onTextClick   = { onNoteClick(navigateId) },
+                maxLines      = if (isLong && !expanded) 8 else Int.MAX_VALUE,
+                overflow      = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
+                modifier      = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(navigateId) }
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = if (isLong) 2.dp else 4.dp),
             )
@@ -424,25 +437,6 @@ fun NoteCard(
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
-        }
-
-        // ── NIP-19 mention chips ──────────────────────────────────────────────
-        val profileRefs = nostrRefs.filterIsInstance<NostrRef.ProfileRef>()
-        if (profileRefs.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.small),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                profileRefs.forEach { ref ->
-                    MentionChip(
-                        pubkeyHex     = ref.pubkeyHex,
-                        onAuthorClick = onAuthorClick,
-                        lookupProfile = lookupProfile,
-                    )
-                }
-            }
         }
 
         // ── BUG #4 FIX: Media grid for multiple images ──────────────────────
@@ -1446,6 +1440,99 @@ private fun EmbeddedQuoteCard(
             }
         }
     }
+}
+
+// ── Inline @mention rendering ────────────────────────────────────────────────
+
+/** Renders note text with nostr profile references as inline @displayName mentions. */
+@Composable
+private fun NostrRichText(
+    content: String,
+    lookupProfile: (suspend (String) -> UserEntity?)?,
+    onAuthorClick: (String) -> Unit,
+    onTextClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+) {
+    // Parse mention positions and resolved pubkeys (stable for same content)
+    val mentions = remember(content) {
+        NOSTR_PROFILE_URI_REGEX.findAll(content).mapNotNull { m ->
+            val ref = decodeNostrRef(m.value)
+            if (ref is NostrRef.ProfileRef) Triple(m.range, m.value, ref.pubkeyHex) else null
+        }.toList()
+    }
+
+    // No mentions — plain Text with click handler
+    if (mentions.isEmpty()) {
+        Text(
+            text       = content,
+            color      = MaterialTheme.colorScheme.onSurface,
+            fontSize   = 15.sp,
+            lineHeight = 22.sp,
+            maxLines   = maxLines,
+            overflow   = overflow,
+            modifier   = modifier.clickable { onTextClick() },
+        )
+        return
+    }
+
+    // Resolve display names reactively
+    var profileMap by remember(content) {
+        mutableStateOf(emptyMap<String, UserEntity?>())
+    }
+    LaunchedEffect(mentions) {
+        if (lookupProfile != null) {
+            profileMap = mentions.associate { (_, _, hex) -> hex to lookupProfile(hex) }
+        }
+    }
+
+    val annotatedText = buildAnnotatedString {
+        var lastIndex = 0
+        for ((range, raw, pubkeyHex) in mentions) {
+            // Text before this mention
+            if (range.first > lastIndex) {
+                append(content.substring(lastIndex, range.first))
+            }
+
+            val profile = profileMap[pubkeyHex]
+            val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
+                ?: profile?.name?.takeIf { it.isNotBlank() }
+                ?: "${raw.take(18)}…"
+
+            withLink(
+                LinkAnnotation.Clickable(
+                    tag = pubkeyHex,
+                    styles = TextLinkStyles(
+                        style = SpanStyle(
+                            color          = Cyan,
+                            fontWeight     = FontWeight.Medium,
+                            textDecoration = TextDecoration.None,
+                        ),
+                    ),
+                    linkInteractionListener = { onAuthorClick(pubkeyHex) },
+                ),
+            ) {
+                append("@$displayName")
+            }
+
+            lastIndex = range.last + 1
+        }
+        // Remaining text after last mention
+        if (lastIndex < content.length) {
+            append(content.substring(lastIndex))
+        }
+    }
+
+    Text(
+        text       = annotatedText,
+        color      = MaterialTheme.colorScheme.onSurface,
+        fontSize   = 15.sp,
+        lineHeight = 22.sp,
+        maxLines   = maxLines,
+        overflow   = overflow,
+        modifier   = modifier.clickable { onTextClick() },
+    )
 }
 
 // ── BUG #2 FIX: Mention chip with display name lookup ───────────────────────
