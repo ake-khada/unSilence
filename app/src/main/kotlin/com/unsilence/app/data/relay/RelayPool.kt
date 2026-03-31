@@ -1041,7 +1041,7 @@ class RelayPool @Inject constructor(
             last == null || (now - last) > 60_000
         }
         if (novel.isEmpty()) {
-            Log.d(TAG, "fetchEngagementBatch: all ${eventIds.size} IDs already in-flight, skipping")
+            Log.v(TAG, "fetchEngagementBatch: all ${eventIds.size} IDs already in-flight, skipping")
             return
         }
         novel.forEach { engagementFetched[it] = now }
