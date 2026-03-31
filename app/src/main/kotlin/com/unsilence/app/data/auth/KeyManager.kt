@@ -112,12 +112,13 @@ class KeyManager @Inject constructor(
             .apply()
     }
 
-    /** Removes all stored credentials (logout). */
+    /** Removes all stored credentials (logout). Uses commit() so the write is
+     *  guaranteed to flush to disk before exitProcess(0) kills the process. */
     fun clear() {
         prefs.edit()
             .remove(KEY_PRIV_HEX)
             .remove(KEY_PUB_HEX)
             .remove(KEY_SIGNER_TYPE)
-            .apply()
+            .commit()
     }
 }
