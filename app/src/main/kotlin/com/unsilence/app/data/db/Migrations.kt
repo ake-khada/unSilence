@@ -24,7 +24,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v9 → v10: NIP-51 relay ecosystem tables (relay_configs, nostr_relay_sets,
  *            nostr_relay_set_members) + coverage ledger table. Migrate own_relays
  *            data into relay_configs (kind 10002).
+ * v11 → v12: Declare event_relays index in Room entity annotation (was only in
+ *             v8→v9 SQL migration). No-op for migrated installs; ensures Room's
+ *             compile-time schema hash matches the on-disk schema.
  */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS `idx_event_relays_by_relay` ON `event_relays` (`relay_url`, `seen_at`, `event_id`)")
+    }
+}
+
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── Step 1: Migrate non-built-in relay sets to NIP-51 nostr_relay_sets ──
