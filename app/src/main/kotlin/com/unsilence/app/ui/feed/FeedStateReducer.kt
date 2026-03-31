@@ -64,7 +64,14 @@ class FeedStateReducer(private val feedKey: String) {
 
         _state.update { current ->
             if (current.visibleEvents.isEmpty() || isAtTop) {
-                // Initial load or user at top — show everything
+                // Skip if same event IDs in same order (avoids recomposition on engagement-only updates)
+                if (current.visibleEvents.size == allEvents.size &&
+                    current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == allEvents[i].id }) {
+                    // Same IDs — check if any content actually changed
+                    if (current.visibleEvents == allEvents) {
+                        return@update current  // Identical — skip entirely
+                    }
+                }
                 pendingIds = emptySet()
                 Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
                 ReducerState(visibleEvents = allEvents)
