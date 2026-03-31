@@ -5,7 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
+import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.CardHydrator
@@ -65,6 +67,7 @@ class FeedViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
+    private val pinnedRelayDao: PinnedRelayDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -80,17 +83,22 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
-    /** Favorite relays pinned to the feed picker. */
-    private val _pinnedRelays = MutableStateFlow<List<FeedType.SingleRelay>>(emptyList())
-    val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> = _pinnedRelays.asStateFlow()
+    /** Favorite relays pinned to the feed picker — backed by Room for persistence. */
+    val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
+        pinnedRelayDao.allFlow()
+            .map { entities -> entities.map { FeedType.SingleRelay(it.relayUrl, it.label) } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun addPinnedRelay(url: String, label: String) {
-        val entry = FeedType.SingleRelay(url, label)
-        _pinnedRelays.value = (_pinnedRelays.value + entry).distinctBy { it.url }
+        viewModelScope.launch {
+            pinnedRelayDao.insert(PinnedRelayEntity(relayUrl = url, label = label))
+        }
     }
 
     fun removePinnedRelay(url: String) {
-        _pinnedRelays.value = _pinnedRelays.value.filter { it.url != url }
+        viewModelScope.launch {
+            pinnedRelayDao.deleteByUrl(url)
+        }
     }
 
     private val _filter = MutableStateFlow(FeedFilter())
@@ -169,7 +177,45 @@ class FeedViewModel @Inject constructor(
         is FeedType.SingleRelay -> t.label
     }
 
+    /** Reactively tracks whether follows exist — used by buildFeedList and the feed sheet. */
+    private val _hasFollows = MutableStateFlow(false)
+    val hasFollows: StateFlow<Boolean> = _hasFollows.asStateFlow()
+
     fun setFeedType(type: FeedType) { _feedType.value = type }
+
+    /** Ordered list of available feeds for cycling. */
+    private fun buildFeedList(): List<FeedType> {
+        val list = mutableListOf<FeedType>()
+        if (_hasFollows.value) list.add(FeedType.Following)
+        list.add(FeedType.Global)
+        for (relay in pinnedRelays.value) list.add(relay)
+        for (set in (userSetsFlow.value)) {
+            list.add(FeedType.RelaySet(set.dTag, set.title ?: set.dTag))
+        }
+        return list
+    }
+
+    private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
+        a is FeedType.Global && b is FeedType.Global -> true
+        a is FeedType.Following && b is FeedType.Following -> true
+        a is FeedType.RelaySet && b is FeedType.RelaySet -> a.dTag == b.dTag
+        a is FeedType.SingleRelay && b is FeedType.SingleRelay -> a.url == b.url
+        else -> false
+    }
+
+    fun nextFeed() {
+        val list = buildFeedList()
+        if (list.size <= 1) return
+        val idx = list.indexOfFirst { feedTypeMatches(it, _feedType.value) }.coerceAtLeast(0)
+        _feedType.value = list[(idx + 1) % list.size]
+    }
+
+    fun previousFeed() {
+        val list = buildFeedList()
+        if (list.size <= 1) return
+        val idx = list.indexOfFirst { feedTypeMatches(it, _feedType.value) }.coerceAtLeast(0)
+        _feedType.value = list[(idx - 1 + list.size) % list.size]
+    }
 
     /** Trigger a re-fetch by toggling the feed type back to itself. */
     fun refresh() {
@@ -209,10 +255,18 @@ class FeedViewModel @Inject constructor(
     }
 
     init {
+        // Reactively track follows — auto-switch to Following on first follow
         viewModelScope.launch {
-            val hasFollows = followDao.count() > 0
-            if (hasFollows) _feedType.value = FeedType.Following
+            followDao.countFlow().collect { count ->
+                val had = _hasFollows.value
+                _hasFollows.value = count > 0
+                if (!had && count > 0 && _feedType.value is FeedType.Global) {
+                    _feedType.value = FeedType.Following
+                }
+            }
+        }
 
+        viewModelScope.launch {
             // Initial relay connection with isHomeFeed=true so feed subscriptions
             // are sent. Bootstrap may update kind-10002 later, which flatMapLatest
             // picks up on next feed type emission.
@@ -235,13 +289,13 @@ class FeedViewModel @Inject constructor(
 
                     // Create a new reducer for this feed key — flatMapLatest on
                     // _activeReducer auto-propagates the new reducer's state.
-                    val feedKey = when (type) {
+                    val newKey = when (type) {
                         is FeedType.Global -> "global"
                         is FeedType.Following -> "following"
                         is FeedType.RelaySet -> "relayset-${type.dTag}"
                         is FeedType.SingleRelay -> "relay-${type.url}"
                     }
-                    _activeReducer.value = FeedStateReducer(feedKey)
+                    _activeReducer.value = FeedStateReducer(newKey)
 
                     // Check coverage before deciding whether to fetch
                     val intent = CoverageIntent.HomeFeed()

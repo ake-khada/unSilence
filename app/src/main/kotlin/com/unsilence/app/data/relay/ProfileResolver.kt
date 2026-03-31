@@ -124,14 +124,17 @@ class ProfileResolver @Inject constructor(
         if (notInFlight.isEmpty()) return
 
         // 2. Room staleness check — skip profiles updated within 6 hours
+        //    Profiles with no avatar get a shorter 1-hour retry window
         val staleThreshold = now / 1000 - STALE_THRESHOLD_SECONDS
+        val noPictureThreshold = now / 1000 - 3600L
         // Batch lookup in chunks of 999 (SQLite IN clause limit)
         val toFetch = mutableListOf<String>()
         for (chunk in notInFlight.chunked(999)) {
             val existing = userDao.getUsersByPubkeys(chunk).associateBy { it.pubkey }
             for (pk in chunk) {
                 val user = existing[pk]
-                if (user == null || user.updatedAt < staleThreshold) {
+                if (user == null || user.updatedAt < staleThreshold ||
+                    (user.picture.isNullOrBlank() && user.updatedAt < noPictureThreshold)) {
                     toFetch.add(pk)
                 }
             }

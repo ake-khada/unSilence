@@ -5,6 +5,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.unsilence.app.data.db.entity.EventEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -374,12 +375,35 @@ interface EventDao {
 
     /** Prune expired events (NIP-40). Called periodically. */
     @Query("""
-        DELETE FROM events
-        WHERE id IN (
-            SELECT t.event_id FROM tags t
-            WHERE t.tag_name = 'expiration'
-              AND CAST(t.tag_value AS INTEGER) < :nowSeconds
-        )
+        SELECT t.event_id FROM tags t
+        WHERE t.tag_name = 'expiration'
+          AND CAST(t.tag_value AS INTEGER) < :nowSeconds
+          AND CAST(t.tag_value AS INTEGER) > 0
     """)
-    suspend fun pruneExpired(nowSeconds: Long)
+    suspend fun findExpiredIds(nowSeconds: Long): List<String>
+
+    @Query("DELETE FROM events WHERE id IN (:ids)")
+    suspend fun deleteEventsByIds(ids: List<String>)
+
+    @Query("DELETE FROM tags WHERE event_id IN (:ids)")
+    suspend fun deleteTagsByEventIds(ids: List<String>)
+
+    @Query("DELETE FROM event_stats WHERE event_id IN (:ids)")
+    suspend fun deleteStatsByEventIds(ids: List<String>)
+
+    @Query("DELETE FROM event_relays WHERE event_id IN (:ids)")
+    suspend fun deleteRelaysByEventIds(ids: List<String>)
+
+    @Transaction
+    suspend fun pruneExpired(nowSeconds: Long) {
+        val ids = findExpiredIds(nowSeconds)
+        if (ids.isEmpty()) return
+        // Room binds at most 999 params; chunk for safety.
+        for (chunk in ids.chunked(500)) {
+            deleteTagsByEventIds(chunk)
+            deleteStatsByEventIds(chunk)
+            deleteRelaysByEventIds(chunk)
+            deleteEventsByIds(chunk)
+        }
+    }
 }

@@ -4,13 +4,12 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
-import coil3.compose.AsyncImage
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +26,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Tune
@@ -36,67 +40,65 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.derivedStateOf
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
-import com.unsilence.app.ui.relays.RelayManagementViewModel
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.unsilence.app.ui.feed.FeedType
-import com.unsilence.app.ui.feed.FeedViewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
+import com.unsilence.app.ui.feed.FeedType
+import com.unsilence.app.ui.feed.FeedViewModel
 import com.unsilence.app.ui.feed.FilterScreen
 import com.unsilence.app.ui.notifications.NotificationsScreen
-import com.unsilence.app.ui.relays.CreateRelaySetScreen
-import com.unsilence.app.ui.relays.RelayManagementScreen
-import com.unsilence.app.ui.search.SearchScreen
-import com.unsilence.app.ui.thread.ThreadScreen
-import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
-import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
+import com.unsilence.app.ui.relays.CreateRelaySetScreen
+import com.unsilence.app.ui.relays.RelayManagementScreen
+import com.unsilence.app.ui.relays.RelayManagementViewModel
+import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.thread.ThreadScreen
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+import kotlin.math.absoluteValue
 
 private val NavUnselected = Color(0xFF555555)
 
@@ -111,12 +113,22 @@ private val TABS = listOf(
 
 private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutSlowInEasing)
 
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
+    a is FeedType.Global && b is FeedType.Global -> true
+    a is FeedType.Following && b is FeedType.Following -> true
+    a is FeedType.RelaySet && b is FeedType.RelaySet -> a.dTag == b.dTag
+    a is FeedType.SingleRelay && b is FeedType.SingleRelay -> a.url == b.url
+    else -> false
+}
+
 @Composable
 fun AppNavigation(onLogout: () -> Unit) {
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
     var showCompose          by remember { mutableStateOf(false) }
-    var showFeedDropdown     by remember { mutableStateOf(false) }
+    var showFeedSheet        by remember { mutableStateOf(false) }
     var showFilter           by remember { mutableStateOf(false) }
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var showRelaySettings    by remember { mutableStateOf(false) }
@@ -127,24 +139,34 @@ fun AppNavigation(onLogout: () -> Unit) {
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
-    // Single lambda passed to every NoteCard-hosting screen.
-    // Opening a user profile does NOT open the own-profile tab — it opens the overlay.
     val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
 
-    // Shared FeedViewModel instance — same object FeedScreen uses (same Activity scope)
     val feedViewModel: FeedViewModel = hiltViewModel()
     val relayManagementVm: RelayManagementViewModel = hiltViewModel()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
+    val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
+
+    // Build the ordered feed list for the carousel
+    val feedList = remember(hasFollows, pinnedRelays, userSets) {
+        buildList {
+            if (hasFollows) add(FeedType.Following to "Following")
+            add(FeedType.Global to "Global")
+            pinnedRelays.forEach { add(it as FeedType to it.label) }
+            userSets.forEach { set ->
+                val name = set.title ?: set.dTag
+                add(FeedType.RelaySet(set.dTag, name) as FeedType to name)
+            }
+        }
+    }
 
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
-    // Profile tab (index 3) has its own top bar — hide the app top bar but keep bottom nav.
     val topBarShown    = barsVisible && selectedTab != 3
     val bottomBarShown = barsVisible
 
@@ -225,53 +247,33 @@ fun AppNavigation(onLogout: () -> Unit) {
                     .height(Sizing.topBarHeight),
                 contentAlignment = Alignment.Center,
             ) {
-                Row(
+                // Layered layout for true centering
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.medium),
-                    verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Left: app name
                     Text(
-                        text       = "unSilence",
-                        color      = Color.White,
-                        fontSize   = 16.sp,
+                        text = "unSilence",
+                        color = Cyan.copy(alpha = 0.6f),
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.CenterStart),
                     )
 
-                    Spacer(Modifier.weight(1f))
+                    // Center: feed carousel
+                    FeedCarousel(
+                        feedList = feedList,
+                        currentFeedType = feedType,
+                        onFeedChanged = { feedViewModel.setFeedType(it) },
+                        onTap = { showFeedSheet = true },
+                        modifier = Modifier.align(Alignment.Center),
+                    )
 
-                    if (showFeedDropdown) {
-                        FeedPickerInline(
-                            feedType        = feedType,
-                            userSets        = userSets,
-                            pinnedRelays    = pinnedRelays,
-                            onFeedChanged   = { type -> feedViewModel.setFeedType(type) },
-                            onNewRelaySet   = { showFeedDropdown = false; showCreateRelaySet = true },
-                            onRelaySettings = { showFeedDropdown = false; showRelaySettings = true },
-                            onDeleteSet     = { dTag ->
-                                relayManagementVm.deleteRelaySet(dTag)
-                                if (feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == dTag) {
-                                    feedViewModel.setFeedType(FeedType.Global)
-                                }
-                            },
-                            onDismiss       = { showFeedDropdown = false },
-                        )
-                    } else {
-                        Text(
-                            text     = "◂ ${feedViewModel.feedTypeLabel}",
-                            color    = Cyan,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .widthIn(max = 120.dp)
-                                .clickable { showFeedDropdown = true },
-                        )
-                    }
-
-                    Spacer(Modifier.weight(1f))
-
+                    // Right: action icons
                     Row(
+                        modifier = Modifier.align(Alignment.CenterEnd),
                         horizontalArrangement = Arrangement.spacedBy(20.dp),
                         verticalAlignment     = Alignment.CenterVertically,
                     ) {
@@ -321,7 +323,6 @@ fun AppNavigation(onLogout: () -> Unit) {
                     }) {
                         Box(contentAlignment = Alignment.Center) {
                             if (index == 3 && userAvatarUrl != null) {
-                                // Profile tab — show user avatar
                                 Box(
                                     modifier = Modifier
                                         .size(iconSize)
@@ -357,6 +358,29 @@ fun AppNavigation(onLogout: () -> Unit) {
                         }
                     }
                 }
+            }
+
+            // ── Feed selector bottom sheet ───────────────────────────────────
+            if (showFeedSheet) {
+                FeedSelectorSheet(
+                    feedType        = feedType,
+                    hasFollows      = hasFollows,
+                    userSets        = userSets,
+                    pinnedRelays    = pinnedRelays,
+                    onFeedChanged   = { type ->
+                        feedViewModel.setFeedType(type)
+                        showFeedSheet = false
+                    },
+                    onNewRelaySet   = { showFeedSheet = false; showCreateRelaySet = true },
+                    onRelaySettings = { showFeedSheet = false; showRelaySettings = true },
+                    onDeleteSet     = { dTag ->
+                        relayManagementVm.deleteRelaySet(dTag)
+                        if (feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == dTag) {
+                            feedViewModel.setFeedType(FeedType.Global)
+                        }
+                    },
+                    onDismiss       = { showFeedSheet = false },
+                )
             }
 
             // ── Filter overlay ────────────────────────────────────────────────
@@ -419,10 +443,137 @@ fun AppNavigation(onLogout: () -> Unit) {
         }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+// ── Feed carousel ─────────────────────────────────────────────────────────
+//
+// Vertical pager with infinite scroll that shows adjacent feed names peeking
+// in above and below, scaling and fading as they move away from center.
+// Tap opens the sheet; swipe cycles feeds with a smooth drum-roller feel.
+
 @Composable
-private fun FeedPickerInline(
+private fun FeedCarousel(
+    feedList: List<Pair<FeedType, String>>,
+    currentFeedType: FeedType,
+    onFeedChanged: (FeedType) -> Unit,
+    onTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (feedList.isEmpty()) return
+
+    val realCount = feedList.size
+
+    // Single feed — static label, no pager
+    if (realCount == 1) {
+        Text(
+            text = feedList[0].second,
+            color = Cyan,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = modifier
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onTap,
+                ),
+        )
+        return
+    }
+
+    val currentIdx = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
+        .coerceAtLeast(0)
+
+    // Infinite scroll via large virtual page count centered at the current feed
+    val virtualCount = realCount * 10_000
+    val middleBase = (virtualCount / 2 / realCount) * realCount
+    val initialPage = middleBase + currentIdx
+
+    val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
+
+    // Recenter pager when feed list changes (follow/unfollow, relay set add/remove)
+    // to prevent mod(realCount) pointing to the wrong feed after virtualCount changes.
+    LaunchedEffect(realCount) {
+        val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
+            .coerceAtLeast(0)
+        val newMiddle = (virtualCount / 2 / realCount) * realCount
+        pagerState.scrollToPage(newMiddle + targetReal)
+    }
+
+    // Pager settled on a new page → update the ViewModel
+    LaunchedEffect(pagerState.settledPage) {
+        val realIdx = pagerState.settledPage.mod(realCount)
+        val settled = feedList.getOrNull(realIdx)?.first ?: return@LaunchedEffect
+        if (!feedTypeMatches(settled, currentFeedType)) {
+            onFeedChanged(settled)
+        }
+    }
+
+    // External change (sheet selection) → scroll pager to match
+    LaunchedEffect(currentFeedType) {
+        val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
+            .coerceAtLeast(0)
+        val currentReal = pagerState.currentPage.mod(realCount)
+        if (targetReal != currentReal) {
+            pagerState.animateScrollToPage(pagerState.currentPage + (targetReal - currentReal))
+        }
+    }
+
+    val pageHeightDp = 26.dp
+
+    Box(
+        modifier = modifier
+            .height(pageHeightDp * 1.7f)
+            .widthIn(min = 80.dp, max = 150.dp)
+            .clip(RoundedCornerShape(10.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        VerticalPager(
+            state = pagerState,
+            pageSize = PageSize.Fixed(pageHeightDp),
+            beyondViewportPageCount = 1,
+            modifier = Modifier
+                .height(pageHeightDp * 1.7f)
+                .fillMaxWidth(),
+        ) { page ->
+            val realIdx = page.mod(realCount)
+            val pageOffset = ((pagerState.currentPage - page) +
+                pagerState.currentPageOffsetFraction).absoluteValue
+
+            Box(
+                modifier = Modifier
+                    .height(pageHeightDp)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
+                        val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
+                        scaleX = scale
+                        scaleY = scale
+                    }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onTap,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = feedList[realIdx].second,
+                    color = Cyan,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+// ── Feed selector bottom sheet ────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun FeedSelectorSheet(
     feedType: FeedType,
+    hasFollows: Boolean,
     userSets: List<NostrRelaySetEntity>,
     pinnedRelays: List<FeedType.SingleRelay>,
     onFeedChanged: (FeedType) -> Unit,
@@ -431,123 +582,128 @@ private fun FeedPickerInline(
     onDeleteSet: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val sheetState = rememberModalBottomSheetState()
     var confirmDeleteDTag by remember { mutableStateOf<String?>(null) }
 
-    BackHandler { onDismiss() }
+    fun isSelected(type: FeedType): Boolean = feedTypeMatches(type, feedType)
 
-    data class FeedItem(val type: FeedType?, val label: String, val dTag: String? = null)
-
-    val items = buildList {
-        add(FeedItem(FeedType.Global, "Global"))
-        add(FeedItem(FeedType.Following, "Following"))
-        userSets.forEach { set ->
-            add(FeedItem(FeedType.RelaySet(set.dTag, set.title ?: set.dTag), set.title ?: set.dTag, dTag = set.dTag))
-        }
-        pinnedRelays.forEach { relay ->
-            add(FeedItem(relay, relay.label))
-        }
-    }
-
-    val currentIndex = items.indexOfFirst { item ->
-        item.type != null && when {
-            item.type is FeedType.Global && feedType is FeedType.Global -> true
-            item.type is FeedType.Following && feedType is FeedType.Following -> true
-            item.type is FeedType.RelaySet && feedType is FeedType.RelaySet ->
-                item.type.dTag == feedType.dTag
-            item.type is FeedType.SingleRelay && feedType is FeedType.SingleRelay ->
-                item.type.url == feedType.url
-            else -> false
-        }
-    }.coerceAtLeast(0)
-
-    val spinnerState = rememberLazyListState(initialFirstVisibleItemIndex = currentIndex)
-    val flingBehavior = rememberSnapFlingBehavior(lazyListState = spinnerState)
-
-    val itemWidth = 70.dp
-    val spinnerWidth = itemWidth * 3
-
-    // Auto-select feed when spinner settles; dismiss after user scroll
-    var hasScrolled by remember { mutableStateOf(false) }
-    LaunchedEffect(spinnerState) {
-        snapshotFlow { spinnerState.isScrollInProgress }
-            .collect { scrolling ->
-                if (scrolling) {
-                    hasScrolled = true
-                } else if (hasScrolled) {
-                    val layoutInfo = spinnerState.layoutInfo
-                    val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.width / 2
-                    val settledIndex = (layoutInfo.visibleItemsInfo.minByOrNull {
-                        kotlin.math.abs((it.offset + it.size / 2) - center)
-                    }?.index ?: 1) - 1
-                    if (settledIndex in items.indices) {
-                        items[settledIndex].type?.let { onFeedChanged(it) }
-                    }
-                    onDismiss()
-                }
-            }
-    }
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        LazyRow(
-            state = spinnerState,
-            flingBehavior = flingBehavior,
-            modifier = Modifier.width(spinnerWidth),
+    @Composable
+    fun SheetItem(label: String, type: FeedType, dTag: String? = null) {
+        val selected = isSelected(type)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (selected) Cyan.copy(alpha = 0.08f) else Color.Transparent)
+                .combinedClickable(
+                    onClick = { onFeedChanged(type) },
+                    onLongClick = { if (dTag != null) confirmDeleteDTag = dTag },
+                )
+                .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            item { Spacer(Modifier.width(itemWidth)) }
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(if (selected) Cyan else Color(0xFF333333), CircleShape),
+            )
+            Spacer(Modifier.width(14.dp))
+            Text(
+                text       = label,
+                color      = if (selected) Cyan else Color(0xFFDDDDDD),
+                fontSize   = 15.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                modifier   = Modifier.weight(1f),
+            )
+        }
+    }
 
-            itemsIndexed(items) { index, item ->
-                val centerIndex by remember {
-                    derivedStateOf {
-                        val layoutInfo = spinnerState.layoutInfo
-                        val center = layoutInfo.viewportStartOffset + layoutInfo.viewportSize.width / 2
-                        layoutInfo.visibleItemsInfo.minByOrNull {
-                            kotlin.math.abs((it.offset + it.size / 2) - center)
-                        }?.index?.minus(1) ?: 0
-                    }
+    @Composable
+    fun SectionLabel(text: String) {
+        Text(
+            text = text.uppercase(),
+            color = Color(0xFF555555),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(start = 32.dp, top = 16.dp, bottom = 4.dp),
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState       = sheetState,
+        containerColor   = Color(0xFF0E0E0E),
+        shape            = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        dragHandle       = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .size(width = 32.dp, height = 4.dp)
+                    .background(Color(0xFF333333), RoundedCornerShape(2.dp)),
+            )
+        },
+    ) {
+        Column(modifier = Modifier.padding(bottom = 28.dp)) {
+            // ── Core feeds ──
+            SectionLabel("Feeds")
+            if (hasFollows) SheetItem("Following", FeedType.Following)
+            SheetItem("Global", FeedType.Global)
+
+            // ── Pinned relays ──
+            if (pinnedRelays.isNotEmpty()) {
+                SectionLabel("Favorite Relays")
+                for (relay in pinnedRelays) {
+                    SheetItem(relay.label, relay)
                 }
-                val isCenter = index == centerIndex
-                Box(
-                    modifier = Modifier
-                        .width(itemWidth)
-                        .combinedClickable(
-                            onClick = { },
-                            onLongClick = {
-                                if (item.dTag != null) confirmDeleteDTag = item.dTag
-                            },
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text       = item.label,
-                        color      = if (isCenter) Cyan else TextSecondary,
-                        fontSize   = if (isCenter) 13.sp else 11.sp,
-                        fontWeight = if (isCenter) FontWeight.SemiBold else FontWeight.Normal,
-                        maxLines   = 1,
-                        overflow   = TextOverflow.Ellipsis,
+            }
+
+            // ── Relay sets ──
+            if (userSets.isNotEmpty()) {
+                SectionLabel("Relay Sets")
+                for (set in userSets) {
+                    SheetItem(
+                        label = set.title ?: set.dTag,
+                        type  = FeedType.RelaySet(set.dTag, set.title ?: set.dTag),
+                        dTag  = set.dTag,
                     )
                 }
             }
 
-            item { Spacer(Modifier.width(itemWidth)) }
-        }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = Color(0xFF1A1A1A), thickness = 1.dp)
+            Spacer(Modifier.height(4.dp))
 
-        Text(
-            text     = "+",
-            color    = Cyan,
-            fontSize = 13.sp,
-            modifier = Modifier
-                .clickable { onNewRelaySet() }
-                .padding(horizontal = 6.dp),
-        )
-        Text(
-            text     = "⚙",
-            color    = TextSecondary,
-            fontSize = 13.sp,
-            modifier = Modifier
-                .clickable { onRelaySettings() }
-                .padding(start = 2.dp, end = 6.dp),
-        )
+            // ── Actions ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onNewRelaySet() }
+                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("+", color = Cyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(14.dp))
+                Text("New Relay Set", color = Cyan, fontSize = 14.sp)
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onRelaySettings() }
+                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("\u2699", color = Color(0xFF666666), fontSize = 14.sp)
+                Spacer(Modifier.width(14.dp))
+                Text("Manage Relays", color = Color(0xFF999999), fontSize = 14.sp)
+            }
+        }
     }
 
     confirmDeleteDTag?.let { dTag ->
