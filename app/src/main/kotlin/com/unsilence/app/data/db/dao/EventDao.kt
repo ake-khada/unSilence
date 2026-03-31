@@ -143,20 +143,19 @@ interface EventDao {
             COALESCE(s.repost_count, 0)   AS repost_count,
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
-        LEFT JOIN  follows     f ON f.pubkey   = e.pubkey
         LEFT JOIN  users       u ON u.pubkey   = e.pubkey
         LEFT JOIN  event_stats s ON s.event_id = e.id
         WHERE e.kind IN (:kinds)
           AND (
-              (f.pubkey IS NOT NULL AND (
+              (e.pubkey IN (SELECT pubkey FROM follows) AND (
                   (:contentFilter = 0)
                   OR (:contentFilter = 1 AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6))
                   OR (:contentFilter = 2 AND (e.reply_to_id IS NOT NULL OR e.root_id IS NOT NULL) AND e.kind != 6)
               ))
               OR (:contentFilter = 2 AND e.id IN (
                   SELECT e2.reply_to_id FROM events e2
-                  INNER JOIN follows f2 ON f2.pubkey = e2.pubkey
                   WHERE e2.reply_to_id IS NOT NULL
+                  AND e2.pubkey IN (SELECT pubkey FROM follows)
               ))
           )
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
