@@ -267,7 +267,7 @@ class FeedViewModel @Inject constructor(
                             relayPool.startGlobalFeed(setUrls)
                             relayPool.connect(setUrls)
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(setUrls, filter, limit)
+                                eventRepository.feedFlow(setUrls, filter, limit, includeReplies = true)
                             }
                         }
                         is FeedType.SingleRelay -> {
@@ -276,7 +276,7 @@ class FeedViewModel @Inject constructor(
                             relayPool.startGlobalFeed(singleUrl)
                             relayPool.connect(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(singleUrl, filter, limit)
+                                eventRepository.feedFlow(singleUrl, filter, limit, includeReplies = true)
                             }
                         }
                     }
