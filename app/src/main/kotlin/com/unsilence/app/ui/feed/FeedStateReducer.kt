@@ -103,6 +103,7 @@ class FeedStateReducer(private val feedKey: String) {
 
     /** User tapped the blue dot — flush latestRows into visible. */
     fun onDotTapped() {
+        if (!_state.value.showDot) return
         flush("DOT_TAP")
     }
 
