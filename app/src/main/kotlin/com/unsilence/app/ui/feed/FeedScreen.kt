@@ -3,6 +3,8 @@ package com.unsilence.app.ui.feed
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +33,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -142,6 +146,9 @@ fun FeedScreen(
             onSelect = { viewModel.setContentFilter(it) },
         )
 
+        // ── Swipe left/right to switch Notes ↔ Conversations ──────────
+        val swipeDrag = remember { mutableFloatStateOf(0f) }
+
         Crossfade(
             targetState = when {
                 state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
@@ -153,7 +160,25 @@ fun FeedScreen(
                 else -> "content"
             },
             label = "feedState",
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .pointerInput(contentFilter) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            val threshold = 100.dp.toPx()
+                            if (swipeDrag.floatValue > threshold && contentFilter == FeedContentFilter.REPLIES_ONLY) {
+                                viewModel.setContentFilter(FeedContentFilter.NOTES_ONLY)
+                            } else if (swipeDrag.floatValue < -threshold && contentFilter == FeedContentFilter.NOTES_ONLY) {
+                                viewModel.setContentFilter(FeedContentFilter.REPLIES_ONLY)
+                            }
+                            swipeDrag.floatValue = 0f
+                        },
+                        onDragCancel = { swipeDrag.floatValue = 0f },
+                        onHorizontalDrag = { _, dragAmount ->
+                            swipeDrag.floatValue += dragAmount
+                        },
+                    )
+                },
         ) { screenState ->
         when (screenState) {
             "loading" -> {
@@ -325,9 +350,7 @@ private fun FeedContentTabs(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Black)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
+            .background(Black),
     ) {
         for (tab in FeedContentFilter.entries) {
             val label = when (tab) {
@@ -335,13 +358,24 @@ private fun FeedContentTabs(
                 FeedContentFilter.REPLIES_ONLY -> "Conversations"
             }
             val isSelected = tab == selected
-            Text(
-                text = label,
-                color = if (isSelected) Cyan else White.copy(alpha = 0.5f),
-                fontSize = 14.sp,
-                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.clickable { onSelect(tab) },
-            )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelect(tab) },
+                    )
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    color = if (isSelected) White else White.copy(alpha = 0.4f),
+                    fontSize = 14.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
         }
     }
 }
