@@ -413,6 +413,38 @@ fun NoteCard(
             }
         }
 
+        // ── NIP-19 embedded quotes (show right after text, before media) ────
+        nostrRefs.filterIsInstance<NostrRef.EventRef>().forEach { ref ->
+            EmbeddedQuoteCard(
+                eventId     = ref.eventId,
+                onNoteClick = onNoteClick,
+                lookupEvent = lookupEvent,
+                lookupProfile = lookupProfile,
+                modifier    = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            )
+        }
+
+        // ── NIP-19 mention chips ──────────────────────────────────────────────
+        val profileRefs = nostrRefs.filterIsInstance<NostrRef.ProfileRef>()
+        if (profileRefs.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                profileRefs.forEach { ref ->
+                    MentionChip(
+                        pubkeyHex     = ref.pubkeyHex,
+                        onAuthorClick = onAuthorClick,
+                        lookupProfile = lookupProfile,
+                    )
+                }
+            }
+        }
+
         // ── BUG #4 FIX: Media grid for multiple images ──────────────────────
         if (imageUrls.isNotEmpty()) {
             MediaGrid(
@@ -465,38 +497,6 @@ fun NoteCard(
                     fetchOgMetadata = fetchOgMetadata,
                 )
                 linkUrls.drop(1).forEach { url -> LinkChip(url = url) }
-            }
-        }
-
-        // ── NIP-19 embedded quotes (Bug #3: show actual content) ─────────────
-        nostrRefs.filterIsInstance<NostrRef.EventRef>().forEach { ref ->
-            EmbeddedQuoteCard(
-                eventId     = ref.eventId,
-                onNoteClick = onNoteClick,
-                lookupEvent = lookupEvent,
-                lookupProfile = lookupProfile,
-                modifier    = Modifier
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.small),
-            )
-        }
-
-        // ── NIP-19 mention chips (Bug #2: show display names) ────────────────
-        val profileRefs = nostrRefs.filterIsInstance<NostrRef.ProfileRef>()
-        if (profileRefs.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.small),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                profileRefs.forEach { ref ->
-                    MentionChip(
-                        pubkeyHex     = ref.pubkeyHex,
-                        onAuthorClick = onAuthorClick,
-                        lookupProfile = lookupProfile,
-                    )
-                }
             }
         }
 
