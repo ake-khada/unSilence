@@ -319,18 +319,7 @@ class RelayPool @Inject constructor(
         conn.send(postsReq)
         conn.send(mediaReq)
         conn.send(longformReq)
-
-        // Replay any persistent subs targeted at this specific relay that were
-        // registered before the connection existed (e.g. relay-global-* from
-        // startGlobalFeed called before connect in FeedViewModel).
-        for ((subId, sub) in persistentSubs) {
-            if (sub.targetRelayUrl == conn.url) {
-                conn.send(sub.reqJson)
-                Log.d(TAG, "Replayed targeted sub '$subId' on ${conn.url}")
-            }
-        }
-
-        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subs + targeted replays)")
+        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subscriptions)")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -381,16 +370,10 @@ class RelayPool @Inject constructor(
                             } else if (conn.url in authenticatedRelays) {
                                 // Already authed — just replay the specific closed sub
                                 persistentSubs[closedSubId]?.let { sub ->
-                                    if (closedSubId.startsWith("relay-global-")) {
-                                        // Global browse subs replay the full limit — no since filter
-                                        conn.send(sub.reqJson)
-                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (full, no since)")
-                                    } else {
-                                        val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
-                                                    else System.currentTimeMillis() / 1000L - 300
-                                        conn.send(injectSince(sub.reqJson, since))
-                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
-                                    }
+                                    val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
+                                                else System.currentTimeMillis() / 1000L - 300
+                                    conn.send(injectSince(sub.reqJson, since))
+                                    Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
                                 }
                             } else {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached")
@@ -1057,7 +1040,13 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        val targets = connections.values.take(3)
+        // When browse mode is active, route engagement to browse relays only.
+        val browseTargets = browseEngagementTargets
+        val targets = if (browseTargets.isNotEmpty()) {
+            browseTargets.mapNotNull { connections[it] }
+        } else {
+            connections.values.take(3)
+        }
 
         // Register coverage lanes: 3 subs × N relays
         val lanes = mutableSetOf<Lane>()
@@ -1164,6 +1153,7 @@ class RelayPool @Inject constructor(
                     guard.set(false)
                     updateConnectionStates()
                     replayPersistentSubs(conn)
+                    onRelayReconnected?.invoke(url)
                     scope.launch { listenForEvents(conn) }
                     Log.d(TAG, "Reconnected $url")
                 } else {
@@ -1193,12 +1183,6 @@ class RelayPool @Inject constructor(
         for ((_, sub) in persistentSubs) {
             // Skip subs targeted at a different relay
             if (sub.targetRelayUrl != null && sub.targetRelayUrl != conn.url) continue
-            // Global browse subs always replay the full limit — no since filter.
-            if (sub.subId.startsWith("relay-global-")) {
-                conn.send(sub.reqJson)
-                Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (full, no since)")
-                continue
-            }
             val since = if (sub.lastEventTime > 0) {
                 maxOf(sub.lastEventTime - 30, 0)
             } else {
@@ -1281,65 +1265,24 @@ class RelayPool @Inject constructor(
         }.toString()
     }
 
-    /**
-     * Send persistent unfiltered global subscriptions to the specified relays.
-     * Used when viewing a relay-set or single-relay feed — these subs have NO
-     * authors filter so the feed shows everything the relay has.
-     *
-     * Closes any existing relay-global-* subs first, then opens new ones.
-     * The subs are registered as persistent so they replay after NIP-42 AUTH
-     * and after reconnection.
-     */
-    fun startGlobalFeed(relayUrls: List<String>) {
-        stopGlobalFeed()
-        for (rawUrl in relayUrls) {
-            val url = normalizeRelayUrl(rawUrl) ?: continue
-            val hash = url.hashCode()
-            val subId = "relay-global-$hash"
-            val req = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(subId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray {
-                        add(JsonPrimitive(1))
-                        add(JsonPrimitive(6))
-                        add(JsonPrimitive(20))
-                        add(JsonPrimitive(21))
-                        add(JsonPrimitive(30023))
-                    })
-                    put("limit", JsonPrimitive(300))
-                })
-            }.toString()
-            // Always register so subscribeAfterConnect / replayPersistentSubs
-            // picks it up even if the connection doesn't exist yet.
-            // Scoped to this relay — won't replay on other relays.
-            registerPersistentSub(subId, req, targetRelayUrl = url)
-            // Send immediately if already connected
-            val conn = connections[url]
-            Log.d(TAG, "startGlobalFeed: url=$url exists=${conn != null} keys=${connections.keys}")
-            conn?.send(req)
-        }
-        Log.d(TAG, "Started global feed on ${relayUrls.size} relay(s)")
-    }
+    // ── Browse session hooks ────────────────────────────────────────────────
+
+    /** When browse mode is active, engagement one-shots route here instead of general connections. */
+    @Volatile var browseEngagementTargets: List<String> = emptyList()
+
+    /** Called after a relay successfully reconnects. Browse session uses this to resend its subs. */
+    var onRelayReconnected: ((String) -> Unit)? = null
+
+    /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
+    fun sendToRelay(url: String, msg: String): Boolean =
+        connections[url]?.send(msg) == true
 
     /**
-     * Close all relay-global-* subscriptions and remove from persistent tracking.
-     * Called when switching away from a relay-set / single-relay feed.
+     * Placeholder for future disconnect logic. In this PR browse CLOSE is enough;
+     * connections may be reused by outbox routing or other consumers.
      */
-    fun stopGlobalFeed() {
-        val globalSubs = persistentSubs.entries.filter { it.key.startsWith("relay-global-") }
-        if (globalSubs.isEmpty()) return
-        for ((subId, sub) in globalSubs) {
-            val closeMsg = """["CLOSE","$subId"]"""
-            val target = sub.targetRelayUrl
-            if (target != null) {
-                connections[target]?.send(closeMsg)
-            } else {
-                connections.values.forEach { it.send(closeMsg) }
-            }
-            persistentSubs.remove(subId)
-        }
-        Log.d(TAG, "Stopped ${globalSubs.size} global feed sub(s)")
+    fun releaseIfUnused(@Suppress("UNUSED_PARAMETER") url: String) {
+        // Intentionally no disconnect logic in this PR.
     }
 
     fun disconnectAll() {
