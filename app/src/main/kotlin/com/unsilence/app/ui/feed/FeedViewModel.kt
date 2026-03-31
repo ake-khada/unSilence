@@ -1,8 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
@@ -110,18 +107,34 @@ class FeedViewModel @Inject constructor(
 
     fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
-    /**
-     * True when the top-of-feed item has a newer created_at than the previous emission.
-     * Used to drive the new-posts dot and to trigger a snap-to-top when the user
-     * is already at index 0. Cleared by FeedScreen via clearNewTopPost().
-     */
-    var hasNewTopPost by mutableStateOf(false)
-        private set
+    // ── Feed-state reducer ────────────────────────────────────────────────
+    private var feedReducer = FeedStateReducer("global")
 
-    fun clearNewTopPost() { hasNewTopPost = false }
+    /** Stable StateFlow that survives feed-reducer swaps. */
+    private val _reducerState = MutableStateFlow(ReducerState())
+    val reducerState: StateFlow<ReducerState> = _reducerState.asStateFlow()
 
-    // created_at of the first item in the last emission; 0 until the first load.
-    private var newestTimestamp = 0L
+    private fun syncReducerState() {
+        _reducerState.value = feedReducer.state.value
+    }
+
+    fun onScrollPositionChanged(firstVisibleIndex: Int) {
+        feedReducer.onScrollPositionChanged(firstVisibleIndex)
+        syncReducerState()
+        _uiState.update { it.copy(events = feedReducer.state.value.visibleEvents) }
+    }
+
+    fun onDotTapped() {
+        feedReducer.onDotTapped()
+        syncReducerState()
+        _uiState.update { it.copy(events = feedReducer.state.value.visibleEvents) }
+    }
+
+    /** True when there are queued new posts (used by nav bar dot indicator). */
+    val hasNewTopPost: Boolean get() = _reducerState.value.showDot
+
+    /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
+    fun clearNewTopPost() { onDotTapped() }
 
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
@@ -216,11 +229,19 @@ class FeedViewModel @Inject constructor(
             combine(_feedType, _filter) { type, filter -> type to filter }
                 .flatMapLatest { (type, filter) ->
                     // Reset all state on feed switch so the new feed starts clean.
-                    newestTimestamp     = 0L
-                    hasNewTopPost       = false
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
                     cardHydrator.clearCache()
+
+                    // Create a new reducer for this feed key
+                    val feedKey = when (type) {
+                        is FeedType.Global -> "global"
+                        is FeedType.Following -> "following"
+                        is FeedType.RelaySet -> "relayset-${type.dTag}"
+                        is FeedType.SingleRelay -> "relay-${type.url}"
+                    }
+                    feedReducer = FeedStateReducer(feedKey)
+                    syncReducerState()
 
                     // Check coverage before deciding whether to fetch
                     val intent = CoverageIntent.HomeFeed()
@@ -278,14 +299,8 @@ class FeedViewModel @Inject constructor(
                     }
                 }
                 .collectLatest { rows ->
-                    val incomingNewest = rows.firstOrNull()?.createdAt ?: 0L
-
-                    // Only flag a new top post after the initial load; the initial
-                    // populate is not a "new post arrived" event.
-                    if (newestTimestamp > 0 && incomingNewest > newestTimestamp) {
-                        hasNewTopPost = true
-                    }
-                    newestTimestamp = incomingNewest
+                    feedReducer.onNewEvents(rows)
+                    syncReducerState()
 
                     // Re-check coverage status from DB on each emission
                     val intent = CoverageIntent.HomeFeed()
@@ -293,15 +308,10 @@ class FeedViewModel @Inject constructor(
                         intent.scopeType, intent.scopeKey, intent.relaySetId
                     )
                     _uiState.value = FeedUiState(
-                        events = rows,
+                        events = feedReducer.state.value.visibleEvents,
                         loading = false,
                         coverageStatus = status,
                     )
-
-                    // Hydration is now handled exclusively by the snapshotFlow-based
-                    // visible-card observer in FeedScreen. The old collectLatest hydration
-                    // was causing duplicate work — both paths were hydrating the same first
-                    // 20 rows, triggering redundant relay REQs and profile fetches.
                 }
         }
     }

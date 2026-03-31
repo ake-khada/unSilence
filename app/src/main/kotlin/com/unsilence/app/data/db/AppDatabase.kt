@@ -44,7 +44,7 @@ import com.unsilence.app.data.db.entity.UserEntity
         NostrRelaySetMemberEntity::class,
         CoverageEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

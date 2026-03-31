@@ -24,9 +24,11 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,7 +45,9 @@ import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.TextSecondary
+import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -59,11 +63,13 @@ fun FeedScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     val state         by viewModel.uiState.collectAsStateWithLifecycle()
+    val reducerState  by viewModel.reducerState.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -202,23 +208,42 @@ fun FeedScreen(
                     )
                 }
 
-                // Auto-scroll on new top post
-                LaunchedEffect(viewModel.hasNewTopPost) {
-                    if (viewModel.hasNewTopPost && listState.firstVisibleItemIndex <= 2) {
-                        listState.scrollToItem(0)
-                        viewModel.clearNewTopPost()
-                    }
-                }
-
-                // Pagination: trigger near bottom of list
+                // Scroll position tracking + pagination (merged observer)
                 LaunchedEffect(Unit) {
                     snapshotFlow { listState.firstVisibleItemIndex }
                         .collect { index ->
+                            viewModel.onScrollPositionChanged(index)
                             val total = listState.layoutInfo.totalItemsCount
                             if (total > 0 && index > total - 10) {
                                 viewModel.loadMore()
                             }
                         }
+                }
+
+                // Blue dot indicator for new posts
+                if (reducerState.showDot) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
+                        Text(
+                            text = "${reducerState.unreadCount} new",
+                            color = Black,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(Cyan, androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                                .clickable {
+                                    viewModel.onDotTapped()
+                                    coroutineScope.launch {
+                                        listState.animateScrollToItem(0)
+                                    }
+                                }
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                    }
                 }
 
                 // Engagement fetch: only for visible items, debounced

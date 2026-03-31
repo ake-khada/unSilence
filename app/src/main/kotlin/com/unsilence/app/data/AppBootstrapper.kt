@@ -13,6 +13,7 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
+import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
@@ -56,6 +57,7 @@ class AppBootstrapper @Inject constructor(
     private val sharedPlayerHolder: SharedPlayerHolder,
     private val cardHydrator: CardHydrator,
     private val nostrRelaySetDao: NostrRelaySetDao,
+    private val profileResolver: ProfileResolver,
 ) {
     private val bootstrapMutex = Mutex()
 
@@ -107,7 +109,7 @@ class AppBootstrapper @Inject constructor(
         // Preloads display names and avatars so the feed shows names, not hex.
         // Includes own pubkey. No need to block — Room flows update reactively.
         val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
-        relayPool.fetchProfiles(followPubkeys.distinct())
+        profileResolver.request(followPubkeys.distinct())
         Log.d(TAG, "Step 2b: requested ${followPubkeys.size} profiles")
 
         // ── Step 3: Wait for own profile to arrive ────────────────────────
@@ -208,7 +210,10 @@ class AppBootstrapper @Inject constructor(
         // 7. Clear card hydration cache (prevents stale data across accounts)
         cardHydrator.clearCache()
 
-        // 8. In-memory state already cleared by eventProcessor.stop() (seenIds)
+        // 8. Clear profile resolver in-flight state
+        profileResolver.clear()
+
+        // 9. In-memory state already cleared by eventProcessor.stop() (seenIds)
         // and relayPool.disconnectAll() (connections map)
 
         Log.d(TAG, "Teardown complete")

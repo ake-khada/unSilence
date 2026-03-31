@@ -233,7 +233,7 @@ class EventProcessor @Inject constructor(
 
         // Build the entity and route to the appropriate priority lane
         val processed: ProcessedEvent? = when (kind) {
-            0 -> buildUserEvent(pubkey, content)
+            0 -> buildUserEvent(pubkey, content, createdAt)
             7 -> buildReactionEvent(id, pubkey, createdAt, content, tags)
             1, 6, 9734, 9735, 20, 21, 30023 -> buildContentEvent(
                 id, pubkey, kind, content, createdAt, tagsJson, sig, tags, relayUrl
@@ -257,7 +257,7 @@ class EventProcessor @Inject constructor(
 
     // ── Entity builders (no DB access — just data class construction) ─────────
 
-    private fun buildUserEvent(pubkey: String, content: String): ProcessedEvent.User? {
+    private fun buildUserEvent(pubkey: String, content: String, createdAt: Long): ProcessedEvent.User? {
         return try {
             val meta = NostrJson.parseToJsonElement(content).jsonObject
             fun str(key: String) = meta[key]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
@@ -271,6 +271,7 @@ class EventProcessor @Inject constructor(
                     nip05       = str("nip05"),
                     lud16       = str("lud16"),
                     banner      = str("banner"),
+                    createdAt   = createdAt,
                     updatedAt   = nowSeconds,
                 )
             )

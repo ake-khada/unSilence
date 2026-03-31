@@ -31,6 +31,10 @@ data class UserEntity(
     @ColumnInfo(name = "banner")
     val banner: String? = null,
 
+    /** created_at from the kind-0 event — used to reject older profiles overwriting newer ones. */
+    @ColumnInfo(name = "created_at", defaultValue = "0")
+    val createdAt: Long = 0,
+
     @ColumnInfo(name = "updated_at")
     val updatedAt: Long,
 
