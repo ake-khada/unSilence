@@ -47,7 +47,6 @@ sealed class FeedType {
 }
 
 data class FeedUiState(
-    val events: List<FeedRow> = emptyList(),
     val loading: Boolean = true,
     val coverageStatus: CoverageStatus = CoverageStatus.NEVER_FETCHED,
 )
@@ -109,30 +108,23 @@ class FeedViewModel @Inject constructor(
     fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
     // ── Feed-state reducer ────────────────────────────────────────────────
-    private var feedReducer = FeedStateReducer("global")
+    private val _activeReducer = MutableStateFlow(FeedStateReducer("global"))
 
-    /** Stable StateFlow that survives feed-reducer swaps. */
-    private val _reducerState = MutableStateFlow(ReducerState())
-    val reducerState: StateFlow<ReducerState> = _reducerState.asStateFlow()
+    /** Automatic propagation: swap reducer → flatMapLatest picks up new state. */
+    val reducerState: StateFlow<ReducerState> = _activeReducer
+        .flatMapLatest { it.state }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReducerState())
 
-    private fun syncReducerState() {
-        _reducerState.value = feedReducer.state.value
-    }
-
-    fun onScrollPositionChanged(firstVisibleIndex: Int) {
-        feedReducer.onScrollPositionChanged(firstVisibleIndex)
-        syncReducerState()
-        _uiState.update { it.copy(events = feedReducer.state.value.visibleEvents) }
+    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
+        _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset)
     }
 
     fun onDotTapped() {
-        feedReducer.onDotTapped()
-        syncReducerState()
-        _uiState.update { it.copy(events = feedReducer.state.value.visibleEvents) }
+        _activeReducer.value.onDotTapped()
     }
 
     /** True when there are queued new posts (used by nav bar dot indicator). */
-    val hasNewTopPost: Boolean get() = _reducerState.value.showDot
+    val hasNewTopPost: Boolean get() = reducerState.value.showDot
 
     /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
     fun clearNewTopPost() { onDotTapped() }
@@ -201,7 +193,7 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
-        val oldest = _uiState.value.events.lastOrNull()?.createdAt ?: return
+        val oldest = _activeReducer.value.state.value.visibleEvents.lastOrNull()?.createdAt ?: return
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
         _displayLimit.value += 200
@@ -237,15 +229,19 @@ class FeedViewModel @Inject constructor(
                     _displayLimit.value = 200
                     cardHydrator.clearCache()
 
-                    // Create a new reducer for this feed key
+                    // Set loading BEFORE swapping reducer to prevent empty-state flash.
+                    // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
+                    _uiState.value = FeedUiState(loading = true, coverageStatus = CoverageStatus.LOADING)
+
+                    // Create a new reducer for this feed key — flatMapLatest on
+                    // _activeReducer auto-propagates the new reducer's state.
                     val feedKey = when (type) {
                         is FeedType.Global -> "global"
                         is FeedType.Following -> "following"
                         is FeedType.RelaySet -> "relayset-${type.dTag}"
                         is FeedType.SingleRelay -> "relay-${type.url}"
                     }
-                    feedReducer = FeedStateReducer(feedKey)
-                    syncReducerState()
+                    _activeReducer.value = FeedStateReducer(feedKey)
 
                     // Check coverage before deciding whether to fetch
                     val intent = CoverageIntent.HomeFeed()
@@ -306,8 +302,7 @@ class FeedViewModel @Inject constructor(
                     }
                 }
                 .collectLatest { rows ->
-                    feedReducer.onNewEvents(rows)
-                    syncReducerState()
+                    _activeReducer.value.onNewEvents(rows)
 
                     // Re-check coverage status from DB on each emission
                     val intent = CoverageIntent.HomeFeed()
@@ -315,7 +310,6 @@ class FeedViewModel @Inject constructor(
                         intent.scopeType, intent.scopeKey, intent.relaySetId
                     )
                     _uiState.value = FeedUiState(
-                        events = feedReducer.state.value.visibleEvents,
                         loading = false,
                         coverageStatus = status,
                     )

@@ -11,7 +11,6 @@ private const val TAG = "FeedState"
 
 data class ReducerState(
     val visibleEvents: List<FeedRow> = emptyList(),
-    val pendingEvents: List<FeedRow> = emptyList(),
     val unreadCount: Int = 0,
     val showDot: Boolean = false,
 )
@@ -20,109 +19,92 @@ data class ReducerState(
  * Per-feed-key state machine for new-notes gating.
  *
  * When the user is at the top of the list, new events merge immediately.
- * When scrolled down, new events queue behind a blue dot. Tapping the
- * dot or scrolling back to top flushes pending events.
+ * When scrolled down, new events are counted but the visible list stays
+ * stable. Tapping the blue dot or scrolling back to top flushes [latestRows].
+ *
+ * Key invariant: [latestRows] always holds the most recent Room emission.
+ * Flush always replaces visibleEvents with latestRows — never reconstructs
+ * from pending+visible.
  */
 class FeedStateReducer(private val feedKey: String) {
 
     private val _state = MutableStateFlow(ReducerState())
     val state: StateFlow<ReducerState> = _state.asStateFlow()
 
-    var isAtTop: Boolean = true
-        private set
+    /** Most recent Room emission — flush always uses this. */
+    private var latestRows: List<FeedRow> = emptyList()
+
+    /** IDs already counted as pending — prevents double-counting on repeated Room emissions. */
+    private var pendingIds: Set<String> = emptySet()
+
+    private var isAtTop: Boolean = true
 
     /**
      * Called when the list scroll position changes.
-     * If user scrolled back to top and there are pending events, auto-flush.
+     * Top = index 0 AND offset 0 (fully scrolled to the very top).
      */
-    fun onScrollPositionChanged(firstVisibleIndex: Int) {
+    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         val wasAtTop = isAtTop
-        isAtTop = firstVisibleIndex <= 1
+        isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
 
-        if (isAtTop && !wasAtTop && _state.value.pendingEvents.isNotEmpty()) {
+        if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
         }
     }
 
     /**
      * Called when Room emits a new list of events for this feed.
-     * Determines whether to merge immediately or queue.
+     *
+     * Always stores into [latestRows]. Uses [takeWhile] to count only
+     * LEADING unseen rows — stops at the first known ID so pagination
+     * appends are never miscounted as new posts.
      */
     fun onNewEvents(allEvents: List<FeedRow>) {
+        latestRows = allEvents
+
         _state.update { current ->
-            if (current.visibleEvents.isEmpty()) {
-                // Initial load — show everything
-                Log.d(TAG, "incoming feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
+            if (current.visibleEvents.isEmpty() || isAtTop) {
+                // Initial load or user at top — show everything
+                pendingIds = emptySet()
+                Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
                 ReducerState(visibleEvents = allEvents)
-            } else if (isAtTop) {
-                // User is at top — merge immediately
-                Log.d(TAG, "incoming feedKey=$feedKey atTop=true action=MERGE count=${allEvents.size}")
-                current.copy(
-                    visibleEvents = allEvents,
-                    pendingEvents = emptyList(),
-                    unreadCount = 0,
-                    showDot = false,
-                )
             } else {
-                // User is scrolled down — find new events and queue them
+                // User is scrolled down — count leading new rows
+                val allIds = allEvents.map { it.id }.toSet()
+                pendingIds = pendingIds.intersect(allIds)  // Drop IDs no longer in Room results
                 val visibleIds = current.visibleEvents.map { it.id }.toSet()
-                val newEvents = allEvents.filter { it.id !in visibleIds }
-                if (newEvents.isEmpty()) {
-                    // No new events, just updated engagement counts etc.
-                    current.copy(visibleEvents = refreshVisible(current.visibleEvents, allEvents))
+                val knownIds = visibleIds + pendingIds
+                val leadingNew = allEvents.takeWhile { it.id !in knownIds }
+
+                if (leadingNew.isEmpty()) {
+                    // No new posts at top — refresh engagement counts in-place
+                    val latestMap = allEvents.associateBy { it.id }
+                    val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
+                    current.copy(visibleEvents = refreshed)
                 } else {
-                    val pending = (newEvents + current.pendingEvents).distinctBy { it.id }
-                    val unread = pending.size
-                    Log.d(TAG, "incoming feedKey=$feedKey atTop=false action=QUEUE count=${newEvents.size}")
-                    Log.d(TAG, "dot feedKey=$feedKey unreadCount=$unread visible=true")
+                    pendingIds = pendingIds + leadingNew.map { it.id }.toSet()
+                    val unread = pendingIds.size
+                    Log.d(TAG, "feedKey=$feedKey atTop=false action=QUEUE leading=${leadingNew.size} total=$unread")
                     current.copy(
-                        pendingEvents = pending,
                         unreadCount = unread,
                         showDot = true,
-                        // Keep visible list stable — only update engagement counts
-                        visibleEvents = refreshVisible(current.visibleEvents, allEvents),
                     )
                 }
             }
         }
     }
 
-    /** User tapped the blue dot — flush all pending into visible. */
+    /** User tapped the blue dot — flush latestRows into visible. */
     fun onDotTapped() {
         flush("DOT_TAP")
     }
 
-    /** Reset on feed switch. */
-    fun reset() {
-        isAtTop = true
-        _state.value = ReducerState()
-    }
-
     private fun flush(reason: String) {
-        _state.update { current ->
-            val merged = (current.pendingEvents + current.visibleEvents)
-                .distinctBy { it.id }
-                .sortedByDescending { it.createdAt }
-            Log.d(TAG, "flush feedKey=$feedKey pending=${current.pendingEvents.size} reason=$reason")
-            current.copy(
-                visibleEvents = merged,
-                pendingEvents = emptyList(),
-                unreadCount = 0,
-                showDot = false,
-            )
-        }
+        val rows = latestRows
+        if (rows.isEmpty()) return
+        pendingIds = emptySet()
+        Log.d(TAG, "flush feedKey=$feedKey count=${rows.size} reason=$reason")
+        _state.value = ReducerState(visibleEvents = rows)
         isAtTop = true
-    }
-
-    /**
-     * Update engagement counts / author info on visible events without reordering.
-     * Preserves the user's scroll position by keeping the same order.
-     */
-    private fun refreshVisible(
-        visible: List<FeedRow>,
-        latest: List<FeedRow>,
-    ): List<FeedRow> {
-        val latestMap = latest.associateBy { it.id }
-        return visible.map { row -> latestMap[row.id] ?: row }
     }
 }

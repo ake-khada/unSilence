@@ -74,10 +74,11 @@ fun FeedScreen(
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── New-post flash animation tracking ──────────────────────────────────────
+    val events = reducerState.visibleEvents
     val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
     var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(state.events) {
-        val currentIds = state.events.map { it.id }.toSet()
+    LaunchedEffect(events) {
+        val currentIds = events.map { it.id }.toSet()
         if (previousEventIds.isNotEmpty()) {
             val freshIds = currentIds - previousEventIds
             for (id in freshIds) newEventIds[id] = true
@@ -89,7 +90,7 @@ fun FeedScreen(
     val videoScope = rememberVideoPlaybackScope(
         ownerId = "feed",
         holder = actionsViewModel.sharedPlayerHolder,
-        events = state.events,
+        events = events,
         listState = listState,
     )
 
@@ -127,11 +128,11 @@ fun FeedScreen(
         Crossfade(
             targetState = when {
                 state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
-                    && state.events.isEmpty() -> "loading"
-                state.coverageStatus == CoverageStatus.FAILED && state.events.isEmpty() -> "failed"
+                    && events.isEmpty() -> "loading"
+                state.coverageStatus == CoverageStatus.FAILED && events.isEmpty() -> "failed"
                 state.coverageStatus in listOf(CoverageStatus.COMPLETE, CoverageStatus.PARTIAL)
-                    && state.events.isEmpty() -> "empty"
-                !state.loading && state.events.isEmpty() -> "empty"
+                    && events.isEmpty() -> "empty"
+                !state.loading && events.isEmpty() -> "empty"
                 else -> "content"
             },
             label = "feedState",
@@ -197,7 +198,7 @@ fun FeedScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     eventFeedItems(
-                        events = state.events,
+                        events = events,
                         engagement = engagement,
                         callbacks = callbacks,
                         videoScope = videoScope,
@@ -210,14 +211,19 @@ fun FeedScreen(
 
                 // Scroll position tracking + pagination (merged observer)
                 LaunchedEffect(Unit) {
-                    snapshotFlow { listState.firstVisibleItemIndex }
-                        .collect { index ->
-                            viewModel.onScrollPositionChanged(index)
-                            val total = listState.layoutInfo.totalItemsCount
-                            if (total > 0 && index > total - 10) {
-                                viewModel.loadMore()
-                            }
+                    snapshotFlow {
+                        Triple(
+                            listState.firstVisibleItemIndex,
+                            listState.firstVisibleItemScrollOffset,
+                            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0,
+                        )
+                    }.collect { (index, offset, lastVisible) ->
+                        viewModel.onScrollPositionChanged(index, offset)
+                        val total = listState.layoutInfo.totalItemsCount
+                        if (total > 0 && lastVisible >= total - 10) {
+                            viewModel.loadMore()
                         }
+                    }
                 }
 
                 // Blue dot indicator for new posts
@@ -258,7 +264,7 @@ fun FeedScreen(
                     .distinctUntilChanged()
                     .collectLatest { visibleIds ->
                         viewModel.fetchEngagementForVisible(visibleIds)
-                        val visibleEvents = state.events.filter { it.id in visibleIds }
+                        val visibleEvents = events.filter { it.id in visibleIds }
                         viewModel.hydrateVisibleCards(visibleEvents)
                     }
                 }
