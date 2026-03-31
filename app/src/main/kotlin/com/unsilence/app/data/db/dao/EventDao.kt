@@ -53,7 +53,7 @@ interface EventDao {
      * Uses a semi-join subquery instead of INNER JOIN to avoid row duplication when
      * an event is associated with multiple relays in the list.
      *
-     * Top-level posts only: reply_to_id IS NULL AND root_id IS NULL (reposts exempt).
+     * [includeReplies]: 1 = show full timeline (relay browse), 0 = top-level only (global).
      * Engagement filters applied via OR — each is opt-in (0 = skip check, 1 = require ≥ 1).
      */
     @Query("""
@@ -84,7 +84,7 @@ interface EventDao {
         LEFT JOIN event_stats s ON s.event_id = e.id
         WHERE e.id IN (SELECT er.event_id FROM event_relays er WHERE er.relay_url IN (:relayUrls))
           AND e.kind      IN (:kinds)
-          AND ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
+          AND ((:includeReplies = 1) OR ((e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6))
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
           AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
               OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
@@ -98,6 +98,7 @@ interface EventDao {
         relayUrls: List<String>,
         kinds: List<Int>,
         sinceTimestamp: Long,
+        includeReplies: Int,
         requireReposts: Int,
         requireReactions: Int,
         requireReplies: Int,

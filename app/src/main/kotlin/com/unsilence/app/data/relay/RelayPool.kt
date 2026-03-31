@@ -319,7 +319,18 @@ class RelayPool @Inject constructor(
         conn.send(postsReq)
         conn.send(mediaReq)
         conn.send(longformReq)
-        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subscriptions)")
+
+        // Replay any persistent subs targeted at this specific relay that were
+        // registered before the connection existed (e.g. relay-global-* from
+        // startGlobalFeed called before connect in FeedViewModel).
+        for ((subId, sub) in persistentSubs) {
+            if (sub.targetRelayUrl == conn.url) {
+                conn.send(sub.reqJson)
+                Log.d(TAG, "Replayed targeted sub '$subId' on ${conn.url}")
+            }
+        }
+
+        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subs + targeted replays)")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -1299,12 +1310,14 @@ class RelayPool @Inject constructor(
                     put("limit", JsonPrimitive(300))
                 })
             }.toString()
-            // Always register so replayPersistentSubs picks it up after
-            // connect/AUTH even if the connection doesn't exist yet.
+            // Always register so subscribeAfterConnect / replayPersistentSubs
+            // picks it up even if the connection doesn't exist yet.
             // Scoped to this relay — won't replay on other relays.
             registerPersistentSub(subId, req, targetRelayUrl = url)
             // Send immediately if already connected
-            connections[url]?.send(req)
+            val conn = connections[url]
+            Log.d(TAG, "startGlobalFeed: url=$url exists=${conn != null} keys=${connections.keys}")
+            conn?.send(req)
         }
         Log.d(TAG, "Started global feed on ${relayUrls.size} relay(s)")
     }
