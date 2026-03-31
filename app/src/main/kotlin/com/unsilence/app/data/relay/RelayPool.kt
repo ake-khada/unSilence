@@ -51,6 +51,9 @@ data class PersistentSub(
 /** A search result correlated with the token of the search session that produced it. */
 data class SearchResult(val token: Long, val eventId: String)
 
+/** Why a relay connection exists — a relay can hold multiple purposes simultaneously. */
+enum class ConnectionPurpose { PERSISTENT, BROWSE, OUTBOX }
+
 /**
  * Manages multiple relay WebSocket connections for the global feed.
  *
@@ -73,13 +76,34 @@ class RelayPool @Inject constructor(
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
-    /**
-     * URLs currently owned exclusively by browse mode.
-     * Connections in this set skip: subscribeAfterConnect, replayPersistentSubs,
-     * AUTH persistent replay, and CLOSED persistent replay.
-     * Populated by [RelayBrowseSession.start], cleared by [RelayBrowseSession.stop].
-     */
-    val browseOnlyUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    // ── Connection purpose tracking ────────────────────────────────────────
+    // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
+    // Persistent sub replay is only skipped when a relay is browse-only.
+    private val connectionPurposes = ConcurrentHashMap<String, MutableSet<ConnectionPurpose>>()
+
+    fun addPurpose(url: String, purpose: ConnectionPurpose) {
+        connectionPurposes.computeIfAbsent(url) { ConcurrentHashMap.newKeySet() }.add(purpose)
+        Log.d(TAG, "Purpose + $purpose on $url (now: ${connectionPurposes[url]})")
+    }
+
+    fun removePurpose(url: String, purpose: ConnectionPurpose) {
+        connectionPurposes[url]?.remove(purpose)
+        if (connectionPurposes[url]?.isEmpty() == true) {
+            connectionPurposes.remove(url)
+        }
+        Log.d(TAG, "Purpose - $purpose on $url (now: ${connectionPurposes[url] ?: "none"})")
+    }
+
+    fun hasPurpose(url: String, purpose: ConnectionPurpose): Boolean =
+        connectionPurposes[url]?.contains(purpose) == true
+
+    fun isBrowseOnly(url: String): Boolean =
+        hasPurpose(url, ConnectionPurpose.BROWSE) &&
+        !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
+        !hasPurpose(url, ConnectionPurpose.OUTBOX)
+
+    fun hasAnyPurpose(url: String): Boolean =
+        connectionPurposes[url]?.isNotEmpty() == true
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
@@ -277,8 +301,8 @@ class RelayPool @Inject constructor(
             connections[url] = conn
             scope.launch {
                 conn.connect()
-                if (url in browseOnlyUrls) {
-                    Log.d(TAG, "BrowseIsolation url=$url purpose=BROWSE skipSubscribeAfterConnect=true")
+                if (isBrowseOnly(url)) {
+                    Log.d(TAG, "Replay check for $url: purposes=${connectionPurposes[url] ?: "none"}, browseOnly=true — skip subscribeAfterConnect")
                 } else {
                     subscribeAfterConnect(conn)
                 }
@@ -381,7 +405,7 @@ class RelayPool @Inject constructor(
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
                                 // Already authed — replay the specific closed sub (not on browse-only)
-                                if (conn.url !in browseOnlyUrls) {
+                                if (!isBrowseOnly(conn.url)) {
                                     persistentSubs[closedSubId]?.let { sub ->
                                         val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
                                                     else System.currentTimeMillis() / 1000L - 300
@@ -389,7 +413,7 @@ class RelayPool @Inject constructor(
                                         Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
                                     }
                                 } else {
-                                    Log.d(TAG, "BrowseIsolation skip CLOSED replay '$closedSubId' on browse-only ${conn.url}")
+                                    Log.d(TAG, "Replay check for ${conn.url}: purposes=${connectionPurposes[conn.url] ?: "none"}, browseOnly=true — skip CLOSED replay '$closedSubId'")
                                 }
                             } else {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached")
@@ -1195,8 +1219,8 @@ class RelayPool @Inject constructor(
      * Updates the `since` filter to avoid re-fetching old events.
      */
     private fun replayPersistentSubs(conn: RelayConnection) {
-        if (conn.url in browseOnlyUrls) {
-            Log.d(TAG, "BrowseIsolation url=${conn.url} purpose=BROWSE skipPersistentReplay=true")
+        if (isBrowseOnly(conn.url)) {
+            Log.d(TAG, "Replay check for ${conn.url}: purposes=${connectionPurposes[conn.url] ?: "none"}, browseOnly=true — skip persistent replay")
             return
         }
         val nowSeconds = System.currentTimeMillis() / 1000L
@@ -1214,7 +1238,7 @@ class RelayPool @Inject constructor(
             replayCount++
             Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (since=$since)")
         }
-        Log.d(TAG, "BrowseIsolation url=${conn.url} purpose=PERSISTENT replayPersistent=true count=$replayCount")
+        Log.d(TAG, "Replay check for ${conn.url}: purposes=${connectionPurposes[conn.url] ?: "none"}, replayed $replayCount persistent sub(s)")
     }
 
     /**
@@ -1257,10 +1281,10 @@ class RelayPool @Inject constructor(
                     Log.d(TAG, "AUTH: sent auth response to $url")
                     // Replay persistent subs — but not on browse-only relays.
                     // Browse session handles its own resend via onRelayReconnected.
-                    if (url !in browseOnlyUrls) {
+                    if (!isBrowseOnly(url)) {
                         replayPersistentSubs(conn)
                     } else {
-                        Log.d(TAG, "AUTH: skip persistent replay on browse-only $url")
+                        Log.d(TAG, "AUTH: purposes=${connectionPurposes[url] ?: "none"}, browseOnly=true — skip persistent replay, notify browse session")
                         onRelayReconnected?.invoke(url)
                     }
                 } else {
@@ -1317,10 +1341,11 @@ class RelayPool @Inject constructor(
     fun disconnectAll() {
         connections.values.forEach { it.close() }
         connections.clear()
-        browseOnlyUrls.clear()
+        connectionPurposes.clear()
         profileFetchAttempted.clear()
         authenticatedRelays.clear()
         authInFlight.clear()
         pendingChallenges.clear()
+        Log.d(TAG, "disconnectAll: all connections, purposes, and auth state cleared")
     }
 }

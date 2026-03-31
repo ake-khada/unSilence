@@ -11,10 +11,12 @@ import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.flow.filter
@@ -95,6 +97,9 @@ class AppBootstrapper @Inject constructor(
 
         // ── Step 1: Connect to indexer relays ───────────────────────────────
         val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+        for (url in indexerUrls) {
+            normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+        }
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Step 1: $ready indexer relay(s) connected")
 
@@ -155,6 +160,9 @@ class AppBootstrapper @Inject constructor(
             .filter { it.marker == null || it.marker == "read" }
             .map { it.relayUrl }
         val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+        for (url in globalUrls) {
+            normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+        }
         relayPool.connect(globalUrls, isHomeFeed = true)
         Log.d(TAG, "Step 5: global relays connecting (${globalUrls.size} URLs)")
 

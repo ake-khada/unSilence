@@ -9,6 +9,7 @@ import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
@@ -224,6 +225,9 @@ class FeedViewModel @Inject constructor(
             // are sent. Bootstrap may update kind-10002 later, which flatMapLatest
             // picks up on next feed type emission.
             val initialUrls = resolveGlobalUrls()
+            for (url in initialUrls) {
+                normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+            }
             relayPool.connect(initialUrls, isHomeFeed = true)
 
             combine(_feedType, _filter) { type, filter -> type to filter }
@@ -264,6 +268,9 @@ class FeedViewModel @Inject constructor(
                             browseSession.stop()
                             val globalUrls = resolveGlobalUrls()
                             currentRelayUrls = globalUrls
+                            for (url in globalUrls) {
+                                normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+                            }
                             relayPool.connect(globalUrls, isHomeFeed = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(globalUrls, filter, limit)
