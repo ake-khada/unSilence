@@ -96,10 +96,9 @@ class AppBootstrapper @Inject constructor(
         }
 
         // ── Step 1: Connect to indexer relays ───────────────────────────────
+        // Indexer relays are bootstrap-only (kind-3, kind-10002 lookups) — NOT tagged
+        // PERSISTENT because they don't host feed subs.
         val indexerUrls = relayConfigDao.getIndexerRelayUrls()
-        for (url in indexerUrls) {
-            normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
-        }
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Step 1: $ready indexer relay(s) connected")
 

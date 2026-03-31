@@ -78,7 +78,8 @@ class RelayBrowseSession @Inject constructor(
         }
         // Clear engagement routing.
         relayPool.browseEngagementTargets = emptyList()
-        // Remove BROWSE purpose. Only disconnect if no other purpose holds the relay.
+        // Remove BROWSE purpose. releaseIfUnused is currently a no-op (connections
+        // are pooled), but gated on hasAnyPurpose so it's safe if it gains real logic.
         for (url in activeTarget) {
             relayPool.removePurpose(url, ConnectionPurpose.BROWSE)
             if (!relayPool.hasAnyPurpose(url)) {
