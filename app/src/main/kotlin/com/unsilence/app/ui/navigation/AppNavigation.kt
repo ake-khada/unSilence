@@ -9,6 +9,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -67,6 +71,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -99,6 +104,7 @@ import com.unsilence.app.ui.thread.ThreadScreen
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import kotlin.math.absoluteValue
+import kotlinx.coroutines.launch
 
 private val NavUnselected = Color(0xFF555555)
 
@@ -256,9 +262,10 @@ fun AppNavigation(onLogout: () -> Unit) {
                     // Left: app name
                     Text(
                         text = "unSilence",
-                        color = Cyan.copy(alpha = 0.6f),
+                        color = Color.White,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp,
                         modifier = Modifier.align(Alignment.CenterStart),
                     )
 
@@ -280,7 +287,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                         Icon(
                             imageVector        = Icons.Filled.Tune,
                             contentDescription = "Filter",
-                            tint               = if (currentFilter.isNonDefault) Cyan else NavUnselected,
+                            tint               = if (currentFilter.isNonDefault) Cyan else Color.White.copy(alpha = 0.7f),
                             modifier           = Modifier
                                 .size(Sizing.navIcon)
                                 .clickable { showFilter = true },
@@ -288,7 +295,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                         Icon(
                             imageVector        = Icons.Filled.Edit,
                             contentDescription = "New post",
-                            tint               = Cyan,
+                            tint               = Color.White.copy(alpha = 0.7f),
                             modifier           = Modifier
                                 .size(Sizing.navIcon)
                                 .clickable { showCompose = true },
@@ -465,7 +472,7 @@ private fun FeedCarousel(
     if (realCount == 1) {
         Text(
             text = feedList[0].second,
-            color = Cyan,
+            color = Color.White,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = modifier
@@ -517,18 +524,48 @@ private fun FeedCarousel(
     }
 
     val pageHeightDp = 26.dp
+    val coroutineScope = rememberCoroutineScope()
+    var engaged by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
             .height(pageHeightDp * 1.7f)
             .widthIn(min = 80.dp, max = 150.dp)
-            .clip(RoundedCornerShape(10.dp)),
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (engaged) Cyan.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { onTap() })
+            }
+            .pointerInput(pagerState) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { engaged = true },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        coroutineScope.launch {
+                            pagerState.scrollBy(-dragAmount.y)
+                        }
+                    },
+                    onDragEnd = {
+                        engaged = false
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(pagerState.currentPage)
+                        }
+                    },
+                    onDragCancel = {
+                        engaged = false
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(pagerState.currentPage)
+                        }
+                    },
+                )
+            },
         contentAlignment = Alignment.Center,
     ) {
         VerticalPager(
             state = pagerState,
             pageSize = PageSize.Fixed(pageHeightDp),
             beyondViewportPageCount = 1,
+            userScrollEnabled = false,
             modifier = Modifier
                 .height(pageHeightDp * 1.7f)
                 .fillMaxWidth(),
@@ -546,17 +583,12 @@ private fun FeedCarousel(
                         val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
                         scaleX = scale
                         scaleY = scale
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onTap,
-                    ),
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = feedList[realIdx].second,
-                    color = Cyan,
+                    color = Color.White,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,

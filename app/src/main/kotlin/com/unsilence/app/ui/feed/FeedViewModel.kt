@@ -358,6 +358,14 @@ class FeedViewModel @Inject constructor(
                 .collectLatest { rows ->
                     _activeReducer.value.onNewEvents(rows)
 
+                    // Eagerly hydrate profiles for the first page of events so
+                    // avatars appear immediately, not only after debounced scroll.
+                    if (rows.isNotEmpty()) {
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            cardHydrator.hydrateVisibleCards(rows.take(20))
+                        }
+                    }
+
                     // Re-check coverage status from DB on each emission
                     val intent = CoverageIntent.HomeFeed()
                     val status = coverageRepository.getStatus(

@@ -17,8 +17,8 @@ import kotlinx.coroutines.flow.Flow
  *   - mention             → the mentioning event
  *
  * [targetNoteContent] is the snippet shown below the action text — the user's
- *   original note for reactions/reposts/zaps/replies, the mentioning note's
- *   text for mentions.
+ *   original note for reactions/reposts/zaps, the reply text for replies,
+ *   the mentioning note's text for mentions.
  */
 data class NotificationRow(
     @ColumnInfo(name = "id")                   val id: String,
@@ -76,7 +76,7 @@ interface NotificationsDao {
             u.display_name              AS actor_display_name,
             u.picture                   AS actor_picture,
             ev.id                       AS target_note_id,
-            COALESCE(te.content, '')    AS target_note_content,
+            COALESCE(ev.content, '')    AS target_note_content,
             ev.created_at               AS created_at
         FROM events ev
         LEFT JOIN users  u  ON u.pubkey  = ev.pubkey
