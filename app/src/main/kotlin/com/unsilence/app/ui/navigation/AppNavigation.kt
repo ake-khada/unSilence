@@ -9,9 +9,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,6 +73,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -105,6 +107,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private val NavUnselected = Color(0xFF555555)
 
@@ -533,31 +536,44 @@ private fun FeedCarousel(
             .widthIn(min = 80.dp, max = 150.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(if (engaged) Cyan.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
-            .pointerInput(Unit) {
-                detectTapGestures(onTap = { onTap() })
-            }
             .pointerInput(pagerState) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { engaged = true },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        coroutineScope.launch {
-                            pagerState.scrollBy(-dragAmount.y)
+                val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+
+                    // Wait for finger lift (tap) or timeout (long press)
+                    val liftedBeforeTimeout = withTimeoutOrNull(longPressTimeout) {
+                        waitForUpOrCancellation()
+                    }
+
+                    if (liftedBeforeTimeout != null) {
+                        // Finger lifted before timeout → TAP
+                        onTap()
+                    } else {
+                        // Long press reached → enter drag mode
+                        engaged = true
+                        try {
+                            do {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (change.pressed) {
+                                    val dragY = change.positionChange().y
+                                    change.consume()
+                                    coroutineScope.launch {
+                                        pagerState.scrollBy(-dragY)
+                                    }
+                                } else {
+                                    break
+                                }
+                            } while (true)
+                        } finally {
+                            engaged = false
+                            coroutineScope.launch {
+                                pagerState.animateScrollToPage(pagerState.currentPage)
+                            }
                         }
-                    },
-                    onDragEnd = {
-                        engaged = false
-                        coroutineScope.launch {
-                            pagerState.animateScrollToPage(pagerState.currentPage)
-                        }
-                    },
-                    onDragCancel = {
-                        engaged = false
-                        coroutineScope.launch {
-                            pagerState.animateScrollToPage(pagerState.currentPage)
-                        }
-                    },
-                )
+                    }
+                }
             },
         contentAlignment = Alignment.Center,
     ) {
