@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +47,7 @@ import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -65,6 +67,7 @@ fun FeedScreen(
 ) {
     val state         by viewModel.uiState.collectAsStateWithLifecycle()
     val reducerState  by viewModel.reducerState.collectAsStateWithLifecycle()
+    val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -126,6 +129,13 @@ fun FeedScreen(
             .fillMaxSize()
             .background(Black),
     ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+        // ── Notes / Conversations tab row ────────────────────────────────
+        FeedContentTabs(
+            selected = contentFilter,
+            onSelect = { viewModel.setContentFilter(it) },
+        )
+
         Crossfade(
             targetState = when {
                 state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
@@ -137,6 +147,7 @@ fun FeedScreen(
                 else -> "content"
             },
             label = "feedState",
+            modifier = Modifier.weight(1f),
         ) { screenState ->
         when (screenState) {
             "loading" -> {
@@ -227,32 +238,6 @@ fun FeedScreen(
                     }
                 }
 
-                // Blue dot indicator for new posts
-                if (reducerState.showDot) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp),
-                        contentAlignment = Alignment.TopCenter,
-                    ) {
-                        Text(
-                            text = "${reducerState.unreadCount} new",
-                            color = Black,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .background(Cyan, androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                                .clickable {
-                                    viewModel.onDotTapped()
-                                    coroutineScope.launch {
-                                        listState.animateScrollToItem(0)
-                                    }
-                                }
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-                    }
-                }
-
                 // Engagement fetch: only for visible items, debounced
                 LaunchedEffect(listState) {
                     snapshotFlow {
@@ -271,6 +256,33 @@ fun FeedScreen(
                 }
             }
         }
+        } // Crossfade
+        } // Column
+
+        // Blue dot indicator for new posts — floated over the column
+        if (reducerState.showDot) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Text(
+                    text = "${reducerState.unreadCount} new",
+                    color = Black,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(Cyan, androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                        .clickable {
+                            viewModel.onDotTapped()
+                            coroutineScope.launch {
+                                listState.animateScrollToItem(0)
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
         }
     }
 
@@ -296,6 +308,35 @@ fun FeedScreen(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
         )
+    }
+}
+
+@Composable
+private fun FeedContentTabs(
+    selected: FeedContentFilter,
+    onSelect: (FeedContentFilter) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Black)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        for (tab in FeedContentFilter.entries) {
+            val label = when (tab) {
+                FeedContentFilter.NOTES_ONLY -> "Notes"
+                FeedContentFilter.REPLIES_ONLY -> "Conversations"
+            }
+            val isSelected = tab == selected
+            Text(
+                text = label,
+                color = if (isSelected) Cyan else White.copy(alpha = 0.5f),
+                fontSize = 14.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.clickable { onSelect(tab) },
+            )
+        }
     }
 }
 

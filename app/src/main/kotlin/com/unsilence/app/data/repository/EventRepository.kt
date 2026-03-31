@@ -23,7 +23,7 @@ class EventRepository @Inject constructor(
         relayUrls: List<String>,
         filter: FeedFilter,
         limit: Int = 300,
-        includeReplies: Boolean = false,
+        contentFilter: Int = 1,
     ): Flow<List<FeedRow>> {
         val sinceTimestamp = filter.sinceHours?.let {
             System.currentTimeMillis() / 1000L - it * 3600L
@@ -32,7 +32,7 @@ class EventRepository @Inject constructor(
             relayUrls        = relayUrls,
             kinds            = filter.enabledKinds,
             sinceTimestamp   = sinceTimestamp,
-            includeReplies   = if (includeReplies) 1 else 0,
+            contentFilter    = contentFilter,
             requireReposts   = if (filter.requireReposts)   1 else 0,
             requireReactions = if (filter.requireReactions) 1 else 0,
             requireReplies   = if (filter.requireReplies)   1 else 0,
@@ -44,13 +44,14 @@ class EventRepository @Inject constructor(
     fun threadFlow(eventId: String): Flow<List<FeedRow>> =
         eventDao.threadFlow(eventId)
 
-    fun followingFeedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> {
+    fun followingFeedFlow(filter: FeedFilter, limit: Int = 300, contentFilter: Int = 1): Flow<List<FeedRow>> {
         val sinceTimestamp = filter.sinceHours?.let {
             (System.currentTimeMillis() / 1000) - (it * 3600L)
         } ?: 0L
         return eventDao.followingFeedFlow(
             kinds            = filter.enabledKinds,
             sinceTimestamp   = sinceTimestamp,
+            contentFilter    = contentFilter,
             requireReposts   = if (filter.requireReposts)   1 else 0,
             requireReactions = if (filter.requireReactions) 1 else 0,
             requireReplies   = if (filter.requireReplies)   1 else 0,

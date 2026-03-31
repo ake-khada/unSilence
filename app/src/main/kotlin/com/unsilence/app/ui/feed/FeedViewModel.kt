@@ -48,6 +48,11 @@ sealed class FeedType {
     data class  SingleRelay(val url: String, val label: String) : FeedType()
 }
 
+enum class FeedContentFilter(val value: Int) {
+    NOTES_ONLY(1),
+    REPLIES_ONLY(2),
+}
+
 data class FeedUiState(
     val loading: Boolean = true,
     val coverageStatus: CoverageStatus = CoverageStatus.NEVER_FETCHED,
@@ -103,6 +108,11 @@ class FeedViewModel @Inject constructor(
 
     private val _filter = MutableStateFlow(FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
+
+    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
+    val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
+
+    fun setContentFilter(f: FeedContentFilter) { _contentFilter.value = f }
 
     /** Signed-in user's avatar URL, for nav icons. */
     val userAvatarUrl: StateFlow<String?> = keyManager.getPublicKeyHex()?.let { pubkey ->
@@ -276,8 +286,8 @@ class FeedViewModel @Inject constructor(
             }
             relayPool.connect(initialUrls, isHomeFeed = true)
 
-            combine(_feedType, _filter) { type, filter -> type to filter }
-                .flatMapLatest { (type, filter) ->
+            combine(_feedType, _filter, _contentFilter) { type, filter, cf -> Triple(type, filter, cf) }
+                .flatMapLatest { (type, filter, cf) ->
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
@@ -289,12 +299,13 @@ class FeedViewModel @Inject constructor(
 
                     // Create a new reducer for this feed key — flatMapLatest on
                     // _activeReducer auto-propagates the new reducer's state.
-                    val newKey = when (type) {
+                    val feedPrefix = when (type) {
                         is FeedType.Global -> "global"
                         is FeedType.Following -> "following"
                         is FeedType.RelaySet -> "relayset-${type.dTag}"
                         is FeedType.SingleRelay -> "relay-${type.url}"
                     }
+                    val newKey = "$feedPrefix-${cf.name}"
                     _activeReducer.value = FeedStateReducer(newKey)
 
                     // Check coverage before deciding whether to fetch
@@ -313,6 +324,7 @@ class FeedViewModel @Inject constructor(
                         }
                     }
 
+                    val cfValue = cf.value
                     when (type) {
                         is FeedType.Global    -> {
                             browseSession.stop()
@@ -323,7 +335,7 @@ class FeedViewModel @Inject constructor(
                             }
                             relayPool.connect(globalUrls, isHomeFeed = true)
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(globalUrls, filter, limit)
+                                eventRepository.feedFlow(globalUrls, filter, limit, contentFilter = cfValue)
                             }
                         }
                         is FeedType.Following -> {
@@ -331,7 +343,7 @@ class FeedViewModel @Inject constructor(
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.followingFeedFlow(filter, limit)
+                                eventRepository.followingFeedFlow(filter, limit, contentFilter = cfValue)
                             }
                         }
                         is FeedType.RelaySet  -> {
@@ -342,7 +354,7 @@ class FeedViewModel @Inject constructor(
                             currentRelayUrls = setUrls
                             browseSession.start(setUrls)
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(setUrls, filter, limit, includeReplies = true)
+                                eventRepository.feedFlow(setUrls, filter, limit, contentFilter = cfValue)
                             }
                         }
                         is FeedType.SingleRelay -> {
@@ -350,7 +362,7 @@ class FeedViewModel @Inject constructor(
                             currentRelayUrls = singleUrl
                             browseSession.start(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(singleUrl, filter, limit, includeReplies = true)
+                                eventRepository.feedFlow(singleUrl, filter, limit, contentFilter = cfValue)
                             }
                         }
                     }
