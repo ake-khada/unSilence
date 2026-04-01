@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -63,6 +66,7 @@ import kotlinx.coroutines.flow.filter
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
+    topBarShown: Boolean = true,
     onNoteClick: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
@@ -140,11 +144,20 @@ fun FeedScreen(
             .background(Black),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-        // ── Notes / Conversations tab row ────────────────────────────────
-        FeedContentTabs(
-            selected = contentFilter,
-            onSelect = { viewModel.setContentFilter(it) },
+        // ── Notes / Conversations tab row (hides with immersive scroll) ─
+        val tabHeight by animateDpAsState(
+            targetValue = if (topBarShown) 48.dp else 0.dp,
+            animationSpec = tween(durationMillis = 200),
+            label = "tabRowHeight",
         )
+        if (tabHeight > 0.dp) {
+            Box(modifier = Modifier.height(tabHeight).fillMaxWidth()) {
+                FeedContentTabs(
+                    selected = contentFilter,
+                    onSelect = { viewModel.setContentFilter(it) },
+                )
+            }
+        }
 
         // ── Swipe left/right to switch Notes ↔ Conversations ──────────
         val swipeDrag = remember { mutableFloatStateOf(0f) }
@@ -249,6 +262,7 @@ fun FeedScreen(
                         newEventIds = newEventIds.keys,
                         onNewPostAnimated = { newEventIds.remove(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
+                        showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                     )
                 }
 

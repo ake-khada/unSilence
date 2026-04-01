@@ -230,14 +230,28 @@ fun NoteCard(
         runCatching { NostrJson.parseToJsonElement(row.content).jsonObject }.getOrNull()
     } else null
 
+    // For kind 6 with no embedded JSON (bridges like mostr.pub), fetch the
+    // referenced event via the e-tag so the card renders actual content.
+    val repostTargetId = if (row.kind == 6) extractRepostTargetId(row.tags) else null
+    val fetchedRepostEvent by produceState<EventEntity?>(null, row.id) {
+        if (row.kind == 6 && boostedJson == null && repostTargetId != null && lookupEvent != null) {
+            value = lookupEvent.invoke(repostTargetId)
+        }
+    }
+
     val effectivePubkey = boostedJson?.get("pubkey")?.jsonPrimitive?.content
+        ?: fetchedRepostEvent?.pubkey
         ?: if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) ?: row.pubkey
         else row.pubkey
-    val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull ?: row.createdAt
-    val effectiveContent   = boostedJson?.get("content")?.jsonPrimitive?.content ?: row.content
+    val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull
+        ?: fetchedRepostEvent?.createdAt
+        ?: row.createdAt
+    val effectiveContent = boostedJson?.get("content")?.jsonPrimitive?.content
+        ?: fetchedRepostEvent?.content
+        ?: row.content
 
     // For kind-6 reposts, navigate to the referenced event, not the wrapper
-    val navigateId = if (row.kind == 6) extractRepostTargetId(row.tags) ?: row.id else row.id
+    val navigateId = if (row.kind == 6) repostTargetId ?: row.id else row.id
 
     // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
     val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
@@ -345,7 +359,8 @@ fun NoteCard(
             ) {
                 AvatarImage(
                     pubkey   = effectivePubkey,
-                    picture  = if (boostedJson == null) row.authorPicture else originalAuthorProfile?.picture,
+                    picture  = if (boostedJson == null && fetchedRepostEvent == null) row.authorPicture
+                               else originalAuthorProfile?.picture,
                     modifier = Modifier.size(Sizing.avatar),
                 )
                 Spacer(Modifier.width(Spacing.small))
@@ -354,7 +369,7 @@ fun NoteCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text       = if (boostedJson != null) {
+                        text       = if (boostedJson != null || fetchedRepostEvent != null) {
                             originalAuthorProfile?.displayName?.takeIf { it.isNotBlank() }
                                 ?: originalAuthorProfile?.name?.takeIf { it.isNotBlank() }
                                 ?: "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"
@@ -368,7 +383,7 @@ fun NoteCard(
                         overflow   = TextOverflow.Ellipsis,
                         modifier   = Modifier.weight(1f, fill = false),
                     )
-                    if (boostedJson == null && !row.authorNip05.isNullOrBlank()) {
+                    if (boostedJson == null && fetchedRepostEvent == null && !row.authorNip05.isNullOrBlank()) {
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             imageVector        = Icons.Filled.Verified,
@@ -615,7 +630,7 @@ private fun ShimmerBox(modifier: Modifier = Modifier) {
  * If the network load fails, the IdentIcon underneath remains visible.
  */
 @Composable
-private fun AvatarImage(pubkey: String, picture: String?, modifier: Modifier = Modifier) {
+internal fun AvatarImage(pubkey: String, picture: String?, modifier: Modifier = Modifier) {
     Box(modifier = modifier.clip(CircleShape)) {
         IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
         if (!picture.isNullOrBlank()) {
@@ -1685,7 +1700,7 @@ private fun LinkChip(url: String) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-private val FeedRow.displayName: String?
+internal val FeedRow.displayName: String?
     get() = authorDisplayName?.takeIf { it.isNotBlank() }
          ?: authorName?.takeIf { it.isNotBlank() }
 
@@ -1695,7 +1710,7 @@ internal val FeedRow.engagementId: String
 /** "user@domain.com" → "domain.com"; identity-free "_@domain.com" → "domain.com". */
 private fun nip05Domain(nip05: String): String = nip05.substringAfter("@", nip05)
 
-private fun relativeTime(createdAtSeconds: Long): String {
+internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
     return when {
         diffMs < TimeUnit.MINUTES.toMillis(1) -> "now"

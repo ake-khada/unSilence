@@ -267,9 +267,6 @@ fun ArticleCard(
     }
 }
 
-private val FeedRow.displayName: String?
-    get() = authorDisplayName?.takeIf { it.isNotBlank() }
-         ?: authorName?.takeIf { it.isNotBlank() }
 
 private fun articleRelativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
