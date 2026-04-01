@@ -54,6 +54,7 @@ import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
+import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -262,17 +263,17 @@ fun ProfileScreen(
                     }
                 }
 
-                // Bio / about
+                // Bio / about (with inline @mention resolution)
                 val about = user?.about?.takeIf { it.isNotBlank() }
                 if (about != null) {
-                    Text(
-                        text      = about,
-                        color     = Color.White,
-                        fontSize  = 14.sp,
-                        textAlign = TextAlign.Center,
-                        maxLines  = 3,
-                        overflow  = TextOverflow.Ellipsis,
-                        modifier  = Modifier
+                    NostrRichText(
+                        content       = about,
+                        lookupProfile = actionsViewModel::lookupProfile,
+                        onAuthorClick = onAuthorClick,
+                        onTextClick   = {},
+                        maxLines      = 3,
+                        overflow      = TextOverflow.Ellipsis,
+                        modifier      = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )

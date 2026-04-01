@@ -1365,9 +1365,8 @@ private fun EmbeddedQuoteCard(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (nestDepth == 0) Color(0xFF0A0A0A) else Color(0xFF0D0D0D))
-            .border(0.5.dp, if (nestDepth == 0) Color(0xFF2A2A2A) else Color(0xFF333333), RoundedCornerShape(8.dp))
+            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
             .clickable { onNoteClick(eventId) }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
@@ -1379,14 +1378,14 @@ private fun EmbeddedQuoteCard(
                     AvatarImage(
                         pubkey   = loadedEvent.pubkey,
                         picture  = author?.picture,
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(24.dp),
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text     = author?.displayName?.takeIf { it.isNotBlank() }
                             ?: author?.name?.takeIf { it.isNotBlank() }
                             ?: "${loadedEvent.pubkey.take(6)}…${loadedEvent.pubkey.takeLast(4)}",
-                        color    = MaterialTheme.colorScheme.onSurface,
+                        color    = Color.White.copy(alpha = 0.7f),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 13.sp,
                         maxLines = 1,
@@ -1409,8 +1408,8 @@ private fun EmbeddedQuoteCard(
                 if (cleanContent.isNotBlank()) {
                     Text(
                         text     = cleanContent,
-                        color    = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                        fontSize = 13.sp,
+                        color    = Color.White.copy(alpha = 0.7f),
+                        fontSize = 14.sp,
                         lineHeight = 18.sp,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
@@ -1461,7 +1460,7 @@ private fun EmbeddedQuoteCard(
 
 /** Renders note text with nostr profile references as inline @displayName mentions. */
 @Composable
-private fun NostrRichText(
+internal fun NostrRichText(
     content: String,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
