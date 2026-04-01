@@ -45,6 +45,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.CoverageStatus
+import com.unsilence.app.data.relay.PlannerCadence
+import com.unsilence.app.data.relay.WarmWindow
+import com.unsilence.app.data.relay.scrollVelocityToCadence
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
@@ -61,6 +64,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -283,20 +287,29 @@ fun FeedScreen(
                     }
                 }
 
-                // Engagement fetch: only for visible items, debounced
+                // Engagement + hydration: viewport-driven, debounced
                 LaunchedEffect(listState) {
                     snapshotFlow {
-                        listState.layoutInfo.visibleItemsInfo
+                        val info = listState.layoutInfo
+                        val visibleKeys = info.visibleItemsInfo
                             .mapNotNull { it.key as? String }
                             .toSet()
+                        val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                        val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                        Triple(visibleKeys, first, last)
                     }
-                    .filter { it.isNotEmpty() }
+                    .filter { it.first.isNotEmpty() }
                     .debounce(500)
                     .distinctUntilChanged()
-                    .collectLatest { visibleIds ->
-                        viewModel.fetchEngagementForVisible(visibleIds)
-                        val visibleEvents = events.filter { it.id in visibleIds }
-                        viewModel.hydrateVisibleCards(visibleEvents)
+                    .collectLatest { (visibleKeys, firstIdx, lastIdx) ->
+                        viewModel.fetchEngagementForVisible(visibleKeys)
+                        val window = WarmWindow.from(
+                            visibleKeys = visibleKeys,
+                            firstVisibleIndex = firstIdx,
+                            lastVisibleIndex = lastIdx,
+                            events = events,
+                        )
+                        viewModel.planHydration(window)
                     }
                 }
             }

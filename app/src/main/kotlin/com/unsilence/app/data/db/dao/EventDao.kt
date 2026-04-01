@@ -305,6 +305,10 @@ interface EventDao {
     """)
     fun threadFlow(eventId: String): Flow<List<FeedRow>>
 
+    /** Batch existence check — returns only the IDs that already exist in Room. */
+    @Query("SELECT id FROM events WHERE id IN (:ids)")
+    suspend fun getExistingIds(ids: List<String>): List<String>
+
     /** Fetch a single event by ID (used to reconstruct JSON for reposts). */
     @Query("SELECT * FROM events WHERE id = :id LIMIT 1")
     suspend fun getEventById(id: String): EventEntity?

@@ -112,7 +112,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**CardHydrator** — Unified card hydration for all surfaces (feed, profile, thread, search, notifications). Extracts pubkeys from events, fetches profiles via ProfileResolver, resolves referenced events. Profile fetch throttled to 1 batch/second during scroll. Planned replacement: HydrationFrontier (spec committed).
+**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow (visible + 2 screens ahead + 1 screen behind) from LazyListLayoutInfo, computes HydrationNeeds per FeedRow via pure `missingFields()` extension, subtracts Room-cached data (batch DAO queries), then dispatches only truly missing profiles/events to network. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`.
 
@@ -121,8 +121,9 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 ### Data Flow
 
 ```
-User scrolls → snapshotFlow (500ms debounce) → hydrateVisibleCards (IO thread)
-    → ProfileResolver (batched, 4 relays) → Room update → Compose recomposition
+User scrolls → snapshotFlow (500ms debounce) → WarmWindow.from(layoutInfo, events)
+    → HydrationFrontier.plan() (Mutex, Room subtraction, priority shedding)
+    → ProfileResolver / RelayPool.fetchEventsByIds → Room update → Compose recomposition
 
 New event arrives → EventProcessor → Room INSERT → Flow emission
     → FeedStateReducer (MERGE if at top, QUEUE if scrolled) → UI update
@@ -237,6 +238,9 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | ExoPlayer buffer | 500ms bufferForPlaybackMs (was 2500ms default) |
 | CDN preconnect | HEAD requests to 7 Nostr CDN hosts at startup |
 | Event relay provenance | INSERT OR IGNORE for deduped events (fixes relay feed gaps) |
+| HydrationFrontier Room subtraction | Batch DAO existence checks before network — never re-fetch cached data |
+| Priority shedding | >15 in-flight: drop OG previews; >20: cap ahead window entirely |
+| One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
 
 ---
 
@@ -255,7 +259,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | S25 | Coverage ledger, NIP-51 relay ecosystem, Room v9-v10 |
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
-| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style |
+| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan) |
 
 ---
 
@@ -282,7 +286,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 
 ## In Progress (Claude Code working)
 
-- HydrationFrontier: architectural replacement for CardHydrator (spec committed, not yet implemented)
+- (none)
 
 ---
 
@@ -348,10 +352,11 @@ ORDER BY e.created_at DESC LIMIT :limit
 Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(ids.take(20)); delay(2000) }
 ```
 
-**Profile fetch throttle:**
+**HydrationFrontier plan cycle:**
 ```kotlin
-val now = System.currentTimeMillis()
-if (now - lastProfileFetchMs >= 1000L) { lastProfileFetchMs = now; fetch() }
+snapshotFlow { layoutInfo } → WarmWindow.from(visibleKeys, firstIdx, lastIdx, events)
+    → viewModel.planHydration(window) → HydrationFrontier.plan(window)
+    → missingFields() per row → Room subtraction → dispatch missing to network
 ```
 
 **Logout pattern:**
@@ -376,8 +381,8 @@ app/src/main/kotlin/com/unsilence/app/
 │   │   ├── entity/  All Room entities
 │   │   └── AppDatabase.kt, DatabaseModule.kt, migrations
 │   ├── relay/       RelayPool, RelayConnection, EventProcessor, ProfileResolver,
-│   │                CardHydrator, OgFetcher, OutboxRouter, ImetaParser,
-│   │                MediaPreconnect
+│   │                HydrationFrontier, CardHydrator (top-level extractors only),
+│   │                OgFetcher, OutboxRouter, ImetaParser, MediaPreconnect
 │   ├── repository/  EventRepository, UserRepository, ZapRepository
 │   └── AppBootstrapper.kt
 ├── di/              Hilt modules
