@@ -16,3 +16,14 @@ node_modules/
 /app/build
 unsilence-sprint*.md
 unsilence-stabilization-sprint.md
+
+# Claude Code / Superpowers working files
+.claude/
+.superpowers/
+_audit_dump/
+
+# Kotlin build artifacts
+.kotlin/
+
+# Session notes
+unsilence-session-*.md
