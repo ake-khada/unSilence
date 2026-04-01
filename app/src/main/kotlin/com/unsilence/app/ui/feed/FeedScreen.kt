@@ -65,6 +65,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.lazy.items
 
 /** Snapshot of the viewport state for debounce + cadence computation. */
 private data class ViewportSnapshot(
@@ -93,6 +97,7 @@ fun FeedScreen(
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -280,6 +285,23 @@ fun FeedScreen(
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                     )
+
+                    if (isLoadingMore) {
+                        item(key = "loading-more") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(64.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    color = Cyan,
+                                    strokeWidth = 2.dp,
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Scroll position tracking + pagination (merged observer)
@@ -293,7 +315,7 @@ fun FeedScreen(
                     }.collect { (index, offset, lastVisible) ->
                         viewModel.onScrollPositionChanged(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
-                        if (total > 0 && lastVisible >= total - 10) {
+                        if (total > 0 && lastVisible >= total / 2) {
                             viewModel.loadMore()
                         }
                     }
@@ -301,8 +323,8 @@ fun FeedScreen(
 
                 // Engagement + hydration: viewport-driven, velocity-aware cadence
                 LaunchedEffect(listState) {
-                    var lastOffset = 0
-                    var lastTimeMs = System.currentTimeMillis()
+                    var prevOffsetEstimate = 0
+                    var prevTimeMs = System.currentTimeMillis()
 
                     snapshotFlow {
                         val info = listState.layoutInfo
@@ -315,17 +337,23 @@ fun FeedScreen(
                         val avgHeight = if (visibleItems.isNotEmpty()) {
                             visibleItems.map { it.size }.average().toFloat()
                         } else 0f
-                        // Compute scroll velocity from offset delta
-                        val totalOffset = first * avgHeight.toInt() +
-                            (listState.firstVisibleItemScrollOffset)
-                        val now = System.currentTimeMillis()
-                        val dt = (now - lastTimeMs).coerceAtLeast(1)
-                        val velocity = kotlin.math.abs(totalOffset - lastOffset).toFloat() / dt
-                        lastOffset = totalOffset
-                        lastTimeMs = now
-                        ViewportSnapshot(visibleKeys, first, last, avgHeight, velocity)
+                        ViewportSnapshot(visibleKeys, first, last, avgHeight, 0f)
                     }
                     .filter { it.visibleKeys.isNotEmpty() }
+                    // Compute velocity outside snapshotFlow — side-effects inside
+                    // snapshotFlow are unreliable (lambda may re-execute for tracking).
+                    // Use fixed 300-px multiplier to avoid avgHeight wobble.
+                    .map { snapshot ->
+                        val offset = snapshot.firstIdx * 300 +
+                            listState.firstVisibleItemScrollOffset
+                        val now = System.currentTimeMillis()
+                        val dt = (now - prevTimeMs).coerceAtLeast(1)
+                        val velocity =
+                            kotlin.math.abs(offset - prevOffsetEstimate).toFloat() / dt
+                        prevOffsetEstimate = offset
+                        prevTimeMs = now
+                        snapshot.copy(velocity = velocity)
+                    }
                     .debounce { snapshot ->
                         scrollVelocityToCadence(snapshot.velocity).debounceMs
                     }

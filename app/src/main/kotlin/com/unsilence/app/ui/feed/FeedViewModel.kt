@@ -166,6 +166,9 @@ class FeedViewModel @Inject constructor(
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
 
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
+
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
 
@@ -268,6 +271,7 @@ class FeedViewModel @Inject constructor(
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
         _displayLimit.value += 200
+        _isLoadingMore.value = true
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
     }
 
@@ -291,7 +295,7 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             // Initial relay connection with isHomeFeed=true so feed subscriptions
             // are sent. Bootstrap may update kind-10002 later, which flatMapLatest
             // picks up on next feed type emission.
@@ -306,6 +310,7 @@ class FeedViewModel @Inject constructor(
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
+                    _isLoadingMore.value = false
                     hydrationFrontier.clearCache()
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
@@ -383,6 +388,7 @@ class FeedViewModel @Inject constructor(
                     }
                 }
                 .collectLatest { rows ->
+                    _isLoadingMore.value = false
                     _activeReducer.value.onNewEvents(rows)
 
                     // Eagerly hydrate the first page so avatars appear immediately.

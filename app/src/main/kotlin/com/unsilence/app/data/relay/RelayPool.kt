@@ -814,9 +814,11 @@ class RelayPool @Inject constructor(
      * Used by pagination: caller sets `until` = oldest event's createdAt in the current list.
      */
     fun fetchOlderEvents(relayUrls: List<String>, untilTimestamp: Long) {
+        val subId = "older-${System.currentTimeMillis()}"
+        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("older-${System.currentTimeMillis()}"))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
