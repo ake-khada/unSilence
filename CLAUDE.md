@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 1, 2026 (late night)
+**Last updated:** April 2, 2026
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -31,7 +31,7 @@
 | Component | Version |
 |-----------|---------|
 | Kotlin | 2.3.0 |
-| Jetpack Compose | BOM 2025.05.00 |
+| Jetpack Compose | BOM 2025.08.00 |
 | JDK | 17 |
 | Gradle | 8.9 |
 | KSP | 2.3.0 |
@@ -191,7 +191,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Followers count (approximate, NIP-45 COUNT via indexer relays, cached daily)
 - Follow/Unfollow button → kind 3 publish via SigningManager
 - NIP-65 outbox relay fetching for user posts
-- Scroll pagination on user profiles
+- Infinite scroll on profile feeds (Notes/Replies/Longform tabs, 50% trigger, same pattern as main feed)
 - Profile staleness TTL (6hr, 1hr for no-picture)
 - IdentIcon fallback for missing avatars
 
@@ -252,6 +252,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Velocity .map fix | Moved velocity computation out of snapshotFlow into .map with fixed 300px multiplier — fixes cadence stuck on IDLE |
 | Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
 | fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
+| Profile infinite scroll | ProfileScreen + UserProfileScreen load older events at 50% scroll |
 
 ---
 
@@ -270,7 +271,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | S25 | Coverage ledger, NIP-51 relay ecosystem, Room v9-v10 |
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
-| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields() |
+| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
 
 ---
 

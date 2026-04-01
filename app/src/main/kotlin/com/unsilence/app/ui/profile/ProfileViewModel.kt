@@ -65,17 +65,30 @@ class ProfileViewModel @Inject constructor(
     val postsFlow: Flow<List<FeedRow>> =
         if (pubkeyHex != null) eventRepository.userPostsFlow(pubkeyHex) else emptyFlow()
 
+    // ── Pagination ────────────────────────────────────────────────────
+    private val _displayLimit = MutableStateFlow(200)
+    private var oldestTimestamp = Long.MAX_VALUE
+    private var fetching = false
+
     // ── Profile tabs ──────────────────────────────────────────────────
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+
+    fun selectTab(tab: ProfileTab) {
+        selectedTab.value = tab
+        _displayLimit.value = 200
+        oldestTimestamp = Long.MAX_VALUE
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val tabPostsFlow: Flow<List<FeedRow>> =
         if (pubkeyHex != null) {
             selectedTab.flatMapLatest { tab ->
-                when (tab) {
-                    ProfileTab.NOTES    -> eventRepository.userNotesFlow(pubkeyHex)
-                    ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pubkeyHex)
-                    ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pubkeyHex)
+                _displayLimit.flatMapLatest { limit ->
+                    when (tab) {
+                        ProfileTab.NOTES    -> eventRepository.userNotesFlow(pubkeyHex, limit)
+                        ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pubkeyHex, limit)
+                        ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pubkeyHex, limit)
+                    }
                 }
             }
         } else emptyFlow()
@@ -156,6 +169,19 @@ class ProfileViewModel @Inject constructor(
                     relayPool.fetchEngagementBatch(newEventIds)
                 }
             }
+        }
+    }
+
+    fun loadMore(currentOldest: Long) {
+        val pk = pubkeyHex ?: return
+        if (fetching || currentOldest >= oldestTimestamp) return
+        fetching = true
+        oldestTimestamp = currentOldest
+        _displayLimit.value += 200
+        relayPool.fetchOlderPosts(pk, currentOldest)
+        viewModelScope.launch {
+            delay(2_000)
+            fetching = false
         }
     }
 
