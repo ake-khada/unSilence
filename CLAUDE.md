@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 1, 2026
+**Last updated:** April 1, 2026 (evening)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -112,7 +112,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**CardHydrator** — Unified card hydration for all surfaces (feed, profile, thread, search, notifications). Extracts pubkeys from events, fetches profiles via ProfileResolver, resolves referenced events. Profile fetch throttled to 1 batch/second during scroll.
+**CardHydrator** — Unified card hydration for all surfaces (feed, profile, thread, search, notifications). Extracts pubkeys from events, fetches profiles via ProfileResolver, resolves referenced events. Profile fetch throttled to 1 batch/second during scroll. Planned replacement: HydrationFrontier (spec committed).
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`.
 
@@ -126,6 +126,12 @@ User scrolls → snapshotFlow (500ms debounce) → hydrateVisibleCards (IO threa
 
 New event arrives → EventProcessor → Room INSERT → Flow emission
     → FeedStateReducer (MERGE if at top, QUEUE if scrolled) → UI update
+
+Conversation threading: reply visible → produceState(replyToId)
+    → lookupEvent (Room check → relay REQ → 3s wait) → ThreadParentCard renders
+
+Bridged repost: kind 6 empty content → produceState(e-tag target)
+    → lookupEvent (Room check → relay REQ → 3s wait) → effectiveContent from fetched event
 ```
 
 ---
@@ -145,20 +151,21 @@ New event arrives → EventProcessor → Room INSERT → Flow emission
 ### Feed
 - Global + Following feed with tab switching (default to Following)
 - Relay-specific feeds via pinned relays (Room-backed, VerticalPager carousel)
-- Notes/Conversations tab split (Room query contentFilter, swipeable, centered layout)
+- Notes/Conversations tab split (Room query contentFilter, swipeable via detectHorizontalDragGestures, centered weight(1f) layout)
+- Conversation threading: parent note compact card above reply with connecting line (produceState + lookupEvent for Room + relay + 3s wait)
 - FeedStateReducer: blue dot when scrolled, auto-merge at top with grey tint flash
-- Immersive scrolling (top bar + bottom nav hide/show via NestedScrollConnection)
+- Immersive scrolling (top bar + bottom nav + tab row hide/show via NestedScrollConnection; topBarShown passed to FeedScreen, animated height)
 - Scroll-to-bottom pagination with growing window
 - Time range + engagement filters
 
 ### Content Rendering
 - Kind 1 notes with images, video, links
-- Kind 6 reposts with original author profile resolution (p-tag extraction)
+- Kind 6 reposts with original author profile resolution (p-tag extraction); bridged reposts (mostr.pub) with empty content fetch referenced event via lookupEvent
 - Kind 30023 long-form articles with WebView reader (org.jetbrains:markdown GFM→HTML)
 - Article preview cards on all screens (banner, title, summary)
 - ImetaParser for NIP-92 media extraction (video + image, dimension-based sizing)
-- Inline @mentions via AnnotatedString + LinkAnnotation.Clickable (cyan, fallback to truncated npub)
-- Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1)
+- Inline @mentions via NostrRichText (AnnotatedString + LinkAnnotation.Clickable, cyan, fallback to truncated npub) — used in notes AND profile bios
+- Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1); unified style with ThreadParentCard (0.08 alpha white border, 12dp rounded, 24dp avatar)
 - OpenGraph link preview cards (OgFetcher with ConcurrentHashMap cache)
 - YouTube thumbnail cards (predictable URL, tap opens browser)
 - Multi-photo/video grid (2x2 layout)
@@ -173,7 +180,7 @@ New event arrives → EventProcessor → Room INSERT → Flow emission
 - Portrait video with proper aspect ratio (capped at 2:3)
 
 ### Profiles
-- Profile view with avatar, banner, bio, NIP-05 badge
+- Profile view with avatar, banner, bio (NostrRichText with @mention resolution), NIP-05 badge
 - Edit profile (name, about, picture, banner, nip05, lud16, website) → kind 0 publish
 - Profile tabs: Notes / Replies / Longform
 - Following count (exact, from kind-3 p-tags)
@@ -248,6 +255,7 @@ New event arrives → EventProcessor → Room INSERT → Flow emission
 | S25 | Coverage ledger, NIP-51 relay ecosystem, Room v9-v10 |
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
+| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style |
 
 ---
 
@@ -274,9 +282,7 @@ New event arrives → EventProcessor → Room INSERT → Flow emission
 
 ## In Progress (Claude Code working)
 
-- Tab row hiding with immersive scroll
-- Conversation threading (parent note card above replies with connecting line)
-- Bridged/cross-posted content rendering (mostr.pub, Mastodon empty cards)
+- HydrationFrontier: architectural replacement for CardHydrator (spec committed, not yet implemented)
 
 ---
 
@@ -331,6 +337,12 @@ ORDER BY e.created_at DESC LIMIT :limit
 
 **followingFeedFlow** — Uses `e.pubkey IN (SELECT pubkey FROM follows)` subquery (not JOIN) to allow parent notes from non-followed authors in Conversations tab.
 
+**Shared composables (internal visibility, cross-package):**
+- `NostrRichText` — inline @mention rendering (NoteCard, ProfileScreen, UserProfileScreen)
+- `AvatarImage` — IdentIcon + AsyncImage overlay (NoteCard, EventFeedItems)
+- `relativeTime` — relative timestamp formatting (NoteCard, EventFeedItems)
+- `displayName` — FeedRow extension for author name (NoteCard, ArticleCard)
+
 **Engagement fetch pattern:**
 ```kotlin
 Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(ids.take(20)); delay(2000) }
@@ -372,7 +384,7 @@ app/src/main/kotlin/com/unsilence/app/
 ├── domain/model/    FeedRow, FeedFilter, FeedType, UserProfile, etc.
 ├── ui/
 │   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, NoteCard,
-│   │                InlineAutoPlayVideo, VideoPlaybackScope, NostrRichText
+│   │                InlineAutoPlayVideo, VideoPlaybackScope, NostrRichText (internal)
 │   ├── navigation/  AppNavigation, BottomNavBar
 │   ├── onboarding/  LoginScreen, RootViewModel
 │   ├── profile/     ProfileScreen, UserProfileScreen, ProfileViewModel
