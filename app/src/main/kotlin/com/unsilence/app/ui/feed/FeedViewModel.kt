@@ -10,7 +10,6 @@ import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
@@ -18,6 +17,8 @@ import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.CoverageRepository
+import com.unsilence.app.data.relay.HydrationFrontier
+import com.unsilence.app.data.relay.WarmWindow
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -70,7 +71,7 @@ class FeedViewModel @Inject constructor(
     private val browseSession: RelayBrowseSession,
     private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
-    private val cardHydrator: CardHydrator,
+    private val hydrationFrontier: HydrationFrontier,
     private val keyManager: KeyManager,
     private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
@@ -177,10 +178,9 @@ class FeedViewModel @Inject constructor(
         engagementChannel.trySend(visibleIds)
     }
 
-    fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
-        if (visibleEvents.isEmpty()) return
+    fun planHydration(window: WarmWindow) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            cardHydrator.hydrateVisibleCards(visibleEvents)
+            hydrationFrontier.plan(window)
         }
     }
 
@@ -306,7 +306,7 @@ class FeedViewModel @Inject constructor(
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
-                    cardHydrator.clearCache()
+                    hydrationFrontier.clearCache()
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
@@ -385,11 +385,16 @@ class FeedViewModel @Inject constructor(
                 .collectLatest { rows ->
                     _activeReducer.value.onNewEvents(rows)
 
-                    // Eagerly hydrate profiles for the first page of events so
-                    // avatars appear immediately, not only after debounced scroll.
+                    // Eagerly hydrate the first page so avatars appear immediately.
                     if (rows.isNotEmpty()) {
+                        val firstPage = rows.take(20)
+                        val window = WarmWindow(
+                            visible = firstPage,
+                            ahead = rows.drop(20).take(20),
+                            behind = emptyList(),
+                        )
                         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            cardHydrator.hydrateVisibleCards(rows.take(20))
+                            hydrationFrontier.plan(window)
                         }
                     }
 

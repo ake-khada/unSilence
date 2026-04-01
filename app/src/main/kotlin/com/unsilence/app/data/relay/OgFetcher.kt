@@ -35,6 +35,9 @@ class OgFetcher @Inject constructor(
     private val cache = ConcurrentHashMap<String, OgMetadata>()
     private val attempted = ConcurrentHashMap<String, Boolean>()
 
+    /** True if the URL has already been fetched (or attempted). */
+    fun hasCached(url: String): Boolean = cache.containsKey(url) || attempted.containsKey(url)
+
     suspend fun fetch(url: String): OgMetadata? {
         cache[url]?.let { return it }
         if (attempted.containsKey(url)) return null

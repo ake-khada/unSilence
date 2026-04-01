@@ -31,6 +31,7 @@ import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -125,6 +126,12 @@ class RelayPool @Inject constructor(
 
     /** Relays that sent CLOSED auth-required without a prior AUTH challenge — suppress repeated warnings. */
     private val authFailedRelays = ConcurrentHashMap.newKeySet<String>()
+
+    /** Active one-shot subscriptions in flight (tracked by unique sub-ID, not per-relay). */
+    private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
+
+    /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
+    fun activeOneShotCount(): Int = _activeOneShotSubs.size
 
     // Evict stale entries every 5 minutes to prevent unbounded growth.
     init {
@@ -496,6 +503,7 @@ class RelayPool @Inject constructor(
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
         if (isOneShotSubscription(subId)) {
+            _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
@@ -592,7 +600,8 @@ class RelayPool @Inject constructor(
         subId.startsWith("user-engagement-")        ||
         subId.startsWith("engagement-replies-")     ||
         subId.startsWith("engagement-reactions-")   ||
-        subId.startsWith("engagement-zaps-")
+        subId.startsWith("engagement-zaps-")        ||
+        subId.startsWith("batch-events-")
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
@@ -722,9 +731,11 @@ class RelayPool @Inject constructor(
         }
         if (novel.isEmpty()) return
         novel.forEach { profileFetchAttempted[it] = now }
+        val subId = "profiles-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("profiles-${System.nanoTime()}"))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
@@ -844,6 +855,7 @@ class RelayPool @Inject constructor(
         if (novel.isEmpty()) return
         novel.forEach { eventFetchInFlight[it] = now }
         val subId = "batch-events-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -1054,6 +1066,9 @@ class RelayPool @Inject constructor(
         val repliesSubId = "engagement-replies-$ts"
         val reactionsSubId = "engagement-reactions-$ts"
         val zapsSubId = "engagement-zaps-$ts"
+        _activeOneShotSubs.add(repliesSubId)
+        _activeOneShotSubs.add(reactionsSubId)
+        _activeOneShotSubs.add(zapsSubId)
 
         // Replies (kind 1 referencing these events)
         val repliesReq = buildJsonArray {
