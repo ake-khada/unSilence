@@ -11,6 +11,7 @@ import com.unsilence.app.data.AppBootstrapper
 import com.unsilence.app.data.auth.KeyManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import kotlin.system.exitProcess
@@ -32,7 +33,7 @@ class RootViewModel @Inject constructor(
         if (isLoggedIn) {
             val pubkey = keyManager.getPublicKeyHex()
             if (pubkey != null) {
-                viewModelScope.launch { bootstrapper.bootstrap(pubkey) }
+                viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
             }
         }
     }
@@ -40,7 +41,7 @@ class RootViewModel @Inject constructor(
     fun onOnboardingComplete() {
         isLoggedIn = true
         val pubkey = keyManager.getPublicKeyHex() ?: return
-        viewModelScope.launch { bootstrapper.bootstrap(pubkey) }
+        viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
     }
 
     fun logout() {
