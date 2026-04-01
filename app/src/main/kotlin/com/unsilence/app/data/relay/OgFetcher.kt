@@ -65,7 +65,7 @@ class OgFetcher @Inject constructor(
 
     private suspend fun doFetch(url: String): OgMetadata? {
         // HEAD first to verify content-type is HTML
-        val headResp = executeWithCancellation(
+        val isHtml = executeWithCancellation(
             client.newCall(
                 Request.Builder()
                     .url(url)
@@ -73,16 +73,12 @@ class OgFetcher @Inject constructor(
                     .header("User-Agent", UA)
                     .build()
             )
-        )
-        try {
+        ).use { headResp ->
             val contentType = headResp.header("Content-Type")
                 ?: headResp.header("content-type")
-            if (contentType != null && !contentType.contains("text/html", ignoreCase = true)) {
-                return null
-            }
-        } finally {
-            headResp.close()
+            contentType == null || contentType.contains("text/html", ignoreCase = true)
         }
+        if (!isHtml) return null
 
         // GET with body size limit
         val response = executeWithCancellation(

@@ -36,6 +36,10 @@ class CardHydrator @Inject constructor(
     private val userRepository: UserRepository,
 ) {
     private val hydratedIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    @Volatile private var lastProfileFetchMs = 0L
+    private companion object {
+        const val PROFILE_FETCH_MIN_INTERVAL_MS = 1000L
+    }
 
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         val newEvents = events.filter { it.id !in hydratedIds }
@@ -69,8 +73,13 @@ class CardHydrator @Inject constructor(
         }
 
         // 4. Single profile fetch for ALL pubkeys (authors + repost authors + ref authors)
+        //    Throttled to max one batch per second to avoid scroll-time amplification.
         if (pubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(pubkeys.toList())
+            val now = System.currentTimeMillis()
+            if (now - lastProfileFetchMs >= PROFILE_FETCH_MIN_INTERVAL_MS) {
+                lastProfileFetchMs = now
+                userRepository.fetchMissingProfiles(pubkeys.toList())
+            }
         }
 
         Log.d(TAG, "Hydrated ${newEvents.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing)")
