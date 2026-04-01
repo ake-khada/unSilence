@@ -140,7 +140,7 @@ fun UserProfileScreen(
         derivedStateOf {
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val totalItems = listState.layoutInfo.totalItemsCount
-            totalItems > 0 && lastVisible >= totalItems - 5
+            totalItems > 0 && lastVisible >= totalItems / 2
         }
     }
 

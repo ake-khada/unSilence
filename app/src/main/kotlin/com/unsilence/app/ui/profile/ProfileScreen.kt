@@ -29,10 +29,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -302,7 +306,7 @@ fun ProfileScreen(
             item {
                 ProfileTabRow(
                     selectedTab   = selectedTab,
-                    onTabSelected = { viewModel.selectedTab.value = it },
+                    onTabSelected = { viewModel.selectTab(it) },
                 )
             }
 
@@ -336,6 +340,24 @@ fun ProfileScreen(
             }
 
             item { Spacer(Modifier.height(Spacing.xl)) }
+        }
+
+        // ── Infinite scroll trigger ──────────────────────────────────────────
+        val shouldLoadMore = remember {
+            derivedStateOf {
+                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                val totalItems = listState.layoutInfo.totalItemsCount
+                totalItems > 0 && lastVisible >= totalItems / 2
+            }
+        }
+        LaunchedEffect(Unit) {
+            snapshotFlow { shouldLoadMore.value }
+                .distinctUntilChanged()
+                .collect { shouldLoad ->
+                    if (shouldLoad && posts.isNotEmpty()) {
+                        viewModel.loadMore(posts.last().createdAt)
+                    }
+                }
         }
 
         // ── Own top bar overlay ───────────────────────────────────────────────
