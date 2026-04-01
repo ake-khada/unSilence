@@ -112,7 +112,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension, subtracts Room-cached data (batch DAO queries), then dispatches only truly missing profiles/events to network. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
+**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension (profiles, repost targets, quoted events, reply parents, OG URLs), subtracts Room-cached data (batch DAO queries), then coalesces dispatches into pending sets flushed on IDLE cadence (immediate), size threshold (10 profiles / 5 events), or 500ms timer. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`.
 
@@ -245,6 +245,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
 | Velocity-aware cadence | Idle 100ms / Moderate 500ms / Fast fling 1500ms debounce |
 | Pixel-based warm window | avgItemHeight → ahead/behind counts instead of row-count multiplier |
+| Coalesced dispatch | Pending sets flush on IDLE/size(10/5)/500ms — eliminates 1-item REQs |
+| Reply parent prefetch | missingFields() catches replyToId → planner prefetches before produceState |
 
 ---
 
