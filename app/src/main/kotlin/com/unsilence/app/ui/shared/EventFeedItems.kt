@@ -1,9 +1,7 @@
 package com.unsilence.app.ui.shared
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -122,8 +120,8 @@ fun LazyListScope.eventFeedItems(
 }
 
 /**
- * A reply with its parent note fetched via lookupEvent and rendered above
- * in a compact card, connected by a thin vertical line.
+ * A reply with its parent note fetched via lookupEvent and embedded
+ * inside the reply card (between header and content), like quoted notes.
  */
 @Composable
 private fun ThreadedReplyItem(
@@ -150,38 +148,19 @@ private fun ThreadedReplyItem(
         }
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        // ── Compact parent card (only if parent was resolved) ────────────
-        val loadedParent = parentEvent
-        if (loadedParent != null) {
-            ThreadParentCard(
-                event = loadedParent,
-                author = parentAuthor,
-                onNoteClick = callbacks.onNoteClick,
-            )
-
-            // ── Connecting line ──────────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .padding(start = 28.dp)
-                    .width(1.dp)
-                    .height(8.dp)
-                    .background(Color.White.copy(alpha = 0.1f)),
-            )
-        }
-
-        // ── Full reply card ──────────────────────────────────────────────
-        EventFeedItem(
-            row = replyRow,
-            engagement = engagement,
-            callbacks = callbacks,
-            videoScope = videoScope,
-            context = context,
-            isNewPost = isNewPost,
-            onNewPostAnimated = onNewPostAnimated,
-            thumbnailCache = thumbnailCache,
-        )
-    }
+    // Single card — parent is embedded inside the reply NoteCard
+    EventFeedItem(
+        row = replyRow,
+        engagement = engagement,
+        callbacks = callbacks,
+        videoScope = videoScope,
+        context = context,
+        isNewPost = isNewPost,
+        onNewPostAnimated = onNewPostAnimated,
+        thumbnailCache = thumbnailCache,
+        parentEvent = parentEvent,
+        parentAuthor = parentAuthor,
+    )
 }
 
 /**
@@ -190,7 +169,7 @@ private fun ThreadedReplyItem(
  * Uses EventEntity + UserEntity (fetched via lookupEvent/lookupProfile).
  */
 @Composable
-private fun ThreadParentCard(
+internal fun ThreadParentCard(
     event: EventEntity,
     author: UserEntity?,
     onNoteClick: (String) -> Unit,
@@ -258,6 +237,8 @@ private fun EventFeedItem(
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
+    parentEvent: EventEntity? = null,
+    parentAuthor: UserEntity? = null,
 ) {
     if (row.kind == 30023) {
         ArticleCard(
@@ -310,6 +291,8 @@ private fun EventFeedItem(
             fetchOgMetadata = callbacks.fetchOgMetadata,
             isNewPost = isNewPost,
             onNewPostAnimated = onNewPostAnimated,
+            parentEvent = parentEvent,
+            parentAuthor = parentAuthor,
         )
     }
 }
