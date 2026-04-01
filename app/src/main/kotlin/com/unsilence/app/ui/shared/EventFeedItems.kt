@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,12 +18,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,7 +37,6 @@ import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.VideoThumbnailCache
-import com.unsilence.app.ui.feed.displayName
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.TextSecondary
@@ -77,14 +74,9 @@ data class EngagementSnapshot(
  * Shared LazyListScope extension that renders a list of FeedRow items
  * using the unified NoteCard / ArticleCard pipeline.
  *
- * Eliminates the duplicated items block across Feed, Profile,
- * UserProfile, and Search screens.
- *
- * [videoScope] is optional — pass null for screens without inline video
- * (Thread, Search).
- *
  * [showThreadParents] — when true (Conversations tab), replies are grouped
  * with a compact parent note card above them, connected by a vertical line.
+ * Parent notes are fetched via [EventActionCallbacks.lookupEvent] (Room + relay).
  */
 fun LazyListScope.eventFeedItems(
     events: List<FeedRow>,
@@ -97,11 +89,24 @@ fun LazyListScope.eventFeedItems(
     thumbnailCache: VideoThumbnailCache? = null,
     showThreadParents: Boolean = false,
 ) {
-    if (!showThreadParents) {
-        items(
-            items = events,
-            key = { it.id },
-        ) { row ->
+    items(
+        items = events,
+        key = { it.id },
+    ) { row ->
+        val replyToId = row.replyToId
+        if (showThreadParents && replyToId != null) {
+            ThreadedReplyItem(
+                parentId = replyToId,
+                replyRow = row,
+                engagement = engagement,
+                callbacks = callbacks,
+                videoScope = videoScope,
+                context = context,
+                isNewPost = row.id in newEventIds,
+                onNewPostAnimated = { onNewPostAnimated(row.id) },
+                thumbnailCache = thumbnailCache,
+            )
+        } else {
             EventFeedItem(
                 row = row,
                 engagement = engagement,
@@ -113,63 +118,16 @@ fun LazyListScope.eventFeedItems(
                 thumbnailCache = thumbnailCache,
             )
         }
-    } else {
-        // Conversations mode: group replies with parent context cards.
-        // Build lookup of events by ID for quick parent resolution.
-        val eventMap = events.associateBy { it.id }
-        // IDs that appear as replyToId targets of other events in this list
-        val replyTargetIds = events.mapNotNull { it.replyToId }.toSet()
-        // "Context-only" parents: rows that are in the list solely because they
-        // are reply targets, not because they are replies themselves.
-        val contextOnlyIds = replyTargetIds.filter { id ->
-            val row = eventMap[id] ?: return@filter false
-            row.replyToId == null && row.rootId == null && row.kind != 6
-        }.toSet()
-
-        // Render: skip context-only parents as standalone items; they appear
-        // as compact parent cards above their replies.
-        val visibleEvents = events.filter { it.id !in contextOnlyIds }
-
-        items(
-            items = visibleEvents,
-            key = { it.id },
-        ) { row ->
-            val parentRow = row.replyToId?.let { eventMap[it] }
-            if (parentRow != null) {
-                ThreadedReplyItem(
-                    parentRow = parentRow,
-                    replyRow = row,
-                    engagement = engagement,
-                    callbacks = callbacks,
-                    videoScope = videoScope,
-                    context = context,
-                    isNewPost = row.id in newEventIds,
-                    onNewPostAnimated = { onNewPostAnimated(row.id) },
-                    thumbnailCache = thumbnailCache,
-                )
-            } else {
-                EventFeedItem(
-                    row = row,
-                    engagement = engagement,
-                    callbacks = callbacks,
-                    videoScope = videoScope,
-                    context = context,
-                    isNewPost = row.id in newEventIds,
-                    onNewPostAnimated = { onNewPostAnimated(row.id) },
-                    thumbnailCache = thumbnailCache,
-                )
-            }
-        }
     }
 }
 
 /**
- * A reply with its parent note rendered above in a compact card,
- * connected by a thin vertical line.
+ * A reply with its parent note fetched via lookupEvent and rendered above
+ * in a compact card, connected by a thin vertical line.
  */
 @Composable
 private fun ThreadedReplyItem(
-    parentRow: FeedRow,
+    parentId: String,
     replyRow: FeedRow,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
@@ -179,22 +137,38 @@ private fun ThreadedReplyItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        // ── Compact parent card ──────────────────────────────────────────
-        ThreadParentCard(
-            row = parentRow,
-            onNoteClick = callbacks.onNoteClick,
-        )
+    // Two-phase parent lookup: Room first, then relay fetch (lookupEvent does both + 3s wait)
+    val parentEvent by produceState<EventEntity?>(null, parentId) {
+        if (callbacks.lookupEvent != null) {
+            value = callbacks.lookupEvent.invoke(parentId)
+        }
+    }
+    val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
+        val pk = parentEvent?.pubkey
+        if (pk != null && callbacks.lookupProfile != null) {
+            value = callbacks.lookupProfile.invoke(pk)
+        }
+    }
 
-        // ── Connecting line ──────────────────────────────────────────────
-        val lineColor = Color.White.copy(alpha = 0.1f)
-        Box(
-            modifier = Modifier
-                .padding(start = 28.dp)
-                .width(1.dp)
-                .height(8.dp)
-                .background(lineColor),
-        )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // ── Compact parent card (only if parent was resolved) ────────────
+        val loadedParent = parentEvent
+        if (loadedParent != null) {
+            ThreadParentCard(
+                event = loadedParent,
+                author = parentAuthor,
+                onNoteClick = callbacks.onNoteClick,
+            )
+
+            // ── Connecting line ──────────────────────────────────────────
+            Box(
+                modifier = Modifier
+                    .padding(start = 28.dp)
+                    .width(1.dp)
+                    .height(8.dp)
+                    .background(Color.White.copy(alpha = 0.1f)),
+            )
+        }
 
         // ── Full reply card ──────────────────────────────────────────────
         EventFeedItem(
@@ -213,10 +187,12 @@ private fun ThreadedReplyItem(
 /**
  * Compact parent note card — shows author, timestamp, and truncated content.
  * No action bar. Clickable to navigate to the parent note.
+ * Uses EventEntity + UserEntity (fetched via lookupEvent/lookupProfile).
  */
 @Composable
 private fun ThreadParentCard(
-    row: FeedRow,
+    event: EventEntity,
+    author: UserEntity?,
     onNoteClick: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -230,19 +206,21 @@ private fun ThreadParentCard(
                 shape = RoundedCornerShape(12.dp),
             )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onNoteClick(row.id) }
+            .clickable { onNoteClick(event.id) }
             .padding(12.dp),
     ) {
         // Compact header: avatar + name + timestamp
         Row(verticalAlignment = Alignment.CenterVertically) {
             AvatarImage(
-                pubkey = row.pubkey,
-                picture = row.authorPicture,
+                pubkey = event.pubkey,
+                picture = author?.picture,
                 modifier = Modifier.size(24.dp),
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}",
+                text = author?.displayName?.takeIf { it.isNotBlank() }
+                    ?: author?.name?.takeIf { it.isNotBlank() }
+                    ?: "${event.pubkey.take(6)}…${event.pubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 13.sp,
@@ -252,15 +230,15 @@ private fun ThreadParentCard(
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = relativeTime(row.createdAt),
+                text = relativeTime(event.createdAt),
                 color = Color.White.copy(alpha = 0.4f),
                 fontSize = 13.sp,
             )
         }
-        if (row.content.isNotBlank()) {
+        if (event.content.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
             Text(
-                text = row.content.trim(),
+                text = event.content.trim(),
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 14.sp,
                 maxLines = 3,
