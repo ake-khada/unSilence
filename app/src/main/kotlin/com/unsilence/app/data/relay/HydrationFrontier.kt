@@ -137,6 +137,9 @@ fun FeedRow.missingFields(): List<HydrationNeed> {
         }
     }
 
+    // Reply parent event (Conversations tab threading)
+    replyToId?.let { needs.add(HydrationNeed.QuotedEvent(it)) }
+
     // Quoted events (nostr:nevent/note URIs in content)
     extractQuotedEventIds(content).forEach {
         needs.add(HydrationNeed.QuotedEvent(it))
@@ -201,10 +204,19 @@ class HydrationFrontier @Inject constructor(
     private val recentlyPlanned = ConcurrentHashMap<String, Long>()
     private val PLAN_TTL_MS = 30_000L
 
-    /** Threshold constants for priority shedding. */
+    // ── Coalesced dispatch — accumulate before flushing ──────────────────
+    private val pendingProfiles = ConcurrentHashMap.newKeySet<String>()
+    private val pendingEvents = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var pendingProfilesSince = 0L
+    @Volatile private var pendingEventsSince = 0L
+
+    /** Threshold constants for priority shedding and coalescing. */
     private companion object {
         const val SHED_OG_THRESHOLD = 15
         const val CAP_AHEAD_THRESHOLD = 20
+        const val PROFILE_FLUSH_SIZE = 10
+        const val EVENT_FLUSH_SIZE = 5
+        const val FLUSH_TIMEOUT_MS = 500L
     }
 
     /**
@@ -275,17 +287,10 @@ class HydrationFrontier @Inject constructor(
             Log.d(TAG, "Room subtracted: $roomKnownEvents events, $roomKnownProfiles profiles")
         }
 
-        // 5. Dispatch to network
-        if (missingEvents.isNotEmpty()) {
-            relayPool.fetchEventsByIds(missingEvents)
-        }
-        if (missingProfiles.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(missingProfiles)
-        }
-        // OG fetches are fire-and-forget — NoteCard's produceState will pick up results.
-        // HydrationFrontier's OG tracking just prevents re-planning.
-
+        // 5. Coalesced dispatch — accumulate and flush when conditions met
         val cadence = scrollVelocityToCadence(window.scrollVelocity)
+        accumulateAndFlush(missingProfiles, missingEvents, cadence, now)
+
         Log.d(
             TAG,
             "plan: visible=${window.visible.size} ahead=${window.ahead.size} behind=${window.behind.size} | " +
@@ -294,9 +299,59 @@ class HydrationFrontier @Inject constructor(
         )
     }
 
+    /**
+     * Accumulate missing items into pending sets and flush when conditions are met:
+     * - IDLE cadence → flush immediately (user stopped scrolling)
+     * - Size threshold → flush when batch is large enough (10 profiles, 5 events)
+     * - Time threshold → flush 500ms after first item was added
+     */
+    private fun accumulateAndFlush(
+        missingProfiles: List<String>,
+        missingEvents: List<String>,
+        cadence: PlannerCadence,
+        now: Long,
+    ) {
+        if (missingProfiles.isNotEmpty()) {
+            if (pendingProfiles.isEmpty()) pendingProfilesSince = now
+            pendingProfiles.addAll(missingProfiles)
+        }
+        if (missingEvents.isNotEmpty()) {
+            if (pendingEvents.isEmpty()) pendingEventsSince = now
+            pendingEvents.addAll(missingEvents)
+        }
+
+        // Flush profiles
+        if (pendingProfiles.isNotEmpty() && (
+                cadence == PlannerCadence.IDLE ||
+                pendingProfiles.size >= PROFILE_FLUSH_SIZE ||
+                (now - pendingProfilesSince) >= FLUSH_TIMEOUT_MS
+            )
+        ) {
+            val batch = pendingProfiles.toList()
+            pendingProfiles.clear()
+            Log.d(TAG, "Flush: ${batch.size} profiles")
+            userRepository.fetchMissingProfiles(batch)
+        }
+
+        // Flush events
+        if (pendingEvents.isNotEmpty() && (
+                cadence == PlannerCadence.IDLE ||
+                pendingEvents.size >= EVENT_FLUSH_SIZE ||
+                (now - pendingEventsSince) >= FLUSH_TIMEOUT_MS
+            )
+        ) {
+            val batch = pendingEvents.toList()
+            pendingEvents.clear()
+            Log.d(TAG, "Flush: ${batch.size} events")
+            relayPool.fetchEventsByIds(batch)
+        }
+    }
+
     /** Clear all tracking state (e.g., on feed switch). */
     fun clearCache() {
         recentlyPlanned.clear()
+        pendingProfiles.clear()
+        pendingEvents.clear()
     }
 
     private fun evictStale(now: Long) {
