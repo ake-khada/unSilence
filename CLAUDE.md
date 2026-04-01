@@ -131,7 +131,7 @@ New event arrives → EventProcessor → Room INSERT → Flow emission
     → FeedStateReducer (MERGE if at top, QUEUE if scrolled) → UI update
 
 Conversation threading: reply visible → produceState(replyToId)
-    → lookupEvent (Room check → relay REQ → 3s wait) → ThreadParentCard renders
+    → lookupEvent (Room check → relay REQ → 3s wait) → ThreadParentCard embedded inside NoteCard
 
 Bridged repost: kind 6 empty content → produceState(e-tag target)
     → lookupEvent (Room check → relay REQ → 3s wait) → effectiveContent from fetched event
@@ -155,7 +155,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Global + Following feed with tab switching (default to Following)
 - Relay-specific feeds via pinned relays (Room-backed, VerticalPager carousel)
 - Notes/Conversations tab split (Room query contentFilter, swipeable via detectHorizontalDragGestures, centered weight(1f) layout)
-- Conversation threading: parent note compact card above reply with connecting line (produceState + lookupEvent for Room + relay + 3s wait)
+- Conversation threading: parent note embedded inside reply card (between header and content, same style as EmbeddedQuoteCard) via produceState + lookupEvent
 - FeedStateReducer: blue dot when scrolled, auto-merge at top with grey tint flash
 - Immersive scrolling (top bar + bottom nav + tab row hide/show via NestedScrollConnection; topBarShown passed to FeedScreen, animated height)
 - Scroll-to-bottom pagination with growing window

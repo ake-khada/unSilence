@@ -101,6 +101,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import com.unsilence.app.ui.shared.ThreadParentCard
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -208,6 +209,8 @@ fun NoteCard(
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     isNewPost: Boolean = false,
     onNewPostAnimated: () -> Unit = {},
+    parentEvent: EventEntity? = null,
+    parentAuthor: UserEntity? = null,
 ) {
     // Subtle flash animation for newly arrived posts
     val flashAlpha = remember { Animatable(if (isNewPost) 1f else 0f) }
@@ -408,6 +411,16 @@ fun NoteCard(
                 color    = TextSecondary,
                 fontSize = 12.sp,
                 modifier = Modifier.clickable { onNoteClick(navigateId) },
+            )
+        }
+
+        // ── Embedded parent card (Conversations tab threading) ────────────────
+        if (parentEvent != null) {
+            ThreadParentCard(
+                event = parentEvent,
+                author = parentAuthor,
+                onNoteClick = onNoteClick,
+                modifier = Modifier.padding(bottom = Spacing.small),
             )
         }
 
