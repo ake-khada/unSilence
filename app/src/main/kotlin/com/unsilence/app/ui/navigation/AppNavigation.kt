@@ -228,6 +228,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                 when (selectedTab) {
                     0    -> FeedScreen(
                         scrollToTopTrigger = scrollToTopTrigger,
+                        topBarShown        = topBarShown,
                         onNoteClick        = { eventId -> threadEventId = eventId },
                         onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },

@@ -1,18 +1,48 @@
 package com.unsilence.app.ui.shared
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.VideoThumbnailCache
+import com.unsilence.app.ui.feed.displayName
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.feed.relativeTime
+import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -52,6 +82,9 @@ data class EngagementSnapshot(
  *
  * [videoScope] is optional — pass null for screens without inline video
  * (Thread, Search).
+ *
+ * [showThreadParents] — when true (Conversations tab), replies are grouped
+ * with a compact parent note card above them, connected by a vertical line.
  */
 fun LazyListScope.eventFeedItems(
     events: List<FeedRow>,
@@ -62,21 +95,178 @@ fun LazyListScope.eventFeedItems(
     newEventIds: Set<String> = emptySet(),
     onNewPostAnimated: (String) -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    showThreadParents: Boolean = false,
 ) {
-    items(
-        items = events,
-        key = { it.id },
-    ) { row ->
+    if (!showThreadParents) {
+        items(
+            items = events,
+            key = { it.id },
+        ) { row ->
+            EventFeedItem(
+                row = row,
+                engagement = engagement,
+                callbacks = callbacks,
+                videoScope = videoScope,
+                context = context,
+                isNewPost = row.id in newEventIds,
+                onNewPostAnimated = { onNewPostAnimated(row.id) },
+                thumbnailCache = thumbnailCache,
+            )
+        }
+    } else {
+        // Conversations mode: group replies with parent context cards.
+        // Build lookup of events by ID for quick parent resolution.
+        val eventMap = events.associateBy { it.id }
+        // IDs that appear as replyToId targets of other events in this list
+        val replyTargetIds = events.mapNotNull { it.replyToId }.toSet()
+        // "Context-only" parents: rows that are in the list solely because they
+        // are reply targets, not because they are replies themselves.
+        val contextOnlyIds = replyTargetIds.filter { id ->
+            val row = eventMap[id] ?: return@filter false
+            row.replyToId == null && row.rootId == null && row.kind != 6
+        }.toSet()
+
+        // Render: skip context-only parents as standalone items; they appear
+        // as compact parent cards above their replies.
+        val visibleEvents = events.filter { it.id !in contextOnlyIds }
+
+        items(
+            items = visibleEvents,
+            key = { it.id },
+        ) { row ->
+            val parentRow = row.replyToId?.let { eventMap[it] }
+            if (parentRow != null) {
+                ThreadedReplyItem(
+                    parentRow = parentRow,
+                    replyRow = row,
+                    engagement = engagement,
+                    callbacks = callbacks,
+                    videoScope = videoScope,
+                    context = context,
+                    isNewPost = row.id in newEventIds,
+                    onNewPostAnimated = { onNewPostAnimated(row.id) },
+                    thumbnailCache = thumbnailCache,
+                )
+            } else {
+                EventFeedItem(
+                    row = row,
+                    engagement = engagement,
+                    callbacks = callbacks,
+                    videoScope = videoScope,
+                    context = context,
+                    isNewPost = row.id in newEventIds,
+                    onNewPostAnimated = { onNewPostAnimated(row.id) },
+                    thumbnailCache = thumbnailCache,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A reply with its parent note rendered above in a compact card,
+ * connected by a thin vertical line.
+ */
+@Composable
+private fun ThreadedReplyItem(
+    parentRow: FeedRow,
+    replyRow: FeedRow,
+    engagement: EngagementSnapshot,
+    callbacks: EventActionCallbacks,
+    videoScope: VideoPlaybackScope?,
+    context: RenderContext,
+    isNewPost: Boolean,
+    onNewPostAnimated: () -> Unit,
+    thumbnailCache: VideoThumbnailCache? = null,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // ── Compact parent card ──────────────────────────────────────────
+        ThreadParentCard(
+            row = parentRow,
+            onNoteClick = callbacks.onNoteClick,
+        )
+
+        // ── Connecting line ──────────────────────────────────────────────
+        val lineColor = Color.White.copy(alpha = 0.1f)
+        Box(
+            modifier = Modifier
+                .padding(start = 28.dp)
+                .width(1.dp)
+                .height(8.dp)
+                .background(lineColor),
+        )
+
+        // ── Full reply card ──────────────────────────────────────────────
         EventFeedItem(
-            row = row,
+            row = replyRow,
             engagement = engagement,
             callbacks = callbacks,
             videoScope = videoScope,
             context = context,
-            isNewPost = row.id in newEventIds,
-            onNewPostAnimated = { onNewPostAnimated(row.id) },
+            isNewPost = isNewPost,
+            onNewPostAnimated = onNewPostAnimated,
             thumbnailCache = thumbnailCache,
         )
+    }
+}
+
+/**
+ * Compact parent note card — shows author, timestamp, and truncated content.
+ * No action bar. Clickable to navigate to the parent note.
+ */
+@Composable
+private fun ThreadParentCard(
+    row: FeedRow,
+    onNoteClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .border(
+                width = 0.5.dp,
+                color = Color.White.copy(alpha = 0.08f),
+                shape = RoundedCornerShape(12.dp),
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onNoteClick(row.id) }
+            .padding(12.dp),
+    ) {
+        // Compact header: avatar + name + timestamp
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AvatarImage(
+                pubkey = row.pubkey,
+                picture = row.authorPicture,
+                modifier = Modifier.size(24.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}",
+                color = Color.White.copy(alpha = 0.7f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = relativeTime(row.createdAt),
+                color = Color.White.copy(alpha = 0.4f),
+                fontSize = 13.sp,
+            )
+        }
+        if (row.content.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = row.content.trim(),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 14.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
