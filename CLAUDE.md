@@ -112,7 +112,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow (visible + 2 screens ahead + 1 screen behind) from LazyListLayoutInfo, computes HydrationNeeds per FeedRow via pure `missingFields()` extension, subtracts Room-cached data (batch DAO queries), then dispatches only truly missing profiles/events to network. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
+**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension, subtracts Room-cached data (batch DAO queries), then dispatches only truly missing profiles/events to network. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`.
 
@@ -121,7 +121,9 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 ### Data Flow
 
 ```
-User scrolls → snapshotFlow (500ms debounce) → WarmWindow.from(layoutInfo, events)
+User scrolls → snapshotFlow → ViewportSnapshot (visibleKeys, indices, avgItemHeight, velocity)
+    → velocity-aware debounce (Idle 100ms / Moderate 500ms / Fast 1500ms)
+    → WarmWindow.from(layoutInfo, events, avgItemHeightPx) — pixel-based ahead/behind estimation
     → HydrationFrontier.plan() (Mutex, Room subtraction, priority shedding)
     → ProfileResolver / RelayPool.fetchEventsByIds → Room update → Compose recomposition
 
@@ -241,6 +243,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | HydrationFrontier Room subtraction | Batch DAO existence checks before network — never re-fetch cached data |
 | Priority shedding | >15 in-flight: drop OG previews; >20: cap ahead window entirely |
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
+| Velocity-aware cadence | Idle 100ms / Moderate 500ms / Fast fling 1500ms debounce |
+| Pixel-based warm window | avgItemHeight → ahead/behind counts instead of row-count multiplier |
 
 ---
 
@@ -259,7 +263,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | S25 | Coverage ledger, NIP-51 relay ecosystem, Room v9-v10 |
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
-| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan) |
+| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging) |
 
 ---
 
@@ -354,9 +358,11 @@ Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(i
 
 **HydrationFrontier plan cycle:**
 ```kotlin
-snapshotFlow { layoutInfo } → WarmWindow.from(visibleKeys, firstIdx, lastIdx, events)
-    → viewModel.planHydration(window) → HydrationFrontier.plan(window)
-    → missingFields() per row → Room subtraction → dispatch missing to network
+snapshotFlow { ViewportSnapshot(keys, indices, avgHeight, velocity) }
+    → debounce(scrollVelocityToCadence(velocity).debounceMs)  // 100/500/1500ms
+    → distinctUntilChanged { range + cadence }
+    → WarmWindow.from(keys, indices, events, avgItemHeightPx)  // pixel-based prefetch
+    → HydrationFrontier.plan(window)  // Mutex, Room subtraction, priority shedding
 ```
 
 **Logout pattern:**

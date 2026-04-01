@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
+import androidx.compose.ui.platform.LocalDensity
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.PlannerCadence
 import com.unsilence.app.data.relay.WarmWindow
@@ -64,7 +65,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
+
+/** Snapshot of the viewport state for debounce + cadence computation. */
+private data class ViewportSnapshot(
+    val visibleKeys: Set<String>,
+    val firstIdx: Int,
+    val lastIdx: Int,
+    val avgItemHeight: Float,
+    val velocity: Float,
+)
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -86,6 +95,9 @@ fun FeedScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val aheadBudgetPx = remember(density) { with(density) { 800.dp.toPx() } }
+    val behindBudgetPx = remember(density) { with(density) { 200.dp.toPx() } }
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -287,27 +299,53 @@ fun FeedScreen(
                     }
                 }
 
-                // Engagement + hydration: viewport-driven, debounced
+                // Engagement + hydration: viewport-driven, velocity-aware cadence
                 LaunchedEffect(listState) {
+                    var lastOffset = 0
+                    var lastTimeMs = System.currentTimeMillis()
+
                     snapshotFlow {
                         val info = listState.layoutInfo
-                        val visibleKeys = info.visibleItemsInfo
+                        val visibleItems = info.visibleItemsInfo
+                        val visibleKeys = visibleItems
                             .mapNotNull { it.key as? String }
                             .toSet()
-                        val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
-                        val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                        Triple(visibleKeys, first, last)
+                        val first = visibleItems.firstOrNull()?.index ?: 0
+                        val last = visibleItems.lastOrNull()?.index ?: 0
+                        val avgHeight = if (visibleItems.isNotEmpty()) {
+                            visibleItems.map { it.size }.average().toFloat()
+                        } else 0f
+                        // Compute scroll velocity from offset delta
+                        val totalOffset = first * avgHeight.toInt() +
+                            (listState.firstVisibleItemScrollOffset)
+                        val now = System.currentTimeMillis()
+                        val dt = (now - lastTimeMs).coerceAtLeast(1)
+                        val velocity = kotlin.math.abs(totalOffset - lastOffset).toFloat() / dt
+                        lastOffset = totalOffset
+                        lastTimeMs = now
+                        ViewportSnapshot(visibleKeys, first, last, avgHeight, velocity)
                     }
-                    .filter { it.first.isNotEmpty() }
-                    .debounce(500)
-                    .distinctUntilChanged()
-                    .collectLatest { (visibleKeys, firstIdx, lastIdx) ->
-                        viewModel.fetchEngagementForVisible(visibleKeys)
+                    .filter { it.visibleKeys.isNotEmpty() }
+                    .debounce { snapshot ->
+                        scrollVelocityToCadence(snapshot.velocity).debounceMs
+                    }
+                    .distinctUntilChanged { old, new ->
+                        old.firstIdx == new.firstIdx &&
+                            old.lastIdx == new.lastIdx &&
+                            old.visibleKeys.size == new.visibleKeys.size &&
+                            scrollVelocityToCadence(old.velocity) == scrollVelocityToCadence(new.velocity)
+                    }
+                    .collectLatest { snapshot ->
+                        viewModel.fetchEngagementForVisible(snapshot.visibleKeys)
                         val window = WarmWindow.from(
-                            visibleKeys = visibleKeys,
-                            firstVisibleIndex = firstIdx,
-                            lastVisibleIndex = lastIdx,
+                            visibleKeys = snapshot.visibleKeys,
+                            firstVisibleIndex = snapshot.firstIdx,
+                            lastVisibleIndex = snapshot.lastIdx,
                             events = events,
+                            avgItemHeightPx = snapshot.avgItemHeight,
+                            aheadBudgetPx = aheadBudgetPx,
+                            behindBudgetPx = behindBudgetPx,
+                            scrollVelocity = snapshot.velocity,
                         )
                         viewModel.planHydration(window)
                     }

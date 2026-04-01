@@ -43,14 +43,11 @@ data class WarmWindow(
     val visible: List<FeedRow>,
     val ahead: List<FeedRow>,
     val behind: List<FeedRow>,
+    val scrollVelocity: Float = 0f,
 ) {
     val all: List<FeedRow> get() = behind + visible + ahead
 
     companion object {
-        /** Pixel budget for prefetch zones. */
-        private const val AHEAD_PX = 2400f  // ~2 screens on a 1200px-tall phone
-        private const val BEHIND_PX = 600f  // ~0.5 screen
-
         /**
          * Build a WarmWindow from layout info.
          *
@@ -59,6 +56,9 @@ data class WarmWindow(
          * @param lastVisibleIndex   index of last visible item in [events]
          * @param events             full ordered feed list
          * @param avgItemHeightPx    average visible item height in pixels (from layoutInfo)
+         * @param aheadBudgetPx      pixel budget for the ahead prefetch zone (density-derived)
+         * @param behindBudgetPx     pixel budget for the behind prefetch zone (density-derived)
+         * @param scrollVelocity     current scroll velocity in px/ms (for cadence logging)
          */
         fun from(
             visibleKeys: Set<String>,
@@ -66,18 +66,21 @@ data class WarmWindow(
             lastVisibleIndex: Int,
             events: List<FeedRow>,
             avgItemHeightPx: Float = 0f,
+            aheadBudgetPx: Float = 0f,
+            behindBudgetPx: Float = 0f,
+            scrollVelocity: Float = 0f,
         ): WarmWindow {
             if (events.isEmpty()) return WarmWindow(emptyList(), emptyList(), emptyList())
 
             val pageSize = (lastVisibleIndex - firstVisibleIndex + 1).coerceAtLeast(1)
 
-            // Pixel-based estimation when we have real item heights,
+            // Pixel-based estimation when we have real item heights and budgets,
             // fall back to row-count multiplier otherwise.
             val aheadCount: Int
             val behindCount: Int
-            if (avgItemHeightPx > 0f) {
-                aheadCount = (AHEAD_PX / avgItemHeightPx).toInt().coerceIn(3, 30)
-                behindCount = (BEHIND_PX / avgItemHeightPx).toInt().coerceIn(1, 10)
+            if (avgItemHeightPx > 0f && aheadBudgetPx > 0f) {
+                aheadCount = (aheadBudgetPx / avgItemHeightPx).toInt().coerceIn(3, 30)
+                behindCount = (behindBudgetPx / avgItemHeightPx).toInt().coerceIn(1, 10)
             } else {
                 aheadCount = (pageSize * 2).coerceIn(3, 30)
                 behindCount = pageSize.coerceIn(1, 10)
@@ -92,7 +95,7 @@ data class WarmWindow(
             val behindStart = (behindEnd - behindCount).coerceAtLeast(0)
             val behind = events.subList(behindStart, behindEnd)
 
-            return WarmWindow(visible, ahead, behind)
+            return WarmWindow(visible, ahead, behind, scrollVelocity)
         }
     }
 }
@@ -282,11 +285,12 @@ class HydrationFrontier @Inject constructor(
         // OG fetches are fire-and-forget — NoteCard's produceState will pick up results.
         // HydrationFrontier's OG tracking just prevents re-planning.
 
+        val cadence = scrollVelocityToCadence(window.scrollVelocity)
         Log.d(
             TAG,
             "plan: visible=${window.visible.size} ahead=${window.ahead.size} behind=${window.behind.size} | " +
                 "missing: events=${missingEvents.size} profiles=${missingProfiles.size} og=${missingOg.size} | " +
-                "novel=${novel.size} inFlight=$inFlight shed=${inFlight >= SHED_OG_THRESHOLD}",
+                "novel=${novel.size} inFlight=$inFlight cadence=$cadence shed=${inFlight >= SHED_OG_THRESHOLD}",
         )
     }
 
