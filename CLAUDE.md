@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 1, 2026 (evening)
+**Last updated:** April 1, 2026 (late night)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -114,14 +114,15 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension (profiles, repost targets, quoted events, reply parents, OG URLs), subtracts Room-cached data (batch DAO queries), then coalesces dispatches into pending sets flushed on IDLE cadence (immediate), size threshold (10 profiles / 5 events), or 500ms timer. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
 
-**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`.
+**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (isLoadingMore StateFlow + spinner footer). Init relay connection runs on Dispatchers.IO to avoid startup jank.
 
-**AppBootstrapper** — Comprehensive bootstrap (fetch kind 0/3/10002/10006/10007/10012/30002 on login) and teardown (disconnect all, clear ProfileResolver, preserve Room cache). Logout = process restart via `exitProcess(0)` with synchronous `.commit()` on SharedPrefs.
+**AppBootstrapper** — Comprehensive bootstrap (fetch kind 0/3/10002/10006/10007/10012/30002 on login) and teardown (disconnect all, clear ProfileResolver, preserve Room cache). Bootstrap runs on Dispatchers.IO to avoid main-thread Davey frames. Logout = process restart via `exitProcess(0)` with synchronous `.commit()` on SharedPrefs.
 
 ### Data Flow
 
 ```
-User scrolls → snapshotFlow → ViewportSnapshot (visibleKeys, indices, avgItemHeight, velocity)
+User scrolls → snapshotFlow → ViewportSnapshot (visibleKeys, indices, avgItemHeight)
+    → .map { velocity from fixed 300px offset estimate }
     → velocity-aware debounce (Idle 100ms / Moderate 500ms / Fast 1500ms)
     → WarmWindow.from(layoutInfo, events, avgItemHeightPx) — pixel-based ahead/behind estimation
     → HydrationFrontier.plan() (Mutex, Room subtraction, priority shedding)
@@ -158,7 +159,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Conversation threading: parent note embedded inside reply card (between header and content, same style as EmbeddedQuoteCard) via produceState + lookupEvent
 - FeedStateReducer: blue dot when scrolled, auto-merge at top with grey tint flash
 - Immersive scrolling (top bar + bottom nav + tab row hide/show via NestedScrollConnection; topBarShown passed to FeedScreen, animated height)
-- Scroll-to-bottom pagination with growing window
+- Infinite scroll: loadMore() at 50% scroll position, fetchOlderEvents with `until` filter, isLoadingMore StateFlow, CircularProgressIndicator footer, displayLimit grows by 200 per page
 - Time range + engagement filters
 
 ### Content Rendering
@@ -247,6 +248,10 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Pixel-based warm window | avgItemHeight → ahead/behind counts instead of row-count multiplier |
 | Coalesced dispatch | Pending sets flush on IDLE/size(10/5)/500ms — eliminates 1-item REQs |
 | Reply parent prefetch | missingFields() catches replyToId → planner prefetches before produceState |
+| Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore spinner |
+| Velocity .map fix | Moved velocity computation out of snapshotFlow into .map with fixed 300px multiplier — fixes cadence stuck on IDLE |
+| Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
+| fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
 
 ---
 
@@ -265,7 +270,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | S25 | Coverage ledger, NIP-51 relay ecosystem, Room v9-v10 |
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
-| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging) |
+| April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields() |
 
 ---
 
@@ -352,6 +357,7 @@ ORDER BY e.created_at DESC LIMIT :limit
 - `AvatarImage` — IdentIcon + AsyncImage overlay (NoteCard, EventFeedItems)
 - `relativeTime` — relative timestamp formatting (NoteCard, EventFeedItems)
 - `displayName` — FeedRow extension for author name (NoteCard, ArticleCard)
+- `ThreadParentCard` — compact parent note card (EventFeedItems, NoteCard) — internal visibility
 
 **Engagement fetch pattern:**
 ```kotlin
@@ -360,8 +366,9 @@ Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(i
 
 **HydrationFrontier plan cycle:**
 ```kotlin
-snapshotFlow { ViewportSnapshot(keys, indices, avgHeight, velocity) }
-    → debounce(scrollVelocityToCadence(velocity).debounceMs)  // 100/500/1500ms
+snapshotFlow { ViewportSnapshot(keys, indices, avgHeight) }
+    → .map { velocity via fixed 300px * index + scrollOffset }  // no avgHeight wobble
+    → debounce(scrollVelocityToCadence(velocity).debounceMs)    // 100/500/1500ms
     → distinctUntilChanged { range + cadence }
     → WarmWindow.from(keys, indices, events, avgItemHeightPx)  // pixel-based prefetch
     → HydrationFrontier.plan(window)  // Mutex, Room subtraction, priority shedding
