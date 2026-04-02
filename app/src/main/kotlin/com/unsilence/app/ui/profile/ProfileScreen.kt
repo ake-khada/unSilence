@@ -3,6 +3,7 @@ package com.unsilence.app.ui.profile
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -40,6 +42,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -139,6 +142,10 @@ fun ProfileScreen(
         "${it.take(6)}…${it.takeLast(4)}"
     }
 
+    // ── Swipe left/right to switch profile tabs ────────────────────────────
+    val swipeDrag = remember { mutableFloatStateOf(0f) }
+    val tabs = ProfileTab.entries
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -147,7 +154,26 @@ fun ProfileScreen(
         // ── Scrollable content ────────────────────────────────────────────────
         LazyColumn(
             state               = listState,
-            modifier            = Modifier.fillMaxSize(),
+            modifier            = Modifier
+                .fillMaxSize()
+                .pointerInput(selectedTab) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            val threshold = 100.dp.toPx()
+                            val curIdx = tabs.indexOf(selectedTab)
+                            if (swipeDrag.floatValue > threshold && curIdx > 0) {
+                                viewModel.selectTab(tabs[curIdx - 1])
+                            } else if (swipeDrag.floatValue < -threshold && curIdx < tabs.lastIndex) {
+                                viewModel.selectTab(tabs[curIdx + 1])
+                            }
+                            swipeDrag.floatValue = 0f
+                        },
+                        onDragCancel = { swipeDrag.floatValue = 0f },
+                        onHorizontalDrag = { _, dragAmount ->
+                            swipeDrag.floatValue += dragAmount
+                        },
+                    )
+                },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Space for our own top bar overlay

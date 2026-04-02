@@ -32,7 +32,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,7 +56,6 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -85,7 +83,6 @@ fun FeedScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -325,31 +322,7 @@ fun FeedScreen(
         } // Crossfade
         } // Column
 
-        // Blue dot indicator for new posts — floated over the column
-        if (reducerState.showDot) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Text(
-                    text = "${reducerState.unreadCount} new",
-                    color = Black,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .background(Cyan, androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                        .clickable {
-                            viewModel.onDotTapped()
-                            coroutineScope.launch {
-                                listState.animateScrollToItem(0)
-                            }
-                        }
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                )
-            }
-        }
+        // Blue dot on home icon (AppNavigation) is the only new-post indicator now
     }
 
     articleRow?.let { row ->
