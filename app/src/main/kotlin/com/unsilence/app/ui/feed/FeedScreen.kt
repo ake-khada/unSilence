@@ -61,6 +61,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -125,12 +126,24 @@ fun FeedScreen(
         previousEventIds = currentIds
     }
 
+    // ── Scroll-settled state for video gating ────────────────────────────────
+    var isScrollSettled by remember { mutableStateOf(true) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            isScrollSettled = false
+        } else {
+            delay(300)
+            isScrollSettled = true
+        }
+    }
+
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
         ownerId = "feed",
         holder = actionsViewModel.sharedPlayerHolder,
         events = events,
         listState = listState,
+        isScrollSettled = isScrollSettled,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -364,7 +377,10 @@ fun FeedScreen(
                             scrollVelocityToCadence(old.velocity) == scrollVelocityToCadence(new.velocity)
                     }
                     .collectLatest { snapshot ->
-                        viewModel.fetchEngagementForVisible(snapshot.visibleKeys)
+                        val cadence = scrollVelocityToCadence(snapshot.velocity)
+                        if (cadence == PlannerCadence.IDLE || cadence == PlannerCadence.MODERATE) {
+                            viewModel.fetchEngagementForVisible(snapshot.visibleKeys)
+                        }
                         val window = WarmWindow.from(
                             visibleKeys = snapshot.visibleKeys,
                             firstVisibleIndex = snapshot.firstIdx,

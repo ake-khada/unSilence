@@ -110,7 +110,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
-**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
+**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Gated behind `isScrollSettled` — SurfaceView only attaches 300ms after scroll stops (prevents surface create/destroy cycling during fling). Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
 **HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension (profiles, repost targets, quoted events, reply parents, OG URLs), subtracts Room-cached data (batch DAO queries), then coalesces dispatches into pending sets flushed on IDLE cadence (immediate), size threshold (10 profiles / 5 events), or 500ms timer. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
 
@@ -253,6 +253,10 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
 | fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
 | Profile infinite scroll | ProfileScreen + UserProfileScreen load older events at 50% scroll |
+| Video scroll-settled gate | SurfaceView only attaches 300ms after scroll stops — eliminates surface create/destroy cycling during fling |
+| Engagement fling skip | fetchEngagement skipped during FAST cadence — only fires on IDLE/MODERATE |
+| MediaMetadataRetriever leak fix | retriever.release() in finally block — fixes resource close warnings from thumbnail extraction |
+| OgFetcher response tighten | GET response chained directly with .use{} — no gap for leak |
 
 ---
 
@@ -272,6 +276,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
 | April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
+| April 2 | Scroll jank fixes: video SurfaceView gated behind 300ms scroll-settled state, engagement fetch skipped during FAST fling cadence, MediaMetadataRetriever leak fixed (finally block), OgFetcher GET response chained with .use{} |
 
 ---
 
