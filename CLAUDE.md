@@ -168,7 +168,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - ImetaParser for NIP-92 media extraction (video + image, dimension-based sizing)
 - Inline @mentions via NostrRichText (AnnotatedString + LinkAnnotation.Clickable, cyan, fallback to truncated npub) — handles both npub and nprofile URIs, used in notes AND profile bios
 - Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1); unified style with ThreadParentCard (0.08 alpha white border, 12dp rounded, 24dp avatar)
-- OpenGraph link preview cards (OgFetcher with ConcurrentHashMap cache)
+- OpenGraph link preview cards (OgFetcher with ConcurrentHashMap cache, Html.fromHtml entity decoding)
 - YouTube thumbnail cards (predictable URL, tap opens browser)
 - Multi-photo/video grid (2x2 layout)
 
@@ -179,7 +179,9 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Fullscreen video dialog with controls
 - HLS (.m3u8) support via media3-exoplayer-hls
 - ExoPlayer: 500ms buffer threshold, CDN preconnect at startup
-- Portrait video with proper aspect ratio (capped at 2:3)
+- Portrait video with proper aspect ratio (capped at 9:16)
+- Imeta dimension seeding into resolvedAspectRatios cache (no sizing pop on recycled renders)
+- ContentScale.Crop on poster/thumbnail images (fills container without letterboxing)
 
 ### Profiles
 - Profile view with avatar, banner, bio (NostrRichText with @mention resolution), NIP-05 badge
@@ -271,7 +273,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
 | April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
-| April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept. UI tweaks: swipeable profile tabs (Notes/Replies/Longform), post button white, "Break the silence..." placeholder, removed "new posts" banner (blue dot on home icon only). Thread nav: tapping reply in Conversations opens full thread from OP (root resolution in ThreadViewModel), parent lookup timeout 3s→5s |
+| April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept. UI tweaks: swipeable profile tabs (Notes/Replies/Longform), post button white, "Break the silence..." placeholder, removed "new posts" banner (blue dot on home icon only). Thread nav: tapping reply in Conversations opens full thread from OP (root resolution in ThreadViewModel), parent lookup timeout 3s→5s. Video: imeta dim seeded into resolvedAspectRatios, ContentScale.Crop for posters/thumbnails (no letterboxing). OG: Html.fromHtml for numeric entity decoding |
 
 ---
 
