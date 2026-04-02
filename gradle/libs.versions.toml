@@ -2,7 +2,7 @@
 kotlin            = "2.3.0"
 agp               = "8.9.1"
 ksp               = "2.3.0"
-compose-bom       = "2025.08.00"
+compose-bom       = "2025.12.00"
 okhttp            = "4.12.0"
 kotlinx-serialization = "1.8.0"
 coil              = "3.0.4"

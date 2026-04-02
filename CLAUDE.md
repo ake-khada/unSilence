@@ -31,7 +31,7 @@
 | Component | Version |
 |-----------|---------|
 | Kotlin | 2.3.0 |
-| Jetpack Compose | BOM 2025.08.00 |
+| Jetpack Compose | BOM 2025.12.00 (Compose 1.10, pausable composition) |
 | JDK | 17 |
 | Gradle | 8.9 |
 | KSP | 2.3.0 |
@@ -110,9 +110,9 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
-**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Gated behind `isScrollSettled` — SurfaceView only attaches 300ms after scroll stops (prevents surface create/destroy cycling during fling). Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
+**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**HydrationFrontier** — Viewport-driven hydration planner (replaced CardHydrator). Builds a WarmWindow from LazyListLayoutInfo using pixel-based estimation (avgItemHeight → ahead/behind item counts), computes HydrationNeeds per FeedRow via pure `missingFields()` extension (profiles, repost targets, quoted events, reply parents, OG URLs), subtracts Room-cached data (batch DAO queries), then coalesces dispatches into pending sets flushed on IDLE cadence (immediate), size threshold (10 profiles / 5 events), or 500ms timer. Velocity-aware cadence: Idle (<0.5 px/ms) → 100ms debounce, Moderate → 500ms, Fast fling → 1500ms. Mutex-serialized `plan()`, 30s TTL dedup, priority shedding under relay pressure (>15 in-flight: drop OG, >20: cap ahead window). Coexists with per-card produceState in NoteCard/ThreadedReplyItem — prefetched data lands in Room first, so produceState resolves from cache.
+**CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), and referenced event author profiles. Idempotent via `hydratedIds` set. Profile fetches throttled to 1s minimum between batches. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (isLoadingMore StateFlow + spinner footer). Init relay connection runs on Dispatchers.IO to avoid startup jank.
 
@@ -121,11 +121,8 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 ### Data Flow
 
 ```
-User scrolls → snapshotFlow → ViewportSnapshot (visibleKeys, indices, avgItemHeight)
-    → .map { velocity from fixed 300px offset estimate }
-    → velocity-aware debounce (Idle 100ms / Moderate 500ms / Fast 1500ms)
-    → WarmWindow.from(layoutInfo, events, avgItemHeightPx) — pixel-based ahead/behind estimation
-    → HydrationFrontier.plan() (Mutex, Room subtraction, priority shedding)
+User scrolls → snapshotFlow(visibleItemKeys) → debounce(500) → distinctUntilChanged
+    → fetchEngagementForVisible(ids) + CardHydrator.hydrateVisibleCards(events)
     → ProfileResolver / RelayPool.fetchEventsByIds → Room update → Compose recomposition
 
 New event arrives → EventProcessor → Room INSERT → Flow emission
@@ -241,20 +238,15 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | ExoPlayer buffer | 500ms bufferForPlaybackMs (was 2500ms default) |
 | CDN preconnect | HEAD requests to 7 Nostr CDN hosts at startup |
 | Event relay provenance | INSERT OR IGNORE for deduped events (fixes relay feed gaps) |
-| HydrationFrontier Room subtraction | Batch DAO existence checks before network — never re-fetch cached data |
-| Priority shedding | >15 in-flight: drop OG previews; >20: cap ahead window entirely |
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
-| Velocity-aware cadence | Idle 100ms / Moderate 500ms / Fast fling 1500ms debounce |
-| Pixel-based warm window | avgItemHeight → ahead/behind counts instead of row-count multiplier |
-| Coalesced dispatch | Pending sets flush on IDLE/size(10/5)/500ms — eliminates 1-item REQs |
-| Reply parent prefetch | missingFields() catches replyToId → planner prefetches before produceState |
 | Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore spinner |
-| Velocity .map fix | Moved velocity computation out of snapshotFlow into .map with fixed 300px multiplier — fixes cadence stuck on IDLE |
+| CardHydrator simple debounce | debounce(500) + distinctUntilChanged replaces velocity-aware planner (258→~38 calls) |
 | Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
 | fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
 | Profile infinite scroll | ProfileScreen + UserProfileScreen load older events at 50% scroll |
-| Video scroll-settled gate | SurfaceView only attaches 300ms after scroll stops — eliminates surface create/destroy cycling during fling |
-| Engagement fling skip | fetchEngagement skipped during FAST cadence — only fires on IDLE/MODERATE |
+| BOM 2025.12.00 | Compose 1.10 pausable composition — runtime pauses heavy composition mid-frame |
+| @Immutable FeedRow | Compose skips recomposition of unchanged FeedRow items |
+| contentType on LazyColumn | Article vs note composition recycling (like RecyclerView viewType) |
 | MediaMetadataRetriever leak fix | retriever.release() in finally block — fixes resource close warnings from thumbnail extraction |
 | OgFetcher response tighten | GET response chained directly with .use{} — no gap for leak |
 
@@ -276,7 +268,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
 | April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
-| April 2 | Scroll jank fixes: video SurfaceView gated behind 300ms scroll-settled state, engagement fetch skipped during FAST fling cadence, MediaMetadataRetriever leak fixed (finally block), OgFetcher GET response chained with .use{} |
+| April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept |
 
 ---
 
@@ -370,14 +362,13 @@ ORDER BY e.created_at DESC LIMIT :limit
 Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(ids.take(20)); delay(2000) }
 ```
 
-**HydrationFrontier plan cycle:**
+**Hydration cycle (CardHydrator):**
 ```kotlin
-snapshotFlow { ViewportSnapshot(keys, indices, avgHeight) }
-    → .map { velocity via fixed 300px * index + scrollOffset }  // no avgHeight wobble
-    → debounce(scrollVelocityToCadence(velocity).debounceMs)    // 100/500/1500ms
-    → distinctUntilChanged { range + cadence }
-    → WarmWindow.from(keys, indices, events, avgItemHeightPx)  // pixel-based prefetch
-    → HydrationFrontier.plan(window)  // Mutex, Room subtraction, priority shedding
+snapshotFlow { visibleItemKeys }
+    → filter { isNotEmpty() }
+    → debounce(500)
+    → distinctUntilChanged()
+    → collectLatest { fetchEngagement + cardHydrator.hydrateVisibleCards }
 ```
 
 **Logout pattern:**
@@ -402,7 +393,7 @@ app/src/main/kotlin/com/unsilence/app/
 │   │   ├── entity/  All Room entities
 │   │   └── AppDatabase.kt, DatabaseModule.kt, migrations
 │   ├── relay/       RelayPool, RelayConnection, EventProcessor, ProfileResolver,
-│   │                HydrationFrontier, CardHydrator (top-level extractors only),
+│   │                CardHydrator, NostrJson (extractors),
 │   │                OgFetcher, OutboxRouter, ImetaParser, MediaPreconnect
 │   ├── repository/  EventRepository, UserRepository, ZapRepository
 │   └── AppBootstrapper.kt

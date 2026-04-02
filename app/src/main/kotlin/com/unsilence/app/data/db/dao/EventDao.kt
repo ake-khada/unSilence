@@ -10,6 +10,7 @@ import com.unsilence.app.data.db.entity.EventEntity
 import kotlinx.coroutines.flow.Flow
 
 /** Flattened result of the feed query (event + author fields + engagement counts). */
+@androidx.compose.runtime.Immutable
 data class FeedRow(
     // ── Event ──────────────────────────────────────────────
     @ColumnInfo(name = "id")                    val id: String,
