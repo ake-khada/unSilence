@@ -116,14 +116,11 @@ class OgFetcher @Inject constructor(
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
         )
 
-        /** Decode common HTML entities in attribute values. */
-        private fun decodeHtmlEntities(s: String): String = s
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
+        /** Decode HTML entities (named + numeric) in attribute values. */
+        private fun decodeHtmlEntities(s: String): String =
+            android.text.Html.fromHtml(s, android.text.Html.FROM_HTML_MODE_LEGACY)
+                .toString()
+                .trim()
 
         /** Resolve a potentially relative URL against the page's base URL. */
         private fun resolveUrl(raw: String, pageUrl: String): String {
