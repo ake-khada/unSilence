@@ -107,6 +107,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 **FeedStateReducer** — Manages feed state transitions:
 - `isAtTop` true → MERGE new events directly into visible list with grey tint flash
 - `isAtTop` false → QUEUE events as pending, show blue dot with count
+- `isAtTop` false + list grew (pagination) → MERGE immediately (no dot), preserves scroll position
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
@@ -165,7 +166,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Kind 30023 long-form articles with WebView reader (org.jetbrains:markdown GFM→HTML)
 - Article preview cards on all screens (banner, title, summary)
 - ImetaParser for NIP-92 media extraction (video + image, dimension-based sizing)
-- Inline @mentions via NostrRichText (AnnotatedString + LinkAnnotation.Clickable, cyan, fallback to truncated npub) — used in notes AND profile bios
+- Inline @mentions via NostrRichText (AnnotatedString + LinkAnnotation.Clickable, cyan, fallback to truncated npub) — handles both npub and nprofile URIs, used in notes AND profile bios
 - Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1); unified style with ThreadParentCard (0.08 alpha white border, 12dp rounded, 24dp avatar)
 - OpenGraph link preview cards (OgFetcher with ConcurrentHashMap cache)
 - YouTube thumbnail cards (predictable URL, tap opens browser)

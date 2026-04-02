@@ -1523,9 +1523,11 @@ internal fun NostrRichText(
             }
 
             val profile = profileMap[pubkeyHex]
+            val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
+                .getOrDefault("${pubkeyHex.take(8)}…")
             val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
                 ?: profile?.name?.takeIf { it.isNotBlank() }
-                ?: "${raw.take(18)}…"
+                ?: npubFallback
 
             withLink(
                 LinkAnnotation.Clickable(

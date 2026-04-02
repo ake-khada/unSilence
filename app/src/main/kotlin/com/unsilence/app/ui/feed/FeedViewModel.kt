@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
@@ -267,12 +268,15 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
-        val oldest = _activeReducer.value.state.value.visibleEvents.lastOrNull()?.createdAt ?: return
+        val events = _activeReducer.value.state.value.visibleEvents
+        val oldest = events.lastOrNull()?.createdAt ?: return
+        Log.d("FeedViewModel", "loadMore: oldest=$oldest lastOldest=$lastOldestTimestamp events=${events.size} limit=${_displayLimit.value}")
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
         _displayLimit.value += 200
         _isLoadingMore.value = true
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
+        Log.d("FeedViewModel", "loadMore: fired, new limit=${_displayLimit.value} relays=${currentRelayUrls.size}")
     }
 
     /** Read kind-10002 read relays from Room, falling back to hardcoded defaults. */

@@ -84,10 +84,18 @@ class FeedStateReducer(private val feedKey: String) {
                 val leadingNew = allEvents.takeWhile { it.id !in knownIds }
 
                 if (leadingNew.isEmpty()) {
-                    // No new posts at top — refresh engagement counts in-place
-                    val latestMap = allEvents.associateBy { it.id }
-                    val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
-                    current.copy(visibleEvents = refreshed)
+                    if (allEvents.size > current.visibleEvents.size) {
+                        // Pagination: visible events are a prefix, new rows appended at bottom.
+                        // Merge immediately so the user can keep scrolling.
+                        Log.d(TAG, "feedKey=$feedKey atTop=false action=PAGINATE old=${current.visibleEvents.size} new=${allEvents.size}")
+                        pendingIds = emptySet()
+                        ReducerState(visibleEvents = allEvents, unreadCount = current.unreadCount, showDot = current.showDot)
+                    } else {
+                        // Same size or smaller — refresh engagement counts in-place
+                        val latestMap = allEvents.associateBy { it.id }
+                        val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
+                        current.copy(visibleEvents = refreshed)
+                    }
                 } else {
                     pendingIds = pendingIds + leadingNew.map { it.id }.toSet()
                     val unread = pendingIds.size
