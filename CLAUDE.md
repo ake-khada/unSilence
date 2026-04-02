@@ -114,7 +114,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), and referenced event author profiles. Idempotent via `hydratedIds` set. Profile fetches throttled to 1s minimum between batches. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
 
-**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (isLoadingMore StateFlow + spinner footer). Init relay connection runs on Dispatchers.IO to avoid startup jank.
+**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (isLoadingMore StateFlow + spinner footer). Init relay connection runs on Dispatchers.IO to avoid startup jank. Feed switch starts with displayLimit=50 (grows via loadMore), first-page hydration delayed 500ms with batch of 10 to avoid ANR.
 
 **AppBootstrapper** — Comprehensive bootstrap (fetch kind 0/3/10002/10006/10007/10012/30002 on login) and teardown (disconnect all, clear ProfileResolver, preserve Room cache). Bootstrap runs on Dispatchers.IO to avoid main-thread Davey frames. Logout = process restart via `exitProcess(0)` with synchronous `.commit()` on SharedPrefs.
 
@@ -241,6 +241,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
 | Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore spinner |
 | CardHydrator simple debounce | debounce(500) + distinctUntilChanged replaces velocity-aware planner (258→~38 calls) |
+| Staggered first-page hydration | 500ms delay + batch of 10 on feed switch — lets Compose render cached data first |
+| displayLimit=50 on feed switch | Start with 50 rows instead of 200 — reduces initial LazyColumn composition cost |
 | Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
 | fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
 | Profile infinite scroll | ProfileScreen + UserProfileScreen load older events at 50% scroll |
