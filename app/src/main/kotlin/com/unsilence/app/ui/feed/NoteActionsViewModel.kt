@@ -220,7 +220,7 @@ class NoteActionsViewModel @Inject constructor(
         relayPool.fetchEventById(eventId)
 
         // Wait for the event to appear in Room (relay → EventProcessor → Room)
-        return withTimeoutOrNull(3_000L) {
+        return withTimeoutOrNull(5_000L) {
             eventRepository.flowById(eventId).filterNotNull().first()
         }
     }

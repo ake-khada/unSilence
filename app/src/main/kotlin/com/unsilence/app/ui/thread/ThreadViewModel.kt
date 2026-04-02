@@ -105,15 +105,21 @@ class ThreadViewModel @Inject constructor(
 
     fun loadThread(eventId: String) {
         published = false  // Always reset so LaunchedEffect won't auto-dismiss
-        if (eventIdFlow.value == eventId) return
-        eventIdFlow.value = eventId
-        _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
+            // Resolve thread root: if the tapped event is a reply, load from its root
+            val event = eventRepository.getEventById(eventId)
+            val rootId = event?.rootId ?: event?.replyToId ?: eventId
+
+            if (eventIdFlow.value == rootId) return@launch  // Already showing this thread
+
+            eventIdFlow.value = rootId
+            _uiState.value = ThreadUiState(loading = true)
+
             val readRelays = relayConfigDao.getAllReadWriteRelays()
                 .filter { it.marker == null || it.marker == "read" }
                 .mapNotNull { normalizeRelayUrl(it.relayUrl) }
             val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
-            relayPool.fetchThread(urls, eventId)
+            relayPool.fetchThread(urls, rootId)
         }
     }
 
