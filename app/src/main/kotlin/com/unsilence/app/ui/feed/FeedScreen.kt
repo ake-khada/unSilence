@@ -291,10 +291,9 @@ fun FeedScreen(
                             listState.firstVisibleItemIndex,
                             listState.firstVisibleItemScrollOffset,
                             listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0,
-                        ) to listState.isScrollInProgress
-                    }.collect { (triple, scrolling) ->
-                        val (index, offset, lastVisible) = triple
-                        viewModel.onScrollPositionChanged(index, offset, scrolling)
+                        )
+                    }.collect { (index, offset, lastVisible) ->
+                        viewModel.onScrollPositionChanged(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
                         if (total > 0 && lastVisible >= total / 2) {
                             viewModel.loadMore()
