@@ -136,8 +136,8 @@ class FeedViewModel @Inject constructor(
         .flatMapLatest { it.state }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReducerState())
 
-    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int, isScrollInProgress: Boolean = false) {
-        _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset, isScrollInProgress)
+    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
+        _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset)
     }
 
     fun onDotTapped() {
@@ -165,6 +165,7 @@ class FeedViewModel @Inject constructor(
 
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
+    private var lastLoadMoreTime = 0L
 
     private val _isLoadingMore = MutableStateFlow(false)
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
@@ -268,12 +269,14 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
-        if (_isLoadingMore.value) return
+        val now = System.currentTimeMillis()
+        if (now - lastLoadMoreTime < 2000) return  // 2s cooldown
         val events = _activeReducer.value.state.value.visibleEvents
         val oldest = events.lastOrNull()?.createdAt ?: return
         Log.d("FeedViewModel", "loadMore: oldest=$oldest lastOldest=$lastOldestTimestamp events=${events.size} limit=${_displayLimit.value}")
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
+        lastLoadMoreTime = now
         _displayLimit.value += 50
         _isLoadingMore.value = true
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
@@ -314,6 +317,7 @@ class FeedViewModel @Inject constructor(
                 .flatMapLatest { (type, filter, cf) ->
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
+                    lastLoadMoreTime = 0L
                     _displayLimit.value = 50
                     _isLoadingMore.value = false
                     cardHydrator.clearCache()
