@@ -53,11 +53,10 @@ class VideoThumbnailCache @Inject constructor(
         if (inFlight.putIfAbsent(videoUrl, true) != null) return null
 
         return withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
             try {
-                val retriever = MediaMetadataRetriever()
                 retriever.setDataSource(videoUrl, HashMap<String, String>())
                 val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                retriever.release()
                 frame?.let {
                     val ratio = it.width.toFloat() / it.height
                     val thumb = VideoThumbnail(
@@ -71,6 +70,8 @@ class VideoThumbnailCache @Inject constructor(
             } catch (_: Exception) {
                 inFlight.remove(videoUrl)
                 null
+            } finally {
+                retriever.release()
             }
         }
     }

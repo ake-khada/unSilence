@@ -84,24 +84,23 @@ class OgFetcher @Inject constructor(
         if (!isHtml) return null
 
         // GET with body size limit
-        val response = executeWithCancellation(
+        return executeWithCancellation(
             client.newCall(
                 Request.Builder()
                     .url(url)
                     .header("User-Agent", UA)
                     .build()
             )
-        )
-        response.use {
-            if (!it.isSuccessful) return null
-            val ct = it.header("Content-Type") ?: ""
+        ).use { response ->
+            if (!response.isSuccessful) return null
+            val ct = response.header("Content-Type") ?: ""
             if (!ct.contains("text/html", ignoreCase = true)) return null
             // Read at most 50KB
-            val source = it.body.source()
+            val source = response.body.source()
             val buf = okio.Buffer()
             source.read(buf, MAX_BODY_SIZE)
             val body = buf.readUtf8()
-            return parseOgTags(body, url)
+            parseOgTags(body, url)
         }
     }
 
