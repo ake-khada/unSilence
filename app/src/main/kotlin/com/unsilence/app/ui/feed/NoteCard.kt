@@ -1214,7 +1214,7 @@ private fun VideoThumbnailCard(
             AsyncImage(
                 model = posterUrl,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.matchParentSize(),
             )
         } else if (thumbnailCache != null) {
@@ -1230,7 +1230,7 @@ private fun VideoThumbnailCard(
                 androidx.compose.foundation.Image(
                     bitmap = thumbnail!!.bitmap.asImageBitmap(),
                     contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier.matchParentSize(),
                 )
             }

@@ -63,7 +63,7 @@ internal fun VideoThumbnailImage(
         AsyncImage(
             model = model.posterUrl,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = ContentScale.Fit,
             modifier = modifier,
         )
     } else if (thumbnailCache != null) {
@@ -82,7 +82,7 @@ internal fun VideoThumbnailImage(
             Image(
                 bitmap = thumbnail!!.bitmap.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = modifier,
             )
         }
@@ -106,11 +106,6 @@ fun VideoPreviewCard(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Seed resolvedAspectRatios from imeta dimensions so the cache is warm on recycled renders
-    if (model.widthPx != null && model.heightPx != null && model.heightPx > 0) {
-        thumbnailCache?.resolvedAspectRatios?.putIfAbsent(model.videoUrl, model.widthPx.toFloat() / model.heightPx)
-    }
-
     // Seed from cache so cards that were previously fetched start at the right size
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = if (!forceSquare && cachedRatio != null) {
@@ -176,11 +171,6 @@ fun InlineVideoPlayer(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Seed resolvedAspectRatios from imeta dimensions so the cache is warm on recycled renders
-    if (model.widthPx != null && model.heightPx != null && model.heightPx > 0) {
-        thumbnailCache?.resolvedAspectRatios?.putIfAbsent(model.videoUrl, model.widthPx.toFloat() / model.heightPx)
-    }
-
     // Use the resolved bitmap aspect ratio if available (matches preview card exactly),
     // otherwise fall back to imeta / 16:9 default.
     val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
