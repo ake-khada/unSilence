@@ -103,7 +103,7 @@ fun ComposeScreen(
                     enabled  = textValue.text.isNotBlank(),
                     shape    = RoundedCornerShape(24.dp),
                     colors   = ButtonDefaults.buttonColors(
-                        containerColor         = Cyan,
+                        containerColor         = Color.White,
                         contentColor           = Black,
                         disabledContainerColor = Color(0xFF004D59),
                         disabledContentColor   = Color(0xFF007A8A),
@@ -162,7 +162,7 @@ fun ComposeScreen(
                     decorationBox = { inner ->
                         if (textValue.text.isEmpty()) {
                             Text(
-                                text     = "What's on your mind?",
+                                text     = "Break the silence...",
                                 color    = TextSecondary,
                                 fontSize = 16.sp,
                             )
