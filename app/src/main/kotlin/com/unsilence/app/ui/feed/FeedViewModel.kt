@@ -136,8 +136,8 @@ class FeedViewModel @Inject constructor(
         .flatMapLatest { it.state }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReducerState())
 
-    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
-        _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset)
+    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int, isScrollInProgress: Boolean = false) {
+        _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset, isScrollInProgress)
     }
 
     fun onDotTapped() {
@@ -268,12 +268,13 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
+        if (_isLoadingMore.value) return
         val events = _activeReducer.value.state.value.visibleEvents
         val oldest = events.lastOrNull()?.createdAt ?: return
         Log.d("FeedViewModel", "loadMore: oldest=$oldest lastOldest=$lastOldestTimestamp events=${events.size} limit=${_displayLimit.value}")
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
-        _displayLimit.value += 200
+        _displayLimit.value += 50
         _isLoadingMore.value = true
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
         Log.d("FeedViewModel", "loadMore: fired, new limit=${_displayLimit.value} relays=${currentRelayUrls.size}")

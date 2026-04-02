@@ -43,9 +43,11 @@ class FeedStateReducer(private val feedKey: String) {
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
      */
-    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
+    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int, isScrollInProgress: Boolean = false) {
         val wasAtTop = isAtTop
-        isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
+        // Only consider "at top" when scroll has settled — during list replacement
+        // LazyColumn may briefly report (0, 0) while isScrollInProgress is true.
+        isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0 && !isScrollInProgress
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
@@ -89,7 +91,7 @@ class FeedStateReducer(private val feedKey: String) {
                         // Merge immediately so the user can keep scrolling.
                         Log.d(TAG, "feedKey=$feedKey atTop=false action=PAGINATE old=${current.visibleEvents.size} new=${allEvents.size}")
                         pendingIds = emptySet()
-                        ReducerState(visibleEvents = allEvents, unreadCount = current.unreadCount, showDot = current.showDot)
+                        current.copy(visibleEvents = allEvents)
                     } else {
                         // Same size or smaller — refresh engagement counts in-place
                         val latestMap = allEvents.associateBy { it.id }

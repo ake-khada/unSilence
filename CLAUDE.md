@@ -105,9 +105,9 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 Auth spam suppression: `authFailedRelays` set, warning logged once then suppressed, cleared on reconnect. Persistent replay guard: requires `PERSISTENT` purpose before replaying subs (blocks OUTBOX-only relays from 31+ unwanted persistent subs).
 
 **FeedStateReducer** — Manages feed state transitions:
-- `isAtTop` true → MERGE new events directly into visible list with grey tint flash
+- `isAtTop` true (requires `!isScrollInProgress` to prevent false positive during list replacement) → MERGE new events directly into visible list with grey tint flash
 - `isAtTop` false → QUEUE events as pending, show blue dot with count
-- `isAtTop` false + list grew (pagination) → MERGE immediately (no dot), preserves scroll position
+- `isAtTop` false + list grew (pagination) → PAGINATE with `current.copy(visibleEvents = allEvents)` (preserves unread/dot state + scroll position)
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
@@ -157,7 +157,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Conversation threading: parent note embedded inside reply card (between header and content, same style as EmbeddedQuoteCard) via produceState + lookupEvent
 - FeedStateReducer: blue dot when scrolled, auto-merge at top with grey tint flash
 - Immersive scrolling (top bar + bottom nav + tab row hide/show via NestedScrollConnection; topBarShown passed to FeedScreen, animated height)
-- Infinite scroll: loadMore() at 50% scroll position, fetchOlderEvents with `until` filter, isLoadingMore StateFlow, CircularProgressIndicator footer, displayLimit grows by 200 per page
+- Infinite scroll: loadMore() at 50% scroll position, fetchOlderEvents with `until` filter, isLoadingMore StateFlow guard (prevents duplicate fires), CircularProgressIndicator footer, displayLimit grows by 50 per page
 - Time range + engagement filters
 
 ### Content Rendering
@@ -240,7 +240,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | CDN preconnect | HEAD requests to 7 Nostr CDN hosts at startup |
 | Event relay provenance | INSERT OR IGNORE for deduped events (fixes relay feed gaps) |
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
-| Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore spinner |
+| Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore guard + spinner |
+| Scroll snap-back fix | isLoadingMore guard prevents duplicate loadMore(), displayLimit += 50 (smaller batches), PAGINATE uses current.copy(), isAtTop gated by !isScrollInProgress |
 | CardHydrator simple debounce | debounce(500) + distinctUntilChanged replaces velocity-aware planner (258→~38 calls) |
 | Staggered first-page hydration | 500ms delay + batch of 10 on feed switch — lets Compose render cached data first |
 | displayLimit=50 on feed switch | Start with 50 rows instead of 200 — reduces initial LazyColumn composition cost |
@@ -271,7 +272,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | March 21 | Stabilization: AMOLED theme, immersive scroll, video fixes, OG cards, media grid, mentions, quote cards, article reader, split feed subs |
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
 | April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
-| April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept. UI tweaks: swipeable profile tabs (Notes/Replies/Longform), post button white, "Break the silence..." placeholder, removed "new posts" banner (blue dot on home icon only). Thread nav: tapping reply in Conversations opens full thread from OP (root resolution in ThreadViewModel), parent lookup timeout 3s→5s. OG: Html.fromHtml for numeric entity decoding |
+| April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept. UI tweaks: swipeable profile tabs (Notes/Replies/Longform), post button white, "Break the silence..." placeholder, removed "new posts" banner (blue dot on home icon only). Thread nav: tapping reply in Conversations opens full thread from OP (root resolution in ThreadViewModel), parent lookup timeout 3s→5s. OG: Html.fromHtml for numeric entity decoding. Scroll snap-back fix: loadMore isLoadingMore guard, displayLimit += 50 (was 200), PAGINATE uses current.copy(), isAtTop requires !isScrollInProgress |
 
 ---
 
