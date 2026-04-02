@@ -17,8 +17,7 @@ import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.CoverageRepository
-import com.unsilence.app.data.relay.HydrationFrontier
-import com.unsilence.app.data.relay.WarmWindow
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -71,7 +70,7 @@ class FeedViewModel @Inject constructor(
     private val browseSession: RelayBrowseSession,
     private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
-    private val hydrationFrontier: HydrationFrontier,
+    private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
     private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
@@ -181,9 +180,10 @@ class FeedViewModel @Inject constructor(
         engagementChannel.trySend(visibleIds)
     }
 
-    fun planHydration(window: WarmWindow) {
+    fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
+        if (visibleEvents.isEmpty()) return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            hydrationFrontier.plan(window)
+            cardHydrator.hydrateVisibleCards(visibleEvents)
         }
     }
 
@@ -311,7 +311,7 @@ class FeedViewModel @Inject constructor(
                     lastOldestTimestamp = 0L
                     _displayLimit.value = 200
                     _isLoadingMore.value = false
-                    hydrationFrontier.clearCache()
+                    cardHydrator.clearCache()
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
@@ -393,14 +393,8 @@ class FeedViewModel @Inject constructor(
 
                     // Eagerly hydrate the first page so avatars appear immediately.
                     if (rows.isNotEmpty()) {
-                        val firstPage = rows.take(20)
-                        val window = WarmWindow(
-                            visible = firstPage,
-                            ahead = rows.drop(20).take(20),
-                            behind = emptyList(),
-                        )
                         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            hydrationFrontier.plan(window)
+                            cardHydrator.hydrateVisibleCards(rows.take(20))
                         }
                     }
 

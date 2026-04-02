@@ -44,11 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
-import androidx.compose.ui.platform.LocalDensity
 import com.unsilence.app.data.relay.CoverageStatus
-import com.unsilence.app.data.relay.PlannerCadence
-import com.unsilence.app.data.relay.WarmWindow
-import com.unsilence.app.data.relay.scrollVelocityToCadence
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
@@ -61,24 +57,13 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.items
-
-/** Snapshot of the viewport state for debounce + cadence computation. */
-private data class ViewportSnapshot(
-    val visibleKeys: Set<String>,
-    val firstIdx: Int,
-    val lastIdx: Int,
-    val avgItemHeight: Float,
-    val velocity: Float,
-)
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
@@ -101,9 +86,6 @@ fun FeedScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
-    val density = LocalDensity.current
-    val aheadBudgetPx = remember(density) { with(density) { 800.dp.toPx() } }
-    val behindBudgetPx = remember(density) { with(density) { 200.dp.toPx() } }
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -126,24 +108,12 @@ fun FeedScreen(
         previousEventIds = currentIds
     }
 
-    // ── Scroll-settled state for video gating ────────────────────────────────
-    var isScrollSettled by remember { mutableStateOf(true) }
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) {
-            isScrollSettled = false
-        } else {
-            delay(300)
-            isScrollSettled = true
-        }
-    }
-
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
         ownerId = "feed",
         holder = actionsViewModel.sharedPlayerHolder,
         events = events,
         listState = listState,
-        isScrollSettled = isScrollSettled,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -334,64 +304,20 @@ fun FeedScreen(
                     }
                 }
 
-                // Engagement + hydration: viewport-driven, velocity-aware cadence
+                // Engagement + hydration: debounced visible items
                 LaunchedEffect(listState) {
-                    var prevOffsetEstimate = 0
-                    var prevTimeMs = System.currentTimeMillis()
-
                     snapshotFlow {
-                        val info = listState.layoutInfo
-                        val visibleItems = info.visibleItemsInfo
-                        val visibleKeys = visibleItems
+                        listState.layoutInfo.visibleItemsInfo
                             .mapNotNull { it.key as? String }
                             .toSet()
-                        val first = visibleItems.firstOrNull()?.index ?: 0
-                        val last = visibleItems.lastOrNull()?.index ?: 0
-                        val avgHeight = if (visibleItems.isNotEmpty()) {
-                            visibleItems.map { it.size }.average().toFloat()
-                        } else 0f
-                        ViewportSnapshot(visibleKeys, first, last, avgHeight, 0f)
                     }
-                    .filter { it.visibleKeys.isNotEmpty() }
-                    // Compute velocity outside snapshotFlow — side-effects inside
-                    // snapshotFlow are unreliable (lambda may re-execute for tracking).
-                    // Use fixed 300-px multiplier to avoid avgHeight wobble.
-                    .map { snapshot ->
-                        val offset = snapshot.firstIdx * 300 +
-                            listState.firstVisibleItemScrollOffset
-                        val now = System.currentTimeMillis()
-                        val dt = (now - prevTimeMs).coerceAtLeast(1)
-                        val velocity =
-                            kotlin.math.abs(offset - prevOffsetEstimate).toFloat() / dt
-                        prevOffsetEstimate = offset
-                        prevTimeMs = now
-                        snapshot.copy(velocity = velocity)
-                    }
-                    .debounce { snapshot ->
-                        scrollVelocityToCadence(snapshot.velocity).debounceMs
-                    }
-                    .distinctUntilChanged { old, new ->
-                        old.firstIdx == new.firstIdx &&
-                            old.lastIdx == new.lastIdx &&
-                            old.visibleKeys.size == new.visibleKeys.size &&
-                            scrollVelocityToCadence(old.velocity) == scrollVelocityToCadence(new.velocity)
-                    }
-                    .collectLatest { snapshot ->
-                        val cadence = scrollVelocityToCadence(snapshot.velocity)
-                        if (cadence == PlannerCadence.IDLE || cadence == PlannerCadence.MODERATE) {
-                            viewModel.fetchEngagementForVisible(snapshot.visibleKeys)
-                        }
-                        val window = WarmWindow.from(
-                            visibleKeys = snapshot.visibleKeys,
-                            firstVisibleIndex = snapshot.firstIdx,
-                            lastVisibleIndex = snapshot.lastIdx,
-                            events = events,
-                            avgItemHeightPx = snapshot.avgItemHeight,
-                            aheadBudgetPx = aheadBudgetPx,
-                            behindBudgetPx = behindBudgetPx,
-                            scrollVelocity = snapshot.velocity,
-                        )
-                        viewModel.planHydration(window)
+                    .filter { it.isNotEmpty() }
+                    .debounce(500)
+                    .distinctUntilChanged()
+                    .collectLatest { visibleIds ->
+                        viewModel.fetchEngagementForVisible(visibleIds)
+                        val visibleEvents = events.filter { it.id in visibleIds }
+                        viewModel.hydrateVisibleCards(visibleEvents)
                     }
                 }
             }

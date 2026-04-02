@@ -78,7 +78,6 @@ fun rememberVideoPlaybackScope(
     holder: SharedPlayerHolder,
     events: List<FeedRow>,
     listState: LazyListState,
-    isScrollSettled: Boolean = true,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
@@ -146,12 +145,10 @@ fun rememberVideoPlaybackScope(
     val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
-    val scrollSettledRef = rememberUpdatedState(isScrollSettled)
     LaunchedEffect(Unit) {
         snapshotFlow { listState.layoutInfo }
             .map { layoutInfo ->
                 if (showFullscreenRef.value) return@map activeRef.value
-                if (!scrollSettledRef.value) return@map null
                 val currentIds = noteIdsRef.value
                 val viewportCenter = (layoutInfo.viewportStartOffset +
                     layoutInfo.viewportEndOffset) / 2

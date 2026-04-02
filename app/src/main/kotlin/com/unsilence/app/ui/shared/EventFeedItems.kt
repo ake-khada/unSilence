@@ -90,6 +90,7 @@ fun LazyListScope.eventFeedItems(
     items(
         items = events,
         key = { it.id },
+        contentType = { if (it.kind == 30023) "article" else "note" },
     ) { row ->
         val replyToId = row.replyToId
         if (showThreadParents && replyToId != null) {
