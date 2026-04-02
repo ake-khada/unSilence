@@ -309,7 +309,7 @@ class FeedViewModel @Inject constructor(
                 .flatMapLatest { (type, filter, cf) ->
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
-                    _displayLimit.value = 200
+                    _displayLimit.value = 50
                     _isLoadingMore.value = false
                     cardHydrator.clearCache()
 
@@ -392,9 +392,11 @@ class FeedViewModel @Inject constructor(
                     _activeReducer.value.onNewEvents(rows)
 
                     // Eagerly hydrate the first page so avatars appear immediately.
+                    // Delayed 500ms so Compose renders cached Room data first.
                     if (rows.isNotEmpty()) {
                         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            cardHydrator.hydrateVisibleCards(rows.take(20))
+                            delay(500)
+                            cardHydrator.hydrateVisibleCards(rows.take(10))
                         }
                     }
 
