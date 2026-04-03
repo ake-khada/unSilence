@@ -142,6 +142,7 @@ class SearchViewModel @Inject constructor(
 
     companion object {
         val DEFAULT_SEARCH_RELAYS = listOf(
+            "wss://nostr.wine",
             "wss://relay.noswhere.com",
             "wss://search.nos.today",
             "wss://antiprimal.net",
