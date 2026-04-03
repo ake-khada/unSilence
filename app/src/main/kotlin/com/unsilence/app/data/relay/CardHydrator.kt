@@ -42,8 +42,13 @@ class CardHydrator @Inject constructor(
     private val thumbnailCache: VideoThumbnailCache,
 ) {
     private val hydratedIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    @Volatile private var lastHydrateTime = 0L
 
-    suspend fun hydrateVisibleCards(events: List<FeedRow>) {
+    /**
+     * @param allEvents Full visible event list from FeedViewModel — used for warm zone lookahead.
+     *                  If null, warm zone is skipped.
+     */
+    suspend fun hydrateVisibleCards(events: List<FeedRow>, allEvents: List<FeedRow>? = null) {
         val newEvents = events.filter { it.id !in hydratedIds }
         if (newEvents.isEmpty()) return
         hydratedIds.addAll(newEvents.map { it.id })
@@ -93,18 +98,63 @@ class CardHydrator @Inject constructor(
         // 5. Prefetch video thumbnails for aspect ratio cache (capped at 3 per batch).
         //    By the time a video card enters the viewport, resolvedAspectRatios
         //    already has the correct ratio — zero sizing pop on first compose.
+        //    Fast scroll guard: skip if called within 300ms of previous call.
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastHydrateTime
+        lastHydrateTime = now
+
+        if (elapsed < 300) {
+            Log.d(TAG, "Hydrated ${newEvents.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing) [thumbnails skipped: fast scroll ${elapsed}ms]")
+            return
+        }
+
         var thumbnailCount = 0
+        var videoFound = 0
         for (event in newEvents) {
             if (thumbnailCount >= 3) break
             if (event.kind == 30023) continue
             val models = buildVideoRenderModels(event)
+            videoFound += models.size
             for (model in models) {
                 if (thumbnailCount >= 3) break
                 if (model.widthPx != null && model.heightPx != null) continue  // imeta has dimensions
                 if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
-                withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
-                thumbnailCount++
+                try {
+                    withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+                    thumbnailCount++
+                    Log.d(TAG, "Prefetched thumbnail: ${model.videoUrl.take(60)}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Thumbnail prefetch failed: ${e.message}")
+                }
             }
+        }
+
+        // Warm zone lookahead: peek 5 items beyond visible, total cap stays at 3
+        if (thumbnailCount < 3 && allEvents != null) {
+            val visibleIds = newEvents.map { it.id }.toSet()
+            val lastVisibleIdx = allEvents.indexOfLast { it.id in visibleIds }
+            if (lastVisibleIdx >= 0) {
+                val warmZone = allEvents.drop(lastVisibleIdx + 1).take(5)
+                for (event in warmZone) {
+                    if (thumbnailCount >= 3) break
+                    if (event.kind == 30023) continue
+                    val models = buildVideoRenderModels(event)
+                    for (model in models) {
+                        if (thumbnailCount >= 3) break
+                        if (model.widthPx != null && model.heightPx != null) continue
+                        if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
+                        try {
+                            withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+                            thumbnailCount++
+                            Log.d(TAG, "Warm prefetch: ${model.videoUrl.take(60)}")
+                        } catch (_: Exception) { /* skip */ }
+                    }
+                }
+            }
+        }
+
+        if (videoFound > 0) {
+            Log.d(TAG, "Video scan: $videoFound models, $thumbnailCount prefetched")
         }
 
         Log.d(TAG, "Hydrated ${newEvents.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing)")

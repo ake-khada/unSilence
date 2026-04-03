@@ -314,7 +314,7 @@ fun FeedScreen(
                     .collectLatest { visibleIds ->
                         viewModel.fetchEngagementForVisible(visibleIds)
                         val visibleEvents = events.filter { it.id in visibleIds }
-                        viewModel.hydrateVisibleCards(visibleEvents)
+                        viewModel.hydrateVisibleCards(visibleEvents, allEvents = events)
                     }
                 }
             }
