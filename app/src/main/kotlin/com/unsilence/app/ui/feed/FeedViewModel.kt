@@ -8,6 +8,7 @@ import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
@@ -74,6 +75,7 @@ class FeedViewModel @Inject constructor(
     private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val pinnedRelayDao: PinnedRelayDao,
+    private val userDao: UserDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -191,6 +193,14 @@ class FeedViewModel @Inject constructor(
      * Used by LazyColumn items to resolve original author info on kind-6 reposts.
      * WhileSubscribed(5000) keeps the flow alive briefly when items scroll off-screen.
      */
+    // ── Hydration controller (replaces engagement channel + CardHydrator wrappers) ──
+    val hydrationController = FeedHydrationController(
+        scope = viewModelScope,
+        cardHydrator = cardHydrator,
+        relayPool = relayPool,
+        userDao = userDao,
+    )
+
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
         profileCache.getOrPut(pubkey) {
             userRepository.userFlow(pubkey)
@@ -348,6 +358,7 @@ class FeedViewModel @Inject constructor(
                     }
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
+                    hydrationController.reset()
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."

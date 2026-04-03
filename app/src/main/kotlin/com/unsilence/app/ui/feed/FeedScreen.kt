@@ -300,6 +300,34 @@ fun FeedScreen(
                     }
                 }
 
+                // Hydration controller: feeds scroll state every frame
+                val controller = viewModel.hydrationController
+                LaunchedEffect(listState) {
+                    var wasScrolling = false
+                    snapshotFlow {
+                        Triple(
+                            listState.firstVisibleItemScrollOffset,
+                            listState.isScrollInProgress,
+                            listState.layoutInfo.visibleItemsInfo
+                                .mapNotNull { it.key as? String }
+                                .toSet()
+                        )
+                    }.collect { (scrollOffset, isScrolling, visibleIds) ->
+                        // Detect scroll start/stop for idle timer
+                        if (isScrolling && !wasScrolling) controller.onScrollStarted()
+                        if (!isScrolling && wasScrolling) controller.onScrollStopped()
+                        wasScrolling = isScrolling
+
+                        val visibleEvents = events.filter { it.id in visibleIds }
+                        controller.onScrollFrame(
+                            visibleItems = visibleEvents,
+                            allEvents = events,
+                            scrollPixelOffset = scrollOffset,
+                            isScrollInProgress = isScrolling,
+                        )
+                    }
+                }
+
                 // Restore scroll position after feed switch
                 LaunchedEffect(restoreGen) {
                     if (restoreGen > 0) {
