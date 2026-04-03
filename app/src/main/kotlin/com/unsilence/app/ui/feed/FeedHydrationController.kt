@@ -27,7 +27,8 @@ class FeedHydrationController(
     private val userDao: UserDao,
 ) {
     companion object {
-        const val FAST_SCROLL_THRESHOLD_PX_PER_SEC = 2000f
+        const val FAST_SCROLL_ENTER_PX_S = 2500f   // must exceed to enter FAST
+        const val FAST_SCROLL_EXIT_PX_S  = 1200f   // must drop below to leave FAST
         const val VELOCITY_WINDOW_FRAMES = 3
         const val IDLE_TIMEOUT_MS = 500L
         const val WARM_ZONE_SIZE = 15
@@ -134,7 +135,7 @@ class FeedHydrationController(
     private fun nextState(isScrollInProgress: Boolean): ScrollState {
         return when (state) {
             ScrollState.WARM_CATCHUP -> {
-                if (velocityPxPerSec > FAST_SCROLL_THRESHOLD_PX_PER_SEC) {
+                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (catchupGateMet()) {
                     ScrollState.SLOW_SCROLL
@@ -143,14 +144,14 @@ class FeedHydrationController(
                 }
             }
             ScrollState.SLOW_SCROLL -> {
-                if (velocityPxPerSec > FAST_SCROLL_THRESHOLD_PX_PER_SEC) {
+                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else {
                     ScrollState.SLOW_SCROLL
                 }
             }
             ScrollState.IDLE -> {
-                if (velocityPxPerSec > FAST_SCROLL_THRESHOLD_PX_PER_SEC) {
+                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (isScrollInProgress) {
                     ScrollState.SLOW_SCROLL
@@ -159,7 +160,7 @@ class FeedHydrationController(
                 }
             }
             ScrollState.FAST_SCROLL -> {
-                if (velocityPxPerSec < FAST_SCROLL_THRESHOLD_PX_PER_SEC) {
+                if (velocityPxPerSec < FAST_SCROLL_EXIT_PX_S) {
                     ScrollState.WARM_CATCHUP
                 } else {
                     ScrollState.FAST_SCROLL
