@@ -40,6 +40,7 @@ class FeedStateReducer(private val feedKey: String) {
     private var pendingIds: Set<String> = emptySet()
 
     private var isAtTop: Boolean = true
+    private var lastAppendTime = 0L
 
     // Coalesce MERGE updates: fixed 200ms window batches rapid Room emissions.
     // First emission opens the window; subsequent emissions update pendingMerge
@@ -88,6 +89,7 @@ class FeedStateReducer(private val feedKey: String) {
     fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         val wasAtTop = isAtTop
         isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
+            && (System.currentTimeMillis() - lastAppendTime > 500)
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
@@ -105,6 +107,24 @@ class FeedStateReducer(private val feedKey: String) {
         latestRows = allEvents
 
         val current = _state.value
+
+        // Structural dedup: skip if event IDs AND engagement counts are unchanged.
+        // Room re-emits on any joined-table write (profile update, relay provenance, etc.)
+        // even when this feed's meaningful data hasn't changed.
+        if (allEvents.size == current.visibleEvents.size) {
+            val unchanged = allEvents.indices.all { i ->
+                val new = allEvents[i]
+                val old = current.visibleEvents[i]
+                new.id == old.id &&
+                    new.replyCount == old.replyCount &&
+                    new.reactionCount == old.reactionCount &&
+                    new.repostCount == old.repostCount &&
+                    new.zapCount == old.zapCount &&
+                    new.zapTotalSats == old.zapTotalSats
+            }
+            if (unchanged) return
+        }
+
         if (current.visibleEvents.isEmpty() || isAtTop) {
             // MERGE path — safe: user is parked at top with no finger on screen.
             // Coalesced via fixed 200ms window in emitCoalesced.
@@ -127,6 +147,7 @@ class FeedStateReducer(private val feedKey: String) {
                     val existingIds = cur.visibleEvents.map { it.id }.toSet()
                     val appended = allEvents.filter { it.id !in existingIds }
                     if (appended.isNotEmpty()) {
+                        lastAppendTime = System.currentTimeMillis()
                         Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${refreshed.size + appended.size}")
                     }
                     cur.copy(visibleEvents = refreshed + appended)
