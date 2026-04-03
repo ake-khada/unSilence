@@ -223,7 +223,6 @@ class UserProfileViewModel @Inject constructor(
         _displayLimit.value = 200
         oldestTimestamp = Long.MAX_VALUE
         fetching = false
-        cardHydrator.clearCache()
         engagementFetchedIds.clear()
         isLoadingPosts.value = true
 

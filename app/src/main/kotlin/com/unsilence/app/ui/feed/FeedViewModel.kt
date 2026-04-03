@@ -26,7 +26,6 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.domain.model.FeedFilter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -34,7 +33,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -140,10 +138,6 @@ class FeedViewModel @Inject constructor(
         _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset)
     }
 
-    fun onScrollProgressChanged(scrolling: Boolean) {
-        _activeReducer.value.onScrollProgressChanged(scrolling)
-    }
-
     fun onDotTapped() {
         _activeReducer.value.onDotTapped()
     }
@@ -153,19 +147,6 @@ class FeedViewModel @Inject constructor(
 
     /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
     fun clearNewTopPost() { onDotTapped() }
-
-    // ── Coalesced engagement fetch — max one call per 2 seconds ─────────
-    private val engagementChannel = Channel<Set<String>>(Channel.CONFLATED)
-
-    init {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            engagementChannel.consumeAsFlow()
-                .collect { ids ->
-                    relayPool.fetchEngagementBatch(ids.toList().take(20))
-                    delay(2000) // minimum 2s between engagement fetches
-                }
-        }
-    }
 
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
@@ -204,22 +185,6 @@ class FeedViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-
-    /**
-     * Fetch engagement only for currently visible items. Called from
-     * FeedScreen via a debounced snapshotFlow on visible item keys.
-     * Dedup now lives in RelayPool.engagementFetched (global, survives VM recreation).
-     */
-    fun fetchEngagementForVisible(visibleIds: Set<String>) {
-        engagementChannel.trySend(visibleIds)
-    }
-
-    fun hydrateVisibleCards(visibleEvents: List<FeedRow>, allEvents: List<FeedRow>? = null) {
-        if (visibleEvents.isEmpty()) return
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            cardHydrator.hydrateVisibleCards(visibleEvents, allEvents)
-        }
-    }
 
     /**
      * Returns a cached StateFlow for the given pubkey's profile.
@@ -383,7 +348,6 @@ class FeedViewModel @Inject constructor(
                     }
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
-                    cardHydrator.clearCache()
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
@@ -455,15 +419,6 @@ class FeedViewModel @Inject constructor(
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
                     _activeReducer.value.onNewEvents(rows)
-
-                    // Eagerly hydrate the first page so avatars appear immediately.
-                    // Delayed 500ms so Compose renders cached Room data first.
-                    if (rows.isNotEmpty()) {
-                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            delay(500)
-                            cardHydrator.hydrateVisibleCards(rows.take(10))
-                        }
-                    }
 
                     // Re-check coverage status from DB on each emission
                     val intent = CoverageIntent.HomeFeed()

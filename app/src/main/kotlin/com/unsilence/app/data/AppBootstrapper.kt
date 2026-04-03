@@ -11,7 +11,6 @@ import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
-import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
@@ -64,7 +63,6 @@ class AppBootstrapper @Inject constructor(
     private val userDao: UserDao,
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
-    private val cardHydrator: CardHydrator,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
@@ -227,10 +225,7 @@ class AppBootstrapper @Inject constructor(
         // 6. Release shared ExoPlayer
         sharedPlayerHolder.release()
 
-        // 7. Clear card hydration cache (prevents stale data across accounts)
-        cardHydrator.clearCache()
-
-        // 8. Clear profile resolver in-flight state
+        // 7. Clear profile resolver in-flight state
         profileResolver.clear()
 
         // 9. In-memory state already cleared by eventProcessor.stop() (seenIds)
