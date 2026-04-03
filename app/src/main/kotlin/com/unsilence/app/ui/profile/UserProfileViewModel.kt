@@ -97,6 +97,7 @@ class UserProfileViewModel @Inject constructor(
     // ── Pagination state ───────────────────────────────────────────────
     private var oldestTimestamp = Long.MAX_VALUE
     private var fetching = false
+    private var outboxRelayUrls: List<String> = emptyList()
 
     // ── Profile lookup for repost original authors ─────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
@@ -228,8 +229,9 @@ class UserProfileViewModel @Inject constructor(
 
         viewModelScope.launch {
             userRepository.fetchMissingProfiles(listOf(pubkey))
-            connectOutboxRelays(pubkey)
-            relayPool.fetchUserPosts(pubkey)
+            outboxRelayUrls = resolveOutboxRelays(pubkey)
+            relayPool.connect(outboxRelayUrls)
+            relayPool.fetchUserPosts(pubkey, outboxRelayUrls)
         }
     }
 
@@ -245,7 +247,7 @@ class UserProfileViewModel @Inject constructor(
         oldestTimestamp = currentOldest
         _displayLimit.value += 200
 
-        relayPool.fetchOlderPosts(pubkey, currentOldest)
+        relayPool.fetchOlderPosts(pubkey, currentOldest, outboxRelayUrls)
 
         // Allow next fetch after relay responses have had time to arrive
         viewModelScope.launch {
@@ -255,10 +257,10 @@ class UserProfileViewModel @Inject constructor(
     }
 
     /**
-     * NIP-65 outbox routing: connect to the user's declared write relays
-     * so we can fetch their posts from where they actually publish.
+     * NIP-65 outbox routing: resolve the user's declared write relays (max 5).
+     * Falls back to 5 general relays if no kind 10002 found.
      */
-    private suspend fun connectOutboxRelays(pubkey: String) {
+    private suspend fun resolveOutboxRelays(pubkey: String): List<String> {
         // Step 1: check Room cache
         var relayList = userRepository.getRelayList(pubkey)
 
@@ -276,18 +278,18 @@ class UserProfileViewModel @Inject constructor(
         }
 
         if (relayList == null) {
-            Log.d(TAG, "No relay list found for $pubkey — fetching from connected relays only")
-            return
+            Log.d(TAG, "No relay list found for $pubkey — using general relays")
+            return GLOBAL_RELAY_URLS.take(5)
         }
 
-        // Step 3: parse write relay URLs and connect
+        // Step 3: parse write relay URLs (max 5)
         val writeUrls = runCatching {
             Json.decodeFromString<List<String>>(relayList.writeRelays)
-        }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList()).take(5)
 
         if (writeUrls.isNotEmpty()) {
-            Log.d(TAG, "Connecting to ${writeUrls.size} outbox relays for $pubkey")
-            relayPool.connect(writeUrls)
+            Log.d(TAG, "Resolved ${writeUrls.size} outbox relays for $pubkey")
         }
+        return writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
     }
 }

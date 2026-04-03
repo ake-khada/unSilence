@@ -1007,7 +1007,7 @@ class RelayPool @Inject constructor(
      * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */
-    fun fetchUserPosts(pubkey: String) {
+    fun fetchUserPosts(pubkey: String, relayUrls: List<String> = emptyList()) {
         val ts = System.currentTimeMillis()
 
         // Posts by this author
@@ -1038,11 +1038,17 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        connections.values.forEach {
+        val targets = if (relayUrls.isNotEmpty()) {
+            relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+                .ifEmpty { connections.values.take(5) }
+        } else {
+            connections.values.toList()
+        }
+        targets.forEach {
             it.send(postsReq)
             it.send(engagementReq)
         }
-        Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${connections.size} relay(s)")
+        Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${targets.size} relay(s)")
     }
 
     /**
@@ -1147,7 +1153,7 @@ class RelayPool @Inject constructor(
      * Fetches posts by [pubkey] older than [untilTimestamp].
      * One-shot subscription — closes on EOSE (prefix "older-" matches isOneShotSubscription).
      */
-    fun fetchOlderPosts(pubkey: String, untilTimestamp: Long) {
+    fun fetchOlderPosts(pubkey: String, untilTimestamp: Long, relayUrls: List<String> = emptyList()) {
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("older-user-${System.currentTimeMillis()}"))
@@ -1164,8 +1170,14 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(200))
             })
         }.toString()
-        connections.values.forEach { it.send(req) }
-        Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp from ${connections.size} relay(s)")
+        val targets = if (relayUrls.isNotEmpty()) {
+            relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+                .ifEmpty { connections.values.take(5) }
+        } else {
+            connections.values.toList()
+        }
+        targets.forEach { it.send(req) }
+        Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp from ${targets.size} relay(s)")
     }
 
     /**

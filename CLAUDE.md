@@ -113,7 +113,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), and referenced event author profiles. Idempotent via `hydratedIds` set. Profile fetches throttled to 1s minimum between batches. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
+**CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), and referenced event author profiles. Idempotent via `hydratedIds` set. No internal throttle — ProfileResolver handles 200ms batching and in-flight dedup. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (isLoadingMore StateFlow + spinner footer). Init relay connection runs on Dispatchers.IO to avoid startup jank. Feed switch starts with displayLimit=50 (grows via loadMore), first-page hydration delayed 500ms with batch of 10 to avoid ANR.
 
@@ -234,7 +234,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Empty hydration skip | 38 wasted calls eliminated |
 | DOT_TAP guard | 70 flushes → fires only when dot visible |
 | Engagement coalescing | Channel.CONFLATED + 2s gap (78 → ~20 calls/session) |
-| Profile fetch throttle | 1s minimum between batches during scroll |
+| Profile fetch — outbox only | Profile screens fetch from outbox relays (max 5), not all 25. CardHydrator throttle removed — ProfileResolver handles 200ms batching |
+| Bootstrap relay cap | Read relays capped at 8 in bootstrap phase 5 (indexers + 8 read ≤ 13 total) |
 | OG fetcher leak fix | .use{} on HEAD response |
 | ExoPlayer buffer | 500ms bufferForPlaybackMs (was 2500ms default) |
 | CDN preconnect | HEAD requests to 7 Nostr CDN hosts at startup |
