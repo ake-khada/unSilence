@@ -81,7 +81,6 @@ class FeedStateReducer(private val feedKey: String) {
         }
 
         isAtTop = atTopConsecutiveCount >= 2
-        Log.d(TAG, "scroll: idx=$firstVisibleIndex off=$firstVisibleOffset consecutive=$atTopConsecutiveCount isAtTop=$isAtTop")
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
