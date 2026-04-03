@@ -106,12 +106,14 @@ fun VideoPreviewCard(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Seed from cache so cards that were previously fetched start at the right size
+    // Use imeta dimensions as authoritative aspect ratio when available.
+    // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
+    val imetaKnown = model.widthPx != null && model.heightPx != null && model.heightPx > 0
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
-    val initialAspect = if (!forceSquare && cachedRatio != null) {
-        feedVideoAspectRatio(cachedRatio, false)
-    } else {
-        feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    val initialAspect = when {
+        imetaKnown -> feedVideoAspectRatio(model.widthPx!!.toFloat() / model.heightPx!!, forceSquare)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
 
@@ -128,7 +130,8 @@ fun VideoPreviewCard(
             model = model,
             thumbnailCache = thumbnailCache,
             modifier = Modifier.matchParentSize(),
-            onAspectRatioResolved = { if (!forceSquare) displayAspect = feedVideoAspectRatio(it, false) },
+            // Only update aspect ratio from bitmap if imeta didn't provide dimensions
+            onAspectRatioResolved = { if (!forceSquare && !imetaKnown) displayAspect = feedVideoAspectRatio(it, false) },
         )
 
         // Play icon overlay
@@ -171,13 +174,14 @@ fun InlineVideoPlayer(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Use the resolved bitmap aspect ratio if available (matches preview card exactly),
-    // otherwise fall back to imeta / 16:9 default.
+    // Use imeta dimensions as authoritative aspect ratio when available.
+    // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
+    val imetaKnown = model.widthPx != null && model.heightPx != null && model.heightPx > 0
     val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
-    val baseAspect = if (!forceSquare && resolvedRatio != null) {
-        feedVideoAspectRatio(resolvedRatio, false)
-    } else {
-        feedVideoAspectRatio(model.aspectRatio, forceSquare)
+    val baseAspect = when {
+        imetaKnown -> feedVideoAspectRatio(model.widthPx!!.toFloat() / model.heightPx!!, forceSquare)
+        !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio, false)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
 
@@ -212,7 +216,7 @@ fun InlineVideoPlayer(
                 model = model,
                 thumbnailCache = thumbnailCache,
                 modifier = Modifier.matchParentSize(),
-                onAspectRatioResolved = { if (!forceSquare) displayAspect = feedVideoAspectRatio(it, false) },
+                onAspectRatioResolved = { if (!forceSquare && !imetaKnown) displayAspect = feedVideoAspectRatio(it, false) },
             )
         }
 
