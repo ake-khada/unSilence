@@ -79,16 +79,20 @@ class CardHydrator @Inject constructor(
             userRepository.fetchMissingProfiles(pubkeys.toList())
         }
 
-        // 5. Prefetch video thumbnails for aspect ratio cache.
+        // 5. Prefetch video thumbnails for aspect ratio cache (capped at 3 per batch).
         //    By the time a video card enters the viewport, resolvedAspectRatios
         //    already has the correct ratio — zero sizing pop on first compose.
+        var thumbnailCount = 0
         for (event in newEvents) {
+            if (thumbnailCount >= 3) break
             if (event.kind == 30023) continue
             val models = buildVideoRenderModels(event)
             for (model in models) {
+                if (thumbnailCount >= 3) break
                 if (model.widthPx != null && model.heightPx != null) continue  // imeta has dimensions
                 if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
                 withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+                thumbnailCount++
             }
         }
 
