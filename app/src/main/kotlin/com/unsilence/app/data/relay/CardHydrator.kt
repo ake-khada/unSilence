@@ -71,6 +71,21 @@ class CardHydrator @Inject constructor(
             }
         }
 
+        // 1b. Warm zone: collect pubkeys from next 10 items for profile pre-resolution.
+        //     Profiles ONLY — no engagement/OG/refs for warm zone items.
+        if (allEvents != null) {
+            val visibleIds = events.map { it.id }.toSet()
+            val lastIdx = allEvents.indexOfLast { it.id in visibleIds }
+            if (lastIdx >= 0) {
+                allEvents.drop(lastIdx + 1).take(10).forEach { event ->
+                    pubkeys.add(event.pubkey)
+                    if (event.kind == 6) {
+                        extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
+                    }
+                }
+            }
+        }
+
         // 2. Fetch missing referenced events (batched, deduped in RelayPool)
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
         if (missingRefs.isNotEmpty()) {
