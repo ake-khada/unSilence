@@ -38,14 +38,25 @@ class FeedStateReducer(private val feedKey: String) {
     private var pendingIds: Set<String> = emptySet()
 
     private var isAtTop: Boolean = true
+    private var atTopConsecutiveCount = 0
 
     /**
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
+     * Requires 2+ consecutive (0,0) reports to confirm truly at top —
+     * prevents false positive from video layout shift.
      */
     fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         val wasAtTop = isAtTop
-        isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
+        val atTopNow = firstVisibleIndex == 0 && firstVisibleOffset == 0
+
+        if (atTopNow) {
+            atTopConsecutiveCount++
+        } else {
+            atTopConsecutiveCount = 0
+        }
+
+        isAtTop = atTopConsecutiveCount >= 2
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
