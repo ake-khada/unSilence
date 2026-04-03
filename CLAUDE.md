@@ -95,7 +95,7 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 
 **EventProcessor** — Receives events from RelayPool, deduplicates via `seenIds` set, processes by kind, stores in Room with denormalized counters. Records relay provenance in `event_relays` even for deduped events (fixes relay feed gaps). Immutable `kindHandlers` map via `dagger.Lazy`.
 
-**ProfileResolver** — Centralized batched profile fetching. 6-hour staleness threshold (1h for no-picture profiles). In-flight guard prevents duplicate requests. Sends to 4 indexer relays (purplepag.es, user.kindpag.es, indexer.coracle.social, antiprimal.net).
+**ProfileResolver** — Centralized batched profile fetching. 6-hour staleness threshold (1h for no-picture profiles). In-flight guard prevents duplicate requests. Sends to 5 indexer relays (purplepag.es, indexer.coracle.social, user.kindpag.es, directory.yabu.me, profiles.nostr1.com).
 
 **RelayPool** — WebSocket connection manager with `ConnectionPurpose` map:
 - `PERSISTENT` — home feed subs (Following/Global), stay open
@@ -140,8 +140,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 
 ## Relay Configuration
 
-**Indexers:** purplepag.es, user.kindpag.es, indexer.coracle.social, antiprimal.net
-**Search (NIP-50):** relay.noswhere.com, search.nos.today, antiprimal.net
+**Indexers:** purplepag.es, indexer.coracle.social, user.kindpag.es, directory.yabu.me, profiles.nostr1.com
+**Search (NIP-50):** nostr.wine, relay.noswhere.com, search.nos.today, antiprimal.net, relay.ditto.pub
 **Global defaults:** relay.damus.io, nos.lol, nostr.mom, relay.nostr.net, relay.primal.net, relay.ditto.pub
 **Connection cap:** 25 relays soft limit
 **Feed subs split:** posts(300), media(100), reactions(200), zaps(200)

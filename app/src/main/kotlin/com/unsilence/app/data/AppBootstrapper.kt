@@ -36,15 +36,19 @@ private const val TAG = "AppBootstrapper"
 /** Default indexer relays — only used for first-launch seeding. */
 private val DEFAULT_INDEXER_URLS = listOf(
     "wss://purplepag.es",
-    "wss://user.kindpag.es",
     "wss://indexer.coracle.social",
-    "wss://antiprimal.net",
+    "wss://user.kindpag.es",
+    "wss://directory.yabu.me",
+    "wss://profiles.nostr1.com",
 )
 
 /** Default search relays — seeded if none found after bootstrap fetch. */
 private val DEFAULT_SEARCH_URLS = listOf(
-    "wss://relay.nostr.band",
+    "wss://nostr.wine",
+    "wss://relay.noswhere.com",
     "wss://search.nos.today",
+    "wss://antiprimal.net",
+    "wss://relay.ditto.pub",
 )
 
 @Singleton
