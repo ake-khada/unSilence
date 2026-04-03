@@ -76,6 +76,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.Image
@@ -149,7 +150,7 @@ private val NOSTR_PROFILE_URI_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", 
 
 private sealed class NostrRef {
     data class EventRef(val eventId: String, val relayHints: List<String> = emptyList()) : NostrRef()
-    data class ProfileRef(val pubkeyHex: String) : NostrRef()
+    data class ProfileRef(val pubkeyHex: String, val relayHints: List<String> = emptyList()) : NostrRef()
     data class AddressRef(val kind: Int, val author: String, val dTag: String, val relayHints: List<String> = emptyList()) : NostrRef()
 }
 
@@ -159,7 +160,7 @@ private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
         is NNote    -> NostrRef.EventRef(entity.hex)
         is NAddress -> NostrRef.AddressRef(entity.kind, entity.author, entity.dTag, entity.relay.map { it.url })
         is NPub     -> NostrRef.ProfileRef(entity.hex)
-        is NProfile -> NostrRef.ProfileRef(entity.hex)
+        is NProfile -> NostrRef.ProfileRef(entity.hex, entity.relay.map { it.url })
         else        -> null
     }
 }.getOrNull()
@@ -1430,11 +1431,26 @@ private fun EmbeddedQuoteCard(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                // Strip nostr URIs and URLs from quoted content for cleaner display
-                val cleanContent = LINK_URL_REGEX.replace(
-                    NOSTR_URI_REGEX.replace(loadedEvent.content, ""),
-                    ""
-                ).trim()
+
+                // Extract media from quoted content
+                val rawContent = loadedEvent.content
+                val quotedImages = remember(rawContent) {
+                    IMAGE_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
+                }
+                val quotedVideos = remember(rawContent) {
+                    VIDEO_URL_REGEX.findAll(rawContent).map { it.value }.distinct()
+                        .filter { it !in quotedImages }.toList()
+                }
+
+                // Strip nostr URIs, media URLs, and bare links for cleaner text
+                val cleanContent = remember(rawContent) {
+                    rawContent
+                        .let { NOSTR_URI_REGEX.replace(it, "") }
+                        .let { IMAGE_URL_REGEX.replace(it, "") }
+                        .let { VIDEO_URL_REGEX.replace(it, "") }
+                        .let { LINK_URL_REGEX.replace(it, "") }
+                        .trim()
+                }
                 if (cleanContent.isNotBlank()) {
                     Text(
                         text     = cleanContent,
@@ -1444,6 +1460,40 @@ private fun EmbeddedQuoteCard(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+
+                // First image preview (capped at 200dp)
+                if (quotedImages.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    AsyncImage(
+                        model              = quotedImages.first(),
+                        contentDescription = null,
+                        contentScale       = ContentScale.Crop,
+                        modifier           = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                    )
+                }
+
+                // Video thumbnail placeholder (no autoplay in quotes)
+                if (quotedVideos.isNotEmpty() && quotedImages.isEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF1A1A1A)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector        = Icons.Filled.PlayArrow,
+                            contentDescription = "Video",
+                            tint               = Color.White.copy(alpha = 0.6f),
+                            modifier           = Modifier.size(48.dp),
+                        )
+                    }
                 }
 
                 // Nested quote: render one level of quotes inside this quoted post
