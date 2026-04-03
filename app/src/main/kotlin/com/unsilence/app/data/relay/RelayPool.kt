@@ -763,6 +763,42 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch profiles using nprofile relay hints. Connects to hinted relays (if not already)
+     * and sends targeted kind-0 REQs. Follows the same pattern as [fetchEventById] with hints.
+     */
+    fun fetchProfilesFromHints(pubkeyHints: Map<String, List<String>>) {
+        if (pubkeyHints.isEmpty()) return
+        val now = System.currentTimeMillis()
+        // Dedup against recent fetches
+        val novel = pubkeyHints.filter { (pk, _) ->
+            val last = profileFetchAttempted[pk]
+            last == null || (now - last) > 300_000
+        }
+        if (novel.isEmpty()) return
+
+        // Connect to all hinted relays
+        val allHintUrls = novel.values.flatten().distinct()
+        if (allHintUrls.isNotEmpty()) connect(allHintUrls)
+
+        // Send one batched REQ to hinted relays
+        val pubkeys = novel.keys.toList()
+        pubkeys.forEach { profileFetchAttempted[it] = now }
+        val subId = "hint-profiles-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
+            })
+        }.toString()
+        val hintConns = allHintUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+        hintConns.forEach { it.send(req) }
+        Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${hintConns.size} hinted relay(s)")
+    }
+
+    /**
      * NIP-50 search: connect to [searchRelayUrls] (if not already) and send a REQ with the
      * "search" field. Results arrive via EventProcessor → Room as with any other subscription.
      *

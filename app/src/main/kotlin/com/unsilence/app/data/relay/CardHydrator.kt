@@ -9,6 +9,7 @@ import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
+import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -47,9 +48,10 @@ class CardHydrator @Inject constructor(
         if (newEvents.isEmpty()) return
         hydratedIds.addAll(newEvents.map { it.id })
 
-        // 1. Collect all pubkeys and referenced event IDs
+        // 1. Collect all pubkeys, referenced event IDs, and nprofile relay hints
         val pubkeys = mutableSetOf<String>()
         val referencedIds = mutableSetOf<String>()
+        val profileHints = mutableMapOf<String, MutableList<String>>()
 
         for (event in newEvents) {
             pubkeys.add(event.pubkey)
@@ -58,6 +60,10 @@ class CardHydrator @Inject constructor(
                 extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
             }
             extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
+            extractProfileHints(event.content).forEach { (pk, relays) ->
+                pubkeys.add(pk)
+                profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
+            }
         }
 
         // 2. Fetch missing referenced events (batched, deduped in RelayPool)
@@ -77,6 +83,11 @@ class CardHydrator @Inject constructor(
         //    ProfileResolver handles batching (200ms window) and in-flight dedup internally.
         if (pubkeys.isNotEmpty()) {
             userRepository.fetchMissingProfiles(pubkeys.toList())
+        }
+
+        // 4b. Targeted fetch for pubkeys with nprofile relay hints
+        if (profileHints.isNotEmpty()) {
+            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
         }
 
         // 5. Prefetch video thumbnails for aspect ratio cache (capped at 3 per batch).
@@ -130,4 +141,19 @@ fun extractQuotedEventIds(content: String): List<String> {
             }
         }.getOrNull()
     }.toList()
+}
+
+/** Extract pubkey → relay hints from nostr:nprofile1... URIs in content. */
+fun extractProfileHints(content: String): Map<String, List<String>> {
+    if (!content.contains("nostr:")) return emptyMap()
+    val hints = mutableMapOf<String, List<String>>()
+    NOSTR_URI_REGEX.findAll(content).forEach { match ->
+        runCatching {
+            val entity = Nip19Parser.uriToRoute(match.value)?.entity
+            if (entity is NProfile && entity.relay.isNotEmpty()) {
+                hints[entity.hex] = entity.relay.map { it.url }
+            }
+        }
+    }
+    return hints
 }
