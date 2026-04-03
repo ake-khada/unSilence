@@ -141,7 +141,8 @@ fun rememberVideoPlaybackScope(
         }
     }
 
-    // Active video detection via scroll position
+    // Active video detection via scroll position with visibility thresholds.
+    // Activate at >=60% visible; deactivate below 35% (hysteresis prevents oscillation).
     val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
@@ -150,15 +151,36 @@ fun rememberVideoPlaybackScope(
             .map { layoutInfo ->
                 if (showFullscreenRef.value) return@map activeRef.value
                 val currentIds = noteIdsRef.value
-                val viewportCenter = (layoutInfo.viewportStartOffset +
-                    layoutInfo.viewportEndOffset) / 2
-                layoutInfo.visibleItemsInfo
+                val viewportStart = layoutInfo.viewportStartOffset
+                val viewportEnd = layoutInfo.viewportEndOffset
+                val viewportCenter = (viewportStart + viewportEnd) / 2
+
+                val videoItems = layoutInfo.visibleItemsInfo
                     .filter { (it.key as? String) in currentIds }
-                    .minByOrNull {
-                        val itemCenter = it.offset + it.size / 2
-                        abs(itemCenter - viewportCenter)
-                    }
+
+                fun visibilityFraction(item: androidx.compose.foundation.lazy.LazyListItemInfo): Float {
+                    val visibleTop = maxOf(item.offset, viewportStart)
+                    val visibleBottom = minOf(item.offset + item.size, viewportEnd)
+                    return if (item.size > 0) maxOf(0, visibleBottom - visibleTop).toFloat() / item.size else 0f
+                }
+
+                val currentActive = activeRef.value
+
+                // Check if current active video is still above deactivation threshold (35%)
+                val currentActiveItem = videoItems.firstOrNull { (it.key as? String) == currentActive }
+                val currentStillVisible = currentActiveItem != null && visibilityFraction(currentActiveItem) >= 0.35f
+
+                // Find best activation candidate (>=60% visible, closest to center)
+                val candidate = videoItems
+                    .filter { visibilityFraction(it) >= 0.6f }
+                    .minByOrNull { abs(it.offset + it.size / 2 - viewportCenter) }
                     ?.key as? String
+
+                when {
+                    candidate != null -> candidate
+                    currentStillVisible -> currentActive
+                    else -> null
+                }
             }
             .debounce(300)
             .distinctUntilChanged()

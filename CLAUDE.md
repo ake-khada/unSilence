@@ -111,7 +111,7 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
-**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState`. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
+**VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState` with visibility thresholds: activate at >=60% visible, deactivate below 35% (hysteresis prevents oscillation). Only active video creates SurfaceView — all others render thumbnail-only. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
 **CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), and referenced event author profiles. Idempotent via `hydratedIds` set. No internal throttle — ProfileResolver handles 200ms batching and in-flight dedup. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
 
@@ -238,6 +238,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Bootstrap relay cap | Read relays capped at 8 in bootstrap phase 5 (indexers + 8 read ≤ 13 total) |
 | OG fetcher leak fix | .use{} on HEAD response |
 | ExoPlayer buffer | 500ms bufferForPlaybackMs (was 2500ms default) |
+| Video surface churn fix | Visibility threshold hysteresis (60% activate / 35% deactivate), imeta-locked placeholder sizing, thumbnail-only for inactive videos |
 | CDN preconnect | HEAD requests to 7 Nostr CDN hosts at startup |
 | Event relay provenance | INSERT OR IGNORE for deduped events (fixes relay feed gaps) |
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
