@@ -105,9 +105,9 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 Auth spam suppression: `authFailedRelays` set, warning logged once then suppressed, cleared on reconnect. Persistent replay guard: requires `PERSISTENT` purpose before replaying subs (blocks OUTBOX-only relays from 31+ unwanted persistent subs).
 
 **FeedStateReducer** — Manages feed state transitions:
-- `isAtTop` true (suppressed for 1s after PAGINATE via `lastPaginateTime`) → MERGE new events directly into visible list with grey tint flash
+- `isAtTop` true → MERGE new events directly into visible list with grey tint flash
 - `isAtTop` false → QUEUE events as pending, show blue dot with count
-- `isAtTop` false + list grew (pagination) → PAGINATE with `current.copy(visibleEvents = allEvents)` (preserves unread/dot state + scroll position)
+- `isAtTop` false + no leading new → APPEND pagination items at bottom + refresh engagement in-place (never replaces existing items)
 - DOT_TAP → flush pending into visible, scroll to top
 - Structural dedup: fast ID-order check prevents state update when Room re-emits same list
 
@@ -241,7 +241,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Event relay provenance | INSERT OR IGNORE for deduped events (fixes relay feed gaps) |
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
 | Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore guard + spinner |
-| Scroll snap-back fix | loadMore() 2s time cooldown, displayLimit += 50, PAGINATE uses current.copy() + sets lastPaginateTime, isAtTop suppressed 1s after PAGINATE |
+| Scroll snap-back fix | Removed PAGINATE branch — pagination appends new items at bottom + refreshes engagement in-place; never replaces visibleEvents when scrolled down |
 | CardHydrator simple debounce | debounce(500) + distinctUntilChanged replaces velocity-aware planner (258→~38 calls) |
 | Staggered first-page hydration | 500ms delay + batch of 10 on feed switch — lets Compose render cached data first |
 | displayLimit=50 on feed switch | Start with 50 rows instead of 200 — reduces initial LazyColumn composition cost |
