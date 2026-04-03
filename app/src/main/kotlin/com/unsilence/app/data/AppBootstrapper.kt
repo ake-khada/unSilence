@@ -166,6 +166,7 @@ class AppBootstrapper @Inject constructor(
         val readRelays = (freshRelays ?: relayConfigDao.getAllReadWriteRelays())
             .filter { it.marker == null || it.marker == "read" }
             .map { it.relayUrl }
+            .take(8)
         val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
         for (url in globalUrls) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }

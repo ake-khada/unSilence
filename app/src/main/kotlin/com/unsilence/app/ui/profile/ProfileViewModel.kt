@@ -10,6 +10,7 @@ import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -69,6 +70,7 @@ class ProfileViewModel @Inject constructor(
     private val _displayLimit = MutableStateFlow(200)
     private var oldestTimestamp = Long.MAX_VALUE
     private var fetching = false
+    private var outboxRelayUrls: List<String> = emptyList()
 
     // ── Profile tabs ──────────────────────────────────────────────────
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
@@ -115,11 +117,12 @@ class ProfileViewModel @Inject constructor(
 
     init {
         if (pubkeyHex != null) {
-            viewModelScope.launch {
+            viewModelScope.launch(Dispatchers.IO) {
                 userRepository.fetchMissingProfiles(listOf(pubkeyHex))
+                val writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
+                outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
+                relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)
             }
-            // Actively request this user's posts from connected relays
-            relayPool.fetchUserPosts(pubkeyHex)
         }
         // Fetch follower count via NIP-45
         if (pubkeyHex != null) {
@@ -178,7 +181,7 @@ class ProfileViewModel @Inject constructor(
         fetching = true
         oldestTimestamp = currentOldest
         _displayLimit.value += 200
-        relayPool.fetchOlderPosts(pk, currentOldest)
+        relayPool.fetchOlderPosts(pk, currentOldest, outboxRelayUrls)
         viewModelScope.launch {
             delay(2_000)
             fetching = false
