@@ -39,9 +39,6 @@ class FeedStateReducer(private val feedKey: String) {
 
     private var isAtTop: Boolean = true
 
-    /** Timestamp of last PAGINATE action — suppresses false isAtTop for 1s after. */
-    private var lastPaginateTime = 0L
-
     /**
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
@@ -49,7 +46,6 @@ class FeedStateReducer(private val feedKey: String) {
     fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         val wasAtTop = isAtTop
         isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
-            && (System.currentTimeMillis() - lastPaginateTime > 1000)
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
@@ -88,19 +84,16 @@ class FeedStateReducer(private val feedKey: String) {
                 val leadingNew = allEvents.takeWhile { it.id !in knownIds }
 
                 if (leadingNew.isEmpty()) {
-                    if (allEvents.size > current.visibleEvents.size) {
-                        // Pagination: visible events are a prefix, new rows appended at bottom.
-                        // Merge immediately so the user can keep scrolling.
-                        Log.d(TAG, "feedKey=$feedKey atTop=false action=PAGINATE old=${current.visibleEvents.size} new=${allEvents.size}")
-                        pendingIds = emptySet()
-                        lastPaginateTime = System.currentTimeMillis()
-                        current.copy(visibleEvents = allEvents)
-                    } else {
-                        // Same size or smaller — refresh engagement counts in-place
-                        val latestMap = allEvents.associateBy { it.id }
-                        val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
-                        current.copy(visibleEvents = refreshed)
+                    // Refresh engagement counts in-place for existing items.
+                    // If list grew (pagination), append new items at the bottom.
+                    val latestMap = allEvents.associateBy { it.id }
+                    val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
+                    val existingIds = current.visibleEvents.map { it.id }.toSet()
+                    val appended = allEvents.filter { it.id !in existingIds }
+                    if (appended.isNotEmpty()) {
+                        Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${refreshed.size + appended.size}")
                     }
+                    current.copy(visibleEvents = refreshed + appended)
                 } else {
                     pendingIds = pendingIds + leadingNew.map { it.id }.toSet()
                     val unread = pendingIds.size
