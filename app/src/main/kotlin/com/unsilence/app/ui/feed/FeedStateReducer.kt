@@ -41,6 +41,11 @@ class FeedStateReducer(private val feedKey: String) {
 
     private var isAtTop: Boolean = true
     private var atTopConsecutiveCount = 0
+    @Volatile private var isScrollInProgress = false
+
+    fun onScrollProgressChanged(scrolling: Boolean) {
+        isScrollInProgress = scrolling
+    }
 
     // Coalesce MERGE updates: fixed 200ms window batches rapid Room emissions.
     // First emission opens the window; subsequent emissions update pendingMerge
@@ -116,8 +121,9 @@ class FeedStateReducer(private val feedKey: String) {
         latestRows = allEvents
 
         val current = _state.value
-        if (current.visibleEvents.isEmpty() || isAtTop) {
-            // MERGE path — coalesced via fixed 200ms window in emitCoalesced.
+        if (current.visibleEvents.isEmpty() || (isAtTop && !isScrollInProgress)) {
+            // MERGE path — safe: user is parked at top with no finger on screen.
+            // Coalesced via fixed 200ms window in emitCoalesced.
             // Dedup check moved to flushPending (runs once per window, not per emission).
             pendingIds = emptySet()
             Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")

@@ -296,6 +296,7 @@ fun FeedScreen(
                         )
                     }.collect { (index, offset, lastVisible) ->
                         viewModel.onScrollPositionChanged(index, offset)
+                        viewModel.onScrollProgressChanged(listState.isScrollInProgress)
                         viewModel.saveScrollPosition(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
                         if (total > 0 && lastVisible >= total / 2) {
