@@ -1432,14 +1432,26 @@ private fun EmbeddedQuoteCard(
                 }
                 Spacer(Modifier.height(4.dp))
 
-                // Extract media from quoted content
+                // Extract media from quoted content: imeta tags + regex fallback
                 val rawContent = loadedEvent.content
-                val quotedImages = remember(rawContent) {
-                    IMAGE_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
+                val imetaMedia = remember(loadedEvent.tags) {
+                    ImetaParser.parse(loadedEvent.tags)
                 }
-                val quotedVideos = remember(rawContent) {
-                    VIDEO_URL_REGEX.findAll(rawContent).map { it.value }.distinct()
-                        .filter { it !in quotedImages }.toList()
+                val imetaImageUrls = remember(imetaMedia) {
+                    imetaMedia.filter { it.mimeType?.startsWith("image") == true }
+                        .map { it.url }.toSet()
+                }
+                val imetaVideoUrls = remember(imetaMedia) {
+                    imetaMedia.filter { it.mimeType?.startsWith("video") == true }
+                        .map { it.url }.toSet()
+                }
+                val quotedImages = remember(rawContent, imetaImageUrls) {
+                    val regexImages = IMAGE_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
+                    (imetaImageUrls + regexImages).distinct()
+                }
+                val quotedVideos = remember(rawContent, imetaVideoUrls) {
+                    val regexVideos = VIDEO_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
+                    (imetaVideoUrls + regexVideos).distinct().filter { it !in quotedImages }
                 }
 
                 // Strip nostr URIs, media URLs, and bare links for cleaner text
