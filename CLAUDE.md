@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 3, 2026 (quoted post media + nprofile hints)
+**Last updated:** April 3, 2026 (FeedHydrationController + 3 bug fixes)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -105,25 +105,33 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 Auth spam suppression: `authFailedRelays` set, warning logged once then suppressed, cleared on reconnect. Persistent replay guard: requires `PERSISTENT` purpose before replaying subs (blocks OUTBOX-only relays from 31+ unwanted persistent subs).
 
 **FeedStateReducer** — Manages feed state transitions:
-- `isAtTop` true AND `!isScrollInProgress` → MERGE new events (coalesced via fixed 200ms window, dedup in flushPending) into visible list with grey tint flash
+- `isAtTop` true → MERGE new events (coalesced via fixed 200ms window, dedup in flushPending) into visible list with grey tint flash
 - `isAtTop` false → QUEUE events as pending, show blue dot with count
 - `isAtTop` false + no leading new → APPEND pagination items at bottom + refresh engagement in-place (never replaces existing items)
 - DOT_TAP → flush pending into visible, scroll to top
-- Structural dedup: fast ID-order check prevents state update when Room re-emits same list
+- Structural dedup: compares IDs + engagement counts (replyCount, reactionCount, repostCount, zapCount, zapTotalSats) — returns early when Room re-emits unchanged data
+- APPEND snap-back suppression: `lastAppendTime` suppresses isAtTop for 500ms after pagination APPEND (prevents false (0,0) during list settlement)
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState` with visibility thresholds: activate at >=60% visible, deactivate below 35% (hysteresis prevents oscillation). 500ms debounce for activation stability + 1s deactivation delay (prevents surface churn during quick scroll). Only active video creates SurfaceView — all others render thumbnail-only. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**CardHydrator** — Unified card hydration for visible feed items. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), referenced event author profiles, nprofile relay hints (targeted fetch via `RelayPool.fetchProfilesFromHints`), and prefetches video thumbnails for aspect ratio cache (max 3 per batch, eliminates sizing pop on first compose). Warm zone profile pre-resolution: collects pubkeys from next 10 items in `allEvents` for batch profile fetch (profiles ONLY, no engagement/refs for warm zone). Idempotent via `hydratedIds` set. No internal throttle — ProfileResolver handles 200ms batching and in-flight dedup. Called from FeedViewModel via simple debounce(500) snapshotFlow on visible item keys.
+**FeedHydrationController** — Single zone-aware scroll state machine replacing 5 independent fetch systems (engagement channel, CardHydrator debounce, ProfileResolver scroll path, loadMore trigger, FeedStateReducer velocity awareness). 4-state machine: WARM_CATCHUP (profiles + refs for visible items, 3s timeout gate), SLOW_SCROLL (warm zone prefetch next 15 items), IDLE (engagement network fetch + 30s stale refresh), FAST_SCROLL (total blackout, zero new requests). Velocity detection via 3-frame sliding window with hysteresis (enter FAST >2500px/s, exit <1200px/s). Constructed in FeedViewModel with viewModelScope, not Hilt-injected. Fed every frame from FeedScreen snapshotFlow. Calls CardHydrator as stateless worker.
 
-**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations), engagement coalescing (Channel.CONFLATED + 2s minimum interval). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (1s timestamp cooldown, displayLimit capped at 300 to prevent OOM). Init relay connection runs on Dispatchers.IO to avoid startup jank. Feed switch starts with displayLimit=50 (grows via loadMore), first-page hydration delayed 500ms with batch of 10 to avoid ANR. Per-feed state persistence: `SavedFeedState` map (capped at 10) saves/restores displayLimit, lastOldestTimestamp, and scroll position per feedKey on feed switches. FeedScreen writes scroll position continuously via `saveScrollPosition`; on switch-back, restoreGeneration triggers a `scrollToItem` after items load (2s timeout, index clamped to available items).
+**CardHydrator** — Stateless card hydration worker. Resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note), referenced event author profiles, nprofile relay hints (targeted fetch via `RelayPool.fetchProfilesFromHints`), and prefetches video thumbnails for aspect ratio cache (max 3 per batch). No internal state tracking — FeedHydrationController decides what items to hydrate and when. ProfileResolver handles 200ms batching and in-flight dedup.
+
+**FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (1s timestamp cooldown, displayLimit capped at 300 to prevent OOM). Init relay connection runs on Dispatchers.IO to avoid startup jank. Feed switch starts with displayLimit=50 (grows via loadMore). Per-feed state persistence: `SavedFeedState` map (capped at 10) saves/restores displayLimit, lastOldestTimestamp, and scroll position per feedKey on feed switches. Owns `FeedHydrationController` instance (constructed with viewModelScope, cardHydrator, relayPool, userDao); controller.reset() on feed switch.
 
 **AppBootstrapper** — Comprehensive bootstrap (fetch kind 0/3/10002/10006/10007/10012/30002 on login) and teardown (disconnect all, clear ProfileResolver, preserve Room cache). Bootstrap runs on Dispatchers.IO to avoid main-thread Davey frames. Logout = process restart via `exitProcess(0)` with synchronous `.commit()` on SharedPrefs.
 
 ### Data Flow
 
 ```
-User scrolls → snapshotFlow(visibleItemKeys) → debounce(500) → distinctUntilChanged
-    → fetchEngagementForVisible(ids) + CardHydrator.hydrateVisibleCards(events)
+User scrolls → snapshotFlow(scrollOffset + isScrolling + visibleIds) → every frame
+    → FeedHydrationController.onScrollFrame(visibleItems, allEvents, offset, isScrolling)
+    → State machine decides:
+        WARM_CATCHUP: CardHydrator.hydrateVisibleCards(visible) — profiles + refs only
+        SLOW_SCROLL:  CardHydrator.hydrateVisibleCards(warmZone) — profiles + refs + thumbnails
+        IDLE:         CardHydrator.hydrateVisibleCards(warmZone) + RelayPool.fetchEngagementBatch(visible)
+        FAST_SCROLL:  (nothing — total blackout)
     → ProfileResolver / RelayPool.fetchEventsByIds → Room update → Compose recomposition
 
 New event arrives → EventProcessor → Room INSERT → Flow emission
@@ -229,12 +237,19 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 
 | Fix | Impact |
 |-----|--------|
+| FeedHydrationController | Replaced 5 independent fetch systems (~15-20 relay msgs/pause) with single 4-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL) |
+| Velocity hysteresis | Enter FAST >2500px/s, exit <1200px/s — dead zone prevents oscillation (was 7 transitions in 300ms at ~2000 boundary) |
+| MERGE structural dedup (IDs + engagement) | Compares IDs + replyCount/reactionCount/repostCount/zapCount/zapTotalSats — blocks Room re-emissions that didn't change meaningful data (72 floods/1.2s → ~5) |
+| APPEND snap-back suppression | isAtTop forced false for 500ms after pagination APPEND — prevents false (0,0) during LazyColumn settlement |
+| CardHydrator stateless | Removed hydratedIds set, 300ms fast-scroll guard, warm zone lookahead — controller tracks what's been hydrated |
+| FeedStateReducer simplified | Reverted MERGE gate to simple isAtTop check — removed isScrollInProgress, atTopConsecutiveCount (display logic no longer knows about scroll velocity) |
+| Engagement → IDLE only | Network engagement fetch only in IDLE state (was every 500ms debounce); Room-cached engagement displayed freely in all states |
 | MERGE structural dedup | 80+ → ~5 spurious recompositions/min |
 | Persistent replay guard | OUTBOX-only relays blocked from 31 persistent subs |
 | Auth spam suppression | filter.nostr.wine auth loop eliminated |
 | Empty hydration skip | 38 wasted calls eliminated |
 | DOT_TAP guard | 70 flushes → fires only when dot visible |
-| Engagement coalescing | Channel.CONFLATED + 2s gap (78 → ~20 calls/session) |
+| Engagement coalescing (replaced by controller) | Channel.CONFLATED + 2s gap → now IDLE-only via FeedHydrationController |
 | Profile fetch — outbox only | Profile screens fetch from outbox relays (max 5), not all 25. CardHydrator throttle removed — ProfileResolver handles 200ms batching |
 | Bootstrap relay cap | Read relays capped at 8 in bootstrap phase 5 (indexers + 8 read ≤ 13 total) |
 | OG fetcher leak fix | .use{} on HEAD response |
@@ -245,8 +260,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | One-shot sub tracking | ConcurrentHashSet tracks active subs for shedding decisions |
 | Infinite scroll 50% trigger | loadMore() fires at half-scroll instead of bottom-10, with isLoadingMore guard + spinner |
 | Scroll snap-back fix | Removed PAGINATE branch — pagination appends new items at bottom + refreshes engagement in-place; never replaces visibleEvents when scrolled down |
-| CardHydrator simple debounce | debounce(500) + distinctUntilChanged replaces velocity-aware planner (258→~38 calls) |
-| Staggered first-page hydration | 500ms delay + batch of 10 on feed switch — lets Compose render cached data first |
+| CardHydrator simple debounce (replaced by controller) | debounce(500) → now zone-aware via FeedHydrationController |
+| Staggered first-page hydration (replaced by controller) | 500ms delay → now WARM_CATCHUP state handles cold start |
 | displayLimit=50 on feed switch | Start with 50 rows instead of 200 — reduces initial LazyColumn composition cost |
 | Startup Dispatchers.IO | Bootstrap + FeedViewModel init relay connection on IO — reduces main-thread Davey frames |
 | fetchOlderEvents one-shot tracking | subId added to _activeOneShotSubs for proper EOSE close + shedding count |
@@ -275,14 +290,16 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Engagement → browse relays only | fetchEngagementBatch excludes indexer relays from fallback path — indexers can't return engagement data |
 | BrowseSession pin enforced | Removed force=true from FeedViewModel feed switches — 30s pin now respected across all relay feed changes |
 | MERGE fixed 200ms window | Coalesce window no longer resets on each emission — dedup runs once per window in flushPending |
-| Thumbnail fast-scroll guard | CardHydrator skips prefetch if called within 300ms of previous call (rapid-fire = fast scroll) |
-| Thumbnail warm zone lookahead | Peek ahead 5 items beyond visible for prefetch, 3 total cap (visible + warm combined) |
+| Thumbnail fast-scroll guard (replaced by controller) | CardHydrator 300ms guard → now FAST_SCROLL state = total blackout |
+| Thumbnail warm zone lookahead (replaced by controller) | 5-item lookahead → now 15-item warm zone via FeedHydrationController |
 | Connection cap 13 | Hard limit reduced from 25 to 13 (5 indexer + 8 browse) — enforced in connect/connectAndAwait/connectForAuthors |
 | Video scope diagnostic logging | Active video transitions logged with old→new ID for surface lifecycle debugging |
 | Per-feed scroll persistence | SavedFeedState map preserves scroll position + displayLimit + lastOldestTimestamp per feedKey across feed switches (cap 10, in-memory only) |
-| Warm zone profile pre-resolution | CardHydrator collects pubkeys from next 10 items beyond visible — ONE batch profile fetch instead of 1-at-a-time |
+| Warm zone profile pre-resolution (replaced by controller) | 10-item lookahead → now 15-item warm zone via FeedHydrationController |
 | Own profile outbox connect | ProfileViewModel connects to outbox relays before fetchUserPosts (matches UserProfileViewModel pattern) — fixes Longform tab "No articles yet" |
-| MERGE scroll-in-progress gate | MERGE gated on `!isScrollInProgress` — prevents visibleEvents replacement while user is actively scrolling (falls through to QUEUE/blue dot instead) |
+| MERGE scroll-in-progress gate (replaced by controller) | Removed — FeedStateReducer reverted to simple isAtTop check; controller handles scroll velocity awareness |
+| EmbeddedQuoteCard ImetaParser | Added ImetaParser.parse() to EmbeddedQuoteCard — merges NIP-92 imeta media with regex-extracted URLs |
+| ProfileViewModel relay list resolution | Added kind 10002 fetch + Room poll (500ms interval, 5s timeout) before fetchUserPosts — fixes own profile Longform tab |
 
 ---
 
@@ -303,7 +320,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | March 31 | Mega sprint (20+ commits): ProfileResolver centralization, relay purpose map, FeedStateReducer+blue dot, bug polish, inline @mentions, Notes/Conversations tabs, relay feed gaps, ExoPlayer perf, auth spam suppression, logout process restart, auto-drop grey tint, engagement coalescing, profile fetch throttle |
 | April 1 | Perf: engagement coalescing (Channel.CONFLATED + 2s), profile fetch throttle (1s), OG fetcher .use{} leak fix. UI: tab row immersive scroll, conversation threading (produceState + lookupEvent), bridged content rendering, profile bio NostrRichText, unified quote/parent card style. HydrationFrontier Phase 1+1.5: viewport-driven hydration replacing CardHydrator (WarmWindow, Room subtraction, priority shedding, Mutex-serialized plan, velocity-aware cadence 100/500/1500ms, pixel-based warm window, planner logging). Infinite scroll (50% trigger, loading spinner, fetchOlderEvents one-shot tracking). Velocity fix (.map + fixed 300px multiplier). Startup Dispatchers.IO. Conversation threading UI redesign (parent card embedded inside reply). Coalesced network dispatch (pending sets flush IDLE/size/timer). Reply parent prefetch in missingFields(). Compose BOM 2025.08.00. Profile infinite scroll (Notes/Replies/Longform tabs) |
 | April 2 | Recovery: HydrationFrontier reverted to CardHydrator (258→~38 plan calls), BOM 2025.08→2025.12.00 (Compose 1.10 pausable composition), @Immutable FeedRow, contentType on LazyColumn items, scroll-settle gate removed, simple debounce(500) restored. MediaMetadataRetriever + OgFetcher leak fixes kept. UI tweaks: swipeable profile tabs (Notes/Replies/Longform), post button white, "Break the silence..." placeholder, removed "new posts" banner (blue dot on home icon only). Thread nav: tapping reply in Conversations opens full thread from OP (root resolution in ThreadViewModel), parent lookup timeout 3s→5s. OG: Html.fromHtml for numeric entity decoding. Scroll snap-back fix: loadMore 2s cooldown, displayLimit += 50 (was 200), PAGINATE uses current.copy() + lastPaginateTime, isAtTop suppressed 1s post-PAGINATE |
-| April 3 | Relay config: updated default indexer (5) + search (5) relay lists. Scroll: removed PAGINATE branch → APPEND-only pagination, 2-consecutive (0,0) isAtTop guard. Perf: outbox-only profile fetch (max 5), removed CardHydrator 1s throttle, bootstrap read relay cap (8). Video: imeta-locked placeholder sizing, visibility threshold hysteresis (60%/35%). NIP: NIP-05 parsing for all address formats, relay hints from nevent1 URIs for quoted posts, nprofile relay hints threaded to RelayPool. Rendering: nostr:naddr1 embedded card (EmbeddedAddressCard), profile note tap navigation (overlay z-order fix in AppNavigation), EmbeddedQuoteCard media (images + video placeholder). Heat reduction: thumbnail prefetch in CardHydrator (3/batch cap), video 500ms activation stability + 1s deactivation delay, BrowseSession 30s pin, loadMore 1s timestamp cooldown + displayLimit cap 300, MERGE 150ms coalesce (thread-safe synchronized+@Volatile), profile scroll 1 relay (4 on profile screen), kind 10002 indexers-only. Heat reduction batch 2: engagement routed to browse relays only (not indexers), BrowseSession 30s pin enforced across feed switches (removed force=true), MERGE coalesce fixed 200ms window (no timer reset, dedup once per window), thumbnail fast-scroll guard (300ms) + warm zone lookahead (5 items), connection cap 25→13, video scope diagnostic logging. UX: per-feed scroll position + displayLimit persistence via SavedFeedState map (capped at 10), scroll restored via restoreGeneration + scrollToItem after items load. Warm zone profile pre-resolution (next 10 items pubkeys batched). Own profile outbox connect fix (Longform tab "No articles yet"). MERGE scroll-in-progress gate (isScrollInProgress → QUEUE instead of MERGE, prevents scroll position reset) |
+| April 3 | Relay config: updated default indexer (5) + search (5) relay lists. Scroll: removed PAGINATE branch → APPEND-only pagination. Perf: outbox-only profile fetch (max 5), removed CardHydrator 1s throttle, bootstrap read relay cap (8). Video: imeta-locked placeholder sizing, visibility threshold hysteresis (60%/35%). NIP: NIP-05 parsing for all address formats, relay hints from nevent1 URIs for quoted posts, nprofile relay hints threaded to RelayPool. Rendering: nostr:naddr1 embedded card (EmbeddedAddressCard), profile note tap navigation (overlay z-order fix in AppNavigation), EmbeddedQuoteCard media (images + video placeholder + ImetaParser). Heat reduction: thumbnail prefetch in CardHydrator (3/batch cap), video 500ms activation stability + 1s deactivation delay, BrowseSession 30s pin, loadMore 1s timestamp cooldown + displayLimit cap 300, MERGE coalesce (thread-safe synchronized+@Volatile), profile scroll 1 relay (4 on profile screen), kind 10002 indexers-only. Heat reduction batch 2: engagement routed to browse relays only (not indexers), BrowseSession 30s pin enforced across feed switches, MERGE coalesce fixed 200ms window, connection cap 25→13, video scope diagnostic logging. UX: per-feed scroll position + displayLimit persistence via SavedFeedState map (capped at 10). **FeedHydrationController:** replaced 5 independent fetch systems with single 4-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL), velocity hysteresis (enter FAST >2500, exit <1200), CardHydrator made stateless worker, FeedStateReducer simplified (simple isAtTop, removed scroll-in-progress/consecutive-count guards), structural dedup (IDs + engagement counts), APPEND snap-back suppression (500ms). Bug fixes: ProfileViewModel relay list resolution (kind 10002 → own profile Longform tab), EmbeddedQuoteCard ImetaParser (quoted note media) |
 
 ---
 
@@ -392,18 +409,12 @@ ORDER BY e.created_at DESC LIMIT :limit
 - `displayName` — FeedRow extension for author name (NoteCard, ArticleCard)
 - `ThreadParentCard` — compact parent note card (EventFeedItems, NoteCard) — internal visibility
 
-**Engagement fetch pattern:**
+**Hydration cycle (FeedHydrationController):**
 ```kotlin
-Channel.CONFLATED → consumeAsFlow → collect { ids → fetchEngagementBatch(ids.take(20)); delay(2000) }
-```
-
-**Hydration cycle (CardHydrator):**
-```kotlin
-snapshotFlow { visibleItemKeys }
-    → filter { isNotEmpty() }
-    → debounce(500)
-    → distinctUntilChanged()
-    → collectLatest { fetchEngagement + cardHydrator.hydrateVisibleCards }
+snapshotFlow { Triple(scrollOffset, isScrollInProgress, visibleIds) }
+    → every frame → controller.onScrollFrame(visibleItems, allEvents, offset, isScrolling)
+    → state machine: WARM_CATCHUP (profiles+refs), SLOW_SCROLL (warm zone),
+      IDLE (engagement+warm zone), FAST_SCROLL (blackout)
 ```
 
 **Logout pattern:**
@@ -435,8 +446,8 @@ app/src/main/kotlin/com/unsilence/app/
 ├── di/              Hilt modules
 ├── domain/model/    FeedRow, FeedFilter, FeedType, UserProfile, etc.
 ├── ui/
-│   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, NoteCard,
-│   │                InlineAutoPlayVideo, VideoPlaybackScope, NostrRichText (internal)
+│   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, FeedHydrationController,
+│   │                NoteCard, InlineAutoPlayVideo, VideoPlaybackScope, NostrRichText (internal)
 │   ├── navigation/  AppNavigation, BottomNavBar
 │   ├── onboarding/  LoginScreen, RootViewModel
 │   ├── profile/     ProfileScreen, UserProfileScreen, ProfileViewModel
