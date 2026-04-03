@@ -53,7 +53,7 @@ data class EventActionCallbacks(
     val zap: (eventId: String, pubkey: String, relayUrl: String, amount: Long) -> Unit = { _, _, _, _ -> },
     val saveNwcUri: (String) -> Unit = {},
     val lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    val lookupEvent: (suspend (String) -> EventEntity?)? = null,
+    val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 )
@@ -136,10 +136,10 @@ private fun ThreadedReplyItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Two-phase parent lookup: Room first, then relay fetch (lookupEvent does both + 3s wait)
+    // Two-phase parent lookup: Room first, then relay fetch (lookupEvent does both + 5s wait)
     val parentEvent by produceState<EventEntity?>(null, parentId) {
         if (callbacks.lookupEvent != null) {
-            value = callbacks.lookupEvent.invoke(parentId)
+            value = callbacks.lookupEvent.invoke(parentId, emptyList())
         }
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {

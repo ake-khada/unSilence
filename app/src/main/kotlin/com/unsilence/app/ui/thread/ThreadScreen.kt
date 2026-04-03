@@ -163,7 +163,7 @@ fun ThreadScreen(
                                         onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                                         thumbnailCache  = actionsViewModel.videoThumbnailCache,
                                         lookupProfile   = actionsViewModel::lookupProfile,
-                                        lookupEvent     = actionsViewModel::lookupEvent,
+                                        lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
                                     )
                                 }
@@ -218,7 +218,7 @@ fun ThreadScreen(
                                         onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                                         thumbnailCache  = actionsViewModel.videoThumbnailCache,
                                         lookupProfile   = actionsViewModel::lookupProfile,
-                                        lookupEvent     = actionsViewModel::lookupEvent,
+                                        lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
                                     )
                                 }

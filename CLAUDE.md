@@ -167,7 +167,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Article preview cards on all screens (banner, title, summary)
 - ImetaParser for NIP-92 media extraction (video + image, dimension-based sizing)
 - Inline @mentions via NostrRichText (AnnotatedString + LinkAnnotation.Clickable, cyan, fallback to truncated npub) — handles both npub and nprofile URIs, used in notes AND profile bios
-- Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1); unified style with ThreadParentCard (0.08 alpha white border, 12dp rounded, 24dp avatar)
+- Embedded quote cards for nostr:note/nevent references (nestDepth cap at 1); relay hints from nevent1 used for targeted fetch; unified style with ThreadParentCard (0.08 alpha white border, 12dp rounded, 24dp avatar)
 - OpenGraph link preview cards (OgFetcher with ConcurrentHashMap cache, Html.fromHtml entity decoding)
 - YouTube thumbnail cards (predictable URL, tap opens browser)
 - Multi-photo/video grid (2x2 layout)
@@ -182,7 +182,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 - Portrait video with proper aspect ratio (capped at 9:16)
 
 ### Profiles
-- Profile view with avatar, banner, bio (NostrRichText with @mention resolution), NIP-05 badge
+- Profile view with avatar, banner, bio (NostrRichText with @mention resolution), NIP-05 badge (handles name@domain, _@domain, bare domain.com)
 - Edit profile (name, about, picture, banner, nip05, lud16, website) → kind 0 publish
 - Profile tabs: Notes / Replies / Longform (swipeable via detectHorizontalDragGestures, same pattern as feed tabs)
 - Following count (exact, from kind-3 p-tags)
