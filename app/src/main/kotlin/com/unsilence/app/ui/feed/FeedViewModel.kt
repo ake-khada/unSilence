@@ -165,6 +165,7 @@ class FeedViewModel @Inject constructor(
 
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
+    private var lastLoadMoreTime = 0L
 
     private val _isLoadingMore = MutableStateFlow(false)
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
@@ -268,13 +269,15 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
-        if (_isLoadingMore.value) return  // Prevent rapid re-fire
+        val now = System.currentTimeMillis()
+        if (now - lastLoadMoreTime < 1000) return  // 1s cooldown — immune to Flow resets
         val events = _activeReducer.value.state.value.visibleEvents
         val oldest = events.lastOrNull()?.createdAt ?: return
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
-        _displayLimit.value += 50
-        _isLoadingMore.value = true
+        lastLoadMoreTime = now
+        _isLoadingMore.value = true  // For spinner UI
+        _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(300)
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
         Log.d("FeedViewModel", "loadMore: fired, new limit=${_displayLimit.value} relays=${currentRelayUrls.size}")
     }
@@ -313,6 +316,7 @@ class FeedViewModel @Inject constructor(
                 .flatMapLatest { (type, filter, cf) ->
                     // Reset all state on feed switch so the new feed starts clean.
                     lastOldestTimestamp = 0L
+                    lastLoadMoreTime = 0L
                     _displayLimit.value = 50
                     _isLoadingMore.value = false
                     cardHydrator.clearCache()
