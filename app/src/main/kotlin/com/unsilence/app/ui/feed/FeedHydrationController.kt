@@ -29,7 +29,7 @@ class FeedHydrationController(
     companion object {
         const val FAST_SCROLL_ENTER_PX_S = 2500f   // must exceed to enter FAST
         const val FAST_SCROLL_EXIT_PX_S  = 1200f   // must drop below to leave FAST
-        const val VELOCITY_WINDOW_FRAMES = 3
+        const val VELOCITY_WINDOW_FRAMES = 6
         const val IDLE_TIMEOUT_MS = 500L
         const val WARM_ZONE_SIZE = 15
         const val WARM_CATCHUP_TIMEOUT_MS = 3000L
@@ -39,9 +39,10 @@ class FeedHydrationController(
     // ── State machine ─────────────────────────────────────────────────
     private var state = ScrollState.WARM_CATCHUP
     private var stateEnteredAt = System.currentTimeMillis()
+    private var lastTransitionTime = 0L
 
     // ── Velocity tracking ─────────────────────────────────────────────
-    private val scrollSamples = ArrayDeque<Pair<Long, Int>>(VELOCITY_WINDOW_FRAMES + 1)
+    private val scrollSamples = ArrayDeque<Pair<Long, Int>>(VELOCITY_WINDOW_FRAMES + 2)
     private var velocityPxPerSec = 0f
 
     // ── Hydration tracking ────────────────────────────────────────────
@@ -82,10 +83,9 @@ class FeedHydrationController(
         lastVisibleIds = visibleItems.map { it.id }.toSet()
 
         // State transitions
-        val previousState = state
-        state = nextState(isScrollInProgress)
-        if (state != previousState) {
-            onStateTransition(previousState, state)
+        val candidate = nextState(isScrollInProgress)
+        if (candidate != state) {
+            transitionTo(candidate)
         }
 
         // Per-frame actions based on current state
@@ -113,6 +113,7 @@ class FeedHydrationController(
         lastAllEvents = emptyList()
         lastVisibleIds = emptySet()
         lastEngagementRefreshTime = 0L
+        lastTransitionTime = 0L
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         Log.d(TAG, "Reset → WARM_CATCHUP")
@@ -180,6 +181,15 @@ class FeedHydrationController(
         if (elapsed >= WARM_CATCHUP_TIMEOUT_MS) return true
         if (lastVisibleItems.isEmpty()) return false
         return lastVisibleItems.all { it.id in hydratedIds }
+    }
+
+    private fun transitionTo(newState: ScrollState) {
+        val now = System.currentTimeMillis()
+        if (now - lastTransitionTime < 200 && newState != ScrollState.IDLE) return
+        lastTransitionTime = now
+        val previousState = state
+        state = newState
+        onStateTransition(previousState, newState)
     }
 
     private fun onStateTransition(from: ScrollState, to: ScrollState) {
@@ -292,8 +302,7 @@ class FeedHydrationController(
             delay(WARM_CATCHUP_TIMEOUT_MS)
             if (state == ScrollState.WARM_CATCHUP) {
                 Log.d(TAG, "WARM_CATCHUP timeout — forcing transition to SLOW_SCROLL")
-                state = ScrollState.SLOW_SCROLL
-                stateEnteredAt = System.currentTimeMillis()
+                transitionTo(ScrollState.SLOW_SCROLL)
             }
         }
     }
@@ -309,9 +318,7 @@ class FeedHydrationController(
         idleTimerJob = scope.launch {
             delay(IDLE_TIMEOUT_MS)
             if (state == ScrollState.SLOW_SCROLL || state == ScrollState.WARM_CATCHUP) {
-                val from = state
-                state = ScrollState.IDLE
-                onStateTransition(from, ScrollState.IDLE)
+                transitionTo(ScrollState.IDLE)
             }
         }
     }
