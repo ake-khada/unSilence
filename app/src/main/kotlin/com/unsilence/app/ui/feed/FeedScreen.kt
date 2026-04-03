@@ -59,6 +59,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.items
@@ -82,6 +83,7 @@ fun FeedScreen(
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
+    val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -294,6 +296,7 @@ fun FeedScreen(
                         )
                     }.collect { (index, offset, lastVisible) ->
                         viewModel.onScrollPositionChanged(index, offset)
+                        viewModel.saveScrollPosition(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
                         if (total > 0 && lastVisible >= total / 2) {
                             viewModel.loadMore()
@@ -315,6 +318,26 @@ fun FeedScreen(
                         viewModel.fetchEngagementForVisible(visibleIds)
                         val visibleEvents = events.filter { it.id in visibleIds }
                         viewModel.hydrateVisibleCards(visibleEvents, allEvents = events)
+                    }
+                }
+
+                // Restore scroll position after feed switch
+                LaunchedEffect(restoreGen) {
+                    if (restoreGen > 0) {
+                        val idx = viewModel.restoreScrollIndex.value
+                        val off = viewModel.restoreScrollOffset.value
+                        if (idx > 0) {
+                            // Wait up to 2s for enough items to populate the list
+                            kotlinx.coroutines.withTimeoutOrNull(2_000) {
+                                snapshotFlow { listState.layoutInfo.totalItemsCount }
+                                    .filter { count: Int -> count > idx }
+                                    .first()
+                            }
+                            val total = listState.layoutInfo.totalItemsCount
+                            if (total > 0) {
+                                listState.scrollToItem(idx.coerceAtMost(total - 1), off)
+                            }
+                        }
                     }
                 }
             }
