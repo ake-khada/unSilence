@@ -873,6 +873,37 @@ class RelayPool @Inject constructor(
     /** Single-ID overload — delegates to batch. */
     fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
 
+    /**
+     * Fetch a single event by ID, connecting to [relayHints] first.
+     * Used for nostr:nevent relay hints — targets the hinted relays plus connected ones.
+     */
+    fun fetchEventById(eventId: String, relayHints: List<String>) {
+        if (relayHints.isNotEmpty()) {
+            connect(relayHints)
+            val hintConns = relayHints.mapNotNull { connections[normalizeRelayUrl(it)] }
+            if (hintConns.isNotEmpty()) {
+                val now = System.currentTimeMillis()
+                val last = eventFetchInFlight[eventId]
+                if (last != null && (now - last) <= 30_000) return
+                eventFetchInFlight[eventId] = now
+                val subId = "hint-event-${System.nanoTime()}"
+                _activeOneShotSubs.add(subId)
+                val req = buildJsonArray {
+                    add(JsonPrimitive("REQ"))
+                    add(JsonPrimitive(subId))
+                    add(buildJsonObject {
+                        put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+                        put("limit", JsonPrimitive(1))
+                    })
+                }.toString()
+                hintConns.forEach { it.send(req) }
+                Log.d(TAG, "fetchEventById: $eventId → ${hintConns.size} hinted relay(s)")
+                return
+            }
+        }
+        fetchEventById(eventId)
+    }
+
     fun publish(eventJson: String) {
         val cmd = buildJsonArray {
             add(JsonPrimitive("EVENT"))

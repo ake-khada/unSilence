@@ -147,13 +147,13 @@ private val NOSTR_EVENT_URI_REGEX = Regex("nostr:n(?:ote|event)1[a-z0-9]+", Rege
 private val NOSTR_PROFILE_URI_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 private sealed class NostrRef {
-    data class EventRef(val eventId: String) : NostrRef()
+    data class EventRef(val eventId: String, val relayHints: List<String> = emptyList()) : NostrRef()
     data class ProfileRef(val pubkeyHex: String) : NostrRef()
 }
 
 private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
-        is NEvent -> NostrRef.EventRef(entity.hex)
+        is NEvent -> NostrRef.EventRef(entity.hex, entity.relay.map { it.url })
         is NNote  -> NostrRef.EventRef(entity.hex)
         is NPub      -> NostrRef.ProfileRef(entity.hex)
         is NProfile  -> NostrRef.ProfileRef(entity.hex)
@@ -205,7 +205,7 @@ fun NoteCard(
     videoRenderModels: List<VideoRenderModel> = emptyList(),
     thumbnailCache: VideoThumbnailCache? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    lookupEvent: (suspend (String) -> EventEntity?)? = null,
+    lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     isNewPost: Boolean = false,
     onNewPostAnimated: () -> Unit = {},
@@ -238,7 +238,7 @@ fun NoteCard(
     val repostTargetId = if (row.kind == 6) extractRepostTargetId(row.tags) else null
     val fetchedRepostEvent by produceState<EventEntity?>(null, row.id) {
         if (row.kind == 6 && boostedJson == null && repostTargetId != null && lookupEvent != null) {
-            value = lookupEvent.invoke(repostTargetId)
+            value = lookupEvent.invoke(repostTargetId, emptyList())
         }
     }
 
@@ -461,6 +461,7 @@ fun NoteCard(
                 onNoteClick = onNoteClick,
                 lookupEvent = lookupEvent,
                 lookupProfile = lookupProfile,
+                relayHints  = ref.relayHints,
                 modifier    = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -1361,14 +1362,15 @@ private fun FullScreenImageDialog(
 private fun EmbeddedQuoteCard(
     eventId: String,
     onNoteClick: (String) -> Unit,
-    lookupEvent: (suspend (String) -> EventEntity?)? = null,
+    lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    relayHints: List<String> = emptyList(),
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
     // Try to load the quoted event (Room first, then relay fetch via lookupEvent)
     val event by produceState<EventEntity?>(null, eventId) {
-        if (lookupEvent != null) value = lookupEvent(eventId)
+        if (lookupEvent != null) value = lookupEvent(eventId, relayHints)
     }
     val author by produceState<UserEntity?>(null, event?.pubkey) {
         val pk = event?.pubkey
@@ -1444,6 +1446,7 @@ private fun EmbeddedQuoteCard(
                             onNoteClick   = onNoteClick,
                             lookupEvent   = lookupEvent,
                             lookupProfile = lookupProfile,
+                            relayHints    = ref.relayHints,
                             nestDepth     = nestDepth + 1,
                         )
                     }
@@ -1721,8 +1724,23 @@ internal val FeedRow.displayName: String?
 internal val FeedRow.engagementId: String
     get() = if (kind == 6 && rootId != null) rootId!! else id
 
-/** "user@domain.com" → "domain.com"; identity-free "_@domain.com" → "domain.com". */
-private fun nip05Domain(nip05: String): String = nip05.substringAfter("@", nip05)
+/**
+ * Parse a NIP-05 address into (name, domain).
+ * Handles: "name@domain.com", "_@domain.com", "domain.com" (bare domain → _@domain.com).
+ */
+internal fun parseNip05(nip05: String): Pair<String, String>? {
+    val trimmed = nip05.trim()
+    if (trimmed.isBlank()) return null
+    val parts = trimmed.split("@")
+    return when {
+        parts.size == 2 && parts[1].contains(".") -> parts[0] to parts[1]
+        parts.size == 1 && trimmed.contains(".")  -> "_" to trimmed
+        else -> null
+    }
+}
+
+/** "user@domain.com" → "domain.com"; "_@domain.com" → "domain.com"; "domain.com" → "domain.com". */
+private fun nip05Domain(nip05: String): String = parseNip05(nip05)?.second ?: nip05
 
 internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L

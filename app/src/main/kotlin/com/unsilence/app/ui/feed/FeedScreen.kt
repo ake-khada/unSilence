@@ -130,7 +130,7 @@ fun FeedScreen(
         zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
         lookupProfile = actionsViewModel::lookupProfile,
-        lookupEvent = actionsViewModel::lookupEvent,
+        lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
         profileFlow = viewModel::profileFlow,
     )
