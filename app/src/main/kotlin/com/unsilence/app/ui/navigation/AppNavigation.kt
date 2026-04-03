@@ -423,22 +423,23 @@ fun AppNavigation(onLogout: () -> Unit) {
                 ComposeScreen(onDismiss = { showCompose = false })
             }
 
-            // ── Thread overlay ────────────────────────────────────────────────
-            threadEventId?.let { eventId ->
-                ThreadScreen(
-                    eventId       = eventId,
-                    onDismiss     = { threadEventId = null },
-                    onQuote       = { noteId -> quoteNoteId = noteId },
-                    onAuthorClick = onAuthorClick,
-                )
-            }
-
             // ── User profile overlay ──────────────────────────────────────────
             userProfilePubkey?.let { pubkey ->
                 UserProfileScreen(
                     pubkey        = pubkey,
                     onDismiss     = { userProfilePubkey = null },
                     onNoteClick   = { eventId -> threadEventId = eventId },
+                    onAuthorClick = onAuthorClick,
+                )
+            }
+
+            // ── Thread overlay ────────────────────────────────────────────────
+            // Must come AFTER user profile so it renders on top when both are visible
+            threadEventId?.let { eventId ->
+                ThreadScreen(
+                    eventId       = eventId,
+                    onDismiss     = { threadEventId = null },
+                    onQuote       = { noteId -> quoteNoteId = noteId },
                     onAuthorClick = onAuthorClick,
                 )
             }

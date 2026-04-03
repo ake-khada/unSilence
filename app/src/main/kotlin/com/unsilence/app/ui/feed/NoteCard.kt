@@ -93,6 +93,7 @@ import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.relay.extractRepostTargetId
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
+import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
 import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
@@ -140,8 +141,8 @@ private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 // Matches nostr: URIs (bech32-encoded entities).
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
-// Matches only event-type nostr: URIs for stripping (note/nevent).
-private val NOSTR_EVENT_URI_REGEX = Regex("nostr:n(?:ote|event)1[a-z0-9]+", RegexOption.IGNORE_CASE)
+// Matches event-type nostr: URIs for stripping (note/nevent/naddr).
+private val NOSTR_EVENT_URI_REGEX = Regex("nostr:n(?:ote|event|addr)1[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 // Matches profile-type nostr: URIs for inline mention rendering.
 private val NOSTR_PROFILE_URI_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", RegexOption.IGNORE_CASE)
@@ -149,15 +150,17 @@ private val NOSTR_PROFILE_URI_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", 
 private sealed class NostrRef {
     data class EventRef(val eventId: String, val relayHints: List<String> = emptyList()) : NostrRef()
     data class ProfileRef(val pubkeyHex: String) : NostrRef()
+    data class AddressRef(val kind: Int, val author: String, val dTag: String, val relayHints: List<String> = emptyList()) : NostrRef()
 }
 
 private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
-        is NEvent -> NostrRef.EventRef(entity.hex, entity.relay.map { it.url })
-        is NNote  -> NostrRef.EventRef(entity.hex)
-        is NPub      -> NostrRef.ProfileRef(entity.hex)
-        is NProfile  -> NostrRef.ProfileRef(entity.hex)
-        else         -> null
+        is NEvent   -> NostrRef.EventRef(entity.hex, entity.relay.map { it.url })
+        is NNote    -> NostrRef.EventRef(entity.hex)
+        is NAddress -> NostrRef.AddressRef(entity.kind, entity.author, entity.dTag, entity.relay.map { it.url })
+        is NPub     -> NostrRef.ProfileRef(entity.hex)
+        is NProfile -> NostrRef.ProfileRef(entity.hex)
+        else        -> null
     }
 }.getOrNull()
 
@@ -463,6 +466,18 @@ fun NoteCard(
                 lookupProfile = lookupProfile,
                 relayHints  = ref.relayHints,
                 modifier    = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small),
+            )
+        }
+
+        // ── NIP-19 naddr references (kind + author + d-tag addressable events) ──
+        nostrRefs.filterIsInstance<NostrRef.AddressRef>().forEach { ref ->
+            EmbeddedAddressCard(
+                addrRef       = ref,
+                onNoteClick   = onNoteClick,
+                lookupProfile = lookupProfile,
+                modifier      = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
@@ -1466,6 +1481,77 @@ private fun EmbeddedQuoteCard(
                     text     = "Quoted post",
                     color    = TextSecondary,
                     fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
+// ── Embedded naddr card ──────────────────────────────────────────────────────
+
+/** Tappable inline card for an addressable event (kind + pubkey + d-tag). */
+@Composable
+private fun EmbeddedAddressCard(
+    addrRef: NostrRef.AddressRef,
+    onNoteClick: (String) -> Unit,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val author by produceState<UserEntity?>(null, addrRef.author) {
+        if (lookupProfile != null) value = lookupProfile(addrRef.author)
+    }
+
+    val kindLabel = when (addrRef.kind) {
+        30023 -> "Article"
+        30024 -> "Draft"
+        30078 -> "App Data"
+        30311 -> "Live Event"
+        else  -> "Event (kind ${addrRef.kind})"
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AvatarImage(
+                    pubkey   = addrRef.author,
+                    picture  = author?.picture,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text     = author?.displayName?.takeIf { it.isNotBlank() }
+                        ?: author?.name?.takeIf { it.isNotBlank() }
+                        ?: "${addrRef.author.take(6)}…${addrRef.author.takeLast(4)}",
+                    color    = Color.White.copy(alpha = 0.7f),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text     = kindLabel,
+                color    = Cyan,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            if (addrRef.dTag.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text     = addrRef.dTag.replace("-", " "),
+                    color    = Color.White.copy(alpha = 0.7f),
+                    fontSize = 14.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
