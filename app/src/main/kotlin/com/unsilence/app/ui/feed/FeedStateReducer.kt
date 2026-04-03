@@ -40,12 +40,6 @@ class FeedStateReducer(private val feedKey: String) {
     private var pendingIds: Set<String> = emptySet()
 
     private var isAtTop: Boolean = true
-    private var atTopConsecutiveCount = 0
-    @Volatile private var isScrollInProgress = false
-
-    fun onScrollProgressChanged(scrolling: Boolean) {
-        isScrollInProgress = scrolling
-    }
 
     // Coalesce MERGE updates: fixed 200ms window batches rapid Room emissions.
     // First emission opens the window; subsequent emissions update pendingMerge
@@ -90,20 +84,10 @@ class FeedStateReducer(private val feedKey: String) {
     /**
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
-     * Requires 2+ consecutive (0,0) reports to confirm truly at top —
-     * prevents false positive from video layout shift.
      */
     fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         val wasAtTop = isAtTop
-        val atTopNow = firstVisibleIndex == 0 && firstVisibleOffset == 0
-
-        if (atTopNow) {
-            atTopConsecutiveCount++
-        } else {
-            atTopConsecutiveCount = 0
-        }
-
-        isAtTop = atTopConsecutiveCount >= 2
+        isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
 
         if (isAtTop && !wasAtTop && _state.value.showDot) {
             flush("TOP_REACHED")
@@ -121,7 +105,7 @@ class FeedStateReducer(private val feedKey: String) {
         latestRows = allEvents
 
         val current = _state.value
-        if (current.visibleEvents.isEmpty() || (isAtTop && !isScrollInProgress)) {
+        if (current.visibleEvents.isEmpty() || isAtTop) {
             // MERGE path — safe: user is parked at top with no finger on screen.
             // Coalesced via fixed 200ms window in emitCoalesced.
             // Dedup check moved to flushPending (runs once per window, not per emission).

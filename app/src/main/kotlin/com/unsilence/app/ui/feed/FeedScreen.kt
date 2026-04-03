@@ -55,16 +55,12 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.items
 
-@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -296,29 +292,11 @@ fun FeedScreen(
                         )
                     }.collect { (index, offset, lastVisible) ->
                         viewModel.onScrollPositionChanged(index, offset)
-                        viewModel.onScrollProgressChanged(listState.isScrollInProgress)
                         viewModel.saveScrollPosition(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
                         if (total > 0 && lastVisible >= total / 2) {
                             viewModel.loadMore()
                         }
-                    }
-                }
-
-                // Engagement + hydration: debounced visible items
-                LaunchedEffect(listState) {
-                    snapshotFlow {
-                        listState.layoutInfo.visibleItemsInfo
-                            .mapNotNull { it.key as? String }
-                            .toSet()
-                    }
-                    .filter { it.isNotEmpty() }
-                    .debounce(500)
-                    .distinctUntilChanged()
-                    .collectLatest { visibleIds ->
-                        viewModel.fetchEngagementForVisible(visibleIds)
-                        val visibleEvents = events.filter { it.id in visibleIds }
-                        viewModel.hydrateVisibleCards(visibleEvents, allEvents = events)
                     }
                 }
 
