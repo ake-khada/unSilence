@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import android.util.Log
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -202,6 +203,8 @@ fun rememberVideoPlaybackScope(
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (scope.activeVideoNoteId != newActiveId) {
+                    val oldId = scope.activeVideoNoteId
+                    Log.d("VideoScope", "Active video: ${oldId?.take(8) ?: "none"} → ${newActiveId?.take(8) ?: "none"}")
                     scope.activeVideoNoteId = newActiveId
                     if (newActiveId == null) {
                         exoPlayer.playWhenReady = false

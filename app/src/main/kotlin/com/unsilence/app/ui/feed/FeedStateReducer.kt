@@ -42,26 +42,44 @@ class FeedStateReducer(private val feedKey: String) {
     private var isAtTop: Boolean = true
     private var atTopConsecutiveCount = 0
 
-    // Coalesce MERGE updates: collect rapid Room emissions for 150ms before
-    // committing to _state. Prevents 93+ MERGEs/session from causing frame skips.
+    // Coalesce MERGE updates: fixed 200ms window batches rapid Room emissions.
+    // First emission opens the window; subsequent emissions update pendingMerge
+    // without resetting the timer. Dedup check runs ONCE per window in flushPending.
     // pendingMerge is written from background threads (collectLatest) and read from
     // the main-thread Handler callback — @Volatile + synchronized guard both paths.
     @Volatile
     private var pendingMerge: ReducerState? = null
+    @Volatile
+    private var coalesceWindowOpen = false
     private val coalesceHandler = Handler(Looper.getMainLooper())
     private val flushPending = Runnable {
         synchronized(this) {
-            pendingMerge?.let { _state.value = it }
+            val pending = pendingMerge ?: run {
+                coalesceWindowOpen = false
+                return@Runnable
+            }
             pendingMerge = null
+            coalesceWindowOpen = false
+
+            // Dedup check — only here, once per window
+            val current = _state.value
+            if (current.visibleEvents.size == pending.visibleEvents.size &&
+                current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == pending.visibleEvents[i].id }) {
+                if (current.visibleEvents == pending.visibleEvents) return@Runnable
+            }
+            _state.value = pending
         }
     }
 
     private fun emitCoalesced(newState: ReducerState) {
         synchronized(this) {
             pendingMerge = newState
+            if (!coalesceWindowOpen) {
+                coalesceWindowOpen = true
+                coalesceHandler.postDelayed(flushPending, 200)
+            }
+            // If window already open: just update pendingMerge, don't reset timer
         }
-        coalesceHandler.removeCallbacks(flushPending)
-        coalesceHandler.postDelayed(flushPending, 150)
     }
 
     /**
@@ -99,12 +117,8 @@ class FeedStateReducer(private val feedKey: String) {
 
         val current = _state.value
         if (current.visibleEvents.isEmpty() || isAtTop) {
-            // MERGE path — coalesced via Handler to batch rapid Room emissions.
-            // Skip if same event IDs in same order (avoids recomposition on engagement-only updates)
-            if (current.visibleEvents.size == allEvents.size &&
-                current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == allEvents[i].id }) {
-                if (current.visibleEvents == allEvents) return
-            }
+            // MERGE path — coalesced via fixed 200ms window in emitCoalesced.
+            // Dedup check moved to flushPending (runs once per window, not per emission).
             pendingIds = emptySet()
             Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
             emitCoalesced(ReducerState(visibleEvents = allEvents))

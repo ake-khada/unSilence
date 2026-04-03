@@ -211,8 +211,8 @@ class RelayPool @Inject constructor(
         for (rawUrl in relayUrls) {
             val url = normalizeRelayUrl(rawUrl) ?: continue
             if (connections.containsKey(url)) continue
-            if (connections.size >= 25) {
-                Log.d(TAG, "Connection cap (25) reached — skipping $url")
+            if (connections.size >= 13) {
+                Log.d(TAG, "Connection cap (13) reached — skipping $url")
                 continue
             }
             val conn = RelayConnection(url, okHttpClient)
@@ -293,8 +293,8 @@ class RelayPool @Inject constructor(
                 continue
             }
             if (connections.containsKey(url)) continue
-            if (connections.size + newUrls.size >= 25) {
-                Log.d(TAG, "Connection cap (25) reached — skipping $url")
+            if (connections.size + newUrls.size >= 13) {
+                Log.d(TAG, "Connection cap (13) reached — skipping $url")
                 continue
             }
             newUrls.add(url)
@@ -695,8 +695,8 @@ class RelayPool @Inject constructor(
             Log.d(TAG, "Added authors subscription on existing $relayUrl (${authorPubkeys.size} authors)")
             return
         }
-        if (connections.size >= 25) {
-            Log.d(TAG, "Connection cap (25) reached — skipping $relayUrl")
+        if (connections.size >= 13) {
+            Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
             return
         }
         val conn = RelayConnection(relayUrl, okHttpClient)
@@ -1186,12 +1186,16 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // When browse mode is active, route engagement to browse relays only.
+        // Route engagement to browse relays when active, otherwise use non-indexer
+        // relays only. Indexer relays (purplepag.es, etc.) store profile metadata
+        // (kind 0, 10002), NOT content events — they can't return engagement data.
         val browseTargets = browseEngagementTargets
         val targets = if (browseTargets.isNotEmpty()) {
             browseTargets.mapNotNull { connections[it] }
         } else {
-            connections.values.take(3)
+            val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+                .mapNotNull { normalizeRelayUrl(it) }.toSet()
+            connections.values.filter { it.url !in indexerUrls }.take(3)
         }
 
         // Register coverage lanes: 3 subs × N relays

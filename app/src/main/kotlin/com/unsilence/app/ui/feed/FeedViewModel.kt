@@ -182,10 +182,10 @@ class FeedViewModel @Inject constructor(
         engagementChannel.trySend(visibleIds)
     }
 
-    fun hydrateVisibleCards(visibleEvents: List<FeedRow>) {
+    fun hydrateVisibleCards(visibleEvents: List<FeedRow>, allEvents: List<FeedRow>? = null) {
         if (visibleEvents.isEmpty()) return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            cardHydrator.hydrateVisibleCards(visibleEvents)
+            cardHydrator.hydrateVisibleCards(visibleEvents, allEvents)
         }
     }
 
@@ -380,7 +380,7 @@ class FeedViewModel @Inject constructor(
                             val setUrls = members.mapNotNull { normalizeRelayUrl(it.relayUrl) }
                                 .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
-                            browseSession.start(setUrls, force = true)
+                            browseSession.start(setUrls)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit, contentFilter = cfValue)
                             }
@@ -388,7 +388,7 @@ class FeedViewModel @Inject constructor(
                         is FeedType.SingleRelay -> {
                             val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
                             currentRelayUrls = singleUrl
-                            browseSession.start(singleUrl, force = true)
+                            browseSession.start(singleUrl)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(singleUrl, filter, limit, contentFilter = cfValue)
                             }
