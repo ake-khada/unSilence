@@ -268,6 +268,7 @@ class FeedViewModel @Inject constructor(
     private var currentRelayUrls: List<String> = emptyList()
 
     fun loadMore() {
+        if (_isLoadingMore.value) return  // Prevent rapid re-fire
         val events = _activeReducer.value.state.value.visibleEvents
         val oldest = events.lastOrNull()?.createdAt ?: return
         if (oldest == lastOldestTimestamp) return
@@ -375,7 +376,7 @@ class FeedViewModel @Inject constructor(
                             val setUrls = members.mapNotNull { normalizeRelayUrl(it.relayUrl) }
                                 .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
-                            browseSession.start(setUrls)
+                            browseSession.start(setUrls, force = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(setUrls, filter, limit, contentFilter = cfValue)
                             }
@@ -383,7 +384,7 @@ class FeedViewModel @Inject constructor(
                         is FeedType.SingleRelay -> {
                             val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
                             currentRelayUrls = singleUrl
-                            browseSession.start(singleUrl)
+                            browseSession.start(singleUrl, force = true)
                             _displayLimit.flatMapLatest { limit ->
                                 eventRepository.feedFlow(singleUrl, filter, limit, contentFilter = cfValue)
                             }

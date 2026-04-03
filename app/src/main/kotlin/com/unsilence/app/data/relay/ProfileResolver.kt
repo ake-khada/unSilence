@@ -79,6 +79,14 @@ class ProfileResolver @Inject constructor(
         }
     }
 
+    /**
+     * Profile-screen fetch: same dedup/staleness checks, but hits [maxRelays]
+     * indexer relays instead of the default 1 (scroll mode).
+     */
+    fun requestWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
+        scope.launch { processBatch(pubkeys, maxRelays) }
+    }
+
     /** Cancel work, drain queued requests, clear caches. Called on logout. */
     @Synchronized
     fun clear() {
@@ -113,7 +121,7 @@ class ProfileResolver @Inject constructor(
         }
     }
 
-    private suspend fun processBatch(pubkeys: List<String>) {
+    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = 1) {
         val now = System.currentTimeMillis()
 
         // 1. In-flight guard
@@ -149,6 +157,6 @@ class ProfileResolver @Inject constructor(
         toFetch.forEach { inFlight[it] = now }
 
         Log.d(TAG, "Batch ${pubkeys.size} → ${toFetch.size} to fetch (${pubkeys.size - toFetch.size} fresh/in-flight)")
-        relayPool.get().fetchProfiles(toFetch)
+        relayPool.get().fetchProfiles(toFetch, maxRelays = maxRelays)
     }
 }
