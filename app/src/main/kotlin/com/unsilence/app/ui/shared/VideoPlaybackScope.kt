@@ -21,8 +21,12 @@ import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlin.math.abs
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /**
@@ -71,7 +75,7 @@ class VideoPlaybackScope(
  * playback transitions, and active-video detection — all the plumbing
  * that was previously duplicated per screen.
  */
-@OptIn(kotlinx.coroutines.FlowPreview::class)
+@OptIn(kotlinx.coroutines.FlowPreview::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Composable
 fun rememberVideoPlaybackScope(
     ownerId: String,
@@ -182,7 +186,19 @@ fun rememberVideoPlaybackScope(
                     else -> null
                 }
             }
-            .debounce(300)
+            .debounce(500)  // require 500ms stability before activation
+            .distinctUntilChanged()
+            .flatMapLatest { candidate ->
+                if (candidate == null && activeRef.value != null) {
+                    // Delay nullification — avoid surface churn during quick scroll
+                    flow {
+                        delay(1000)
+                        emit(null as String?)
+                    }
+                } else {
+                    flowOf(candidate)
+                }
+            }
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (scope.activeVideoNoteId != newActiveId) {

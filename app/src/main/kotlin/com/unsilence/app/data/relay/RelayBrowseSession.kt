@@ -32,6 +32,10 @@ class RelayBrowseSession @Inject constructor(
     private val generation = AtomicLong(0)
     private var activeTarget: List<String> = emptyList()
     private val activeSubIds = mutableMapOf<String, String>() // relayUrl -> subId
+    private var lastStartTime = 0L
+    private companion object {
+        const val MIN_SESSION_LIFETIME_MS = 30_000L
+    }
 
     init {
         // Register for reconnect notifications so we can resend browse subs
@@ -39,8 +43,14 @@ class RelayBrowseSession @Inject constructor(
         relayPool.onRelayReconnected = { url -> onRelayReconnected(url) }
     }
 
-    fun start(relayUrls: List<String>) {
+    fun start(relayUrls: List<String>, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && _isActive.value && now - lastStartTime < MIN_SESSION_LIFETIME_MS) {
+            Log.d(TAG, "Pinned: ${now - lastStartTime}ms < ${MIN_SESSION_LIFETIME_MS}ms — skipping restart")
+            return  // Pin current session
+        }
         stop()
+        lastStartTime = now
         val gen = generation.incrementAndGet()
         val normalized = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct().take(3)
         if (normalized.isEmpty()) return

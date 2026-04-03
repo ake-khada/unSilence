@@ -118,7 +118,7 @@ class ProfileViewModel @Inject constructor(
     init {
         if (pubkeyHex != null) {
             viewModelScope.launch(Dispatchers.IO) {
-                userRepository.fetchMissingProfiles(listOf(pubkeyHex))
+                userRepository.fetchProfilesWithFanout(listOf(pubkeyHex))
                 val writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
                 outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
                 relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)

@@ -627,19 +627,25 @@ class RelayPool @Inject constructor(
      */
     fun fetchRelayLists(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
+        // Send to indexer relays only (not all connections) to avoid broadcast storm
+        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+        val indexerConns = indexerUrls.mapNotNull { connections[it] }
+        val targets = indexerConns.ifEmpty { connections.values.take(3) }
         // Chunk to keep individual filters under 500 authors
         pubkeys.chunked(500).forEach { chunk ->
+            val subId = "kind10002-${System.nanoTime()}"
+            _activeOneShotSubs.add(subId)
             val req = buildJsonArray {
                 add(JsonPrimitive("REQ"))
-                add(JsonPrimitive("kind10002-${System.nanoTime()}"))
+                add(JsonPrimitive(subId))
                 add(buildJsonObject {
                     put("kinds", buildJsonArray { add(JsonPrimitive(10002)) })
                     put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
                 })
             }.toString()
-            connections.values.forEach { it.send(req) }
+            targets.forEach { it.send(req) }
         }
-        Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s)")
+        Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s) from ${targets.size} relay(s)")
     }
 
     /**
@@ -721,8 +727,9 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-    /** Send a kind 0 profile request for [pubkeys] to indexer relays only (deduped). */
-    fun fetchProfiles(pubkeys: List<String>) {
+    /** Send a kind 0 profile request for [pubkeys] to indexer relays only (deduped).
+     *  [maxRelays] caps how many relays receive the REQ (1 for scroll, more for profile screen). */
+    fun fetchProfiles(pubkeys: List<String>, maxRelays: Int = 5) {
         if (pubkeys.isEmpty()) return
         val now = System.currentTimeMillis()
         val novel = pubkeys.filter { pk ->
@@ -742,14 +749,15 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
-        val indexerConns = indexerUrls.mapNotNull { connections[it] }
-        // Always aim for at least 3 targets: supplement with general relays if needed
-        val targets = if (indexerConns.size >= 3) {
+        val indexerConns = indexerUrls.mapNotNull { connections[it] }.take(maxRelays)
+        // Supplement with general relays if needed (at least 1 target)
+        val minTargets = minOf(maxRelays, 3)
+        val targets = if (indexerConns.size >= minTargets) {
             indexerConns
         } else {
-            val extras = connections.values.filter { it !in indexerConns }.take(3 - indexerConns.size)
+            val extras = connections.values.filter { it !in indexerConns }.take(minTargets - indexerConns.size)
             indexerConns + extras
-        }.ifEmpty { connections.values.take(3) }
+        }.ifEmpty { connections.values.take(minTargets) }
         targets.forEach { it.send(req) }
         Log.d(TAG, "Fetching ${novel.size} profiles from ${targets.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }

@@ -3,11 +3,15 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.ConcurrentHashMap
@@ -34,6 +38,7 @@ class CardHydrator @Inject constructor(
     private val eventDao: EventDao,
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
+    private val thumbnailCache: VideoThumbnailCache,
 ) {
     private val hydratedIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
@@ -72,6 +77,19 @@ class CardHydrator @Inject constructor(
         //    ProfileResolver handles batching (200ms window) and in-flight dedup internally.
         if (pubkeys.isNotEmpty()) {
             userRepository.fetchMissingProfiles(pubkeys.toList())
+        }
+
+        // 5. Prefetch video thumbnails for aspect ratio cache.
+        //    By the time a video card enters the viewport, resolvedAspectRatios
+        //    already has the correct ratio — zero sizing pop on first compose.
+        for (event in newEvents) {
+            if (event.kind == 30023) continue
+            val models = buildVideoRenderModels(event)
+            for (model in models) {
+                if (model.widthPx != null && model.heightPx != null) continue  // imeta has dimensions
+                if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
+                withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+            }
         }
 
         Log.d(TAG, "Hydrated ${newEvents.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing)")

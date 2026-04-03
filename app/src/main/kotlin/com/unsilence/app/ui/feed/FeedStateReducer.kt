@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.unsilence.app.data.db.dao.FeedRow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +42,28 @@ class FeedStateReducer(private val feedKey: String) {
     private var isAtTop: Boolean = true
     private var atTopConsecutiveCount = 0
 
+    // Coalesce MERGE updates: collect rapid Room emissions for 150ms before
+    // committing to _state. Prevents 93+ MERGEs/session from causing frame skips.
+    // pendingMerge is written from background threads (collectLatest) and read from
+    // the main-thread Handler callback — @Volatile + synchronized guard both paths.
+    @Volatile
+    private var pendingMerge: ReducerState? = null
+    private val coalesceHandler = Handler(Looper.getMainLooper())
+    private val flushPending = Runnable {
+        synchronized(this) {
+            pendingMerge?.let { _state.value = it }
+            pendingMerge = null
+        }
+    }
+
+    private fun emitCoalesced(newState: ReducerState) {
+        synchronized(this) {
+            pendingMerge = newState
+        }
+        coalesceHandler.removeCallbacks(flushPending)
+        coalesceHandler.postDelayed(flushPending, 150)
+    }
+
     /**
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
@@ -73,43 +97,40 @@ class FeedStateReducer(private val feedKey: String) {
     fun onNewEvents(allEvents: List<FeedRow>) {
         latestRows = allEvents
 
-        _state.update { current ->
-            if (current.visibleEvents.isEmpty() || isAtTop) {
-                // Skip if same event IDs in same order (avoids recomposition on engagement-only updates)
-                if (current.visibleEvents.size == allEvents.size &&
-                    current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == allEvents[i].id }) {
-                    // Same IDs — check if any content actually changed
-                    if (current.visibleEvents == allEvents) {
-                        return@update current  // Identical — skip entirely
-                    }
-                }
-                pendingIds = emptySet()
-                Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
-                ReducerState(visibleEvents = allEvents)
-            } else {
-                // User is scrolled down — count leading new rows
+        val current = _state.value
+        if (current.visibleEvents.isEmpty() || isAtTop) {
+            // MERGE path — coalesced via Handler to batch rapid Room emissions.
+            // Skip if same event IDs in same order (avoids recomposition on engagement-only updates)
+            if (current.visibleEvents.size == allEvents.size &&
+                current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == allEvents[i].id }) {
+                if (current.visibleEvents == allEvents) return
+            }
+            pendingIds = emptySet()
+            Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
+            emitCoalesced(ReducerState(visibleEvents = allEvents))
+        } else {
+            // User is scrolled down — APPEND/QUEUE paths use atomic _state.update
+            _state.update { cur ->
                 val allIds = allEvents.map { it.id }.toSet()
-                pendingIds = pendingIds.intersect(allIds)  // Drop IDs no longer in Room results
-                val visibleIds = current.visibleEvents.map { it.id }.toSet()
+                pendingIds = pendingIds.intersect(allIds)
+                val visibleIds = cur.visibleEvents.map { it.id }.toSet()
                 val knownIds = visibleIds + pendingIds
                 val leadingNew = allEvents.takeWhile { it.id !in knownIds }
 
                 if (leadingNew.isEmpty()) {
-                    // Refresh engagement counts in-place for existing items.
-                    // If list grew (pagination), append new items at the bottom.
                     val latestMap = allEvents.associateBy { it.id }
-                    val refreshed = current.visibleEvents.map { row -> latestMap[row.id] ?: row }
-                    val existingIds = current.visibleEvents.map { it.id }.toSet()
+                    val refreshed = cur.visibleEvents.map { row -> latestMap[row.id] ?: row }
+                    val existingIds = cur.visibleEvents.map { it.id }.toSet()
                     val appended = allEvents.filter { it.id !in existingIds }
                     if (appended.isNotEmpty()) {
                         Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${refreshed.size + appended.size}")
                     }
-                    current.copy(visibleEvents = refreshed + appended)
+                    cur.copy(visibleEvents = refreshed + appended)
                 } else {
                     pendingIds = pendingIds + leadingNew.map { it.id }.toSet()
                     val unread = pendingIds.size
                     Log.d(TAG, "feedKey=$feedKey atTop=false action=QUEUE leading=${leadingNew.size} total=$unread")
-                    current.copy(
+                    cur.copy(
                         unreadCount = unread,
                         showDot = true,
                     )

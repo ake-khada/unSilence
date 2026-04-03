@@ -228,7 +228,7 @@ class UserProfileViewModel @Inject constructor(
         isLoadingPosts.value = true
 
         viewModelScope.launch {
-            userRepository.fetchMissingProfiles(listOf(pubkey))
+            userRepository.fetchProfilesWithFanout(listOf(pubkey))
             outboxRelayUrls = resolveOutboxRelays(pubkey)
             relayPool.connect(outboxRelayUrls)
             relayPool.fetchUserPosts(pubkey, outboxRelayUrls)

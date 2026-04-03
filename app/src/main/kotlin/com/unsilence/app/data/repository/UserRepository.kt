@@ -33,8 +33,14 @@ class UserRepository @Inject constructor(
     /**
      * Requests profiles for pubkeys not yet cached OR stale (>6 hours).
      * Delegates to [ProfileResolver] for in-flight dedup, batching, and staleness checks.
+     * Default scroll mode: 1 indexer relay.
      */
     fun fetchMissingProfiles(pubkeys: List<String>) {
         profileResolver.request(pubkeys)
+    }
+
+    /** Profile screen variant: hits up to [maxRelays] indexer relays for better coverage. */
+    fun fetchProfilesWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
+        profileResolver.requestWithFanout(pubkeys, maxRelays)
     }
 }
