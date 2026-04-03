@@ -121,6 +121,10 @@ class ProfileViewModel @Inject constructor(
                 userRepository.fetchProfilesWithFanout(listOf(pubkeyHex))
                 val writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
                 outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
+                // Connect to outbox relays first so fetchUserPosts can reach them
+                // (matches UserProfileViewModel pattern — without this, write relays
+                // not in the pool cause fallback to general relays that lack articles)
+                relayPool.connect(outboxRelayUrls)
                 relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)
             }
         }
