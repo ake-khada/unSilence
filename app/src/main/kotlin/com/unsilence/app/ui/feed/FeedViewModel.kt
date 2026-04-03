@@ -167,6 +167,34 @@ class FeedViewModel @Inject constructor(
     private var lastOldestTimestamp = 0L
     private var lastLoadMoreTime = 0L
 
+    // ── Per-feed saved state (scroll position + displayLimit) ────────────
+    private data class SavedFeedState(
+        val displayLimit: Int = 50,
+        val lastOldestTimestamp: Long = 0L,
+        val scrollIndex: Int = 0,
+        val scrollOffset: Int = 0,
+    )
+
+    private val savedFeedStates = mutableMapOf<String, SavedFeedState>()
+    private var currentFeedKey = ""
+
+    // Scroll position — written by FeedScreen, read when saving feed state
+    private val _savedScrollIndex = MutableStateFlow(0)
+    private val _savedScrollOffset = MutableStateFlow(0)
+
+    fun saveScrollPosition(index: Int, offset: Int) {
+        _savedScrollIndex.value = index
+        _savedScrollOffset.value = offset
+    }
+
+    // Scroll restore — set on feed switch when saved state exists
+    private val _restoreScrollIndex = MutableStateFlow(0)
+    private val _restoreScrollOffset = MutableStateFlow(0)
+    private val _restoreGeneration = MutableStateFlow(0)
+    val restoreScrollIndex: StateFlow<Int> = _restoreScrollIndex.asStateFlow()
+    val restoreScrollOffset: StateFlow<Int> = _restoreScrollOffset.asStateFlow()
+    val restoreGeneration: StateFlow<Int> = _restoreGeneration.asStateFlow()
+
     private val _isLoadingMore = MutableStateFlow(false)
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
@@ -314,10 +342,42 @@ class FeedViewModel @Inject constructor(
 
             combine(_feedType, _filter, _contentFilter) { type, filter, cf -> Triple(type, filter, cf) }
                 .flatMapLatest { (type, filter, cf) ->
-                    // Reset all state on feed switch so the new feed starts clean.
-                    lastOldestTimestamp = 0L
+                    // Compute new feedKey first for save/restore
+                    val feedPrefix = when (type) {
+                        is FeedType.Global -> "global"
+                        is FeedType.Following -> "following"
+                        is FeedType.RelaySet -> "relayset-${type.dTag}"
+                        is FeedType.SingleRelay -> "relay-${type.url}"
+                    }
+                    val newKey = "$feedPrefix-${cf.name}"
+
+                    // Save current feed state before switching
+                    if (currentFeedKey.isNotEmpty()) {
+                        savedFeedStates[currentFeedKey] = SavedFeedState(
+                            displayLimit = _displayLimit.value,
+                            lastOldestTimestamp = lastOldestTimestamp,
+                            scrollIndex = _savedScrollIndex.value,
+                            scrollOffset = _savedScrollOffset.value,
+                        )
+                        if (savedFeedStates.size > 10) {
+                            savedFeedStates.keys.first().let { savedFeedStates.remove(it) }
+                        }
+                    }
+                    currentFeedKey = newKey
+
+                    // Restore saved state or start fresh
+                    val saved = savedFeedStates[newKey]
+                    if (saved != null) {
+                        _displayLimit.value = saved.displayLimit
+                        lastOldestTimestamp = saved.lastOldestTimestamp
+                        _restoreScrollIndex.value = saved.scrollIndex
+                        _restoreScrollOffset.value = saved.scrollOffset
+                        _restoreGeneration.value++
+                    } else {
+                        lastOldestTimestamp = 0L
+                        _displayLimit.value = 50
+                    }
                     lastLoadMoreTime = 0L
-                    _displayLimit.value = 50
                     _isLoadingMore.value = false
                     cardHydrator.clearCache()
 
@@ -327,13 +387,6 @@ class FeedViewModel @Inject constructor(
 
                     // Create a new reducer for this feed key — flatMapLatest on
                     // _activeReducer auto-propagates the new reducer's state.
-                    val feedPrefix = when (type) {
-                        is FeedType.Global -> "global"
-                        is FeedType.Following -> "following"
-                        is FeedType.RelaySet -> "relayset-${type.dTag}"
-                        is FeedType.SingleRelay -> "relay-${type.url}"
-                    }
-                    val newKey = "$feedPrefix-${cf.name}"
                     _activeReducer.value = FeedStateReducer(newKey)
 
                     // Check coverage before deciding whether to fetch
