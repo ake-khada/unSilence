@@ -140,6 +140,10 @@ class FeedViewModel @Inject constructor(
         _activeReducer.value.onScrollPositionChanged(firstVisibleIndex, firstVisibleOffset)
     }
 
+    fun onScrollProgressChanged(scrolling: Boolean) {
+        _activeReducer.value.onScrollProgressChanged(scrolling)
+    }
+
     fun onDotTapped() {
         _activeReducer.value.onDotTapped()
     }
