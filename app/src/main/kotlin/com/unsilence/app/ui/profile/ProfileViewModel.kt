@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -119,11 +120,23 @@ class ProfileViewModel @Inject constructor(
         if (pubkeyHex != null) {
             viewModelScope.launch(Dispatchers.IO) {
                 userRepository.fetchProfilesWithFanout(listOf(pubkeyHex))
-                val writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
+
+                // Resolve outbox relays: check Room cache first, fetch kind 10002 if missing
+                var writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
+                if (writeUrls.isEmpty()) {
+                    relayPool.fetchRelayLists(listOf(pubkeyHex))
+                    withTimeoutOrNull(5_000) {
+                        while (true) {
+                            delay(500)
+                            val resolved = getWriteRelayUrls(pubkeyHex).take(5)
+                            if (resolved.isNotEmpty()) {
+                                writeUrls = resolved
+                                break
+                            }
+                        }
+                    }
+                }
                 outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
-                // Connect to outbox relays first so fetchUserPosts can reach them
-                // (matches UserProfileViewModel pattern — without this, write relays
-                // not in the pool cause fallback to general relays that lack articles)
                 relayPool.connect(outboxRelayUrls)
                 relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)
             }
