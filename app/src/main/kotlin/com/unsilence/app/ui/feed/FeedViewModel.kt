@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -431,6 +432,12 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                     }
+                }
+                // Skip duplicate Room emissions: any write to users/event_stats/event_relays
+                // triggers re-query even when this feed's event IDs haven't changed.
+                // Compare IDs only — profile/engagement updates are cosmetic.
+                .distinctUntilChanged { old, new ->
+                    old.size == new.size && old.indices.all { i -> old[i].id == new[i].id }
                 }
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
