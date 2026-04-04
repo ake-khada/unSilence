@@ -61,11 +61,12 @@ class FeedStateReducer(private val feedKey: String) {
             pendingMerge = null
             coalesceWindowOpen = false
 
-            // Dedup check — only here, once per window
+            // Dedup check — only here, once per window. ID-only: profile/engagement
+            // updates are cosmetic and flow reactively via Room Flows.
             val current = _state.value
             if (current.visibleEvents.size == pending.visibleEvents.size &&
                 current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == pending.visibleEvents[i].id }) {
-                if (current.visibleEvents == pending.visibleEvents) return@Runnable
+                return@Runnable
             }
             _state.value = pending
         }
@@ -108,19 +109,13 @@ class FeedStateReducer(private val feedKey: String) {
 
         val current = _state.value
 
-        // Structural dedup: skip if event IDs AND engagement counts are unchanged.
-        // Room re-emits on any joined-table write (profile update, relay provenance, etc.)
-        // even when this feed's meaningful data hasn't changed.
+        // Structural dedup: skip if event IDs are unchanged.
+        // Room re-emits on ANY joined-table write (profile resolve, engagement update,
+        // relay provenance, etc.) even when the event list itself hasn't changed.
+        // Profile data and engagement counts flow to Compose reactively via Room Flows.
         if (allEvents.size == current.visibleEvents.size) {
             val unchanged = allEvents.indices.all { i ->
-                val new = allEvents[i]
-                val old = current.visibleEvents[i]
-                new.id == old.id &&
-                    new.replyCount == old.replyCount &&
-                    new.reactionCount == old.reactionCount &&
-                    new.repostCount == old.repostCount &&
-                    new.zapCount == old.zapCount &&
-                    new.zapTotalSats == old.zapTotalSats
+                allEvents[i].id == current.visibleEvents[i].id
             }
             if (unchanged) return
         }
