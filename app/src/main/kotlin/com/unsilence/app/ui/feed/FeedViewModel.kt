@@ -434,11 +434,11 @@ class FeedViewModel @Inject constructor(
                     }
                 }
                 // Skip duplicate Room emissions: any write to users/event_stats/event_relays
-                // triggers re-query even when this feed's event IDs haven't changed.
-                // Compare IDs only — profile/engagement updates are cosmetic.
-                .distinctUntilChanged { old, new ->
-                    old.size == new.size && old.indices.all { i -> old[i].id == new[i].id }
-                }
+                // triggers re-query even when this feed's data hasn't changed.
+                // FeedRow is a data class — equals() compares all fields including
+                // authorName/Picture and engagement counts. Only truly unchanged
+                // emissions are filtered; profile resolves and engagement updates pass.
+                .distinctUntilChanged()
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
                     Log.d("FeedVM", "Feed emission: size=${rows.size} feedKey=$currentFeedKey")
