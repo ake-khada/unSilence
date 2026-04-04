@@ -4,6 +4,7 @@ import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
+import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
@@ -57,6 +58,7 @@ class AppBootstrapper @Inject constructor(
     private val eventProcessor: EventProcessor,
     private val outboxRouter: OutboxRouter,
     private val maintenanceJob: DatabaseMaintenanceJob,
+    private val eventDao: EventDao,
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
     private val relayConfigDao: RelayConfigDao,
@@ -183,6 +185,10 @@ class AppBootstrapper @Inject constructor(
         }
 
         maintenanceJob.start()
+
+        // One-time cleanup of JSON-spam events already in the database
+        val spamRemoved = eventDao.pruneJsonSpam()
+        if (spamRemoved > 0) Log.d(TAG, "Cleaned $spamRemoved JSON-spam events")
 
         // Warm up DNS + TLS connection pools for common media CDNs (fire-and-forget)
         MediaPreconnect.warmUp(okHttpClient)
