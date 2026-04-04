@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -137,6 +138,7 @@ class ProfileViewModel @Inject constructor(
                     }
                 }
                 outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
+                Log.d("ProfileVM", "Longform: pubkey=$pubkeyHex outboxRelays=${outboxRelayUrls.size} urls=$outboxRelayUrls")
                 relayPool.connect(outboxRelayUrls)
                 relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)
             }

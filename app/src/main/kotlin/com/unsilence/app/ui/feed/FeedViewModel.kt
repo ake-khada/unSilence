@@ -129,6 +129,7 @@ class FeedViewModel @Inject constructor(
     fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
     // ── Feed-state reducer ────────────────────────────────────────────────
+    private var lastResetFeedKey: String? = null
     private val _activeReducer = MutableStateFlow(FeedStateReducer("global"))
 
     /** Automatic propagation: swap reducer → flatMapLatest picks up new state. */
@@ -358,7 +359,11 @@ class FeedViewModel @Inject constructor(
                     }
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
-                    hydrationController.reset()
+                    // Only reset controller on actual feed switch, not on every Room re-emission
+                    if (newKey != lastResetFeedKey) {
+                        lastResetFeedKey = newKey
+                        hydrationController.reset()
+                    }
 
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
@@ -429,6 +434,7 @@ class FeedViewModel @Inject constructor(
                 }
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
+                    Log.d("FeedVM", "Feed emission: size=${rows.size} feedKey=$currentFeedKey")
                     _activeReducer.value.onNewEvents(rows)
 
                     // Re-check coverage status from DB on each emission

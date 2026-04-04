@@ -212,8 +212,13 @@ class RelayPool @Inject constructor(
             val url = normalizeRelayUrl(rawUrl) ?: continue
             if (connections.containsKey(url)) continue
             if (connections.size >= 13) {
-                Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                continue
+                // Browse connections get up to 3 extra slots above the general cap
+                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+                val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
+                if (!isBrowse || browseCount >= 3) {
+                    Log.d(TAG, "Connection cap (13) reached — skipping $url")
+                    continue
+                }
             }
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
@@ -294,8 +299,13 @@ class RelayPool @Inject constructor(
             }
             if (connections.containsKey(url)) continue
             if (connections.size + newUrls.size >= 13) {
-                Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                continue
+                // Browse connections get up to 3 extra slots above the general cap
+                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+                val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
+                if (!isBrowse || browseCount >= 3) {
+                    Log.d(TAG, "Connection cap (13) reached — skipping $url")
+                    continue
+                }
             }
             newUrls.add(url)
         }
@@ -696,8 +706,13 @@ class RelayPool @Inject constructor(
             return
         }
         if (connections.size >= 13) {
-            Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
-            return
+            // Browse connections get up to 3 extra slots above the general cap
+            val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+            val isBrowse = hasPurpose(relayUrl, ConnectionPurpose.BROWSE)
+            if (!isBrowse || browseCount >= 3) {
+                Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
+                return
+            }
         }
         val conn = RelayConnection(relayUrl, okHttpClient)
         connections[relayUrl] = conn
