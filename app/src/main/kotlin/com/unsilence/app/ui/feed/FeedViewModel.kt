@@ -366,6 +366,8 @@ class FeedViewModel @Inject constructor(
                         hydrationController.reset()
                     }
 
+                    val isBrowse = type is FeedType.SingleRelay || type is FeedType.RelaySet
+
                     // Set loading BEFORE swapping reducer to prevent empty-state flash.
                     // Without this, Crossfade sees COMPLETE + empty events → "No posts yet."
                     _uiState.value = FeedUiState(loading = true, coverageStatus = CoverageStatus.LOADING)
@@ -374,18 +376,24 @@ class FeedViewModel @Inject constructor(
                     // _activeReducer auto-propagates the new reducer's state.
                     _activeReducer.value = FeedStateReducer(newKey)
 
-                    // Check coverage before deciding whether to fetch
-                    val intent = CoverageIntent.HomeFeed()
-                    val status = coverageRepository.ensureCoverage(intent)
-                    _uiState.value = FeedUiState(loading = status != CoverageStatus.COMPLETE, coverageStatus = status)
+                    // Browse feeds skip home coverage — they stay LOADING until
+                    // events arrive from the browse relay or the timeout fires.
+                    if (!isBrowse) {
+                        val intent = CoverageIntent.HomeFeed()
+                        val status = coverageRepository.ensureCoverage(intent)
+                        _uiState.value = FeedUiState(loading = status != CoverageStatus.COMPLETE, coverageStatus = status)
+                    }
 
-                    // Timeout: if still LOADING after 10s, persist FAILED and update UI
+                    // Timeout: if still LOADING after 10s, mark failed and update UI
                     viewModelScope.launch {
                         delay(10_000)
                         if (_uiState.value.coverageStatus == CoverageStatus.LOADING) {
-                            coverageRepository.markFailed(
-                                intent.scopeType, intent.scopeKey, intent.relaySetId
-                            )
+                            if (!isBrowse) {
+                                val intent = CoverageIntent.HomeFeed()
+                                coverageRepository.markFailed(
+                                    intent.scopeType, intent.scopeKey, intent.relaySetId
+                                )
+                            }
                             _uiState.update { it.copy(loading = false, coverageStatus = CoverageStatus.FAILED) }
                         }
                     }
@@ -444,15 +452,22 @@ class FeedViewModel @Inject constructor(
                     Log.d("FeedVM", "Feed emission: size=${rows.size} feedKey=$currentFeedKey")
                     _activeReducer.value.onNewEvents(rows)
 
-                    // Re-check coverage status from DB on each emission
-                    val intent = CoverageIntent.HomeFeed()
-                    val status = coverageRepository.getStatus(
-                        intent.scopeType, intent.scopeKey, intent.relaySetId
-                    )
-                    _uiState.value = FeedUiState(
-                        loading = false,
-                        coverageStatus = status,
-                    )
+                    // Browse feeds: keep LOADING until events arrive (timeout handles failure).
+                    // Home feeds: re-check coverage status from DB on each emission.
+                    val currentType = _feedType.value
+                    val currentIsBrowse = currentType is FeedType.SingleRelay || currentType is FeedType.RelaySet
+                    if (currentIsBrowse) {
+                        if (rows.isNotEmpty()) {
+                            _uiState.value = FeedUiState(loading = false, coverageStatus = CoverageStatus.COMPLETE)
+                        }
+                        // If empty, keep LOADING — 10s timeout will mark FAILED
+                    } else {
+                        val intent = CoverageIntent.HomeFeed()
+                        val status = coverageRepository.getStatus(
+                            intent.scopeType, intent.scopeKey, intent.relaySetId
+                        )
+                        _uiState.value = FeedUiState(loading = false, coverageStatus = status)
+                    }
                 }
         }
     }
