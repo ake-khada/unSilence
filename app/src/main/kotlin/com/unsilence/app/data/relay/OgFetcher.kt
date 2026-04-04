@@ -67,34 +67,21 @@ class OgFetcher @Inject constructor(
     }
 
     private suspend fun doFetch(url: String): OgMetadata? {
-        // HEAD first to verify content-type is HTML
-        val isHtml = executeWithCancellation(
-            client.newCall(
-                Request.Builder()
-                    .url(url)
-                    .head()
-                    .header("User-Agent", UA)
-                    .build()
-            )
-        ).use { headResp ->
-            val contentType = headResp.header("Content-Type")
-                ?: headResp.header("content-type")
-            contentType == null || contentType.contains("text/html", ignoreCase = true)
-        }
-        if (!isHtml) return null
-
-        // GET with body size limit
+        // Skip HEAD — many sites block it or return wrong content-type.
+        // Go straight to GET with body size limit.
         return executeWithCancellation(
             client.newCall(
                 Request.Builder()
                     .url(url)
                     .header("User-Agent", UA)
+                    .header("Accept", "text/html,application/xhtml+xml")
                     .build()
             )
         ).use { response ->
             if (!response.isSuccessful) return null
             val ct = response.header("Content-Type") ?: ""
-            if (!ct.contains("text/html", ignoreCase = true)) return null
+            if (ct.isNotBlank() && !ct.contains("text/html", ignoreCase = true)
+                && !ct.contains("application/xhtml", ignoreCase = true)) return null
             // Read at most 50KB
             val source = response.body.source()
             val buf = okio.Buffer()
@@ -106,7 +93,8 @@ class OgFetcher @Inject constructor(
 
     companion object {
         private const val TAG = "OgFetcher"
-        private const val UA = "Mozilla/5.0 (compatible; unSilence/1.0)"
+        // Realistic browser UA — many sites (yahoo.co.jp, etc.) 403 bot-like UAs.
+        private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
         private const val MAX_BODY_SIZE = 50_000L
 
         // Matches property= or name= with og: prefix, in either order with content=
@@ -114,6 +102,19 @@ class OgFetcher @Inject constructor(
             """<meta\s+[^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
             """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*/?>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+        )
+
+        // Fallback: twitter card tags (twitter:image, twitter:title, etc.)
+        private val TWITTER_TAG_REGEX = Regex(
+            """<meta\s+[^>]*(?:property|name)\s*=\s*["']twitter:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
+            """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*(?:property|name)\s*=\s*["']twitter:(\w+)["'][^>]*/?>""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+        )
+
+        // Fallback: HTML <title> tag
+        private val TITLE_TAG_REGEX = Regex(
+            """<title[^>]*>([^<]+)</title>""",
+            RegexOption.IGNORE_CASE,
         )
 
         /** Decode HTML entities (named + numeric) in attribute values. */
@@ -145,34 +146,50 @@ class OgFetcher @Inject constructor(
         }
 
         internal fun parseOgTags(html: String, originalUrl: String): OgMetadata? {
-            val tags = mutableMapOf<String, String>()
+            val ogTags = mutableMapOf<String, String>()
             for (match in OG_TAG_REGEX.findAll(html)) {
-                // First alternative: property/name then content
                 val key1 = match.groupValues[1]
                 val val1 = match.groupValues[2]
-                // Second alternative: content then property/name
                 val key2 = match.groupValues[4]
                 val val2 = match.groupValues[3]
-
                 val key = key1.ifBlank { key2 }
                 val value = val1.ifBlank { val2 }
                 if (key.isNotBlank() && value.isNotBlank()) {
-                    tags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
+                    ogTags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
                 }
             }
 
-            val title = tags["title"]
-            val image = tags["image"]?.let { resolveUrl(it, originalUrl) }
-            Log.d(TAG, "og:image=$image for $originalUrl (raw=${tags["image"]})")
+            // Fallback: twitter card tags fill any gaps
+            val twitterTags = mutableMapOf<String, String>()
+            for (match in TWITTER_TAG_REGEX.findAll(html)) {
+                val key1 = match.groupValues[1]
+                val val1 = match.groupValues[2]
+                val key2 = match.groupValues[4]
+                val val2 = match.groupValues[3]
+                val key = key1.ifBlank { key2 }
+                val value = val1.ifBlank { val2 }
+                if (key.isNotBlank() && value.isNotBlank()) {
+                    twitterTags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
+                }
+            }
+
+            val title = ogTags["title"] ?: twitterTags["title"]
+                ?: TITLE_TAG_REGEX.find(html)?.groupValues?.get(1)?.let { decodeHtmlEntities(it) }
+            val image = (ogTags["image"] ?: twitterTags["image"])
+                ?.let { resolveUrl(it, originalUrl) }
+            val description = ogTags["description"] ?: twitterTags["description"]
+            val siteName = ogTags["site_name"]
+
+            Log.d(TAG, "og:image=$image for $originalUrl")
 
             // Require at least a title or image to be useful
             if (title.isNullOrBlank() && image.isNullOrBlank()) return null
 
             return OgMetadata(
-                title       = decodeHtmlEntities(title ?: ""),
-                description = tags["description"]?.let { decodeHtmlEntities(it) },
+                title       = title ?: "",
+                description = description,
                 imageUrl    = image,
-                siteName    = tags["site_name"]?.let { decodeHtmlEntities(it) },
+                siteName    = siteName,
                 url         = originalUrl,
             )
         }

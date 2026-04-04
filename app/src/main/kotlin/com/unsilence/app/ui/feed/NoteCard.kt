@@ -267,8 +267,14 @@ fun NoteCard(
     val contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim()
 
     // ── Media extraction: regex from content + imeta from tags ────────────────
-    // Wrapped in remember to avoid re-parsing JSON on every recomposition.
-    val imetaMedia = remember(row.tags) { ImetaParser.parse(row.tags) }
+    // For kind-6 reposts, use the ORIGINAL event's tags (from embedded JSON or
+    // fetched event) since the repost wrapper tags rarely carry imeta.
+    val effectiveTags = if (row.kind == 6) {
+        boostedJson?.get("tags")?.toString()
+            ?: fetchedRepostEvent?.tags
+            ?: row.tags
+    } else row.tags
+    val imetaMedia = remember(effectiveTags) { ImetaParser.parse(effectiveTags) }
     val mediaExtraction = remember(row.id, contentNoNostr) {
         // 1. Extract YouTube URLs first (web pages, not playable files).
         val youtubeEmbeds = YOUTUBE_URL_REGEX.findAll(contentNoNostr).map { match ->

@@ -432,8 +432,8 @@ interface EventDao {
         }
     }
 
-    /** Find kind-1 events whose content is JSON (machine-generated spam). */
-    @Query("SELECT id FROM events WHERE kind = 1 AND content LIKE '{%'")
+    /** Find kind-1 events whose content is machine-generated spam. */
+    @Query("SELECT id FROM events WHERE kind = 1 AND (content LIKE '{%' OR content LIKE 'xitchat-broadcast-v1-%')")
     suspend fun findJsonSpamIds(): List<String>
 
     /** Remove all JSON-spam kind-1 events and their related rows. */
