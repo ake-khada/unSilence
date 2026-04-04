@@ -93,11 +93,14 @@ fun FeedScreen(
         if (previousEventIds.isNotEmpty()) {
             val freshIds = currentIds - previousEventIds
             for (id in freshIds) newEventIds[id] = true
-            // When new events auto-merged at top, LazyColumn maintains scroll
-            // position by key — new items above push the user down. Scroll back
-            // to index 0 so the user sees the new posts immediately.
+            // Only scroll to top when new events MERGED at top (not APPENDed at bottom).
+            // Check: fresh IDs are at the start of the list = MERGE, at the end = APPEND.
             if (freshIds.isNotEmpty() && !reducerState.showDot) {
-                listState.scrollToItem(0)
+                val firstFreshIdx = events.indexOfFirst { it.id in freshIds }
+                if (firstFreshIdx == 0) {
+                    // New events at top (MERGE) — scroll to show them
+                    listState.scrollToItem(0)
+                }
             }
         }
         previousEventIds = currentIds
