@@ -431,4 +431,22 @@ interface EventDao {
             deleteEventsByIds(chunk)
         }
     }
+
+    /** Find kind-1 events whose content is JSON (machine-generated spam). */
+    @Query("SELECT id FROM events WHERE kind = 1 AND content LIKE '{%'")
+    suspend fun findJsonSpamIds(): List<String>
+
+    /** Remove all JSON-spam kind-1 events and their related rows. */
+    @Transaction
+    suspend fun pruneJsonSpam(): Int {
+        val ids = findJsonSpamIds()
+        if (ids.isEmpty()) return 0
+        for (chunk in ids.chunked(500)) {
+            deleteTagsByEventIds(chunk)
+            deleteStatsByEventIds(chunk)
+            deleteRelaysByEventIds(chunk)
+            deleteEventsByIds(chunk)
+        }
+        return ids.size
+    }
 }

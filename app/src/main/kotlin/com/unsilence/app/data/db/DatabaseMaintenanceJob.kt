@@ -65,6 +65,12 @@ class DatabaseMaintenanceJob @Inject constructor(
 
             // 2. NIP-40 expiration prune
             eventDao.pruneExpired(System.currentTimeMillis() / 1000L)
+
+            // 3. Remove JSON-spam kind-1 events (machine-generated payloads)
+            val spamRemoved = eventDao.pruneJsonSpam()
+            if (spamRemoved > 0) {
+                Log.d(TAG, "Removed $spamRemoved JSON-spam events")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Maintenance failed: ${e.message}")
         }
