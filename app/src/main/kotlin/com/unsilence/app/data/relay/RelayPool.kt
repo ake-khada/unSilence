@@ -210,6 +210,10 @@ class RelayPool @Inject constructor(
         val newConns = mutableListOf<RelayConnection>()
         for (rawUrl in relayUrls) {
             val url = normalizeRelayUrl(rawUrl) ?: continue
+            if (url in blockedUrls) {
+                Log.d(TAG, "Blocked relay — skipping $url")
+                continue
+            }
             if (connections.containsKey(url)) continue
             if (connections.size >= 13) {
                 // Browse connections get up to 3 extra slots above the general cap
