@@ -20,6 +20,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import androidx.room.withTransaction
+import com.unsilence.app.data.db.AppDatabase
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.intOrNull
@@ -73,6 +75,7 @@ sealed class ProcessedEvent {
  */
 @Singleton
 class EventProcessor @Inject constructor(
+    private val database: AppDatabase,
     private val eventDao: EventDao,
     private val userDao: UserDao,
     private val reactionDao: ReactionDao,
@@ -437,6 +440,10 @@ class EventProcessor @Inject constructor(
             }
         }
 
+        // Wrap ALL Room writes in a single transaction — triggers ONE Room Flow
+        // re-emission instead of 6+ separate ones (events, users, reactions, tags,
+        // relays, stats). This is the single biggest Room performance improvement.
+        database.withTransaction {
         // Single batch insert per table — one SQLite write-lock acquisition instead of N
         if (events.isNotEmpty())    eventDao.insertOrIgnoreBatch(events.values.toList())
         if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
@@ -479,31 +486,39 @@ class EventProcessor @Inject constructor(
         if (allRelayEntities.isNotEmpty()) eventRelayDao.insertAll(allRelayEntities)
         if (allTagEntities.isNotEmpty())   tagDao.insertAll(allTagEntities)
 
-        // Update stats for parent events
+        // Collect all stat updates, then batch into ONE Room transaction.
+        // This triggers a single Room Flow re-emission instead of N separate ones.
+        val replyTargets = mutableListOf<String>()
+        val repostTargets = mutableListOf<String>()
+        val zapTargets = mutableListOf<Pair<String, Long>>()
+
         for (entity in events.values) {
             when (entity.kind) {
                 1 -> {
-                    entity.replyToId?.let { eventStatsDao.incrementReplyCount(it) }
+                    entity.replyToId?.let { replyTargets.add(it) }
                     if (entity.rootId != null && entity.rootId != entity.replyToId) {
-                        eventStatsDao.incrementReplyCount(entity.rootId)
+                        replyTargets.add(entity.rootId)
                     }
                 }
                 6 -> {
-                    entity.rootId?.let { eventStatsDao.incrementRepostCount(it) }
+                    entity.rootId?.let { repostTargets.add(it) }
                 }
                 9735 -> {
                     if (entity.rootId != null) {
                         val sats = extractZapSats(entity.tags)
-                        eventStatsDao.incrementZapStats(entity.rootId, sats)
+                        zapTargets.add(entity.rootId to sats)
                     }
                 }
             }
         }
 
-        // Update reaction stats
-        for (entity in reactions.values) {
-            eventStatsDao.incrementReactionCount(entity.targetEventId)
+        val reactionTargets = reactions.values.map { it.targetEventId }
+
+        if (replyTargets.isNotEmpty() || repostTargets.isNotEmpty() ||
+            reactionTargets.isNotEmpty() || zapTargets.isNotEmpty()) {
+            eventStatsDao.batchIncrementStats(replyTargets, repostTargets, reactionTargets, zapTargets)
         }
+        } // database.withTransaction
     }
 
     // ── NIP-10: threading ─────────────────────────────────────────────────────
