@@ -43,27 +43,28 @@ class RelayBrowseSession @Inject constructor(
         relayPool.onRelayReconnected = { url -> onRelayReconnected(url) }
     }
 
-    fun start(relayUrls: List<String>, force: Boolean = false) {
+    suspend fun start(relayUrls: List<String>, force: Boolean = false) {
+        val normalized = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct().take(3)
+        if (normalized.isEmpty()) return
+
+        // Pin check: only skip if SAME target URLs within cooldown
         val now = System.currentTimeMillis()
-        if (!force && _isActive.value && now - lastStartTime < MIN_SESSION_LIFETIME_MS) {
-            Log.d(TAG, "Pinned: ${now - lastStartTime}ms < ${MIN_SESSION_LIFETIME_MS}ms — skipping restart")
-            return  // Pin current session
+        if (!force && _isActive.value && now - lastStartTime < MIN_SESSION_LIFETIME_MS
+            && normalized.toSet() == activeTarget.toSet()) {
+            Log.d(TAG, "Pinned: same target, ${now - lastStartTime}ms < ${MIN_SESSION_LIFETIME_MS}ms — skipping restart")
+            return
         }
         stop()
         lastStartTime = now
         val gen = generation.incrementAndGet()
-        val normalized = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct().take(3)
-        if (normalized.isEmpty()) return
 
-        // Tag BROWSE purpose BEFORE connect so subscribeAfterConnect/replayPersistentSubs
-        // checks isBrowseOnly(). If a URL also has PERSISTENT or OUTBOX purpose, the
-        // purpose map correctly allows persistent replay on dual-purpose relays.
+        // Tag BROWSE purpose BEFORE connect so cap-exemption logic sees BROWSE.
         for (url in normalized) {
             relayPool.addPurpose(url, ConnectionPurpose.BROWSE)
         }
 
-        // Ensure sockets exist (reuses already-open connections).
-        relayPool.connect(normalized)
+        // Await WebSocket readiness — prevents browse REQ being sent before ws is open.
+        relayPool.connectAndAwait(normalized, timeoutMs = 5_000)
 
         // Set engagement routing BEFORE sending subs so any engagement fetches
         // triggered by the new feed are already routed correctly.
