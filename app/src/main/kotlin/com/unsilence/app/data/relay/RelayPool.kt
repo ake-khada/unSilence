@@ -823,7 +823,7 @@ class RelayPool @Inject constructor(
         val now = System.currentTimeMillis()
         val novel = pubkeys.filter { pk ->
             val lastAttempt = profileFetchAttempted[pk]
-            lastAttempt == null || (now - lastAttempt) > 300_000 // 5 min TTL
+            lastAttempt == null || (now - lastAttempt) > 120_000 // 2 min TTL
         }
         if (novel.isEmpty()) return
         novel.forEach { profileFetchAttempted[it] = now }
