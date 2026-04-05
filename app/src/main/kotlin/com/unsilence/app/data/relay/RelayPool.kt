@@ -107,6 +107,8 @@ class RelayPool @Inject constructor(
         connectionPurposes[url]?.isNotEmpty() == true
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
+    /** One-shot REQ callbacks that return the first EVENT's raw tags JSON. */
+    internal val eventTagsCallbacks = ConcurrentHashMap<String, CompletableDeferred<String?>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
     /** Global engagement dedup — event IDs already fetched (60s TTL). */
@@ -177,6 +179,27 @@ class RelayPool @Inject constructor(
      * Extract the Nostr event ID from a raw EVENT message without JSON parsing.
      * Scans for the `"id":"` marker and grabs the next 64 hex chars.
      */
+    /** Extract the "tags" array from a raw EVENT JSON as a JSON string.
+     *  Scans for `"tags":` and grabs the JSON array. */
+    private fun extractTagsFromRaw(raw: String): String? {
+        val marker = "\"tags\":"
+        val idx = raw.indexOf(marker)
+        if (idx < 0) return null
+        val start = raw.indexOf('[', idx + marker.length)
+        if (start < 0) return null
+        var depth = 0
+        for (i in start until raw.length) {
+            when (raw[i]) {
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return raw.substring(start, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
     private fun extractEventIdFromRaw(raw: String): String? {
         val marker = "\"id\":\""
         val markerIdx = raw.indexOf(marker)
@@ -458,6 +481,12 @@ class RelayPool @Inject constructor(
                 // Update lastEventTime for persistent sub tracking
                 val subId = extractEventSubId(raw)
                 if (subId != null) {
+                    // One-shot event-tags callback (e.g. following count)
+                    eventTagsCallbacks[subId]?.let { deferred ->
+                        val tagsJson = extractTagsFromRaw(raw)
+                        deferred.complete(tagsJson)
+                        eventTagsCallbacks.remove(subId)
+                    }
                     persistentSubs.computeIfPresent(subId) { _, sub ->
                         sub.copy(lastEventTime = System.currentTimeMillis() / 1000L)
                     }
@@ -569,6 +598,47 @@ class RelayPool @Inject constructor(
 
                 withTimeoutOrNull(10_000) { deferred.await() }
                     .also { countCallbacks.remove(subId) }
+            } catch (_: Exception) { null }
+        }
+
+    /**
+     * Fetch the following count for a pubkey by retrieving their kind-3 event
+     * and counting p-tags. Returns null on timeout or failure.
+     */
+    suspend fun fetchFollowingCount(pubkeyHex: String): Long? =
+        withContext(Dispatchers.IO) {
+            try {
+                val subId = "following-count-${System.nanoTime()}"
+                val req = buildJsonArray {
+                    add(JsonPrimitive("REQ"))
+                    add(JsonPrimitive(subId))
+                    add(buildJsonObject {
+                        put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                        put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                        put("limit", JsonPrimitive(1))
+                    })
+                }.toString()
+
+                val deferred = CompletableDeferred<String?>()
+                eventTagsCallbacks[subId] = deferred
+
+                // Send to indexer relays (faster) or first 3 connections
+                val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+                val targets = indexerUrls.mapNotNull { connections[it] }
+                    .ifEmpty { connections.values.take(3).toList() }
+                targets.forEach { it.send(req) }
+
+                val tagsJson = withTimeoutOrNull(10_000) { deferred.await() }
+                    ?: run { eventTagsCallbacks.remove(subId); return@withContext null }
+                eventTagsCallbacks.remove(subId)
+
+                // Count p-tags in the tags array
+                runCatching {
+                    NostrJson.parseToJsonElement(tagsJson).jsonArray
+                        .count { tag ->
+                            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "p"
+                        }.toLong()
+                }.getOrNull()
             } catch (_: Exception) { null }
         }
 
@@ -1121,6 +1191,17 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
+        // Dedicated longform articles subscription (own limit so kind-1 doesn't crowd them out)
+        val longformReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("user-longform-$ts"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30023)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("limit", JsonPrimitive(50))
+            })
+        }.toString()
+
         // Reactions and zaps targeting this author (#p tag)
         val engagementReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -1140,6 +1221,7 @@ class RelayPool @Inject constructor(
         }
         targets.forEach {
             it.send(postsReq)
+            it.send(longformReq)
             it.send(engagementReq)
         }
         Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${targets.size} relay(s)")

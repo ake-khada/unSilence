@@ -449,4 +449,12 @@ interface EventDao {
         }
         return ids.size
     }
+
+    /** Latest created_at for events seen on any of [relayUrls]. Used by browse session to
+     *  build a `since` filter so the relay only sends genuinely new events. */
+    @Query("""
+        SELECT MAX(e.created_at) FROM events e
+        WHERE e.id IN (SELECT er.event_id FROM event_relays er WHERE er.relay_url IN (:relayUrls))
+    """)
+    suspend fun maxCreatedAtForRelays(relayUrls: List<String>): Long?
 }
