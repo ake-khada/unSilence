@@ -348,7 +348,7 @@ fun NoteCard(
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    text     = "$reposterLabel boosted",
+                    text     = "$reposterLabel boosted · ${relativeTime(row.createdAt)}",
                     color    = TextSecondary,
                     fontSize = 12.sp,
                 )
@@ -1894,7 +1894,7 @@ internal fun parseNip05(nip05: String): Pair<String, String>? {
 }
 
 /** "user@domain.com" → "domain.com"; "_@domain.com" → "domain.com"; "domain.com" → "domain.com". */
-private fun nip05Domain(nip05: String): String = parseNip05(nip05)?.second ?: nip05
+internal fun nip05Domain(nip05: String): String = parseNip05(nip05)?.second ?: nip05
 
 internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L

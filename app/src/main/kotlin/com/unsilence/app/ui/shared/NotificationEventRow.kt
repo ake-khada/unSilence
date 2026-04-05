@@ -73,20 +73,29 @@ fun NotificationEventRow(
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
         verticalAlignment = Alignment.Top,
     ) {
-        // Actor avatar
-        Box(
-            modifier = Modifier
-                .size(Sizing.avatar)
-                .clip(CircleShape),
-        ) {
-            IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
-            if (!row.actorPicture.isNullOrBlank()) {
-                AsyncImage(
-                    model = row.actorPicture,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                )
+        // Actor avatar with notification type icon below
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(Sizing.avatar)
+                    .clip(CircleShape),
+            ) {
+                IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
+                if (!row.actorPicture.isNullOrBlank()) {
+                    AsyncImage(
+                        model = row.actorPicture,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
+            Spacer(Modifier.height(4.dp))
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(14.dp),
+            )
         }
 
         Spacer(Modifier.width(Spacing.small))
@@ -95,13 +104,6 @@ fun NotificationEventRow(
         Column(modifier = Modifier.weight(1f)) {
             // Actor + action label
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = iconTint,
-                    modifier = Modifier.size(14.dp),
-                )
-                Spacer(Modifier.width(4.dp))
                 Text(
                     text = actorLabel,
                     color = Color.White,
@@ -116,6 +118,14 @@ fun NotificationEventRow(
                     text = actionText,
                     color = TextSecondary,
                     fontSize = 13.sp,
+                )
+            }
+
+            // For replies: show the parent note (what was replied to) then the reply
+            if (row.notifType == "reply" && row.parentNoteContent.isNotBlank()) {
+                CompactNotePreview(
+                    content = row.parentNoteContent,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
 
