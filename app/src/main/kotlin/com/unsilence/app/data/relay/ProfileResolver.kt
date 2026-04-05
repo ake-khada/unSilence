@@ -45,10 +45,11 @@ class ProfileResolver @Inject constructor(
     private var evictJob: Job? = null
 
     companion object {
-        private const val IN_FLIGHT_TTL_MS = 30_000L
+        private const val IN_FLIGHT_TTL_MS = 15_000L
         private const val STALE_THRESHOLD_SECONDS = 6 * 3600L
         private const val BATCH_WINDOW_MS = 200L
         private const val MAX_BATCH_SIZE = 150
+        private const val DEFAULT_SCROLL_RELAYS = 3
     }
 
     init {
@@ -121,7 +122,7 @@ class ProfileResolver @Inject constructor(
         }
     }
 
-    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = 1) {
+    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = DEFAULT_SCROLL_RELAYS) {
         val now = System.currentTimeMillis()
 
         // 1. In-flight guard
