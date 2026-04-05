@@ -888,6 +888,38 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch profiles directly from specific relay URLs (e.g. the source relays of visible events).
+     * Bypasses [profileFetchAttempted] dedup so it can run alongside [fetchProfiles].
+     * Uses its own lightweight dedup to avoid hammering the same relay within 60 s.
+     */
+    private val sourceProfileAttempted = ConcurrentHashMap<String, Long>()
+
+    fun fetchProfilesFromSourceRelays(pubkeys: List<String>, relayUrls: List<String>) {
+        if (pubkeys.isEmpty() || relayUrls.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val novel = pubkeys.filter { pk ->
+            val last = sourceProfileAttempted[pk]
+            last == null || (now - last) > 60_000
+        }
+        if (novel.isEmpty()) return
+        novel.forEach { sourceProfileAttempted[it] = now }
+
+        val subId = "src-profiles-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
+            })
+        }.toString()
+        val conns = relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+        conns.forEach { it.send(req) }
+        Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${conns.size} source relay(s)")
+    }
+
+    /**
      * NIP-50 search: connect to [searchRelayUrls] (if not already) and send a REQ with the
      * "search" field. Results arrive via EventProcessor → Room as with any other subscription.
      *
