@@ -129,12 +129,24 @@ fun NotificationEventRow(
                 )
             }
 
-            // Compact embedded note preview using shared rendering style
+            // Compact embedded note preview — plain text for replies, grey box otherwise
             if (row.targetNoteContent.isNotBlank()) {
-                CompactNotePreview(
-                    content = row.targetNoteContent,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                if (row.notifType == "reply") {
+                    Text(
+                        text = row.targetNoteContent.trim(),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                } else {
+                    CompactNotePreview(
+                        content = row.targetNoteContent,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         }
 

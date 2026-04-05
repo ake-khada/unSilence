@@ -100,15 +100,13 @@ fun ArticleCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.medium, vertical = Spacing.small)
-            .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-            .background(ArticleCardBackground)
             .clickable { onClick() },
     ) {
-        // ── Author row ─────────────────────────────────────────────────────────
+        // ── Author row (no background — sits on app's black) ───────────────────
         Row(
             modifier          = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                .padding(horizontal = 4.dp, vertical = Spacing.small),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(modifier = Modifier.size(Sizing.avatar).clip(CircleShape)) {
@@ -157,6 +155,13 @@ fun ArticleCard(
             )
         }
 
+        // ── Card body (image + text + actions — grey background with rounded corners) ──
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                .background(ArticleCardBackground),
+        ) {
         // ── Banner image (16:9) ──────────────────────────────────────────────
         if (!image.isNullOrBlank()) {
             SubcomposeAsyncImage(
@@ -262,6 +267,7 @@ fun ArticleCard(
                 contentDescription = "Share",
             )
         }
+        } // end card body Column
     }
 
     if (showConnectWallet) {
