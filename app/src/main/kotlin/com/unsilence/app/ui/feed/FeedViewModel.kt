@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -441,11 +442,12 @@ class FeedViewModel @Inject constructor(
                         }
                     }
                 }
+                // Drop intermediate emissions when the collector is busy (scroll scenarios).
+                // Without conflate(), rapid Room re-queries queue up and force Compose
+                // to recompose for each intermediate state — causing micro-stutters.
+                .conflate()
                 // Skip duplicate Room emissions: any write to users/event_stats/event_relays
                 // triggers re-query even when this feed's data hasn't changed.
-                // FeedRow is a data class — equals() compares all fields including
-                // authorName/Picture and engagement counts. Only truly unchanged
-                // emissions are filtered; profile resolves and engagement updates pass.
                 .distinctUntilChanged()
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
