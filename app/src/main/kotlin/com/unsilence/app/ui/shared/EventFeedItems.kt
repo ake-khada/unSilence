@@ -15,9 +15,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -260,10 +262,18 @@ private fun EventFeedItem(
         )
     } else {
         // Resolve original author profile for kind-6 reposts
-        val originalAuthorProfile = if (row.kind == 6 && callbacks.profileFlow != null) {
-            extractRepostAuthorPubkey(row.content, row.tags)
-                ?.let { callbacks.profileFlow.invoke(it).collectAsState().value }
+        val repostAuthorPubkey = if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) else null
+        val originalAuthorProfile = if (repostAuthorPubkey != null && callbacks.profileFlow != null) {
+            callbacks.profileFlow.invoke(repostAuthorPubkey).collectAsState().value
         } else null
+
+        // Fallback: if profile flow returned null, kick off a one-shot relay fetch
+        if (repostAuthorPubkey != null && originalAuthorProfile == null && callbacks.lookupProfile != null) {
+            LaunchedEffect(repostAuthorPubkey) {
+                delay(1500)
+                callbacks.lookupProfile.invoke(repostAuthorPubkey)
+            }
+        }
 
         val showVideo = videoScope != null &&
             context in setOf(RenderContext.Feed, RenderContext.Profile)

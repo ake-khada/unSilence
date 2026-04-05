@@ -29,6 +29,7 @@ data class NotificationRow(
     @ColumnInfo(name = "actor_picture")        val actorPicture: String?,
     @ColumnInfo(name = "target_note_id")       val targetNoteId: String?,
     @ColumnInfo(name = "target_note_content")  val targetNoteContent: String,
+    @ColumnInfo(name = "parent_note_content")  val parentNoteContent: String,
     @ColumnInfo(name = "created_at")           val createdAt: Long,
 )
 
@@ -59,6 +60,7 @@ interface NotificationsDao {
             u.picture                   AS actor_picture,
             r.target_event_id           AS target_note_id,
             COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
             r.created_at                AS created_at
         FROM reactions r
         LEFT JOIN users  u  ON u.pubkey = r.pubkey
@@ -77,6 +79,7 @@ interface NotificationsDao {
             u.picture                   AS actor_picture,
             ev.id                       AS target_note_id,
             COALESCE(ev.content, '')    AS target_note_content,
+            COALESCE(te.content, '')    AS parent_note_content,
             ev.created_at               AS created_at
         FROM events ev
         LEFT JOIN users  u  ON u.pubkey  = ev.pubkey
@@ -96,6 +99,7 @@ interface NotificationsDao {
             u.picture                   AS actor_picture,
             ev.root_id                  AS target_note_id,
             COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
             ev.created_at               AS created_at
         FROM events ev
         LEFT JOIN users  u  ON u.pubkey = ev.pubkey
@@ -115,6 +119,7 @@ interface NotificationsDao {
             u.picture                   AS actor_picture,
             ev.root_id                  AS target_note_id,
             COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
             ev.created_at               AS created_at
         FROM events ev
         LEFT JOIN users  u  ON u.pubkey = ev.pubkey
@@ -133,6 +138,7 @@ interface NotificationsDao {
             u.picture                   AS actor_picture,
             ev.id                       AS target_note_id,
             COALESCE(ev.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
             ev.created_at               AS created_at
         FROM events ev
         LEFT JOIN users u ON u.pubkey = ev.pubkey

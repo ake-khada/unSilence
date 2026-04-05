@@ -9,6 +9,7 @@ import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
+import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
@@ -57,6 +58,7 @@ class UserProfileViewModel @Inject constructor(
     private val relayListDao: RelayListDao,
     private val relayConfigDao: RelayConfigDao,
     private val cardHydrator: CardHydrator,
+    private val userDao: UserDao,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -109,6 +111,11 @@ class UserProfileViewModel @Inject constructor(
         }
 
     val isLoadingPosts = MutableStateFlow(true)
+
+    /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
+    val followerCount = MutableStateFlow<Long?>(null)
+    /** Following count parsed from the user's kind-3 event p-tags. */
+    val followingCount = MutableStateFlow<Long?>(null)
 
     private val engagementFetchedIds = mutableSetOf<String>()
 
@@ -225,12 +232,43 @@ class UserProfileViewModel @Inject constructor(
         fetching = false
         engagementFetchedIds.clear()
         isLoadingPosts.value = true
+        followerCount.value = null
+        followingCount.value = null
 
         viewModelScope.launch {
             userRepository.fetchProfilesWithFanout(listOf(pubkey))
             outboxRelayUrls = resolveOutboxRelays(pubkey)
             relayPool.connect(outboxRelayUrls)
             relayPool.fetchUserPosts(pubkey, outboxRelayUrls)
+        }
+
+        // Fetch follower count via NIP-45 COUNT
+        viewModelScope.launch(Dispatchers.IO) {
+            val cached = userDao.getFollowerCount(pubkey)
+            val cachedAt = userDao.getFollowerCountUpdatedAt(pubkey)
+            val oneDayAgo = System.currentTimeMillis() / 1000 - 86_400
+
+            if (cached != null && cachedAt != null && cachedAt > oneDayAgo) {
+                followerCount.value = cached
+            } else {
+                val count = relayPool.sendCount(
+                    relayUrl = "wss://antiprimal.net",
+                    filter = buildJsonObject {
+                        put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                        put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                    },
+                )
+                if (count != null) {
+                    followerCount.value = count
+                    userDao.updateFollowerCount(pubkey, count, System.currentTimeMillis() / 1000)
+                }
+            }
+        }
+
+        // Fetch following count by parsing p-tags from kind-3 event
+        viewModelScope.launch(Dispatchers.IO) {
+            val count = relayPool.fetchFollowingCount(pubkey)
+            if (count != null) followingCount.value = count
         }
     }
 

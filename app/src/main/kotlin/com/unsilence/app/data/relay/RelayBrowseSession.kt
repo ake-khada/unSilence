@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import com.unsilence.app.data.db.dao.EventDao
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.JsonPrimitive
@@ -25,6 +26,7 @@ private const val TAG = "BrowseSession"
 @Singleton
 class RelayBrowseSession @Inject constructor(
     private val relayPool: RelayPool,
+    private val eventDao: EventDao,
 ) {
     private val _isActive = MutableStateFlow(false)
     val isActive: StateFlow<Boolean> = _isActive
@@ -70,10 +72,13 @@ class RelayBrowseSession @Inject constructor(
         // triggered by the new feed are already routed correctly.
         relayPool.browseEngagementTargets = normalized
 
+        // Query latest event timestamp so we only ask for newer events on revisit
+        val since = eventDao.maxCreatedAtForRelays(normalized)
+
         for (url in normalized) {
             val hash = url.hashCode()
             val subId = "browse-$gen-$hash"
-            val req = buildBrowseReq(subId)
+            val req = buildBrowseReq(subId, since)
             activeSubIds[url] = subId
             relayPool.sendToRelay(url, req)
         }
@@ -120,7 +125,7 @@ class RelayBrowseSession @Inject constructor(
         Log.d(TAG, "Resent browse sub '$subId' on reconnected $url")
     }
 
-    private fun buildBrowseReq(subId: String): String =
+    private fun buildBrowseReq(subId: String, since: Long? = null): String =
         buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -132,6 +137,9 @@ class RelayBrowseSession @Inject constructor(
                     add(JsonPrimitive(21))
                     add(JsonPrimitive(30023))
                 })
+                if (since != null && since > 0L) {
+                    put("since", JsonPrimitive(since))
+                }
                 put("limit", JsonPrimitive(300))
             })
         }.toString()

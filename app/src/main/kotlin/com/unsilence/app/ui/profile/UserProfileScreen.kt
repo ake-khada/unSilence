@@ -61,6 +61,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
+import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
@@ -105,6 +106,8 @@ fun UserProfileScreen(
     val clipboard        = LocalClipboardManager.current
     val isFollowing    by viewModel.isFollowing.collectAsStateWithLifecycle(initialValue = false)
     val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
+    val followerCount  by viewModel.followerCount.collectAsStateWithLifecycle()
+    val followingCount by viewModel.followingCount.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -364,6 +367,29 @@ fun UserProfileScreen(
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
                             Text("Follow", color = Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                // Following / Followers stats row
+                if (followingCount != null || followerCount != null) {
+                    Spacer(Modifier.height(Spacing.small))
+                    Row(
+                        modifier              = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.medium),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        followingCount?.let { count ->
+                            Text("$count", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Following", color = TextSecondary, fontSize = 14.sp)
+                        }
+                        Spacer(Modifier.width(Spacing.large))
+                        followerCount?.let { count ->
+                            Text("~${count.toCompactSats()}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Followers", color = TextSecondary, fontSize = 14.sp)
                         }
                     }
                 }
