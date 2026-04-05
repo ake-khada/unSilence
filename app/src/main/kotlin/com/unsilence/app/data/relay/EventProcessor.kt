@@ -542,7 +542,10 @@ class EventProcessor @Inject constructor(
         val replyToId = eTags.firstOrNull { it.getOrNull(3)?.jsonPrimitive?.content == "reply" }
             ?.getOrNull(1)?.jsonPrimitive?.content
 
-        if (rootId != null || replyToId != null) return Pair(replyToId, rootId)
+        if (rootId != null || replyToId != null) {
+            // If root marker exists but no reply marker, the reply target IS the root
+            return Pair(replyToId ?: rootId, rootId)
+        }
 
         // Positional fallback
         val ids = eTags.mapNotNull { it.getOrNull(1)?.jsonPrimitive?.content }
