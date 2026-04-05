@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -240,24 +242,21 @@ fun ThreadScreen(
                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Sender avatar — real picture with IdentIcon fallback
-                val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
-                Box(
-                    modifier = Modifier
-                        .size(Sizing.avatar)
-                        .clip(CircleShape),
+                val focused = state.focusedNote
+
+                // Like button for focused note
+                IconButton(
+                    onClick  = { focused?.let { actionsViewModel.react(it.id, it.pubkey) } },
+                    modifier = Modifier.size(36.dp),
+                    enabled  = focused != null,
                 ) {
-                    viewModel.pubkeyHex?.let { pubkey ->
-                        IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
-                    }
-                    if (!userAvatarUrl.isNullOrBlank()) {
-                        AsyncImage(
-                            model              = userAvatarUrl,
-                            contentDescription = null,
-                            contentScale       = ContentScale.Crop,
-                            modifier           = Modifier.fillMaxSize(),
-                        )
-                    }
+                    Icon(
+                        imageVector        = Icons.Filled.Favorite,
+                        contentDescription = "Like",
+                        tint               = if (focused != null && focused.engagementId in reactedIds)
+                                                 Color(0xFFE91E63) else TextSecondary,
+                        modifier           = Modifier.size(20.dp),
+                    )
                 }
 
                 Spacer(Modifier.width(Spacing.small))
@@ -278,8 +277,8 @@ fun ThreadScreen(
 
                 Spacer(Modifier.width(Spacing.small))
 
-                val focused = state.focusedNote
-                TextButton(
+                // Send arrow
+                IconButton(
                     onClick  = {
                         if (replyText.isNotBlank() && focused != null) {
                             val rootId = focused.rootId ?: focused.id
@@ -291,9 +290,15 @@ fun ThreadScreen(
                             )
                         }
                     },
-                    enabled = replyText.isNotBlank() && focused != null,
+                    enabled  = replyText.isNotBlank() && focused != null,
+                    modifier = Modifier.size(36.dp),
                 ) {
-                    Text("Reply", color = Cyan, fontSize = 14.sp)
+                    Icon(
+                        imageVector        = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send reply",
+                        tint               = if (replyText.isNotBlank()) Cyan else TextSecondary,
+                        modifier           = Modifier.size(20.dp),
+                    )
                 }
             }
         }

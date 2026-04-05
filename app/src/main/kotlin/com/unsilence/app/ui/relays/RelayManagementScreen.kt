@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.DropdownMenu
@@ -41,6 +42,7 @@ import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +67,7 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val TabLabels = listOf("Inbox/Outbox", "Index", "Search", "Relay Sets", "Favorites", "Blocked")
@@ -447,8 +450,26 @@ private fun FavoriteRelayRow(
             overflow = TextOverflow.Ellipsis,
         )
         if (onStartFeed != null) {
-            IconButton(onClick = onStartFeed, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Add, contentDescription = "Add to Feed", tint = Cyan, modifier = Modifier.size(18.dp))
+            var justAdded by remember { mutableStateOf(false) }
+            LaunchedEffect(justAdded) {
+                if (justAdded) {
+                    delay(1500)
+                    justAdded = false
+                }
+            }
+            IconButton(
+                onClick = {
+                    onStartFeed()
+                    justAdded = true
+                },
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    if (justAdded) Icons.Filled.Check else Icons.Filled.Add,
+                    contentDescription = "Add to Feed",
+                    tint = if (justAdded) Color(0xFF4CAF50) else Cyan,
+                    modifier = Modifier.size(18.dp),
+                )
             }
         }
         IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
