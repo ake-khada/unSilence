@@ -40,54 +40,70 @@ class CardHydrator @Inject constructor(
     private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
 ) {
-    suspend fun hydrateVisibleCards(events: List<FeedRow>) {
+    /**
+     * Phase 1: Profile resolution only — avatar, name, identity.
+     * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
+     * BEFORE any ref/engagement work.
+     */
+    suspend fun hydrateProfiles(events: List<FeedRow>) {
         if (events.isEmpty()) return
 
-        // 1. Collect all pubkeys, referenced event IDs, and nprofile relay hints
         val pubkeys = mutableSetOf<String>()
-        val referencedIds = mutableSetOf<String>()
         val profileHints = mutableMapOf<String, MutableList<String>>()
 
         for (event in events) {
             pubkeys.add(event.pubkey)
             if (event.kind == 6) {
                 extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
-                extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
             }
-            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
             extractProfileHints(event.content).forEach { (pk, relays) ->
                 pubkeys.add(pk)
                 profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
             }
         }
 
-        // 2. Fetch missing referenced events (batched, deduped in RelayPool)
+        if (pubkeys.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(pubkeys.toList())
+        }
+        if (profileHints.isNotEmpty()) {
+            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
+        }
+
+        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys")
+    }
+
+    /**
+     * Phase 2: Referenced events + thumbnails. The slow path — ref fetches have a
+     * 1500ms wait for relay responses. Also resolves ref-event author profiles.
+     * Called from SLOW_SCROLL (after profiles) and IDLE.
+     */
+    suspend fun hydrateRefs(events: List<FeedRow>) {
+        if (events.isEmpty()) return
+
+        val referencedIds = mutableSetOf<String>()
+        for (event in events) {
+            if (event.kind == 6) {
+                extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
+            }
+            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
+        }
+
+        // Fetch missing referenced events
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
         if (missingRefs.isNotEmpty()) {
             relayPool.fetchEventsByIds(missingRefs.toList())
         }
 
-        // 3. After ref events arrive, collect their authors too
+        // After ref events arrive, resolve their authors
         if (missingRefs.isNotEmpty()) {
             delay(1500)
-            missingRefs.mapNotNull { eventDao.getEventById(it)?.pubkey }
-                .forEach { pubkeys.add(it) }
+            val refAuthors = missingRefs.mapNotNull { eventDao.getEventById(it)?.pubkey }
+            if (refAuthors.isNotEmpty()) {
+                userRepository.fetchMissingProfiles(refAuthors)
+            }
         }
 
-        // 4. Single profile fetch for ALL pubkeys (authors + repost authors + ref authors)
-        //    ProfileResolver handles batching (200ms window) and in-flight dedup internally.
-        if (pubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(pubkeys.toList())
-        }
-
-        // 4b. Targeted fetch for pubkeys with nprofile relay hints
-        if (profileHints.isNotEmpty()) {
-            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
-        }
-
-        // 5. Prefetch video thumbnails for aspect ratio cache (capped at 3 per batch).
-        //    By the time a video card enters the viewport, resolvedAspectRatios
-        //    already has the correct ratio — zero sizing pop on first compose.
+        // Prefetch video thumbnails (capped at 3 per batch)
         var thumbnailCount = 0
         var videoFound = 0
         for (event in events) {
@@ -97,7 +113,7 @@ class CardHydrator @Inject constructor(
             videoFound += models.size
             for (model in models) {
                 if (thumbnailCount >= 3) break
-                if (model.widthPx != null && model.heightPx != null) continue  // imeta has dimensions
+                if (model.widthPx != null && model.heightPx != null) continue
                 if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
                 try {
                     withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
@@ -109,11 +125,17 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        if (videoFound > 0) {
-            Log.d(TAG, "Video scan: $videoFound models, $thumbnailCount prefetched")
-        }
+        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing), $thumbnailCount thumbnails")
+    }
 
-        Log.d(TAG, "Hydrated ${events.size} cards: ${pubkeys.size} profiles, ${referencedIds.size} refs (${missingRefs.size} missing)")
+    /**
+     * Full hydration: profiles + refs + thumbnails. Used by IDLE state where
+     * there's no urgency to split phases.
+     */
+    suspend fun hydrateVisibleCards(events: List<FeedRow>) {
+        if (events.isEmpty()) return
+        hydrateProfiles(events)
+        hydrateRefs(events)
     }
 }
 

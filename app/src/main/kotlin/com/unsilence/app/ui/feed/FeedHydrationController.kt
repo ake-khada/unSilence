@@ -46,14 +46,16 @@ class FeedHydrationController(
     private var velocityPxPerSec = 0f
 
     // ── Hydration tracking ────────────────────────────────────────────
-    private val hydratedIds = mutableSetOf<String>()
+    private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done
+    private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
     private val engagementFetchedIds = mutableSetOf<String>()
     private var lastEngagementRefreshTime = 0L
 
     // ── Jobs ──────────────────────────────────────────────────────────
     private var idleTimerJob: Job? = null
     private var catchupTimeoutJob: Job? = null
-    private var hydrationJob: Job? = null
+    private var profileJob: Job? = null     // Phase 1: profiles
+    private var refJob: Job? = null         // Phase 2: refs + thumbnails
     private var engagementJob: Job? = null
 
     // ── Latest data from FeedScreen ──────────────────────────────────
@@ -103,9 +105,11 @@ class FeedHydrationController(
     fun reset() {
         idleTimerJob?.cancel()
         catchupTimeoutJob?.cancel()
-        hydrationJob?.cancel()
+        profileJob?.cancel()
+        refJob?.cancel()
         engagementJob?.cancel()
-        hydratedIds.clear()
+        profileHydratedIds.clear()
+        refHydratedIds.clear()
         engagementFetchedIds.clear()
         scrollSamples.clear()
         velocityPxPerSec = 0f
@@ -180,7 +184,7 @@ class FeedHydrationController(
         val elapsed = System.currentTimeMillis() - stateEnteredAt
         if (elapsed >= WARM_CATCHUP_TIMEOUT_MS) return true
         if (lastVisibleItems.isEmpty()) return false
-        return lastVisibleItems.all { it.id in hydratedIds }
+        return lastVisibleItems.all { it.id in profileHydratedIds }
     }
 
     private fun transitionTo(newState: ScrollState) {
@@ -205,6 +209,10 @@ class FeedHydrationController(
             ScrollState.WARM_CATCHUP -> {
                 catchupTimeoutJob?.cancel()
             }
+            ScrollState.FAST_SCROLL -> {
+                // Entering from FAST_SCROLL → cancel any stale Phase 2 work
+                refJob?.cancel()
+            }
             else -> {}
         }
 
@@ -219,52 +227,74 @@ class FeedHydrationController(
     // ── State handlers ────────────────────────────────────────────────
 
     /**
-     * WARM_CATCHUP: Hydrate visible items (profiles + refs only, no thumbnails).
-     * Only fires for items not yet hydrated.
+     * WARM_CATCHUP: Phase 1 ONLY — profiles for visible items.
+     * No refs, no thumbnails, no engagement. Avatars appear first.
      */
     private fun handleWarmCatchup() {
-        val toHydrate = lastVisibleItems.filter { it.id !in hydratedIds }
-        if (toHydrate.isEmpty()) return
+        val toProfile = lastVisibleItems.filter { it.id !in profileHydratedIds }
+        if (toProfile.isEmpty()) return
 
-        // Only launch one hydration at a time
-        if (hydrationJob?.isActive == true) return
-        hydrationJob = scope.launch(Dispatchers.IO) {
-            cardHydrator.hydrateVisibleCards(toHydrate)
-            hydratedIds.addAll(toHydrate.map { it.id })
-            Log.d(TAG, "WARM_CATCHUP: hydrated ${toHydrate.size} visible items")
+        if (profileJob?.isActive == true) return
+        profileJob = scope.launch(Dispatchers.IO) {
+            cardHydrator.hydrateProfiles(toProfile)
+            profileHydratedIds.addAll(toProfile.map { it.id })
+            Log.d(TAG, "WARM_CATCHUP: profiles for ${toProfile.size} visible items")
         }
     }
 
     /**
-     * SLOW_SCROLL: Warm zone prefetch — next 15 items beyond visible.
-     * Profiles + refs + thumbnails.
+     * SLOW_SCROLL: Phase 1 first for warm zone, then Phase 2 for items
+     * that already have profiles resolved.
      */
     private fun handleSlowScroll() {
         val warmZone = computeWarmZone()
-        val toHydrate = warmZone.filter { it.id !in hydratedIds }
-        if (toHydrate.isEmpty()) return
+        val combined = lastVisibleItems + warmZone
 
-        if (hydrationJob?.isActive == true) return
-        hydrationJob = scope.launch(Dispatchers.IO) {
-            cardHydrator.hydrateVisibleCards(toHydrate)
-            hydratedIds.addAll(toHydrate.map { it.id })
-            Log.d(TAG, "SLOW_SCROLL: hydrated ${toHydrate.size} warm zone items")
+        // Phase 1: profiles for anything not yet profile-hydrated
+        val toProfile = combined.filter { it.id !in profileHydratedIds }
+        if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
+            profileJob = scope.launch(Dispatchers.IO) {
+                cardHydrator.hydrateProfiles(toProfile)
+                profileHydratedIds.addAll(toProfile.map { it.id })
+                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items")
+            }
+        }
+
+        // Phase 2: refs + thumbnails only for items already profile-hydrated
+        val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
+        if (toRef.isNotEmpty() && refJob?.isActive != true) {
+            refJob = scope.launch(Dispatchers.IO) {
+                cardHydrator.hydrateRefs(toRef)
+                refHydratedIds.addAll(toRef.map { it.id })
+                Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
+            }
         }
     }
 
     /**
-     * IDLE: Engagement fetch for visible items + stale refresh every 30s.
-     * Also continues warm zone if incomplete.
+     * IDLE: Full hydration (profiles + refs) for warm zone + engagement.
      */
     private fun handleIdle() {
-        // Warm zone catchup (if not yet complete)
         val warmZone = computeWarmZone()
-        val toHydrate = warmZone.filter { it.id !in hydratedIds }
-        if (toHydrate.isNotEmpty() && hydrationJob?.isActive != true) {
-            hydrationJob = scope.launch(Dispatchers.IO) {
-                cardHydrator.hydrateVisibleCards(toHydrate)
-                hydratedIds.addAll(toHydrate.map { it.id })
-                Log.d(TAG, "IDLE: hydrated ${toHydrate.size} remaining warm zone items")
+        val combined = lastVisibleItems + warmZone
+
+        // Phase 1: profiles for anything not yet done
+        val toProfile = combined.filter { it.id !in profileHydratedIds }
+        if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
+            profileJob = scope.launch(Dispatchers.IO) {
+                cardHydrator.hydrateProfiles(toProfile)
+                profileHydratedIds.addAll(toProfile.map { it.id })
+                Log.d(TAG, "IDLE: profiles for ${toProfile.size} items")
+            }
+        }
+
+        // Phase 2: refs + thumbnails
+        val toRef = combined.filter { it.id !in refHydratedIds }
+        if (toRef.isNotEmpty() && refJob?.isActive != true) {
+            refJob = scope.launch(Dispatchers.IO) {
+                cardHydrator.hydrateRefs(toRef)
+                refHydratedIds.addAll(toRef.map { it.id })
+                Log.d(TAG, "IDLE: refs for ${toRef.size} items")
             }
         }
     }
