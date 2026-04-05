@@ -8,9 +8,18 @@ import androidx.room.Transaction
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetMemberEntity
 import kotlinx.coroutines.flow.Flow
+import java.util.concurrent.ConcurrentHashMap
 
 @Dao
 abstract class NostrRelaySetDao {
+
+    /**
+     * Locally deleted relay set d-tags. Bootstrap re-fetches kind 30002 from relays
+     * and would re-insert deleted sets — this guard prevents that.
+     * Keyed by "ownerPubkey:dTag" for multi-account safety.
+     * Cleared on logout (process restart).
+     */
+    val deletedDTags: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     @Query("SELECT * FROM nostr_relay_sets WHERE owner_pubkey = :ownerPubkey ORDER BY title ASC")
     abstract fun getAllSets(ownerPubkey: String): Flow<List<NostrRelaySetEntity>>
@@ -37,7 +46,13 @@ abstract class NostrRelaySetDao {
     abstract suspend fun deleteMember(dTag: String, ownerPubkey: String, relayUrl: String)
 
     @Query("DELETE FROM nostr_relay_sets WHERE d_tag = :dTag AND owner_pubkey = :ownerPubkey")
-    abstract suspend fun deleteSet(dTag: String, ownerPubkey: String)
+    abstract suspend fun deleteSetInternal(dTag: String, ownerPubkey: String)
+
+    /** Delete a relay set and mark it so bootstrap won't re-insert from relay data. */
+    open suspend fun deleteSet(dTag: String, ownerPubkey: String) {
+        deletedDTags.add("$ownerPubkey:$dTag")
+        deleteSetInternal(dTag, ownerPubkey)
+    }
 
     @Query("DELETE FROM nostr_relay_sets")
     abstract suspend fun clearAllSets()
@@ -68,6 +83,10 @@ abstract class NostrRelaySetDao {
         members: List<NostrRelaySetMemberEntity>,
         eventCreatedAt: Long,
     ) {
+        // Skip sets that were locally deleted this session
+        val key = "${set.ownerPubkey}:${set.dTag}"
+        if (key in deletedDTags) return
+
         val existing = maxCreatedAt(set.dTag, set.ownerPubkey) ?: 0L
         if (eventCreatedAt <= existing) return
         deleteMembersByDTag(set.dTag, set.ownerPubkey)
