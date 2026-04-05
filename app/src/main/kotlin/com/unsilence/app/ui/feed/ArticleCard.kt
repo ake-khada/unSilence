@@ -21,6 +21,8 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.Icon
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -43,6 +45,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -101,22 +104,6 @@ fun ArticleCard(
             .background(ArticleCardBackground)
             .clickable { onClick() },
     ) {
-        // ── Banner image (16:9) ──────────────────────────────────────────────
-        if (!image.isNullOrBlank()) {
-            SubcomposeAsyncImage(
-                model              = image,
-                contentDescription = null,
-                contentScale       = ContentScale.Crop,
-                modifier           = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(
-                        topStart = Sizing.mediaCornerRadius,
-                        topEnd   = Sizing.mediaCornerRadius,
-                    )),
-            )
-        }
-
         // ── Author row ─────────────────────────────────────────────────────────
         Row(
             modifier          = Modifier
@@ -142,12 +129,43 @@ fun ArticleCard(
                 fontSize   = 13.sp,
                 maxLines   = 1,
                 overflow   = TextOverflow.Ellipsis,
-                modifier   = Modifier.weight(1f),
+                modifier   = Modifier.weight(1f, fill = false),
             )
+            if (!row.authorNip05.isNullOrBlank()) {
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    imageVector        = Icons.Filled.Verified,
+                    contentDescription = "NIP-05 verified",
+                    tint               = Cyan,
+                    modifier           = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    text     = nip05Domain(row.authorNip05),
+                    color    = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+            Spacer(Modifier.weight(1f))
             Text(
                 text     = articleRelativeTime(row.createdAt),
                 color    = TextSecondary,
                 fontSize = 12.sp,
+            )
+        }
+
+        // ── Banner image (16:9) ──────────────────────────────────────────────
+        if (!image.isNullOrBlank()) {
+            SubcomposeAsyncImage(
+                model              = image,
+                contentDescription = null,
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f),
             )
         }
 
