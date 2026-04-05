@@ -92,10 +92,12 @@ fun LazyListScope.eventFeedItems(
         key = { it.id },
         contentType = { if (it.kind == 30023) "article" else "note" },
     ) { row ->
-        val replyToId = row.replyToId
-        if (showThreadParents && replyToId != null) {
+        // replyToId is the direct parent; rootId is the thread root.
+        // Fall back to rootId when replyToId is null (direct reply to root).
+        val parentId = row.replyToId ?: row.rootId
+        if (showThreadParents && parentId != null) {
             ThreadedReplyItem(
-                parentId = replyToId,
+                parentId = parentId,
                 replyRow = row,
                 engagement = engagement,
                 callbacks = callbacks,
