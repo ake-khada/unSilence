@@ -64,12 +64,19 @@ class CardHydrator @Inject constructor(
 
         if (pubkeys.isNotEmpty()) {
             userRepository.fetchMissingProfiles(pubkeys.toList())
+
+            // Also query the source relays where these events came from —
+            // relay feed users often only have profiles on their home relay.
+            val sourceRelays = events.map { it.relayUrl }.distinct()
+            if (sourceRelays.isNotEmpty()) {
+                relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
+            }
         }
         if (profileHints.isNotEmpty()) {
             relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
         }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys")
+        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
     }
 
     /**
