@@ -325,8 +325,8 @@ class FeedHydrationController(
             }
         }
 
-        // Warm zone engagement pre-check
-        checkWarmZoneEngagement(warmZone)
+        // Engagement freshness pre-check (warm zone items approaching viewport)
+        checkEngagementFreshness(warmZone)
     }
 
     /**
@@ -361,19 +361,21 @@ class FeedHydrationController(
             }
         }
 
-        // Warm zone engagement pre-check (also in IDLE for items that arrived since last check)
-        checkWarmZoneEngagement(warmZone)
+        // Warm zone engagement pre-check (visible + warm zone — unified)
+        checkEngagementFreshness(lastVisibleItems + warmZone)
     }
 
     /**
-     * Warm zone engagement freshness check. For items entering the warm zone,
-     * checks if engagement data is fresh (updated_at < 5 min). Stale or missing
-     * items get a targeted engagement fetch. Max 5 items per pass.
+     * Engagement freshness check for visible + warm zone items.
+     * Checks if engagement data is fresh (updated_at < 5 min). Stale or missing
+     * items get a targeted engagement fetch, max 5 per pass.
      * Runs in SLOW_SCROLL and IDLE — NOT FAST_SCROLL or WARM_CATCHUP.
+     * Replaces the old IDLE-only fetchEngagementForVisible() — no more dedicated
+     * hot zone network calls. Room-cached engagement displays freely.
      */
-    private fun checkWarmZoneEngagement(warmZone: List<FeedRow>) {
-        if (warmZone.isEmpty() || warmEngagementJob?.isActive == true) return
-        val candidateIds = warmZone.map { it.id }
+    private fun checkEngagementFreshness(items: List<FeedRow>) {
+        if (items.isEmpty() || warmEngagementJob?.isActive == true) return
+        val candidateIds = items.map { it.id }
             .filter { it !in engagementFetchedIds }
         if (candidateIds.isEmpty()) return
 
@@ -384,7 +386,7 @@ class FeedHydrationController(
             if (staleIds.isNotEmpty()) {
                 engagementFetchedIds.addAll(staleIds)
                 relayPool.fetchEngagementBatch(staleIds)
-                Log.d(TAG, "Warm zone engagement: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateIds.size - freshIds.size - staleIds.size} deferred)")
+                Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateIds.size - freshIds.size - staleIds.size} deferred)")
             }
         }
     }
@@ -404,35 +406,17 @@ class FeedHydrationController(
             }
         }
 
+        // No dedicated visible-item engagement fetch — hot zone is read-only from Room.
+        // checkEngagementFreshness() in handleIdle() covers visible + warm zone items
+        // using Room's updated_at freshness check. Background backfill covers the full feed.
+        // 30s stale cycle: clears in-memory dedup so freshness check re-evaluates via Room.
         engagementJob = scope.launch(Dispatchers.IO) {
-            // Initial engagement fetch for visible items
-            fetchEngagementForVisible()
-
-            // Quick recheck after 2s — list may still be populating at IDLE entry
-            delay(2_000L)
-            if (state != ScrollState.IDLE) return@launch
-            fetchEngagementForVisible()
-
-            // Stale refresh loop every 30s while IDLE
             while (true) {
                 delay(ENGAGEMENT_REFRESH_INTERVAL_MS)
                 if (state != ScrollState.IDLE) break
-                fetchEngagementForVisible()
-                Log.d(TAG, "IDLE: stale engagement refresh")
+                engagementFetchedIds.clear()
+                Log.d(TAG, "IDLE: stale refresh — cleared engagement dedup for re-check")
             }
-        }
-    }
-
-    private fun fetchEngagementForVisible() {
-        val novelIds = lastVisibleItems
-            .map { it.id }
-            .filter { it !in engagementFetchedIds }
-            .take(20)
-        if (novelIds.isNotEmpty()) {
-            engagementFetchedIds.addAll(novelIds)
-            relayPool.fetchEngagementBatch(novelIds)
-            lastEngagementRefreshTime = System.currentTimeMillis()
-            Log.d(TAG, "Engagement fetch: ${novelIds.size} items")
         }
     }
 
