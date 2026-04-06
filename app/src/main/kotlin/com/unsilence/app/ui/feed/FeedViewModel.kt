@@ -26,6 +26,7 @@ import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.domain.model.ShowType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -409,7 +410,7 @@ class FeedViewModel @Inject constructor(
                     }
 
                     val cfValue = cf.value
-                    when (type) {
+                    val roomFlow = when (type) {
                         is FeedType.Global    -> {
                             browseSession.stop()
                             val globalUrls = resolveGlobalUrls()
@@ -450,6 +451,9 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                     }
+                    // Post-query media type filter: Text/Images/Video within kind 1
+                    if (filter.needsMediaFilter) roomFlow.map { rows -> applyMediaFilter(rows, filter.showTypes) }
+                    else roomFlow
                 }
                 // Drop intermediate emissions when the collector is busy (scroll scenarios).
                 // Without conflate(), rapid Room re-queries queue up and force Compose
@@ -481,5 +485,42 @@ class FeedViewModel @Inject constructor(
                     }
                 }
         }
+    }
+
+    companion object {
+        // Lightweight regexes matching NoteCard patterns for post-query media filtering
+        private val IMAGE_REGEX = Regex(
+            """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val VIDEO_REGEX = Regex(
+            """https?://\S+\.(?:mp4|mov|webm|m3u8|m4v|avi)(?:\?\S*)?""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val IMETA_IMAGE_REGEX = Regex(""""image/""", RegexOption.IGNORE_CASE)
+        private val IMETA_VIDEO_REGEX = Regex(""""video/""", RegexOption.IGNORE_CASE)
+
+        private fun hasImage(row: FeedRow): Boolean =
+            IMAGE_REGEX.containsMatchIn(row.content) ||
+            IMETA_IMAGE_REGEX.containsMatchIn(row.tags)
+
+        private fun hasVideo(row: FeedRow): Boolean =
+            VIDEO_REGEX.containsMatchIn(row.content) ||
+            IMETA_VIDEO_REGEX.containsMatchIn(row.tags)
+
+        fun applyMediaFilter(rows: List<FeedRow>, types: Set<ShowType>): List<FeedRow> =
+            rows.filter { row ->
+                when (row.kind) {
+                    1 -> {
+                        val img = hasImage(row)
+                        val vid = hasVideo(row)
+                        (ShowType.TEXT in types && !img && !vid) ||
+                        (ShowType.IMAGES in types && img) ||
+                        (ShowType.VIDEO in types && vid)
+                    }
+                    // kind 20/21/6/30023 already filtered by SQL kinds
+                    else -> true
+                }
+            }
     }
 }
