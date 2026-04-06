@@ -8,6 +8,7 @@ import com.unsilence.app.data.db.dao.NotificationsDao
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,6 +21,8 @@ data class NotificationsUiState(
     val loading: Boolean = true,
 )
 
+enum class NotifFilter { Following, Global }
+
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
     private val keyManager: KeyManager,
@@ -31,26 +34,42 @@ class NotificationsViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(NotificationsUiState())
     val uiState: StateFlow<NotificationsUiState> = _uiState.asStateFlow()
 
+    private val _filter = MutableStateFlow(NotifFilter.Following)
+    val filter: StateFlow<NotifFilter> = _filter.asStateFlow()
+
+    private var collectJob: Job? = null
+
     init {
         keyManager.getPublicKeyHex()?.let { pubkey ->
-            // Pull notification events from connected relays.
             relayPool.fetchNotifications(pubkey)
+            startCollecting(pubkey)
+        }
+    }
 
-            // Collect the live Room query — re-emits as new events arrive via EventProcessor.
-            viewModelScope.launch {
-                notificationsDao.notificationsFlow(pubkey).collect { rows ->
-                    _uiState.update { it.copy(items = rows, loading = false) }
+    fun setFilter(f: NotifFilter) {
+        if (_filter.value == f) return
+        _filter.value = f
+        _uiState.update { it.copy(loading = true) }
+        keyManager.getPublicKeyHex()?.let { startCollecting(it) }
+    }
 
-                    // Fetch profiles for actors whose picture is still null.
-                    // UserRepository.fetchMissingProfiles already dedupes via
-                    // cached pubkeys + stale threshold, so no local set needed.
-                    val missingPubkeys = rows
-                        .filter { it.actorPicture == null }
-                        .map { it.actorPubkey }
-                        .distinct()
-                    if (missingPubkeys.isNotEmpty()) {
-                        userRepository.fetchMissingProfiles(missingPubkeys)
-                    }
+    private fun startCollecting(pubkey: String) {
+        collectJob?.cancel()
+        collectJob = viewModelScope.launch {
+            val flow = if (_filter.value == NotifFilter.Following)
+                notificationsDao.notificationsFollowingFlow(pubkey)
+            else
+                notificationsDao.notificationsFlow(pubkey)
+
+            flow.collect { rows ->
+                _uiState.update { it.copy(items = rows, loading = false) }
+
+                val missingPubkeys = rows
+                    .filter { it.actorPicture == null }
+                    .map { it.actorPubkey }
+                    .distinct()
+                if (missingPubkeys.isNotEmpty()) {
+                    userRepository.fetchMissingProfiles(missingPubkeys)
                 }
             }
         }
