@@ -135,6 +135,47 @@ class RelayPool @Inject constructor(
     /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
     fun activeOneShotCount(): Int = _activeOneShotSubs.size
 
+    // ── Per-relay REQ queue ───────────────────────────────────────────
+    // Relays typically allow 10-20 concurrent subscriptions. When a relay hits
+    // the limit, new one-shot REQs are queued and sent as CLOSE events free slots.
+    companion object {
+        const val MAX_CONCURRENT_REQS_PER_RELAY = 10
+    }
+    /** Active one-shot sub count per relay URL. */
+    private val relayOneShotCount = ConcurrentHashMap<String, AtomicInteger>()
+    /** Queued REQs per relay — sent when slots free up. */
+    private val relayReqQueue = ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<String>>()
+
+    /**
+     * Send a one-shot REQ to a relay, queuing if the relay is at its concurrent sub limit.
+     * Call this instead of conn.send(req) for all one-shot subscription REQs.
+     */
+    private fun sendOneShotToRelay(conn: RelayConnection, req: String) {
+        val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
+        if (count.get() >= MAX_CONCURRENT_REQS_PER_RELAY) {
+            val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
+            queue.add(req)
+            Log.d(TAG, "Queued REQ for ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+            return
+        }
+        count.incrementAndGet()
+        conn.send(req)
+    }
+
+    /**
+     * Flush queued REQs for a relay after a slot frees up.
+     */
+    private fun flushRelayQueue(conn: RelayConnection) {
+        val count = relayOneShotCount[conn.url] ?: return
+        val queue = relayReqQueue[conn.url] ?: return
+        while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY) {
+            val req = queue.poll() ?: break
+            count.incrementAndGet()
+            conn.send(req)
+            Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+        }
+    }
+
     // Evict stale entries every 5 minutes to prevent unbounded growth.
     init {
         scope.launch {
@@ -548,6 +589,11 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
+            // Free per-relay slot and flush queued REQs
+            relayOneShotCount[conn.url]?.let { count ->
+                val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
+                if (prev > 0) flushRelayQueue(conn)
+            }
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
         // Notify coverage registry — returns handle only when ALL lanes resolved
@@ -662,10 +708,11 @@ class RelayPool @Inject constructor(
     /**
      * Subscription IDs are prefixed to encode their lifecycle type.
      *
-     *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, search-, older-,
-     *                                relay-ecosystem-,
+     *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, hint-profiles-,
+     *                                src-profiles-, search-, older-, relay-ecosystem-,
      *                                thread-event-, thread-replies-, thread-reactions-,
-     *                                thread-zaps-, user-posts-, user-engagement-,
+     *                                thread-zaps-, user-posts-, user-longform-,
+     *                                user-engagement-, hint-event-,
      *                                engagement-replies-, engagement-reactions-, engagement-zaps-
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
@@ -673,6 +720,9 @@ class RelayPool @Inject constructor(
         subId.startsWith("kind3-")                  ||
         subId.startsWith("kind10002-")              ||
         subId.startsWith("profiles-")               ||
+        subId.startsWith("hint-profiles-")          ||
+        subId.startsWith("src-profiles-")           ||
+        subId.startsWith("hint-event-")             ||
         subId.startsWith("search-")                 ||
         subId.startsWith("older-")                  ||
         subId.startsWith("relay-ecosystem-")        ||
@@ -681,6 +731,7 @@ class RelayPool @Inject constructor(
         subId.startsWith("thread-reactions-")       ||
         subId.startsWith("thread-zaps-")            ||
         subId.startsWith("user-posts-")             ||
+        subId.startsWith("user-longform-")          ||
         subId.startsWith("user-engagement-")        ||
         subId.startsWith("engagement-replies-")     ||
         subId.startsWith("engagement-reactions-")   ||
@@ -701,7 +752,7 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(1))
             })
         }.toString()
-        connections.values.forEach { it.send(req) }
+        connections.values.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${connections.size} relay(s)")
     }
 
@@ -727,7 +778,7 @@ class RelayPool @Inject constructor(
                     put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
                 })
             }.toString()
-            targets.forEach { it.send(req) }
+            targets.forEach { sendOneShotToRelay(it, req) }
         }
         Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s) from ${targets.size} relay(s)")
     }
@@ -755,7 +806,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         for (url in indexerRelayUrls) {
-            connections[url]?.send(req)
+            connections[url]?.let { sendOneShotToRelay(it, req) }
         }
         Log.d(TAG, "Fetching NIP-51 relay ecosystem for $pubkeyHex from ${indexerRelayUrls.size} indexers")
     }
@@ -847,7 +898,7 @@ class RelayPool @Inject constructor(
             val extras = connections.values.filter { it !in indexerConns }.take(minTargets - indexerConns.size)
             indexerConns + extras
         }.ifEmpty { connections.values.take(minTargets) }
-        targets.forEach { it.send(req) }
+        targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "Fetching ${novel.size} profiles from ${targets.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }
 
@@ -883,7 +934,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         val hintConns = allHintUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
-        hintConns.forEach { it.send(req) }
+        hintConns.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${hintConns.size} hinted relay(s)")
     }
 
@@ -915,7 +966,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         val conns = relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
-        conns.forEach { it.send(req) }
+        conns.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${conns.size} source relay(s)")
     }
 
@@ -1001,7 +1052,7 @@ class RelayPool @Inject constructor(
         // Fallback to all connected relays when relayUrls is empty (e.g. Following feed)
         val targets = if (relayUrls.isEmpty()) connections.values.toList()
             else relayUrls.mapNotNull { connections[it] }
-        targets.forEach { it.send(req) }
+        targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "Fetching older events until $untilTimestamp from ${targets.size} relay(s)")
     }
 
@@ -1031,7 +1082,7 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
-        connections.values.take(3).forEach { it.send(req) }
+        connections.values.take(3).forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${minOf(connections.size, 3)} relay(s)")
     }
 
@@ -1061,7 +1112,7 @@ class RelayPool @Inject constructor(
                         put("limit", JsonPrimitive(1))
                     })
                 }.toString()
-                hintConns.forEach { it.send(req) }
+                hintConns.forEach { sendOneShotToRelay(it, req) }
                 Log.d(TAG, "fetchEventById: $eventId → ${hintConns.size} hinted relay(s)")
                 return
             }
@@ -1117,6 +1168,10 @@ class RelayPool @Inject constructor(
     fun fetchThread(rawRelayUrls: List<String>, eventId: String) {
         val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }
         val ts = System.currentTimeMillis()
+        _activeOneShotSubs.add("thread-event-$ts")
+        _activeOneShotSubs.add("thread-replies-$ts")
+        _activeOneShotSubs.add("thread-reactions-$ts")
+        _activeOneShotSubs.add("thread-zaps-$ts")
 
         // The event itself
         val eventReq = buildJsonArray {
@@ -1162,10 +1217,10 @@ class RelayPool @Inject constructor(
 
         for (url in relayUrls) {
             connections[url]?.let { conn ->
-                conn.send(eventReq)
-                conn.send(repliesReq)
-                conn.send(reactionsReq)
-                conn.send(zapsReq)
+                sendOneShotToRelay(conn, eventReq)
+                sendOneShotToRelay(conn, repliesReq)
+                sendOneShotToRelay(conn, reactionsReq)
+                sendOneShotToRelay(conn, zapsReq)
             }
         }
         Log.d(TAG, "Fetching thread + engagement for $eventId from ${relayUrls.size} relay(s)")
@@ -1205,6 +1260,9 @@ class RelayPool @Inject constructor(
      */
     fun fetchUserPosts(pubkey: String, relayUrls: List<String> = emptyList()) {
         val ts = System.currentTimeMillis()
+        _activeOneShotSubs.add("user-posts-$ts")
+        _activeOneShotSubs.add("user-longform-$ts")
+        _activeOneShotSubs.add("user-engagement-$ts")
 
         // Posts by this author
         val postsReq = buildJsonArray {
@@ -1252,9 +1310,9 @@ class RelayPool @Inject constructor(
             connections.values.toList()
         }
         targets.forEach {
-            it.send(postsReq)
-            it.send(longformReq)
-            it.send(engagementReq)
+            sendOneShotToRelay(it, postsReq)
+            sendOneShotToRelay(it, longformReq)
+            sendOneShotToRelay(it, engagementReq)
         }
         Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${targets.size} relay(s)")
     }
@@ -1353,9 +1411,9 @@ class RelayPool @Inject constructor(
         subscriptionRegistry.get().register(handle)
 
         targets.forEach { conn ->
-            conn.send(repliesReq)
-            conn.send(reactionsReq)
-            conn.send(zapsReq)
+            sendOneShotToRelay(conn, repliesReq)
+            sendOneShotToRelay(conn, reactionsReq)
+            sendOneShotToRelay(conn, zapsReq)
         }
         Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s) (${lanes.size} lanes, ${eventIds.size - novel.size} deduped)")
     }
@@ -1388,7 +1446,7 @@ class RelayPool @Inject constructor(
         } else {
             connections.values.toList()
         }
-        targets.forEach { it.send(req) }
+        targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp from ${targets.size} relay(s)")
     }
 
@@ -1597,6 +1655,8 @@ class RelayPool @Inject constructor(
         authInFlight.clear()
         pendingChallenges.clear()
         authFailedRelays.clear()
+        relayOneShotCount.clear()
+        relayReqQueue.clear()
         Log.d(TAG, "disconnectAll: all connections, purposes, and auth state cleared")
     }
 }

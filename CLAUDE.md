@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 6, 2026 (Phase2 ref debounce, FAST_SCROLL job cancellation)
+**Last updated:** April 6, 2026 (Phase2 ref debounce, FAST_SCROLL job cancellation, per-relay REQ queue)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -102,7 +102,7 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 - `BROWSE` — relay-specific feed browsing, temporary
 - `OUTBOX` — NIP-65 outbox relay connections for followed users
 
-Auth spam suppression: `authFailedRelays` set, warning logged once then suppressed, cleared on reconnect. Persistent replay guard: requires `PERSISTENT` purpose before replaying subs (blocks OUTBOX-only relays from 31+ unwanted persistent subs). `connectAndAwait()` checks `blockedUrls` before connecting (matches `connect()` behavior).
+Auth spam suppression: `authFailedRelays` set, warning logged once then suppressed, cleared on reconnect. Persistent replay guard: requires `PERSISTENT` purpose before replaying subs (blocks OUTBOX-only relays from 31+ unwanted persistent subs). `connectAndAwait()` checks `blockedUrls` before connecting (matches `connect()` behavior). Per-relay REQ queue: tracks active one-shot subs per relay URL (cap 10), queues overflow, flushes on EOSE/CLOSE via `sendOneShotToRelay()`.
 
 **RelayBrowseSession** — Manages temporary browse subscriptions for relay-specific feeds. `start()` is `suspend` (calls `connectAndAwait` for WebSocket readiness). Pin check compares target URL sets (not just time — allows immediate switch to different relay). Coverage: browse feeds skip `CoverageIntent.HomeFeed()` to avoid premature COMPLETE → "No posts yet" flash.
 
@@ -324,6 +324,8 @@ Bridged repost: kind 6 empty content → produceState(e-tag target)
 | Feed Flow conflate() | Drops intermediate Room emissions during scroll — prevents queued recompositions from distinctUntilChanged pass-throughs |
 | Phase 2 ref debounce | 500ms minimum interval between hydrateRefs runs — eliminates tiny repeated Phase 2 passes during scroll settle (was firing every ~100-200ms) |
 | FAST_SCROLL job cancellation | Entering FAST_SCROLL immediately cancels both profileJob and refJob — clean blackout instead of stale jobs completing mid-scroll |
+| Per-relay REQ queue | Tracks active one-shot subs per relay (cap 10), queues overflow REQs, flushes on EOSE/CLOSE — eliminates "too many concurrent REQs" relay errors |
+| One-shot sub tracking fix | Added missing `_activeOneShotSubs` tracking + `isOneShotSubscription` prefixes for hint-profiles, src-profiles, hint-event, user-longform, thread subs — proper CLOSE on EOSE |
 
 ---
 
