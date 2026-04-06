@@ -34,7 +34,8 @@ class FeedHydrationController(
         const val WARM_ZONE_SIZE = 15
         const val WARM_CATCHUP_TIMEOUT_MS = 3000L
         const val ENGAGEMENT_REFRESH_INTERVAL_MS = 30_000L
-        const val REF_DEBOUNCE_MS = 500L
+        const val REF_DEBOUNCE_MS = 500L               // IDLE
+        const val REF_DEBOUNCE_SLOW_SCROLL_MS = 2000L  // SLOW_SCROLL — refs can wait while browsing
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -269,10 +270,10 @@ class FeedHydrationController(
         }
 
         // Phase 2: refs + thumbnails only for items already profile-hydrated
-        // Debounced — minimum 500ms between Phase 2 runs to avoid tiny repeated passes
+        // 2000ms debounce during SLOW_SCROLL — user is browsing, refs can wait
         val now = System.currentTimeMillis()
         val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
-        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
+        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
             lastRefStartTime = now
             refJob = scope.launch(Dispatchers.IO) {
                 if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
