@@ -137,6 +137,16 @@ private val YOUTUBE_URL_REGEX = Regex(
     RegexOption.IGNORE_CASE,
 )
 
+// Rewrites AT Protocol getBlob URLs to Bluesky CDN proxy (PDS blobs get gc'd, CDN caches persist).
+private val GET_BLOB_REGEX = Regex(
+    """https?://\S+/xrpc/com\.atproto\.sync\.getBlob\?did=(did:[^&\s]+)&cid=([^&\s]+)""",
+    RegexOption.IGNORE_CASE,
+)
+private fun rewriteBskyUrl(url: String): String {
+    val m = GET_BLOB_REGEX.find(url) ?: return url
+    return "https://cdn.bsky.app/img/feed_fullsize/plain/${m.groupValues[1]}/${m.groupValues[2]}@jpeg"
+}
+
 // Matches any remaining http/https URL (applied after stripping image + video URLs).
 private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
@@ -337,6 +347,7 @@ fun NoteCard(
             .map { it.url }
         val allImageUrls   = (regexImageUrls + imetaImageUrls).distinct()
                                  .filter { it !in allVideoUrls }
+                                 .map(::rewriteBskyUrl)
 
         val afterImages    = IMAGE_URL_REGEX.replace(afterVideos, "")
         val ytUrls         = youtubeEmbeds.map { it.url }.toSet()
@@ -1497,7 +1508,7 @@ private fun EmbeddedQuoteCard(
                 }
                 val quotedImages = remember(rawContent, imetaImageUrls) {
                     val regexImages = IMAGE_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
-                    (imetaImageUrls + regexImages).distinct()
+                    (imetaImageUrls + regexImages).distinct().map(::rewriteBskyUrl)
                 }
                 val quotedVideos = remember(rawContent, imetaVideoUrls) {
                     val regexVideos = VIDEO_URL_REGEX.findAll(rawContent).map { it.value }.distinct().toList()
