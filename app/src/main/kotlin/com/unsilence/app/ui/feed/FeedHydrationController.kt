@@ -53,6 +53,7 @@ class FeedHydrationController(
     private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done
     private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
     private val engagementFetchedIds = mutableSetOf<String>()
+    private val fanOutPendingIds = mutableSetOf<String>()     // indexer-only, needs fan-out in IDLE
     private var lastEngagementRefreshTime = 0L
     private var lastRefStartTime = 0L           // Phase 2 debounce
 
@@ -116,6 +117,7 @@ class FeedHydrationController(
         profileHydratedIds.clear()
         refHydratedIds.clear()
         engagementFetchedIds.clear()
+        fanOutPendingIds.clear()
         scrollSamples.clear()
         velocityPxPerSec = 0f
         lastVisibleItems = emptyList()
@@ -258,9 +260,11 @@ class FeedHydrationController(
 
         if (profileJob?.isActive == true) return
         profileJob = scope.launch(Dispatchers.IO) {
-            cardHydrator.hydrateProfiles(toProfile)
-            profileHydratedIds.addAll(toProfile.map { it.id })
-            Log.d(TAG, "WARM_CATCHUP: profiles for ${toProfile.size} visible items")
+            cardHydrator.hydrateProfiles(toProfile, fanOut = false)
+            val ids = toProfile.map { it.id }
+            profileHydratedIds.addAll(ids)
+            fanOutPendingIds.addAll(ids)
+            Log.d(TAG, "WARM_CATCHUP: profiles for ${toProfile.size} visible items (indexer-only)")
         }
     }
 
@@ -280,9 +284,11 @@ class FeedHydrationController(
             .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
             profileJob = scope.launch(Dispatchers.IO) {
-                cardHydrator.hydrateProfiles(toProfile)
-                profileHydratedIds.addAll(toProfile.map { it.id })
-                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (capped from ${combined.count { it.id !in profileHydratedIds }})")
+                cardHydrator.hydrateProfiles(toProfile, fanOut = false)
+                val ids = toProfile.map { it.id }
+                profileHydratedIds.addAll(ids)
+                fanOutPendingIds.addAll(ids)
+                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (indexer-only, capped from ${combined.count { it.id !in profileHydratedIds }})")
             }
         }
 
@@ -304,18 +310,19 @@ class FeedHydrationController(
 
     /**
      * IDLE: Full hydration (profiles + refs) for warm zone + engagement.
+     * New items get full fan-out.
      */
     private fun handleIdle() {
         val warmZone = computeWarmZone()
         val combined = lastVisibleItems + warmZone
 
-        // Phase 1: profiles for anything not yet done
+        // Phase 1: profiles for anything not yet done (full fan-out)
         val toProfile = combined.filter { it.id !in profileHydratedIds }
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
             profileJob = scope.launch(Dispatchers.IO) {
-                cardHydrator.hydrateProfiles(toProfile)
+                cardHydrator.hydrateProfiles(toProfile, fanOut = true)
                 profileHydratedIds.addAll(toProfile.map { it.id })
-                Log.d(TAG, "IDLE: profiles for ${toProfile.size} items")
+                Log.d(TAG, "IDLE: profiles for ${toProfile.size} items (full fan-out)")
             }
         }
 
@@ -335,6 +342,20 @@ class FeedHydrationController(
     }
 
     private fun startIdleEngagement() {
+        // Deferred fan-out: batch source + hint relay fetches for items that got
+        // indexer-only profile resolution during scroll. Fires once on IDLE entry.
+        if (fanOutPendingIds.isNotEmpty()) {
+            val combined = lastVisibleItems + computeWarmZone()
+            val pendingItems = combined.filter { it.id in fanOutPendingIds }
+            if (pendingItems.isNotEmpty()) {
+                fanOutPendingIds.removeAll(pendingItems.map { it.id }.toSet())
+                scope.launch(Dispatchers.IO) {
+                    cardHydrator.fanOutProfiles(pendingItems)
+                    Log.d(TAG, "IDLE: deferred fan-out for ${pendingItems.size} items")
+                }
+            }
+        }
+
         engagementJob = scope.launch(Dispatchers.IO) {
             // Initial engagement fetch for visible items
             fetchEngagementForVisible()
