@@ -375,18 +375,19 @@ class FeedHydrationController(
      */
     private fun checkEngagementFreshness(items: List<FeedRow>) {
         if (items.isEmpty() || warmEngagementJob?.isActive == true) return
-        val candidateIds = items.map { it.id }
+        val candidateTargetIds = items.map { engagementTargetId(it) }
+            .distinct()
             .filter { it !in engagementFetchedIds }
-        if (candidateIds.isEmpty()) return
+        if (candidateTargetIds.isEmpty()) return
 
         warmEngagementJob = scope.launch(Dispatchers.IO) {
             val threshold = System.currentTimeMillis() - ENGAGEMENT_STALE_MS
-            val freshIds = eventStatsDao.getFreshEngagementIds(candidateIds, threshold).toSet()
-            val staleIds = candidateIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
+            val freshIds = eventStatsDao.getFreshEngagementIds(candidateTargetIds, threshold).toSet()
+            val staleIds = candidateTargetIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
             if (staleIds.isNotEmpty()) {
                 engagementFetchedIds.addAll(staleIds)
                 relayPool.fetchEngagementBatch(staleIds)
-                Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateIds.size - freshIds.size - staleIds.size} deferred)")
+                Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateTargetIds.size - freshIds.size - staleIds.size} deferred)")
             }
         }
     }
@@ -435,10 +436,10 @@ class FeedHydrationController(
             Log.d(TAG, "Backfill: starting (${lastAllEvents.size} feed events)")
 
             while (true) {
-                val allIds = lastAllEvents.map { it.id }
-                val novel = allIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
+                val allTargetIds = lastAllEvents.map { engagementTargetId(it) }.distinct()
+                val novel = allTargetIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
                 if (novel.isEmpty()) {
-                    Log.d(TAG, "Backfill: complete — all ${allIds.size} events covered")
+                    Log.d(TAG, "Backfill: complete — all ${allTargetIds.size} events covered")
                     break
                 }
 
@@ -500,6 +501,12 @@ class FeedHydrationController(
             kotlin.math.abs(pos - centerIndex)
         }
     }
+
+    // ── Engagement target resolution ─────────────────────────────────
+
+    /** For kind 6 reposts, engagement targets the original event (root_id), not the wrapper. */
+    private fun engagementTargetId(row: FeedRow): String =
+        if (row.kind == 6 && row.rootId != null) row.rootId else row.id
 
     // ── Zone computation ──────────────────────────────────────────────
 

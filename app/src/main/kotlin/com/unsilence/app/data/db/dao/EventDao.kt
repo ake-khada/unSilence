@@ -83,7 +83,7 @@ interface EventDao {
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
         LEFT JOIN users       u ON u.pubkey  = e.pubkey
-        LEFT JOIN event_stats s ON s.event_id = e.id
+        LEFT JOIN event_stats s ON s.event_id = CASE WHEN e.kind = 6 THEN COALESCE(e.root_id, e.id) ELSE e.id END
         WHERE e.id IN (SELECT er.event_id FROM event_relays er WHERE er.relay_url IN (:relayUrls))
           AND e.kind      IN (:kinds)
           AND ((:contentFilter = 0)
@@ -145,7 +145,7 @@ interface EventDao {
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
         LEFT JOIN  users       u ON u.pubkey   = e.pubkey
-        LEFT JOIN  event_stats s ON s.event_id = e.id
+        LEFT JOIN  event_stats s ON s.event_id = CASE WHEN e.kind = 6 THEN COALESCE(e.root_id, e.id) ELSE e.id END
         WHERE e.kind IN (:kinds)
           AND (
               (e.pubkey IN (SELECT pubkey FROM follows) AND (
@@ -205,7 +205,7 @@ interface EventDao {
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
         LEFT JOIN users       u ON u.pubkey   = e.pubkey
-        LEFT JOIN event_stats s ON s.event_id = e.id
+        LEFT JOIN event_stats s ON s.event_id = CASE WHEN e.kind = 6 THEN COALESCE(e.root_id, e.id) ELSE e.id END
         WHERE e.pubkey = :pubkey
           AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL)
                OR e.kind = 6)
@@ -231,7 +231,7 @@ interface EventDao {
             COALESCE(s.zap_count, 0)      AS zap_count
         FROM events e
         LEFT JOIN users       u ON u.pubkey   = e.pubkey
-        LEFT JOIN event_stats s ON s.event_id = e.id
+        LEFT JOIN event_stats s ON s.event_id = CASE WHEN e.kind = 6 THEN COALESCE(e.root_id, e.id) ELSE e.id END
         WHERE e.pubkey = :pubkey
           AND ((e.kind = 1 AND e.reply_to_id IS NULL AND e.root_id IS NULL) OR e.kind = 6)
         ORDER BY e.created_at DESC
