@@ -44,8 +44,53 @@ class CardHydrator @Inject constructor(
      * Phase 1: Profile resolution only — avatar, name, identity.
      * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
      * BEFORE any ref/engagement work.
+     *
+     * @param fanOut When false, only fetches from indexer relays (fastest path).
+     *   Source relay and hint relay fetches are skipped — use [fanOutProfiles]
+     *   later in IDLE to catch up.
      */
-    suspend fun hydrateProfiles(events: List<FeedRow>) {
+    suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true) {
+        if (events.isEmpty()) return
+
+        val pubkeys = mutableSetOf<String>()
+        val profileHints = mutableMapOf<String, MutableList<String>>()
+
+        for (event in events) {
+            pubkeys.add(event.pubkey)
+            if (event.kind == 6) {
+                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
+            }
+            if (fanOut) {
+                extractProfileHints(event.content).forEach { (pk, relays) ->
+                    pubkeys.add(pk)
+                    profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
+                }
+            }
+        }
+
+        if (pubkeys.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(pubkeys.toList())
+
+            if (fanOut) {
+                val sourceRelays = events.map { it.relayUrl }.distinct()
+                if (sourceRelays.isNotEmpty()) {
+                    relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
+                }
+            }
+        }
+        if (fanOut && profileHints.isNotEmpty()) {
+            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
+        }
+
+        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
+    }
+
+    /**
+     * Deferred fan-out: source relay + hint relay profile fetches for items
+     * that were previously hydrated with fanOut=false during scroll.
+     * Called from IDLE to catch up on profiles that only exist on non-indexer relays.
+     */
+    suspend fun fanOutProfiles(events: List<FeedRow>) {
         if (events.isEmpty()) return
 
         val pubkeys = mutableSetOf<String>()
@@ -63,8 +108,6 @@ class CardHydrator @Inject constructor(
         }
 
         if (pubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(pubkeys.toList())
-
             val sourceRelays = events.map { it.relayUrl }.distinct()
             if (sourceRelays.isNotEmpty()) {
                 relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
@@ -74,7 +117,7 @@ class CardHydrator @Inject constructor(
             relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
         }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
+        Log.d(TAG, "Fan-out profiles: ${events.size} cards → ${pubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
     }
 
     /**
