@@ -34,6 +34,7 @@ class FeedHydrationController(
         const val WARM_ZONE_SIZE = 15
         const val WARM_CATCHUP_TIMEOUT_MS = 3000L
         const val ENGAGEMENT_REFRESH_INTERVAL_MS = 30_000L
+        const val REF_DEBOUNCE_MS = 500L
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -50,6 +51,7 @@ class FeedHydrationController(
     private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
     private val engagementFetchedIds = mutableSetOf<String>()
     private var lastEngagementRefreshTime = 0L
+    private var lastRefStartTime = 0L           // Phase 2 debounce
 
     // ── Jobs ──────────────────────────────────────────────────────────
     private var idleTimerJob: Job? = null
@@ -117,6 +119,7 @@ class FeedHydrationController(
         lastAllEvents = emptyList()
         lastVisibleIds = emptySet()
         lastEngagementRefreshTime = 0L
+        lastRefStartTime = 0L
         lastTransitionTime = 0L
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
@@ -220,6 +223,11 @@ class FeedHydrationController(
         when (to) {
             ScrollState.IDLE -> startIdleEngagement()
             ScrollState.WARM_CATCHUP -> startCatchupTimeout()
+            ScrollState.FAST_SCROLL -> {
+                // Cancel all hydration work immediately — total blackout
+                profileJob?.cancel()
+                refJob?.cancel()
+            }
             else -> {}
         }
     }
@@ -261,9 +269,13 @@ class FeedHydrationController(
         }
 
         // Phase 2: refs + thumbnails only for items already profile-hydrated
+        // Debounced — minimum 500ms between Phase 2 runs to avoid tiny repeated passes
+        val now = System.currentTimeMillis()
         val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
-        if (toRef.isNotEmpty() && refJob?.isActive != true) {
+        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
+            lastRefStartTime = now
             refJob = scope.launch(Dispatchers.IO) {
+                if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
                 cardHydrator.hydrateRefs(toRef)
                 refHydratedIds.addAll(toRef.map { it.id })
                 Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
@@ -289,9 +301,13 @@ class FeedHydrationController(
         }
 
         // Phase 2: refs + thumbnails
+        // Debounced — minimum 500ms between Phase 2 runs
+        val now = System.currentTimeMillis()
         val toRef = combined.filter { it.id !in refHydratedIds }
-        if (toRef.isNotEmpty() && refJob?.isActive != true) {
+        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
+            lastRefStartTime = now
             refJob = scope.launch(Dispatchers.IO) {
+                if (state == ScrollState.FAST_SCROLL) return@launch
                 cardHydrator.hydrateRefs(toRef)
                 refHydratedIds.addAll(toRef.map { it.id })
                 Log.d(TAG, "IDLE: refs for ${toRef.size} items")
