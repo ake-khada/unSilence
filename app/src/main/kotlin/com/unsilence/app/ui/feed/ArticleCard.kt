@@ -109,45 +109,49 @@ fun ArticleCard(
                 .padding(horizontal = 4.dp, vertical = Spacing.small),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.size(Sizing.avatar).clip(CircleShape)) {
-                IdentIcon(pubkey = row.pubkey, modifier = Modifier.fillMaxSize())
-                if (!row.authorPicture.isNullOrBlank()) {
-                    AsyncImage(
-                        model              = row.authorPicture,
-                        contentDescription = null,
-                        modifier           = Modifier.fillMaxSize(),
+            Row(
+                modifier          = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(modifier = Modifier.size(Sizing.avatar).clip(CircleShape)) {
+                    IdentIcon(pubkey = row.pubkey, modifier = Modifier.fillMaxSize())
+                    if (!row.authorPicture.isNullOrBlank()) {
+                        AsyncImage(
+                            model              = row.authorPicture,
+                            contentDescription = null,
+                            modifier           = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(Spacing.small))
+                Text(
+                    text       = authorLabel,
+                    color      = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize   = 13.sp,
+                    maxLines   = 1,
+                    overflow   = TextOverflow.Ellipsis,
+                    modifier   = Modifier.weight(1f, fill = false),
+                )
+                if (!row.authorNip05.isNullOrBlank()) {
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector        = Icons.Filled.Verified,
+                        contentDescription = "NIP-05 verified",
+                        tint               = Cyan,
+                        modifier           = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        text     = nip05Domain(row.authorNip05),
+                        color    = TextSecondary,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
-            Spacer(Modifier.width(Spacing.small))
-            Text(
-                text       = authorLabel,
-                color      = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                fontSize   = 13.sp,
-                maxLines   = 1,
-                overflow   = TextOverflow.Ellipsis,
-                modifier   = Modifier.weight(1f, fill = false),
-            )
-            if (!row.authorNip05.isNullOrBlank()) {
-                Spacer(Modifier.width(4.dp))
-                Icon(
-                    imageVector        = Icons.Filled.Verified,
-                    contentDescription = "NIP-05 verified",
-                    tint               = Cyan,
-                    modifier           = Modifier.size(14.dp),
-                )
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    text     = nip05Domain(row.authorNip05),
-                    color    = TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-            }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(Spacing.micro))
             Text(
                 text     = articleRelativeTime(row.createdAt),
                 color    = TextSecondary,
