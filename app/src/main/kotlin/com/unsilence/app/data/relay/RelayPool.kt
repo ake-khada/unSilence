@@ -144,7 +144,13 @@ class RelayPool @Inject constructor(
     companion object {
         const val MAX_CONCURRENT_REQS_PER_RELAY = 10
         const val IDLE_EVICTION_THRESHOLD_MS = 60_000L
+        const val OUTBOX_IDLE_EVICTION_MS = 30_000L
+        const val STEADY_STATE_DELAY_MS = 30_000L
+        const val STEADY_STATE_CAP = 10
     }
+
+    /** After bootstrap settles (30s), tighten cap to [STEADY_STATE_CAP] for non-PERSISTENT. */
+    @Volatile private var steadyStateActive = false
     /** Active one-shot sub count per relay URL. */
     private val relayOneShotCount = ConcurrentHashMap<String, AtomicInteger>()
     /** Queued REQs per relay — sent when slots free up. */
@@ -186,7 +192,8 @@ class RelayPool @Inject constructor(
      */
     private fun evictIdleConnection(): Boolean {
         val now = System.currentTimeMillis()
-        // Find BROWSE/OUTBOX-only connections idle for 60+ seconds
+        // Find BROWSE/OUTBOX-only connections that exceed their idle threshold.
+        // OUTBOX uses 30s (radios idle sooner), BROWSE uses 60s.
         val candidate = connections.entries
             .filter { (url, _) ->
                 !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
@@ -194,7 +201,9 @@ class RelayPool @Inject constructor(
             }
             .filter { (url, _) ->
                 val lastActive = connectionLastActivity[url] ?: 0L
-                (now - lastActive) >= IDLE_EVICTION_THRESHOLD_MS
+                val threshold = if (hasPurpose(url, ConnectionPurpose.OUTBOX) && !hasPurpose(url, ConnectionPurpose.BROWSE))
+                    OUTBOX_IDLE_EVICTION_MS else IDLE_EVICTION_THRESHOLD_MS
+                (now - lastActive) >= threshold
             }
             .maxByOrNull { (url, _) ->
                 // Evict the most idle connection first
@@ -224,6 +233,22 @@ class RelayPool @Inject constructor(
                 engagementFetched.entries.removeIf { it.value < cutoff }
                 eventFetchInFlight.entries.removeIf { it.value < cutoff }
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
+            }
+        }
+        // Steady-state cap: 30s after startup, tighten to 10 non-PERSISTENT connections
+        scope.launch {
+            delay(STEADY_STATE_DELAY_MS)
+            steadyStateActive = true
+            Log.d(TAG, "Steady-state cap active: evicting idle non-PERSISTENT connections above $STEADY_STATE_CAP")
+            // Proactive sweep: evict OUTBOX/BROWSE connections above the steady-state cap
+            val nonPersistent = connections.entries.filter { (url, _) ->
+                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
+            }
+            if (nonPersistent.size > STEADY_STATE_CAP) {
+                val toEvict = nonPersistent.size - STEADY_STATE_CAP
+                var evicted = 0
+                repeat(toEvict) { if (evictIdleConnection()) evicted++ }
+                Log.d(TAG, "Steady-state sweep: evicted $evicted/${toEvict} idle connections (pool has ${connections.size})")
             }
         }
     }
