@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
@@ -415,21 +414,12 @@ fun ProfileScreen(
                 verticalAlignment     = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint               = Color.White,
-                        )
-                    }
-                    TextButton(onClick = { showEditProfile = true }) {
-                        Text(
-                            text     = "Edit Profile",
-                            color    = Cyan,
-                            fontSize = 14.sp,
-                        )
-                    }
+                TextButton(onClick = { showEditProfile = true }) {
+                    Text(
+                        text     = "Edit Profile",
+                        color    = Cyan,
+                        fontSize = 14.sp,
+                    )
                 }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(
