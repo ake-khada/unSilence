@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 
@@ -67,11 +68,7 @@ fun FilterBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // Local editable state
-    var showKind1     by remember { mutableStateOf(currentFilter.showKind1) }
-    var showKind6     by remember { mutableStateOf(currentFilter.showKind6) }
-    var showKind20    by remember { mutableStateOf(currentFilter.showKind20) }
-    var showKind21    by remember { mutableStateOf(currentFilter.showKind21) }
-    var showKind30023 by remember { mutableStateOf(currentFilter.showKind30023) }
+    var showTypes     by remember { mutableStateOf(currentFilter.showTypes) }
     var sinceHours    by remember { mutableStateOf(currentFilter.sinceHours) }
     var minReplies    by remember { mutableFloatStateOf(currentFilter.minReplies.toFloat()) }
     var minReposts    by remember { mutableFloatStateOf(currentFilter.minReposts.toFloat()) }
@@ -79,29 +76,21 @@ fun FilterBottomSheet(
     var zapSlider     by remember { mutableFloatStateOf(satsToZapSlider(currentFilter.minZapSats)) }
 
     fun buildFilter() = FeedFilter(
-        showKind1     = showKind1,
-        showKind6     = showKind6,
-        showKind20    = showKind20,
-        showKind21    = showKind21,
-        showKind30023 = showKind30023,
-        sinceHours    = sinceHours,
-        minReplies    = minReplies.toInt(),
-        minReposts    = minReposts.toInt(),
-        minReactions  = minReactions.toInt(),
-        minZapSats    = zapSliderToSats(zapSlider),
+        showTypes    = showTypes,
+        sinceHours   = sinceHours,
+        minReplies   = minReplies.toInt(),
+        minReposts   = minReposts.toInt(),
+        minReactions = minReactions.toInt(),
+        minZapSats   = zapSliderToSats(zapSlider),
     )
 
     fun reset() {
-        showKind1     = true
-        showKind6     = true
-        showKind20    = true
-        showKind21    = true
-        showKind30023 = true
-        sinceHours    = null
-        minReplies    = 0f
-        minReposts    = 0f
-        minReactions  = 0f
-        zapSlider     = 0f
+        showTypes    = setOf(ShowType.ALL)
+        sinceHours   = null
+        minReplies   = 0f
+        minReposts   = 0f
+        minReactions = 0f
+        zapSlider    = 0f
     }
 
     ModalBottomSheet(
@@ -136,26 +125,23 @@ fun FilterBottomSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement   = Arrangement.spacedBy(8.dp),
             ) {
-                val allSelected = showKind1 && showKind6 && showKind20 && showKind21 && showKind30023
-                FilterChip("All", allSelected) {
-                    showKind1 = true; showKind6 = true; showKind20 = true
-                    showKind21 = true; showKind30023 = true
+                val isAll = ShowType.ALL in showTypes
+
+                FilterChip("All", isAll) {
+                    showTypes = setOf(ShowType.ALL)
                 }
-                FilterChip("Notes", showKind1 && !allSelected) {
-                    showKind1 = !showKind1
+
+                fun toggleType(type: ShowType) {
+                    val current = if (isAll) emptySet() else showTypes
+                    val next = if (type in current) current - type else current + type
+                    showTypes = if (next.isEmpty()) setOf(ShowType.ALL) else next
                 }
-                FilterChip("Reposts", showKind6 && !allSelected) {
-                    showKind6 = !showKind6
-                }
-                FilterChip("Pictures", showKind20 && !allSelected) {
-                    showKind20 = !showKind20
-                }
-                FilterChip("Videos", showKind21 && !allSelected) {
-                    showKind21 = !showKind21
-                }
-                FilterChip("Articles", showKind30023 && !allSelected) {
-                    showKind30023 = !showKind30023
-                }
+
+                FilterChip("Text", !isAll && ShowType.TEXT in showTypes) { toggleType(ShowType.TEXT) }
+                FilterChip("Images", !isAll && ShowType.IMAGES in showTypes) { toggleType(ShowType.IMAGES) }
+                FilterChip("Video", !isAll && ShowType.VIDEO in showTypes) { toggleType(ShowType.VIDEO) }
+                FilterChip("Articles", !isAll && ShowType.ARTICLES in showTypes) { toggleType(ShowType.ARTICLES) }
+                FilterChip("Reposts", !isAll && ShowType.REPOSTS in showTypes) { toggleType(ShowType.REPOSTS) }
             }
 
             Spacer(Modifier.height(20.dp))
