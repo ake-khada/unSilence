@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Dns
@@ -69,20 +68,14 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
                     .padding(horizontal = Spacing.small),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint               = Color.White,
-                        modifier           = Modifier.size(22.dp),
-                    )
-                }
                 Text(
                     text       = "Settings",
                     color      = Color.White,
                     fontSize   = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier   = Modifier.weight(1f),
+                    modifier   = Modifier
+                        .weight(1f)
+                        .padding(start = Spacing.small),
                 )
             }
 
