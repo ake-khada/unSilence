@@ -207,24 +207,26 @@ class NoteActionsViewModel @Inject constructor(
      * Look up an event by ID. Checks Room first; if missing, triggers a one-shot relay
      * fetch and waits up to 5 seconds for the event to arrive via EventProcessor → Room.
      * [relayHints] from nevent1 URIs are used for targeted fetching.
+     *
+     * Fetch is triggered once per event ID (fetchedQuoteIds guard), but Room observation
+     * happens every call — so recomposition after a late relay arrival can still resolve.
      */
     suspend fun lookupEvent(eventId: String, relayHints: List<String> = emptyList()): EventEntity? {
         // Fast path: already cached in Room
         eventRepository.getEventById(eventId)?.let { return it }
 
-        // Don't re-fetch the same event
+        // Trigger relay fetch only once per event ID
         synchronized(fetchedQuoteIds) {
-            if (!fetchedQuoteIds.add(eventId)) return null
+            if (fetchedQuoteIds.add(eventId)) {
+                if (relayHints.isNotEmpty()) {
+                    relayPool.fetchEventById(eventId, relayHints)
+                } else {
+                    relayPool.fetchEventById(eventId)
+                }
+            }
         }
 
-        // Send REQ — prefer relay hints from nevent, fall back to connected relays
-        if (relayHints.isNotEmpty()) {
-            relayPool.fetchEventById(eventId, relayHints)
-        } else {
-            relayPool.fetchEventById(eventId)
-        }
-
-        // Wait for the event to appear in Room (relay → EventProcessor → Room)
+        // Wait for the event to appear in Room (from any source)
         return withTimeoutOrNull(5_000L) {
             eventRepository.flowById(eventId).filterNotNull().first()
         }
