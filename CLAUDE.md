@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 6, 2026 (Bluesky CDN URL rewrite, quoted post full postcard rendering)
+**Last updated:** April 6, 2026 (engagement count double-counting fix, Bluesky CDN URL rewrite, quoted post full postcard rendering)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -93,7 +93,7 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 
 ### Key Subsystems
 
-**EventProcessor** — Receives events from RelayPool, deduplicates via `seenIds` set, processes by kind, stores in Room with denormalized counters. Records relay provenance in `event_relays` even for deduped events (fixes relay feed gaps). Immutable `kindHandlers` map via `dagger.Lazy`. Spam filter: drops kind-1 events starting with `{` (JSON machine payloads) or `xitchat-broadcast-v1-` before processing.
+**EventProcessor** — Receives events from RelayPool, deduplicates via `seenIds` set, processes by kind, stores in Room with denormalized counters. `insertOrIgnoreBatch` returns row IDs — only newly inserted events (row ID != -1) trigger stat increments (prevents double-counting across restarts). Records relay provenance in `event_relays` even for deduped events (fixes relay feed gaps). Immutable `kindHandlers` map via `dagger.Lazy`. Spam filter: drops kind-1 events starting with `{` (JSON machine payloads) or `xitchat-broadcast-v1-` before processing.
 
 **ProfileResolver** — Centralized batched profile fetching. 6-hour staleness threshold (1h for no-picture profiles). 15s in-flight guard prevents duplicate requests. Default scroll mode: 3 indexer relays. Profile screen fanout: up to 4 indexer relays via `requestWithFanout()`.
 
@@ -336,6 +336,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target + relay hint)
 | Steady-state cap 10 | 30s after startup, proactive sweep evicts idle non-PERSISTENT connections above cap of 10 |
 | CardHydrator collection reuse | Reverted — @Singleton called from multiple scopes concurrently (ConcurrentModificationException). Local variables are correct. |
 | FeedStateReducer APPEND early return | Skips associateBy/map/filter when no new IDs in APPEND path — avoids allocation for engagement/profile refreshes |
+| Engagement count dedup | insertOrIgnoreBatch returns row IDs; only newly inserted events (row ID != -1) trigger stat increments — prevents double-counting when duplicates arrive across app restarts or seenIds cache trimming. Bootstrap Phase 3 recalculateCounts() fixes inflated stats from correlated subqueries. |
 
 ---
 
