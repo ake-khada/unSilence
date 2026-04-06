@@ -6,6 +6,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,8 +31,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,6 +68,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.db.entity.RelayConfigEntity
+import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -90,8 +97,10 @@ fun RelayManagementScreen(
     val blockedRelays   by viewModel.blockedRelays.collectAsStateWithLifecycle(initialValue = emptyList())
     val favoriteRelays  by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
     val relaySets       by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
+    val trustScores     by viewModel.trustScores.collectAsStateWithLifecycle(initialValue = emptyMap())
 
     var showCreateRelaySet by remember { mutableStateOf(false) }
+    var trustDetailRelay by remember { mutableStateOf<RelayTrustScoreEntity?>(null) }
 
     if (showCreateRelaySet) {
         CreateRelaySetScreen(
@@ -180,8 +189,10 @@ fun RelayManagementScreen(
                         items(readWriteRelays, key = { it.id }) { relay ->
                             ReadWriteRelayRow(
                                 relay          = relay,
+                                trustScore     = trustScores[relay.relayUrl],
                                 onToggleMarker = { viewModel.toggleMarker(relay) },
                                 onRemove       = { viewModel.removeReadWriteRelay(relay.relayUrl) },
+                                onTrustTap     = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -206,8 +217,10 @@ fun RelayManagementScreen(
                         }
                         items(indexerRelays, key = { it.id }) { relay ->
                             SimpleRelayRow(
-                                url      = relay.relayUrl,
-                                onRemove = { viewModel.removeIndexerRelay(relay.relayUrl) },
+                                url        = relay.relayUrl,
+                                onRemove   = { viewModel.removeIndexerRelay(relay.relayUrl) },
+                                trustScore = trustScores[relay.relayUrl],
+                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -222,8 +235,10 @@ fun RelayManagementScreen(
                         }
                         items(searchRelays, key = { it.id }) { relay ->
                             SimpleRelayRow(
-                                url      = relay.relayUrl,
-                                onRemove = { viewModel.removeSearchRelay(relay.relayUrl) },
+                                url        = relay.relayUrl,
+                                onRemove   = { viewModel.removeSearchRelay(relay.relayUrl) },
+                                trustScore = trustScores[relay.relayUrl],
+                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -300,8 +315,10 @@ fun RelayManagementScreen(
                         }
                         items(blockedRelays, key = { it.id }) { relay ->
                             SimpleRelayRow(
-                                url      = relay.relayUrl,
-                                onRemove = { viewModel.removeBlockedRelay(relay.relayUrl) },
+                                url        = relay.relayUrl,
+                                onRemove   = { viewModel.removeBlockedRelay(relay.relayUrl) },
+                                trustScore = trustScores[relay.relayUrl],
+                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -309,6 +326,14 @@ fun RelayManagementScreen(
                 }
             }
         }
+    }
+
+    // Trust score detail bottom sheet
+    trustDetailRelay?.let { score ->
+        TrustScoreDetailSheet(
+            score = score,
+            onDismiss = { trustDetailRelay = null },
+        )
     }
 }
 
@@ -359,13 +384,20 @@ private fun displayUrl(url: String): String =
     url.removePrefix("wss://").removePrefix("ws://")
 
 @Composable
-private fun SimpleRelayRow(url: String, onRemove: () -> Unit) {
+private fun SimpleRelayRow(
+    url: String,
+    onRemove: () -> Unit,
+    trustScore: RelayTrustScoreEntity? = null,
+    onTrustTap: () -> Unit = {},
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        TrustScoreDot(trustScore, onClick = onTrustTap)
+        Spacer(Modifier.width(8.dp))
         Text(
             text     = displayUrl(url),
             color    = Color.White,
@@ -383,8 +415,10 @@ private fun SimpleRelayRow(url: String, onRemove: () -> Unit) {
 @Composable
 private fun ReadWriteRelayRow(
     relay: RelayConfigEntity,
+    trustScore: RelayTrustScoreEntity?,
     onToggleMarker: () -> Unit,
     onRemove: () -> Unit,
+    onTrustTap: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -392,6 +426,9 @@ private fun ReadWriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Trust score dot
+        TrustScoreDot(trustScore, onClick = onTrustTap)
+        Spacer(Modifier.width(8.dp))
         Text(
             text     = displayUrl(relay.relayUrl),
             color    = Color.White,
@@ -581,5 +618,158 @@ private fun RelaySetRow(
                 }
             }
         }
+    }
+}
+
+// ── Trust score components ──────────────────────────────────────────────────
+
+private val TrustGreen  = Color(0xFF4CAF50)
+private val TrustYellow = Color(0xFFFFC107)
+private val TrustRed    = Color(0xFFFF5252)
+private val TrustGray   = Color(0xFF666666)
+
+private fun trustColor(score: Int?): Color = when {
+    score == null -> TrustGray
+    score >= 70   -> TrustGreen
+    score >= 40   -> TrustYellow
+    else          -> TrustRed
+}
+
+@Composable
+private fun TrustScoreDot(score: RelayTrustScoreEntity?, onClick: () -> Unit) {
+    val color = trustColor(score?.score)
+    Canvas(
+        modifier = Modifier
+            .size(10.dp)
+            .clickable(enabled = score != null, onClick = onClick),
+    ) {
+        drawCircle(color = color)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TrustScoreDetailSheet(
+    score: RelayTrustScoreEntity,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Color(0xFF1A1A1A),
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.medium)
+                .padding(bottom = 32.dp),
+        ) {
+            // Header
+            Text(
+                text = displayUrl(score.relayUrl),
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Canvas(modifier = Modifier.size(10.dp)) {
+                    drawCircle(color = trustColor(score.score))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Trust Score: ${score.score}/100",
+                    color = trustColor(score.score),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = score.confidence.replaceFirstChar { it.uppercase() } + " confidence",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Score breakdown bars
+            TrustBar("Reliability", score.reliability, 0.40f)
+            TrustBar("Quality", score.quality, 0.35f)
+            TrustBar("Accessibility", score.accessibility, 0.25f)
+
+            Spacer(Modifier.height(12.dp))
+
+            // Metadata row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                score.policy?.let { policy ->
+                    MetadataChip(label = "Policy", value = policy)
+                }
+                score.countryCode?.let { cc ->
+                    MetadataChip(label = "Region", value = cc)
+                }
+                MetadataChip(label = "Observations", value = score.observations.toString())
+            }
+
+            score.operatorVerified?.let { method ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Operator verified: $method",
+                    color = TrustGreen,
+                    fontSize = 12.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrustBar(label: String, value: Int, weight: Float) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.width(100.dp),
+        )
+        Text(
+            text = "$value",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(28.dp),
+        )
+        LinearProgressIndicator(
+            progress = { value / 100f },
+            modifier = Modifier
+                .weight(1f)
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp)),
+            color = trustColor(value),
+            trackColor = Color(0xFF333333),
+        )
+        Text(
+            text = "${(weight * 100).toInt()}%",
+            color = TextSecondary.copy(alpha = 0.6f),
+            fontSize = 10.sp,
+            modifier = Modifier.width(28.dp).padding(start = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun MetadataChip(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = label, color = TextSecondary, fontSize = 10.sp)
     }
 }
