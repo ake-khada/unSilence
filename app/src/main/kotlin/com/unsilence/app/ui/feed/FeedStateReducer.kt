@@ -137,9 +137,14 @@ class FeedStateReducer(private val feedKey: String) {
                 val leadingNew = allEvents.takeWhile { it.id !in knownIds }
 
                 if (leadingNew.isEmpty()) {
+                    // Quick check: are there any new IDs to append?
+                    // If not, this is just an engagement/profile refresh — skip allocation.
+                    val existingIds = cur.visibleEvents.map { it.id }.toSet()
+                    val hasNewItems = allEvents.any { it.id !in existingIds }
+                    if (!hasNewItems) return@update cur  // no allocation needed
+
                     val latestMap = allEvents.associateBy { it.id }
                     val refreshed = cur.visibleEvents.map { row -> latestMap[row.id] ?: row }
-                    val existingIds = cur.visibleEvents.map { it.id }.toSet()
                     val appended = allEvents.filter { it.id !in existingIds }
                     if (appended.isNotEmpty()) {
                         lastAppendTime = System.currentTimeMillis()
