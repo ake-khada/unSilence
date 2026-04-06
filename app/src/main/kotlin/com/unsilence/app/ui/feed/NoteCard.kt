@@ -166,6 +166,24 @@ private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
     }
 }.getOrNull()
 
+/** Extract relay hints from q-tags: eventId → list of relay URLs. */
+private fun extractQTagHints(tagsJson: String): Map<String, List<String>> {
+    if (!tagsJson.contains("\"q\"")) return emptyMap()
+    return try {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val result = mutableMapOf<String, MutableList<String>>()
+        for (tag in parsed) {
+            val arr = tag.jsonArray
+            if (arr.getOrNull(0)?.jsonPrimitive?.content == "q") {
+                val id = arr.getOrNull(1)?.jsonPrimitive?.content ?: continue
+                val relay = arr.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: continue
+                result.getOrPut(id) { mutableListOf() }.add(relay)
+            }
+        }
+        result
+    } catch (_: Exception) { emptyMap() }
+}
+
 private data class YouTubeEmbed(val url: String, val videoId: String)
 
 private data class MediaExtraction(
@@ -272,8 +290,17 @@ fun NoteCard(
     val navigateId = if (row.kind == 6) repostTargetId ?: row.id else row.id
 
     // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
+    // Merge relay hints from q-tags into nevent-derived EventRefs
+    val qTagHints = remember(row.tags) { extractQTagHints(row.tags) }
     val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
         .mapNotNull { decodeNostrRef(it.value) }
+        .map { ref ->
+            if (ref is NostrRef.EventRef) {
+                val extra = qTagHints[ref.eventId].orEmpty()
+                if (extra.isNotEmpty()) ref.copy(relayHints = (ref.relayHints + extra).distinct())
+                else ref
+            } else ref
+        }
         .toList()
     val contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim()
 
@@ -482,12 +509,13 @@ fun NoteCard(
         // ── NIP-19 embedded quotes (show right after text, before media) ────
         nostrRefs.filterIsInstance<NostrRef.EventRef>().forEach { ref ->
             EmbeddedQuoteCard(
-                eventId     = ref.eventId,
-                onNoteClick = onNoteClick,
-                lookupEvent = lookupEvent,
-                lookupProfile = lookupProfile,
-                relayHints  = ref.relayHints,
-                modifier    = Modifier
+                eventId         = ref.eventId,
+                onNoteClick     = onNoteClick,
+                lookupEvent     = lookupEvent,
+                lookupProfile   = lookupProfile,
+                fetchOgMetadata = fetchOgMetadata,
+                relayHints      = ref.relayHints,
+                modifier        = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
             )
@@ -1401,6 +1429,7 @@ private fun EmbeddedQuoteCard(
     onNoteClick: (String) -> Unit,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     relayHints: List<String> = emptyList(),
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
@@ -1475,47 +1504,84 @@ private fun EmbeddedQuoteCard(
                     (imetaVideoUrls + regexVideos).distinct().filter { it !in quotedImages }
                 }
 
-                // Strip nostr URIs, media URLs, and bare links for cleaner text
+                // Strip nostr URIs and media URLs for cleaner text (keep link URLs)
                 val cleanContent = remember(rawContent) {
                     rawContent
                         .let { NOSTR_URI_REGEX.replace(it, "") }
                         .let { IMAGE_URL_REGEX.replace(it, "") }
                         .let { VIDEO_URL_REGEX.replace(it, "") }
-                        .let { LINK_URL_REGEX.replace(it, "") }
                         .trim()
                 }
-                if (cleanContent.isNotBlank()) {
+                // Extract link URLs for OG preview
+                val linkUrls = remember(rawContent) {
+                    LINK_URL_REGEX.findAll(rawContent).map { it.value }
+                        .filter { url -> url !in quotedImages && url !in quotedVideos }
+                        .distinct().toList()
+                }
+                val displayText = remember(cleanContent) {
+                    LINK_URL_REGEX.replace(cleanContent, "").trim()
+                }
+                if (displayText.isNotBlank()) {
                     Text(
-                        text     = cleanContent,
-                        color    = Color.White.copy(alpha = 0.7f),
+                        text     = displayText,
+                        color    = Color.White.copy(alpha = 0.85f),
                         fontSize = 14.sp,
-                        lineHeight = 18.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 20.sp,
                     )
                 }
 
-                // First image preview (capped at 200dp)
+                // All images (grid for 2+, single full-width for 1)
                 if (quotedImages.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    AsyncImage(
-                        model              = quotedImages.first(),
-                        contentDescription = null,
-                        contentScale       = ContentScale.Crop,
-                        modifier           = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 200.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                    )
+                    Spacer(Modifier.height(6.dp))
+                    if (quotedImages.size == 1) {
+                        AsyncImage(
+                            model              = quotedImages.first(),
+                            contentDescription = null,
+                            contentScale       = ContentScale.Crop,
+                            modifier           = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 300.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                        )
+                    } else {
+                        // 2x2 grid for multiple images
+                        val gridImages = quotedImages.take(4)
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            for (rowIdx in gridImages.indices step 2) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    AsyncImage(
+                                        model              = gridImages[rowIdx],
+                                        contentDescription = null,
+                                        contentScale       = ContentScale.Crop,
+                                        modifier           = Modifier
+                                            .weight(1f)
+                                            .height(150.dp)
+                                            .clip(RoundedCornerShape(6.dp)),
+                                    )
+                                    if (rowIdx + 1 < gridImages.size) {
+                                        AsyncImage(
+                                            model              = gridImages[rowIdx + 1],
+                                            contentDescription = null,
+                                            contentScale       = ContentScale.Crop,
+                                            modifier           = Modifier
+                                                .weight(1f)
+                                                .height(150.dp)
+                                                .clip(RoundedCornerShape(6.dp)),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Video thumbnail placeholder (no autoplay in quotes)
                 if (quotedVideos.isNotEmpty() && quotedImages.isEmpty()) {
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(120.dp)
+                            .height(150.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF0A0A0A)),
                         contentAlignment = Alignment.Center,
@@ -1529,6 +1595,15 @@ private fun EmbeddedQuoteCard(
                     }
                 }
 
+                // OG link preview for first non-media URL
+                if (linkUrls.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    LinkPreviewCard(
+                        url             = linkUrls.first(),
+                        fetchOgMetadata = fetchOgMetadata,
+                    )
+                }
+
                 // Nested quote: render one level of quotes inside this quoted post
                 if (nestDepth < 1) {
                     val nestedEventRefs = remember(loadedEvent.content) {
@@ -1540,18 +1615,19 @@ private fun EmbeddedQuoteCard(
                     nestedEventRefs.forEach { ref ->
                         Spacer(Modifier.height(4.dp))
                         EmbeddedQuoteCard(
-                            eventId       = ref.eventId,
-                            onNoteClick   = onNoteClick,
-                            lookupEvent   = lookupEvent,
-                            lookupProfile = lookupProfile,
-                            relayHints    = ref.relayHints,
-                            nestDepth     = nestDepth + 1,
+                            eventId         = ref.eventId,
+                            onNoteClick     = onNoteClick,
+                            lookupEvent     = lookupEvent,
+                            lookupProfile   = lookupProfile,
+                            fetchOgMetadata = fetchOgMetadata,
+                            relayHints      = ref.relayHints,
+                            nestDepth       = nestDepth + 1,
                         )
                     }
                 }
             }
         } else {
-            // Fallback: minimal quote placeholder
+            // Fallback: event unavailable (e.g. bridge post never propagated)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector        = Icons.Filled.FormatQuote,
@@ -1561,7 +1637,7 @@ private fun EmbeddedQuoteCard(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text     = "Quoted post",
+                    text     = "Quoted post unavailable",
                     color    = TextSecondary,
                     fontSize = 13.sp,
                 )

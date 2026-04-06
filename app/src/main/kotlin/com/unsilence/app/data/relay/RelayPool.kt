@@ -1165,33 +1165,37 @@ class RelayPool @Inject constructor(
 
     /**
      * Fetch a single event by ID, connecting to [relayHints] first.
-     * Used for nostr:nevent relay hints — targets the hinted relays plus connected ones.
+     * Sends to hint relays AND broadcasts to connected relays as fallback
+     * (hint relay connections may not be open yet when REQ is sent).
      */
     fun fetchEventById(eventId: String, relayHints: List<String>) {
+        val now = System.currentTimeMillis()
+        val last = eventFetchInFlight[eventId]
+        if (last != null && (now - last) <= 30_000) return
+        eventFetchInFlight[eventId] = now
+
+        val subId = "hint-event-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+
+        // Send to hint relays (may still be connecting — REQ could be silently dropped)
         if (relayHints.isNotEmpty()) {
             connect(relayHints)
-            val hintConns = relayHints.mapNotNull { connections[normalizeRelayUrl(it)] }
-            if (hintConns.isNotEmpty()) {
-                val now = System.currentTimeMillis()
-                val last = eventFetchInFlight[eventId]
-                if (last != null && (now - last) <= 30_000) return
-                eventFetchInFlight[eventId] = now
-                val subId = "hint-event-${System.nanoTime()}"
-                _activeOneShotSubs.add(subId)
-                val req = buildJsonArray {
-                    add(JsonPrimitive("REQ"))
-                    add(JsonPrimitive(subId))
-                    add(buildJsonObject {
-                        put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
-                        put("limit", JsonPrimitive(1))
-                    })
-                }.toString()
-                hintConns.forEach { sendOneShotToRelay(it, req) }
-                Log.d(TAG, "fetchEventById: $eventId → ${hintConns.size} hinted relay(s)")
-                return
-            }
+            relayHints.mapNotNull { connections[normalizeRelayUrl(it)] }
+                .forEach { sendOneShotToRelay(it, req) }
         }
-        fetchEventById(eventId)
+
+        // Also broadcast to all connected relays as fallback — bridge events
+        // may only exist on relays not listed in the hint
+        connections.values.forEach { sendOneShotToRelay(it, req) }
+        Log.d(TAG, "fetchEventById: $eventId → hints=${relayHints.size} + ${connections.size} connected")
     }
 
     fun publish(eventJson: String) {
