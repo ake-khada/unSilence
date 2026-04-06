@@ -21,6 +21,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -86,14 +87,13 @@ class AppBootstrapper @Inject constructor(
      * don't interleave steps.
      */
     suspend fun bootstrap(pubkeyHex: String) = bootstrapMutex.withLock {
-        // EventProcessor drainers start in init{} with immutable kindHandlers —
-        // no registration race. Just start OutboxRouter's internal flows.
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 1 (0ms): Feed connections — user sees content ASAP
+        // ═══════════════════════════════════════════════════════════════════
         outboxRouter.start()
-
-        // ── Claim orphaned relay sets from migration (owner_pubkey = "") ─
         nostrRelaySetDao.claimOrphaned(pubkeyHex)
 
-        // ── Seed kind 99 indexer relays if none exist ───────────────────
+        // Seed kind 99 indexer relays if none exist
         val existingIndexers = relayConfigDao.getIndexerRelayUrls()
         if (existingIndexers.isEmpty()) {
             relayConfigDao.insertAll(
@@ -103,66 +103,38 @@ class AppBootstrapper @Inject constructor(
             )
         }
 
-        // ── Step 1: Connect to indexer relays ───────────────────────────────
-        // Indexer relays are bootstrap-only (kind-3, kind-10002 lookups) — NOT tagged
-        // PERSISTENT because they don't host feed subs.
+        // Step 1: Connect to indexer relays
         val indexerUrls = relayConfigDao.getIndexerRelayUrls()
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
-        Log.d(TAG, "Step 1: $ready indexer relay(s) connected")
+        Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
-        // ── Step 2: Fetch kind-3, wait for follows ──────────────────────────
+        // Step 2: Fetch kind-3, wait for follows
         relayPool.fetchFollowList(pubkeyHex)
         val follows = withTimeoutOrNull(10_000L) {
             followDao.followsFlow().filter { it.isNotEmpty() }.first()
         }
-        Log.d(TAG, "Step 2: ${follows?.size ?: 0} follows loaded")
+        Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded")
 
-        // ── Step 2b: Fetch profiles for all followed pubkeys ──────────────
-        // Preloads display names and avatars so the feed shows names, not hex.
-        // Includes own pubkey. No need to block — Room flows update reactively.
-        val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
-        profileResolver.request(followPubkeys.distinct())
-        Log.d(TAG, "Step 2b: requested ${followPubkeys.size} profiles")
-
-        // ── Step 3: Wait for own profile to arrive ────────────────────────
-        val profile = withTimeoutOrNull(10_000L) {
-            userDao.userFlow(pubkeyHex).filterNotNull().first()
-        }
-        Log.d(TAG, "Step 3: profile ${if (profile != null) "loaded" else "timeout"}")
-
-        // ── Step 4: Fetch kind-10002 (relay list) — wait for response ────────
-        // Record what we had before so we can detect when fresh data arrives.
+        // Step 3: Fetch kind-10002 (relay list) — wait for response
         val relaysBefore = relayConfigDao.getAllReadWriteRelays()
         relayPool.fetchRelayLists(listOf(pubkeyHex))
-        Log.d(TAG, "Step 4: kind-10002 requested (had ${relaysBefore.size} existing)")
-
-        // Wait up to 5s for kind-10002 to land in Room (new or updated data).
         val freshRelays = withTimeoutOrNull(5_000L) {
             if (relaysBefore.isEmpty()) {
-                // No existing data — wait for first non-empty emission
                 relayConfigDao.getReadWriteRelays()
                     .filter { it.isNotEmpty() }
                     .first()
             } else {
-                // Have existing data — wait for any change (new event overwrites)
                 relayConfigDao.getReadWriteRelays()
                     .filter { it != relaysBefore }
                     .first()
             }
         }
-        Log.d(TAG, "Step 4: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"}")
+        Log.d(TAG, "Phase1 Step3: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"}")
 
-        // ── Step 4b: Fetch NIP-51 relay ecosystem kinds ─────────────────────
-        // One-shot: blocked relays, search relays, favorites, relay sets.
-        // EventProcessor routes these through OutboxRouter handlers.
-        relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
-        Log.d(TAG, "Step 4b: NIP-51 relay kinds (10006/10007/10012/30002) requested")
-
-        // ── Step 4c: Pre-load blocked relays before opening global connections ──
+        // Step 4: Pre-load blocked relays before global connections
         relayPool.refreshBlockedRelays()
-        Log.d(TAG, "Step 4c: blocked relay snapshot loaded")
 
-        // ── Step 5: Connect to global relays (feed subscriptions) ───────────
+        // Step 5: Connect to global relays — feed subscriptions start HERE
         val readRelays = (freshRelays ?: relayConfigDao.getAllReadWriteRelays())
             .filter { it.marker == null || it.marker == "read" }
             .map { it.relayUrl }
@@ -172,9 +144,21 @@ class AppBootstrapper @Inject constructor(
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
         relayPool.connect(globalUrls, isHomeFeed = true)
-        Log.d(TAG, "Step 5: global relays connecting (${globalUrls.size} URLs)")
+        Log.d(TAG, "Phase1 complete: feed subs active (${globalUrls.size} relays)")
 
-        // ── Seed kind 10007 search relays if none exist after fetch ─────
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 2 (1000ms): Profile resolution + relay ecosystem
+        // ═══════════════════════════════════════════════════════════════════
+        delay(1000L)
+
+        val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
+        profileResolver.request(followPubkeys.distinct())
+        Log.d(TAG, "Phase2: requested ${followPubkeys.size} profiles")
+
+        relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
+        Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
+
+        // Seed kind 10007 search relays if none exist after fetch
         val existingSearch = relayConfigDao.searchRelayUrls()
         if (existingSearch.isEmpty()) {
             relayConfigDao.insertAll(
@@ -184,13 +168,16 @@ class AppBootstrapper @Inject constructor(
             )
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 3 (2500ms): Maintenance + media preconnect
+        // ═══════════════════════════════════════════════════════════════════
+        delay(1500L)
+
         maintenanceJob.start()
 
-        // One-time cleanup of JSON-spam events already in the database
         val spamRemoved = eventDao.pruneJsonSpam()
-        if (spamRemoved > 0) Log.d(TAG, "Cleaned $spamRemoved JSON-spam events")
+        if (spamRemoved > 0) Log.d(TAG, "Phase3: cleaned $spamRemoved JSON-spam events")
 
-        // Warm up DNS + TLS connection pools for common media CDNs (fire-and-forget)
         MediaPreconnect.warmUp(okHttpClient)
 
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
