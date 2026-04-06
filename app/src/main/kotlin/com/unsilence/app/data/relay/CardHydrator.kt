@@ -88,9 +88,13 @@ class CardHydrator @Inject constructor(
         if (events.isEmpty()) return
 
         val referencedIds = mutableSetOf<String>()
+        val relayHints = mutableMapOf<String, String>()  // eventId → relay hint
         for (event in events) {
             if (event.kind == 6) {
-                extractRepostTargetId(event.tags)?.let { referencedIds.add(it) }
+                extractRepostTargetId(event.tags)?.let { id ->
+                    referencedIds.add(id)
+                    extractRepostTargetRelay(event.tags)?.let { relay -> relayHints[id] = relay }
+                }
             }
             extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
         }
@@ -98,7 +102,13 @@ class CardHydrator @Inject constructor(
         // Fetch missing referenced events
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
         if (missingRefs.isNotEmpty()) {
+            // Broadcast fetch for all missing refs
             relayPool.fetchEventsByIds(missingRefs.toList())
+            // Also try relay hints for repost targets (bridge events may only exist there)
+            for (id in missingRefs) {
+                val hint = relayHints[id] ?: continue
+                relayPool.fetchEventById(id, listOf(hint))
+            }
         }
 
         // After ref events arrive, resolve their authors
@@ -144,6 +154,15 @@ class CardHydrator @Inject constructor(
         hydrateProfiles(events)
         hydrateRefs(events)
     }
+}
+
+/** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
+fun extractRepostTargetRelay(tagsJson: String): String? {
+    return try {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
+        eTag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+    } catch (_: Exception) { null }
 }
 
 /** Extract the repost target event ID from the first "e" tag in a tags JSON string. */
