@@ -36,9 +36,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -103,6 +105,16 @@ fun ProfileScreen(
     var showSettings    by remember { mutableStateOf(false) }
     var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    // Intercept avatar tap: own pubkey → scroll to top, other → navigate
+    val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
+        if (tappedPubkey == viewModel.pubkeyHex) {
+            scope.launch { listState.animateScrollToItem(0) }
+        } else {
+            onAuthorClick(tappedPubkey)
+        }
+    }
 
     // ── Shared video playback — replaces ~80 lines of duplicated state ────────
     val videoScope = rememberVideoPlaybackScope(
@@ -121,7 +133,7 @@ fun ProfileScreen(
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
-        onAuthorClick = onAuthorClick,
+        onAuthorClick = interceptedAuthorClick,
         onArticleClick = { articleRow = it },
         react = { id, pk -> actionsViewModel.react(id, pk) },
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
@@ -299,7 +311,7 @@ fun ProfileScreen(
                     NostrRichText(
                         content       = about,
                         lookupProfile = actionsViewModel::lookupProfile,
-                        onAuthorClick = onAuthorClick,
+                        onAuthorClick = interceptedAuthorClick,
                         onTextClick   = {},
                         maxLines      = 3,
                         overflow      = TextOverflow.Ellipsis,
