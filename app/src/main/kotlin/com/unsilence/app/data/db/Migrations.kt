@@ -53,6 +53,12 @@ val MIGRATION_13_14 = object : Migration(13, 14) {
     }
 }
 
+val MIGRATION_14_15 = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `event_stats` ADD COLUMN `updated_at` INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── Step 1: Migrate non-built-in relay sets to NIP-51 nostr_relay_sets ──

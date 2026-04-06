@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
@@ -78,6 +79,7 @@ class FeedViewModel @Inject constructor(
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val pinnedRelayDao: PinnedRelayDao,
     private val userDao: UserDao,
+    private val eventStatsDao: EventStatsDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -202,6 +204,7 @@ class FeedViewModel @Inject constructor(
         cardHydrator = cardHydrator,
         relayPool = relayPool,
         userDao = userDao,
+        eventStatsDao = eventStatsDao,
     )
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =

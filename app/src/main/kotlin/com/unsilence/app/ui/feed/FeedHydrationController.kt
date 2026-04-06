@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import android.util.Log
+import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.relay.CardHydrator
@@ -25,6 +26,7 @@ class FeedHydrationController(
     private val cardHydrator: CardHydrator,
     private val relayPool: RelayPool,
     private val userDao: UserDao,
+    private val eventStatsDao: EventStatsDao,
 ) {
     companion object {
         const val FAST_SCROLL_ENTER_PX_S = 2500f   // must exceed to enter FAST
@@ -40,6 +42,8 @@ class FeedHydrationController(
         const val SLOW_SCROLL_REF_CAP = 2              // max refs per SLOW_SCROLL pass
         const val BACKFILL_BATCH_SIZE = 15             // engagement backfill batch size
         const val BACKFILL_DELAY_MS = 2500L            // delay between backfill batches
+        const val ENGAGEMENT_STALE_MS = 5 * 60 * 1000L // 5 minutes — warm zone freshness threshold
+        const val WARM_ZONE_ENGAGEMENT_CAP = 5         // max warm zone engagement fetches per pass
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -67,6 +71,7 @@ class FeedHydrationController(
     private var refJob: Job? = null         // Phase 2: refs + thumbnails
     private var engagementJob: Job? = null
     private var backfillJob: Job? = null    // Background engagement accumulation
+    private var warmEngagementJob: Job? = null // Warm zone engagement pre-check
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -125,6 +130,7 @@ class FeedHydrationController(
         refJob?.cancel()
         engagementJob?.cancel()
         backfillJob?.cancel()
+        warmEngagementJob?.cancel()
         profileHydratedIds.clear()
         refHydratedIds.clear()
         engagementFetchedIds.clear()
@@ -318,6 +324,9 @@ class FeedHydrationController(
                 Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
             }
         }
+
+        // Warm zone engagement pre-check
+        checkWarmZoneEngagement(warmZone)
     }
 
     /**
@@ -349,6 +358,33 @@ class FeedHydrationController(
                 cardHydrator.hydrateRefs(toRef)
                 refHydratedIds.addAll(toRef.map { it.id })
                 Log.d(TAG, "IDLE: refs for ${toRef.size} items")
+            }
+        }
+
+        // Warm zone engagement pre-check (also in IDLE for items that arrived since last check)
+        checkWarmZoneEngagement(warmZone)
+    }
+
+    /**
+     * Warm zone engagement freshness check. For items entering the warm zone,
+     * checks if engagement data is fresh (updated_at < 5 min). Stale or missing
+     * items get a targeted engagement fetch. Max 5 items per pass.
+     * Runs in SLOW_SCROLL and IDLE — NOT FAST_SCROLL or WARM_CATCHUP.
+     */
+    private fun checkWarmZoneEngagement(warmZone: List<FeedRow>) {
+        if (warmZone.isEmpty() || warmEngagementJob?.isActive == true) return
+        val candidateIds = warmZone.map { it.id }
+            .filter { it !in engagementFetchedIds }
+        if (candidateIds.isEmpty()) return
+
+        warmEngagementJob = scope.launch(Dispatchers.IO) {
+            val threshold = System.currentTimeMillis() - ENGAGEMENT_STALE_MS
+            val freshIds = eventStatsDao.getFreshEngagementIds(candidateIds, threshold).toSet()
+            val staleIds = candidateIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
+            if (staleIds.isNotEmpty()) {
+                engagementFetchedIds.addAll(staleIds)
+                relayPool.fetchEngagementBatch(staleIds)
+                Log.d(TAG, "Warm zone engagement: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateIds.size - freshIds.size - staleIds.size} deferred)")
             }
         }
     }

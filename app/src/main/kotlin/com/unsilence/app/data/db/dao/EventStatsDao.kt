@@ -57,15 +57,25 @@ abstract class EventStatsDao {
         UPDATE event_stats SET
             reply_count = (SELECT COUNT(*) FROM events WHERE (reply_to_id = event_stats.event_id OR root_id = event_stats.event_id) AND kind = 1),
             repost_count = (SELECT COUNT(*) FROM events WHERE root_id = event_stats.event_id AND kind = 6),
-            reaction_count = (SELECT COUNT(*) FROM reactions WHERE target_event_id = event_stats.event_id)
+            reaction_count = (SELECT COUNT(*) FROM reactions WHERE target_event_id = event_stats.event_id),
+            updated_at = :now
     """)
-    abstract suspend fun recalculateCounts()
+    abstract suspend fun recalculateCounts(now: Long = System.currentTimeMillis())
 
     /**
      * Batch all stat updates into ONE Room transaction.
      * This triggers a single Room Flow re-emission instead of N separate ones.
      * Each pair is (eventId, updateType) where updateType is the stat to increment.
      */
+    @Query("UPDATE event_stats SET updated_at = :now WHERE event_id IN (:eventIds)")
+    abstract suspend fun touchUpdatedAt(eventIds: List<String>, now: Long)
+
+    /**
+     * Returns event IDs from [eventIds] that have fresh engagement data (updated within threshold).
+     */
+    @Query("SELECT event_id FROM event_stats WHERE event_id IN (:eventIds) AND updated_at > :threshold")
+    abstract suspend fun getFreshEngagementIds(eventIds: List<String>, threshold: Long): List<String>
+
     @Transaction
     open suspend fun batchIncrementStats(
         replyTargets: List<String>,
@@ -75,7 +85,8 @@ abstract class EventStatsDao {
     ) {
         // Ensure rows exist for all targets
         val allIds = replyTargets + repostTargets + reactionTargets + zapTargets.map { it.first }
-        for (id in allIds.distinct()) {
+        val distinctIds = allIds.distinct()
+        for (id in distinctIds) {
             insertOrIgnore(EventStatsEntity(eventId = id))
         }
         // Increment stats
@@ -83,5 +94,9 @@ abstract class EventStatsDao {
         for (id in repostTargets) incrementRepostCountInternal(id)
         for (id in reactionTargets) incrementReactionCountInternal(id)
         for ((id, sats) in zapTargets) incrementZapStatsInternal(id, sats)
+        // Mark updated
+        if (distinctIds.isNotEmpty()) {
+            touchUpdatedAt(distinctIds, System.currentTimeMillis())
+        }
     }
 }
