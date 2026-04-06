@@ -90,7 +90,9 @@ import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
 import com.unsilence.app.ui.feed.FilterScreen
+import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
+import com.unsilence.app.ui.notifications.NotificationsViewModel
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
@@ -152,12 +154,14 @@ fun AppNavigation(onLogout: () -> Unit) {
 
     val feedViewModel: FeedViewModel = hiltViewModel()
     val relayManagementVm: RelayManagementViewModel = hiltViewModel()
+    val notifViewModel: NotificationsViewModel = hiltViewModel()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
+    val notifFilter   by notifViewModel.filter.collectAsStateWithLifecycle()
 
     // Build the ordered feed list for the carousel
     val feedList = remember(hasFollows, pinnedRelays, userSets) {
@@ -240,6 +244,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                     )
                     2    -> NotificationsScreen(
                         onNoteClick = { eventId -> threadEventId = eventId },
+                        viewModel   = notifViewModel,
                     )
                     3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick)
                     else -> PlaceholderScreen()
@@ -273,37 +278,46 @@ fun AppNavigation(onLogout: () -> Unit) {
                         modifier = Modifier.align(Alignment.CenterStart),
                     )
 
-                    // Center: feed carousel
-                    FeedCarousel(
-                        feedList = feedList,
-                        currentFeedType = feedType,
-                        onFeedChanged = { feedViewModel.setFeedType(it) },
-                        onTap = { showFeedSheet = true },
-                        modifier = Modifier.align(Alignment.Center),
-                    )
+                    if (selectedTab == 2) {
+                        // Center: notification filter carousel
+                        NotifFilterCarousel(
+                            current = notifFilter,
+                            onChanged = { notifViewModel.setFilter(it) },
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    } else {
+                        // Center: feed carousel
+                        FeedCarousel(
+                            feedList = feedList,
+                            currentFeedType = feedType,
+                            onFeedChanged = { feedViewModel.setFeedType(it) },
+                            onTap = { showFeedSheet = true },
+                            modifier = Modifier.align(Alignment.Center),
+                        )
 
-                    // Right: action icons
-                    Row(
-                        modifier = Modifier.align(Alignment.CenterEnd),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
-                        verticalAlignment     = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector        = Icons.Filled.Tune,
-                            contentDescription = "Filter",
-                            tint               = if (currentFilter.isNonDefault) Cyan else Color.White.copy(alpha = 0.7f),
-                            modifier           = Modifier
-                                .size(Sizing.navIcon)
-                                .clickable { showFilter = true },
-                        )
-                        Icon(
-                            imageVector        = Icons.Filled.Edit,
-                            contentDescription = "New post",
-                            tint               = Color.White.copy(alpha = 0.7f),
-                            modifier           = Modifier
-                                .size(Sizing.navIcon)
-                                .clickable { showCompose = true },
-                        )
+                        // Right: action icons
+                        Row(
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                            horizontalArrangement = Arrangement.spacedBy(20.dp),
+                            verticalAlignment     = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector        = Icons.Filled.Tune,
+                                contentDescription = "Filter",
+                                tint               = if (currentFilter.isNonDefault) Cyan else Color.White.copy(alpha = 0.7f),
+                                modifier           = Modifier
+                                    .size(Sizing.navIcon)
+                                    .clickable { showFilter = true },
+                            )
+                            Icon(
+                                imageVector        = Icons.Filled.Edit,
+                                contentDescription = "New post",
+                                tint               = Color.White.copy(alpha = 0.7f),
+                                modifier           = Modifier
+                                    .size(Sizing.navIcon)
+                                    .clickable { showCompose = true },
+                            )
+                        }
                     }
                 }
             }
@@ -606,6 +620,104 @@ private fun FeedCarousel(
             ) {
                 Text(
                     text = feedList[realIdx].second,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+// ── Notification filter carousel (revolver only, no tap-to-open) ─────────
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NotifFilterCarousel(
+    current: NotifFilter,
+    onChanged: (NotifFilter) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val items = NotifFilter.entries
+    val realCount = items.size
+    val virtualCount = realCount * 10_000
+    val middleBase = (virtualCount / 2 / realCount) * realCount
+    val initialPage = middleBase + items.indexOf(current)
+
+    val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(pagerState.settledPage) {
+        val settled = items[pagerState.settledPage.mod(realCount)]
+        if (settled != current) onChanged(settled)
+    }
+
+    LaunchedEffect(current) {
+        val targetReal = items.indexOf(current)
+        val currentReal = pagerState.currentPage.mod(realCount)
+        if (targetReal != currentReal) {
+            pagerState.animateScrollToPage(pagerState.currentPage + (targetReal - currentReal))
+        }
+    }
+
+    val pageHeightDp = 26.dp
+
+    Box(
+        modifier = modifier
+            .height(pageHeightDp * 1.7f)
+            .widthIn(min = 80.dp, max = 150.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .pointerInput(pagerState) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    do {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: break
+                        if (change.pressed) {
+                            val dragY = change.positionChange().y
+                            change.consume()
+                            coroutineScope.launch { pagerState.scrollBy(-dragY) }
+                        } else {
+                            break
+                        }
+                    } while (true)
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(pagerState.currentPage)
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        VerticalPager(
+            state = pagerState,
+            pageSize = PageSize.Fixed(pageHeightDp),
+            beyondViewportPageCount = 1,
+            userScrollEnabled = false,
+            modifier = Modifier
+                .height(pageHeightDp * 1.7f)
+                .fillMaxWidth(),
+        ) { page ->
+            val realIdx = page.mod(realCount)
+            val pageOffset = ((pagerState.currentPage - page) +
+                pagerState.currentPageOffsetFraction).absoluteValue
+
+            Box(
+                modifier = Modifier
+                    .height(pageHeightDp)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
+                        val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
+                        scaleX = scale
+                        scaleY = scale
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = items[realIdx].name,
                     color = Color.White,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,

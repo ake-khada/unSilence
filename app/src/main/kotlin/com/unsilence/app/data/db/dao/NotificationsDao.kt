@@ -152,4 +152,116 @@ interface NotificationsDao {
         LIMIT 100
     """)
     fun notificationsFlow(userPubkey: String): Flow<List<NotificationRow>>
+
+    /**
+     * Same as [notificationsFlow] but filtered to only show notifications
+     * from users the current user follows (kind 3 contact list).
+     */
+    @Query("""
+        SELECT
+            r.event_id                  AS id,
+            'reaction'                  AS notif_type,
+            r.pubkey                    AS actor_pubkey,
+            u.name                      AS actor_name,
+            u.display_name              AS actor_display_name,
+            u.picture                   AS actor_picture,
+            r.target_event_id           AS target_note_id,
+            COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
+            r.created_at                AS created_at
+        FROM reactions r
+        LEFT JOIN users  u  ON u.pubkey = r.pubkey
+        LEFT JOIN events te ON te.id    = r.target_event_id
+        WHERE te.pubkey = :userPubkey
+          AND r.pubkey  != :userPubkey
+          AND r.pubkey IN (SELECT pubkey FROM follows)
+
+        UNION ALL
+
+        SELECT
+            ev.id                       AS id,
+            'reply'                     AS notif_type,
+            ev.pubkey                   AS actor_pubkey,
+            u.name                      AS actor_name,
+            u.display_name              AS actor_display_name,
+            u.picture                   AS actor_picture,
+            ev.id                       AS target_note_id,
+            COALESCE(ev.content, '')    AS target_note_content,
+            COALESCE(te.content, '')    AS parent_note_content,
+            ev.created_at               AS created_at
+        FROM events ev
+        LEFT JOIN users  u  ON u.pubkey  = ev.pubkey
+        LEFT JOIN events te ON te.id     = ev.reply_to_id
+        WHERE ev.kind    = 1
+          AND ev.pubkey != :userPubkey
+          AND ev.reply_to_id IN (SELECT id FROM events WHERE pubkey = :userPubkey)
+          AND ev.pubkey IN (SELECT pubkey FROM follows)
+
+        UNION ALL
+
+        SELECT
+            ev.id                       AS id,
+            'repost'                    AS notif_type,
+            ev.pubkey                   AS actor_pubkey,
+            u.name                      AS actor_name,
+            u.display_name              AS actor_display_name,
+            u.picture                   AS actor_picture,
+            ev.root_id                  AS target_note_id,
+            COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
+            ev.created_at               AS created_at
+        FROM events ev
+        LEFT JOIN users  u  ON u.pubkey = ev.pubkey
+        LEFT JOIN events te ON te.id    = ev.root_id
+        WHERE ev.kind    = 6
+          AND ev.pubkey != :userPubkey
+          AND ev.root_id IN (SELECT id FROM events WHERE pubkey = :userPubkey)
+          AND ev.pubkey IN (SELECT pubkey FROM follows)
+
+        UNION ALL
+
+        SELECT
+            ev.id                       AS id,
+            'zap'                       AS notif_type,
+            ev.pubkey                   AS actor_pubkey,
+            u.name                      AS actor_name,
+            u.display_name              AS actor_display_name,
+            u.picture                   AS actor_picture,
+            ev.root_id                  AS target_note_id,
+            COALESCE(te.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
+            ev.created_at               AS created_at
+        FROM events ev
+        LEFT JOIN users  u  ON u.pubkey = ev.pubkey
+        LEFT JOIN events te ON te.id    = ev.root_id
+        WHERE ev.kind    = 9735
+          AND ev.root_id IN (SELECT id FROM events WHERE pubkey = :userPubkey)
+          AND ev.pubkey IN (SELECT pubkey FROM follows)
+
+        UNION ALL
+
+        SELECT
+            ev.id                       AS id,
+            'mention'                   AS notif_type,
+            ev.pubkey                   AS actor_pubkey,
+            u.name                      AS actor_name,
+            u.display_name              AS actor_display_name,
+            u.picture                   AS actor_picture,
+            ev.id                       AS target_note_id,
+            COALESCE(ev.content, '')    AS target_note_content,
+            ''                          AS parent_note_content,
+            ev.created_at               AS created_at
+        FROM events ev
+        LEFT JOIN users u ON u.pubkey = ev.pubkey
+        WHERE ev.kind    = 1
+          AND ev.pubkey != :userPubkey
+          AND ev.tags LIKE '%"p","' || :userPubkey || '"%'
+          AND (ev.reply_to_id IS NULL
+               OR ev.reply_to_id NOT IN (SELECT id FROM events WHERE pubkey = :userPubkey))
+          AND ev.pubkey IN (SELECT pubkey FROM follows)
+
+        ORDER BY created_at DESC
+        LIMIT 100
+    """)
+    fun notificationsFollowingFlow(userPubkey: String): Flow<List<NotificationRow>>
 }
