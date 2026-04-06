@@ -92,6 +92,7 @@ import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.relay.extractRepostTargetId
+import com.unsilence.app.data.relay.extractRepostTargetRelay
 import com.unsilence.app.ui.common.IdentIcon
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
@@ -118,9 +119,9 @@ import java.util.concurrent.TimeUnit
 internal val ActionTint = Color(0xFF555555)
 private val MediaPlaceholder = Color(0xFF1A1A1A)
 
-// Matches URLs ending in image extensions, or from known Nostr image hosts.
+// Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
 private val IMAGE_URL_REGEX = Regex(
-    """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+""",
+    """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+|https?://\S+/xrpc/com\.atproto\.sync\.getBlob\?\S+""",
     RegexOption.IGNORE_CASE,
 )
 
@@ -240,9 +241,10 @@ fun NoteCard(
     // For kind 6 with no embedded JSON (bridges like mostr.pub), fetch the
     // referenced event via the e-tag so the card renders actual content.
     val repostTargetId = if (row.kind == 6) extractRepostTargetId(row.tags) else null
+    val repostRelayHint = if (row.kind == 6) extractRepostTargetRelay(row.tags) else null
     val fetchedRepostEvent by produceState<EventEntity?>(null, row.id) {
         if (row.kind == 6 && boostedJson == null && repostTargetId != null && lookupEvent != null) {
-            value = lookupEvent.invoke(repostTargetId, emptyList())
+            value = lookupEvent.invoke(repostTargetId, listOfNotNull(repostRelayHint))
         }
     }
 
@@ -294,7 +296,9 @@ fun NoteCard(
         // 3. Extract image URLs from remaining content.
         val afterVideos    = VIDEO_URL_REGEX.replace(afterYoutube, "")
         val regexImageUrls = IMAGE_URL_REGEX.findAll(afterVideos).map { it.value }.toList()
-        val imetaImageUrls = imetaMedia.filter { it.mimeType?.startsWith("image/") == true }.map { it.url }
+        val imetaImageUrls = imetaMedia
+            .filter { it.mimeType?.startsWith("image/") == true || (it.mimeType == null && !isDirectVideoUrl(it.url)) }
+            .map { it.url }
         val allImageUrls   = (regexImageUrls + imetaImageUrls).distinct()
                                  .filter { it !in allVideoUrls }
 
