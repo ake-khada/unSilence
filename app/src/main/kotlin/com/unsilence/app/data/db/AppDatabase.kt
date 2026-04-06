@@ -47,7 +47,7 @@ import com.unsilence.app.data.db.entity.UserEntity
         CoverageEntity::class,
         PinnedRelayEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

@@ -12,4 +12,5 @@ data class EventStatsEntity(
     @ColumnInfo(name = "reaction_count") val reactionCount: Int = 0,
     @ColumnInfo(name = "zap_count") val zapCount: Int = 0,
     @ColumnInfo(name = "zap_total_sats") val zapTotalSats: Long = 0,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = 0,
 )
