@@ -10,10 +10,10 @@ data class FeedFilter(
     val showKind21: Boolean = true,
     val showKind30023: Boolean = true,
     val sinceHours: Int? = null,
-    val requireReposts: Boolean = false,
-    val requireReactions: Boolean = false,
-    val requireReplies: Boolean = false,
-    val requireZaps: Boolean = false,
+    val minReplies: Int = 0,
+    val minReposts: Int = 0,
+    val minReactions: Int = 0,
+    val minZapSats: Long = 0,
 ) {
     /** Kinds enabled by this filter. */
     val enabledKinds: List<Int> get() = buildList {
@@ -27,7 +27,7 @@ data class FeedFilter(
     /** True when any field differs from the defaults (used for the filter dot). */
     val isNonDefault: Boolean get() =
         sinceHours != null ||
-        requireReposts || requireReactions || requireReplies || requireZaps ||
+        minReplies > 0 || minReposts > 0 || minReactions > 0 || minZapSats > 0 ||
         !showKind1 || !showKind6 || !showKind20 || !showKind21 || !showKind30023
 
     companion object {

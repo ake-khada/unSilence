@@ -29,15 +29,15 @@ class EventRepository @Inject constructor(
             System.currentTimeMillis() / 1000L - it * 3600L
         } ?: 0L
         return eventDao.feedFlow(
-            relayUrls        = relayUrls,
-            kinds            = filter.enabledKinds,
-            sinceTimestamp   = sinceTimestamp,
-            contentFilter    = contentFilter,
-            requireReposts   = if (filter.requireReposts)   1 else 0,
-            requireReactions = if (filter.requireReactions) 1 else 0,
-            requireReplies   = if (filter.requireReplies)   1 else 0,
-            requireZaps      = if (filter.requireZaps)      1 else 0,
-            limit            = limit,
+            relayUrls      = relayUrls,
+            kinds          = filter.enabledKinds,
+            sinceTimestamp = sinceTimestamp,
+            contentFilter  = contentFilter,
+            minReplies     = filter.minReplies,
+            minReposts     = filter.minReposts,
+            minReactions   = filter.minReactions,
+            minZapSats     = filter.minZapSats,
+            limit          = limit,
         )
     }
 
@@ -49,14 +49,14 @@ class EventRepository @Inject constructor(
             (System.currentTimeMillis() / 1000) - (it * 3600L)
         } ?: 0L
         return eventDao.followingFeedFlow(
-            kinds            = filter.enabledKinds,
-            sinceTimestamp   = sinceTimestamp,
-            contentFilter    = contentFilter,
-            requireReposts   = if (filter.requireReposts)   1 else 0,
-            requireReactions = if (filter.requireReactions) 1 else 0,
-            requireReplies   = if (filter.requireReplies)   1 else 0,
-            requireZaps      = if (filter.requireZaps)      1 else 0,
-            limit            = limit,
+            kinds          = filter.enabledKinds,
+            sinceTimestamp = sinceTimestamp,
+            contentFilter  = contentFilter,
+            minReplies     = filter.minReplies,
+            minReposts     = filter.minReposts,
+            minReactions   = filter.minReactions,
+            minZapSats     = filter.minZapSats,
+            limit          = limit,
         )
     }
 
