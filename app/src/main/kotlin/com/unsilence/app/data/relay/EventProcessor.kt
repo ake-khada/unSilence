@@ -445,17 +445,27 @@ class EventProcessor @Inject constructor(
         // re-emission instead of 6+ separate ones (events, users, reactions, tags,
         // relays, stats). This is the single biggest Room performance improvement.
         database.withTransaction {
-        // Single batch insert per table — one SQLite write-lock acquisition instead of N
-        if (events.isNotEmpty())    eventDao.insertOrIgnoreBatch(events.values.toList())
+        // Single batch insert per table — one SQLite write-lock acquisition instead of N.
+        // insertOrIgnoreBatch returns row IDs: -1 = already existed (duplicate).
+        val eventList = events.values.toList()
+        val eventRowIds = if (eventList.isNotEmpty()) eventDao.insertOrIgnoreBatch(eventList) else emptyList()
         if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
-        if (reactions.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactions.values.toList())
+        val reactionList = reactions.values.toList()
+        val reactionRowIds = if (reactionList.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactionList) else emptyList()
 
-        // Collect all tags and relay entries across events, then batch-insert once
-        val allRelayEntities = ArrayList<EventRelayEntity>(events.size)
-        val allTagEntities   = ArrayList<TagEntity>(events.size * 4) // ~4 tags per event avg
+        // Build set of newly inserted event IDs (row ID != -1)
+        val newEventIds = HashSet<String>(eventList.size)
+        for (i in eventRowIds.indices) {
+            if (eventRowIds[i] != -1L) newEventIds.add(eventList[i].id)
+        }
 
-        for (entity in events.values) {
-            // Relay provenance
+        // Collect all tags and relay entries across ALL events (provenance even for dupes),
+        // then batch-insert once
+        val allRelayEntities = ArrayList<EventRelayEntity>(eventList.size)
+        val allTagEntities   = ArrayList<TagEntity>(eventList.size * 4) // ~4 tags per event avg
+
+        for (entity in eventList) {
+            // Relay provenance — always record, even for duplicates
             allRelayEntities.add(
                 EventRelayEntity(
                     eventId = entity.id,
@@ -464,7 +474,8 @@ class EventProcessor @Inject constructor(
                 )
             )
 
-            // Parse tags
+            // Parse tags — only for newly inserted events
+            if (entity.id !in newEventIds) continue
             try {
                 val tagsArray = NostrJson.parseToJsonElement(entity.tags).jsonArray
                 for (index in 0 until tagsArray.size) {
@@ -487,13 +498,14 @@ class EventProcessor @Inject constructor(
         if (allRelayEntities.isNotEmpty()) eventRelayDao.insertAll(allRelayEntities)
         if (allTagEntities.isNotEmpty())   tagDao.insertAll(allTagEntities)
 
-        // Collect all stat updates, then batch into ONE Room transaction.
-        // This triggers a single Room Flow re-emission instead of N separate ones.
+        // Only increment stats for NEWLY INSERTED events — prevents double-counting
+        // when the same event arrives from multiple relays or across app restarts.
         val replyTargets = mutableListOf<String>()
         val repostTargets = mutableListOf<String>()
         val zapTargets = mutableListOf<Pair<String, Long>>()
 
-        for (entity in events.values) {
+        for (entity in eventList) {
+            if (entity.id !in newEventIds) continue
             when (entity.kind) {
                 1 -> {
                     entity.replyToId?.let { replyTargets.add(it) }
@@ -513,7 +525,10 @@ class EventProcessor @Inject constructor(
             }
         }
 
-        val reactionTargets = reactions.values.map { it.targetEventId }
+        // Only count reactions that were newly inserted
+        val reactionTargets = reactionRowIds.indices
+            .filter { reactionRowIds[it] != -1L }
+            .map { reactionList[it].targetEventId }
 
         if (replyTargets.isNotEmpty() || repostTargets.isNotEmpty() ||
             reactionTargets.isNotEmpty() || zapTargets.isNotEmpty()) {

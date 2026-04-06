@@ -50,6 +50,18 @@ abstract class EventStatsDao {
     }
 
     /**
+     * Recalculate all engagement counts from actual events. Fixes inflated stats
+     * caused by double-counting when duplicate events were processed across restarts.
+     */
+    @Query("""
+        UPDATE event_stats SET
+            reply_count = (SELECT COUNT(*) FROM events WHERE (reply_to_id = event_stats.event_id OR root_id = event_stats.event_id) AND kind = 1),
+            repost_count = (SELECT COUNT(*) FROM events WHERE root_id = event_stats.event_id AND kind = 6),
+            reaction_count = (SELECT COUNT(*) FROM reactions WHERE target_event_id = event_stats.event_id)
+    """)
+    abstract suspend fun recalculateCounts()
+
+    /**
      * Batch all stat updates into ONE Room transaction.
      * This triggers a single Room Flow re-emission instead of N separate ones.
      * Each pair is (eventId, updateType) where updateType is the stat to increment.
