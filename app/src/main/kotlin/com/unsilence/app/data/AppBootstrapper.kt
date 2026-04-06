@@ -5,6 +5,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.EventDao
+import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
@@ -67,6 +68,7 @@ class AppBootstrapper @Inject constructor(
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
     private val nostrRelaySetDao: NostrRelaySetDao,
+    private val eventStatsDao: EventStatsDao,
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
 ) {
@@ -177,6 +179,9 @@ class AppBootstrapper @Inject constructor(
 
         val spamRemoved = eventDao.pruneJsonSpam()
         if (spamRemoved > 0) Log.d(TAG, "Phase3: cleaned $spamRemoved JSON-spam events")
+
+        eventStatsDao.recalculateCounts()
+        Log.d(TAG, "Phase3: recalculated engagement counts")
 
         MediaPreconnect.warmUp(okHttpClient)
 

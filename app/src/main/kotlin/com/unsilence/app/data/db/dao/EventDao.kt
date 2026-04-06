@@ -44,9 +44,9 @@ interface EventDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertOrIgnore(event: EventEntity)
 
-    /** Batch insert for the event pipeline. Room wraps the list insert in a single transaction. */
+    /** Batch insert for the event pipeline. Returns row IDs; -1 = already existed (ignored). */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertOrIgnoreBatch(events: List<EventEntity>)
+    suspend fun insertOrIgnoreBatch(events: List<EventEntity>): List<Long>
 
     /**
      * Feed query: events seen on any of [relayUrls] (via the event_relays junction

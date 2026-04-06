@@ -13,9 +13,9 @@ interface ReactionDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertOrIgnore(reaction: ReactionEntity)
 
-    /** Batch insert for the event pipeline. Room wraps the list insert in a single transaction. */
+    /** Batch insert for the event pipeline. Returns row IDs; -1 = already existed (ignored). */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertOrIgnoreBatch(reactions: List<ReactionEntity>)
+    suspend fun insertOrIgnoreBatch(reactions: List<ReactionEntity>): List<Long>
 
     /**
      * All event IDs that [pubkey] has reacted to.
