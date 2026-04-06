@@ -36,6 +36,8 @@ class FeedHydrationController(
         const val ENGAGEMENT_REFRESH_INTERVAL_MS = 30_000L
         const val REF_DEBOUNCE_MS = 500L               // IDLE
         const val REF_DEBOUNCE_SLOW_SCROLL_MS = 2000L  // SLOW_SCROLL — refs can wait while browsing
+        const val SLOW_SCROLL_PROFILE_CAP = 4          // max profiles per SLOW_SCROLL pass
+        const val SLOW_SCROLL_REF_CAP = 2              // max refs per SLOW_SCROLL pass
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -124,6 +126,7 @@ class FeedHydrationController(
         lastTransitionTime = 0L
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
+        startCatchupTimeout()
         Log.d(TAG, "Reset → WARM_CATCHUP")
     }
 
@@ -224,12 +227,22 @@ class FeedHydrationController(
         when (to) {
             ScrollState.IDLE -> startIdleEngagement()
             ScrollState.WARM_CATCHUP -> startCatchupTimeout()
+            ScrollState.SLOW_SCROLL -> {
+                // Auto-start idle timer so engagement fetches even without user scrolling.
+                // If user starts scrolling, onScrollStarted() cancels this.
+                idleTimerJob?.cancel()
+                idleTimerJob = scope.launch {
+                    delay(IDLE_TIMEOUT_MS)
+                    if (state == ScrollState.SLOW_SCROLL) {
+                        transitionTo(ScrollState.IDLE)
+                    }
+                }
+            }
             ScrollState.FAST_SCROLL -> {
                 // Cancel all hydration work immediately — total blackout
                 profileJob?.cancel()
                 refJob?.cancel()
             }
-            else -> {}
         }
     }
 
@@ -253,26 +266,31 @@ class FeedHydrationController(
 
     /**
      * SLOW_SCROLL: Phase 1 first for warm zone, then Phase 2 for items
-     * that already have profiles resolved.
+     * that already have profiles resolved. Hard-capped per pass to avoid
+     * competing with UI layout during scroll.
      */
     private fun handleSlowScroll() {
         val warmZone = computeWarmZone()
         val combined = lastVisibleItems + warmZone
+        val viewportCenter = lastVisibleItems.size / 2
 
-        // Phase 1: profiles for anything not yet profile-hydrated
+        // Phase 1: profiles — max 4 per pass, closest to viewport center first
         val toProfile = combined.filter { it.id !in profileHydratedIds }
+            .sortedByProximity(combined, viewportCenter)
+            .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
             profileJob = scope.launch(Dispatchers.IO) {
                 cardHydrator.hydrateProfiles(toProfile)
                 profileHydratedIds.addAll(toProfile.map { it.id })
-                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items")
+                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (capped from ${combined.count { it.id !in profileHydratedIds }})")
             }
         }
 
-        // Phase 2: refs + thumbnails only for items already profile-hydrated
-        // 2000ms debounce during SLOW_SCROLL — user is browsing, refs can wait
+        // Phase 2: refs — max 2 per pass, 2000ms debounce
         val now = System.currentTimeMillis()
         val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
+            .sortedByProximity(combined, viewportCenter)
+            .take(SLOW_SCROLL_REF_CAP)
         if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
             lastRefStartTime = now
             refJob = scope.launch(Dispatchers.IO) {
@@ -319,6 +337,11 @@ class FeedHydrationController(
     private fun startIdleEngagement() {
         engagementJob = scope.launch(Dispatchers.IO) {
             // Initial engagement fetch for visible items
+            fetchEngagementForVisible()
+
+            // Quick recheck after 2s — list may still be populating at IDLE entry
+            delay(2_000L)
+            if (state != ScrollState.IDLE) return@launch
             fetchEngagementForVisible()
 
             // Stale refresh loop every 30s while IDLE
@@ -372,6 +395,24 @@ class FeedHydrationController(
 
     fun onScrollStarted() {
         idleTimerJob?.cancel()
+    }
+
+    // ── Proximity sorting ────────────────────────────────────────────
+
+    /**
+     * Sort items by their proximity to the viewport center in the combined list.
+     * Items closest to center are prioritized — they're what the user sees first.
+     */
+    private fun List<FeedRow>.sortedByProximity(
+        combined: List<FeedRow>,
+        centerIndex: Int,
+    ): List<FeedRow> {
+        if (size <= 1) return this
+        val positionMap = combined.withIndex().associate { (i, row) -> row.id to i }
+        return sortedBy { item ->
+            val pos = positionMap[item.id] ?: Int.MAX_VALUE
+            kotlin.math.abs(pos - centerIndex)
+        }
     }
 
     // ── Zone computation ──────────────────────────────────────────────
