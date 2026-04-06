@@ -40,12 +40,6 @@ class CardHydrator @Inject constructor(
     private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
 ) {
-    // Reusable collections — cleared at start of each call. Safe because
-    // FeedHydrationController serializes profileJob/refJob (one at a time).
-    private val reusePubkeys = mutableSetOf<String>()
-    private val reuseProfileHints = mutableMapOf<String, MutableList<String>>()
-    private val reuseRefIds = mutableSetOf<String>()
-    private val reuseRelayHints = mutableMapOf<String, String>()
     /**
      * Phase 1: Profile resolution only — avatar, name, identity.
      * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
@@ -54,33 +48,33 @@ class CardHydrator @Inject constructor(
     suspend fun hydrateProfiles(events: List<FeedRow>) {
         if (events.isEmpty()) return
 
-        reusePubkeys.clear()
-        reuseProfileHints.clear()
+        val pubkeys = mutableSetOf<String>()
+        val profileHints = mutableMapOf<String, MutableList<String>>()
 
         for (event in events) {
-            reusePubkeys.add(event.pubkey)
+            pubkeys.add(event.pubkey)
             if (event.kind == 6) {
-                extractRepostAuthorPubkey(event.content, event.tags)?.let { reusePubkeys.add(it) }
+                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
             }
             extractProfileHints(event.content).forEach { (pk, relays) ->
-                reusePubkeys.add(pk)
-                reuseProfileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
+                pubkeys.add(pk)
+                profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
             }
         }
 
-        if (reusePubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(reusePubkeys.toList())
+        if (pubkeys.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(pubkeys.toList())
 
             val sourceRelays = events.map { it.relayUrl }.distinct()
             if (sourceRelays.isNotEmpty()) {
-                relayPool.fetchProfilesFromSourceRelays(reusePubkeys.toList(), sourceRelays)
+                relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
             }
         }
-        if (reuseProfileHints.isNotEmpty()) {
-            relayPool.fetchProfilesFromHints(reuseProfileHints.mapValues { it.value.distinct() })
+        if (profileHints.isNotEmpty()) {
+            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
         }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${reusePubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
+        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
     }
 
     /**
@@ -91,26 +85,26 @@ class CardHydrator @Inject constructor(
     suspend fun hydrateRefs(events: List<FeedRow>) {
         if (events.isEmpty()) return
 
-        reuseRefIds.clear()
-        reuseRelayHints.clear()
+        val referencedIds = mutableSetOf<String>()
+        val relayHints = mutableMapOf<String, String>()
         for (event in events) {
             if (event.kind == 6) {
                 extractRepostTargetId(event.tags)?.let { id ->
-                    reuseRefIds.add(id)
-                    extractRepostTargetRelay(event.tags)?.let { relay -> reuseRelayHints[id] = relay }
+                    referencedIds.add(id)
+                    extractRepostTargetRelay(event.tags)?.let { relay -> relayHints[id] = relay }
                 }
             }
-            extractQuotedEventIds(event.content).forEach { reuseRefIds.add(it) }
+            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
         }
 
         // Fetch missing referenced events
-        val missingRefs = reuseRefIds.filter { eventDao.getEventById(it) == null }
+        val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
         if (missingRefs.isNotEmpty()) {
             // Broadcast fetch for all missing refs
             relayPool.fetchEventsByIds(missingRefs.toList())
             // Also try relay hints for repost targets (bridge events may only exist there)
             for (id in missingRefs) {
-                val hint = reuseRelayHints[id] ?: continue
+                val hint = relayHints[id] ?: continue
                 relayPool.fetchEventById(id, listOf(hint))
             }
         }
@@ -146,7 +140,7 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${reuseRefIds.size} refs (${missingRefs.size} missing), $thumbnailCount thumbnails")
+        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing), $thumbnailCount thumbnails")
     }
 
     /**
