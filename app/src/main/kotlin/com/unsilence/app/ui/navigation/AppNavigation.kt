@@ -89,7 +89,7 @@ import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
-import com.unsilence.app.ui.feed.FilterScreen
+import com.unsilence.app.ui.feed.FilterBottomSheet
 import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.notifications.NotificationsViewModel
@@ -408,9 +408,9 @@ fun AppNavigation(onLogout: () -> Unit) {
                 )
             }
 
-            // ── Filter overlay ────────────────────────────────────────────────
+            // ── Filter bottom sheet ───────────────────────────────────────────
             if (showFilter) {
-                FilterScreen(
+                FilterBottomSheet(
                     currentFilter = currentFilter,
                     onApply       = { filter -> feedViewModel.updateFilter(filter) },
                     onDismiss     = { showFilter = false },

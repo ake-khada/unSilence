@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,26 +9,24 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,187 +40,258 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
-import com.unsilence.app.ui.theme.Sizing
-import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.TextSecondary
 
-@OptIn(ExperimentalLayoutApi::class)
+// ── Zap slider breakpoints (sats) ───────────────────────────────────────────
+private val ZAP_BREAKPOINTS = longArrayOf(
+    0, 100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 210_000, 500_000, 1_000_000, 5_000_000,
+)
+
+private fun zapSliderToSats(fraction: Float): Long {
+    val idx = (fraction * (ZAP_BREAKPOINTS.size - 1)).toInt()
+        .coerceIn(0, ZAP_BREAKPOINTS.size - 1)
+    return ZAP_BREAKPOINTS[idx]
+}
+
+private fun satsToZapSlider(sats: Long): Float {
+    val idx = ZAP_BREAKPOINTS.indexOfFirst { it >= sats }.coerceAtLeast(0)
+    return idx.toFloat() / (ZAP_BREAKPOINTS.size - 1).toFloat()
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun FilterScreen(
+fun FilterBottomSheet(
     currentFilter: FeedFilter,
     onApply: (FeedFilter) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    BackHandler(onBack = onDismiss)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    var sinceHours       by remember { mutableStateOf(currentFilter.sinceHours) }
-    var requireReposts   by remember { mutableStateOf(currentFilter.requireReposts) }
-    var requireReactions by remember { mutableStateOf(currentFilter.requireReactions) }
-    var requireReplies   by remember { mutableStateOf(currentFilter.requireReplies) }
-    var requireZaps      by remember { mutableStateOf(currentFilter.requireZaps) }
-    var showKind1        by remember { mutableStateOf(currentFilter.showKind1) }
-    var showKind6        by remember { mutableStateOf(currentFilter.showKind6) }
-    var showKind20       by remember { mutableStateOf(currentFilter.showKind20) }
-    var showKind21       by remember { mutableStateOf(currentFilter.showKind21) }
-    var showKind30023    by remember { mutableStateOf(currentFilter.showKind30023) }
+    // Local editable state
+    var showKind1     by remember { mutableStateOf(currentFilter.showKind1) }
+    var showKind6     by remember { mutableStateOf(currentFilter.showKind6) }
+    var showKind20    by remember { mutableStateOf(currentFilter.showKind20) }
+    var showKind21    by remember { mutableStateOf(currentFilter.showKind21) }
+    var showKind30023 by remember { mutableStateOf(currentFilter.showKind30023) }
+    var sinceHours    by remember { mutableStateOf(currentFilter.sinceHours) }
+    var minReplies    by remember { mutableFloatStateOf(currentFilter.minReplies.toFloat()) }
+    var minReposts    by remember { mutableFloatStateOf(currentFilter.minReposts.toFloat()) }
+    var minReactions  by remember { mutableFloatStateOf(currentFilter.minReactions.toFloat()) }
+    var zapSlider     by remember { mutableFloatStateOf(satsToZapSlider(currentFilter.minZapSats)) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Black),
+    fun buildFilter() = FeedFilter(
+        showKind1     = showKind1,
+        showKind6     = showKind6,
+        showKind20    = showKind20,
+        showKind21    = showKind21,
+        showKind30023 = showKind30023,
+        sinceHours    = sinceHours,
+        minReplies    = minReplies.toInt(),
+        minReposts    = minReposts.toInt(),
+        minReactions  = minReactions.toInt(),
+        minZapSats    = zapSliderToSats(zapSlider),
+    )
+
+    fun reset() {
+        showKind1     = true
+        showKind6     = true
+        showKind20    = true
+        showKind21    = true
+        showKind30023 = true
+        sinceHours    = null
+        minReplies    = 0f
+        minReposts    = 0f
+        minReactions  = 0f
+        zapSlider     = 0f
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = {
+            onApply(buildFilter())
+            onDismiss()
+        },
+        sheetState     = sheetState,
+        containerColor = Color(0xFF0E0E0E),
+        shape          = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        dragHandle     = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .size(width = 32.dp, height = 4.dp)
+                    .background(Color(0xFF333333), RoundedCornerShape(2.dp)),
+            )
+        },
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(bottom = 16.dp),
         ) {
-            // ── Top bar ────────────────────────────────────────────────────────
+            // ── SHOW section ─────────────────────────────────────────────
+            SectionLabel("SHOW")
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement   = Arrangement.spacedBy(8.dp),
+            ) {
+                val allSelected = showKind1 && showKind6 && showKind20 && showKind21 && showKind30023
+                FilterChip("All", allSelected) {
+                    showKind1 = true; showKind6 = true; showKind20 = true
+                    showKind21 = true; showKind30023 = true
+                }
+                FilterChip("Notes", showKind1 && !allSelected) {
+                    showKind1 = !showKind1
+                }
+                FilterChip("Reposts", showKind6 && !allSelected) {
+                    showKind6 = !showKind6
+                }
+                FilterChip("Pictures", showKind20 && !allSelected) {
+                    showKind20 = !showKind20
+                }
+                FilterChip("Videos", showKind21 && !allSelected) {
+                    showKind21 = !showKind21
+                }
+                FilterChip("Articles", showKind30023 && !allSelected) {
+                    showKind30023 = !showKind30023
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ── WHEN section ─────────────────────────────────────────────
+            SectionLabel("WHEN")
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement   = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    1 to "1h", 6 to "6h", 24 to "24h",
+                    168 to "Week", 720 to "Month", null to "All",
+                ).forEach { (hours, label) ->
+                    FilterChip(label, sinceHours == hours) { sinceHours = hours }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ── ENGAGEMENT section ───────────────────────────────────────
+            SectionLabel("ENGAGEMENT")
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                EngagementSlider(
+                    label = "\uD83D\uDCAC Replies",
+                    value = minReplies,
+                    onValueChange = { minReplies = it },
+                    range = 0f..100f,
+                    steps = 99,
+                    displayValue = minReplies.toInt().toString(),
+                )
+                EngagementSlider(
+                    label = "\uD83D\uDD04 Reposts",
+                    value = minReposts,
+                    onValueChange = { minReposts = it },
+                    range = 0f..100f,
+                    steps = 99,
+                    displayValue = minReposts.toInt().toString(),
+                )
+                EngagementSlider(
+                    label = "\u2764\uFE0F Reactions",
+                    value = minReactions,
+                    onValueChange = { minReactions = it },
+                    range = 0f..100f,
+                    steps = 99,
+                    displayValue = minReactions.toInt().toString(),
+                )
+                EngagementSlider(
+                    label = "\u26A1 Zaps (sats)",
+                    value = zapSlider,
+                    onValueChange = { zapSlider = it },
+                    range = 0f..1f,
+                    steps = ZAP_BREAKPOINTS.size - 2,
+                    displayValue = zapSliderToSats(zapSlider).toCompactSats(),
+                )
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ── Actions ──────────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
-                    .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.small),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint               = Color.White,
-                    )
+                TextButton(onClick = { reset() }) {
+                    Text("Reset", color = Color(0xFF888888), fontSize = 14.sp)
                 }
-                Text(
-                    text       = "Filter",
-                    color      = Color.White,
-                    fontSize   = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier   = Modifier.weight(1f),
-                )
                 TextButton(onClick = {
-                    sinceHours       = null
-                    requireReposts   = false
-                    requireReactions = false
-                    requireReplies   = false
-                    requireZaps      = false
-                    showKind1        = true
-                    showKind6        = true
-                    showKind20       = true
-                    showKind21       = true
-                    showKind30023    = true
+                    onApply(buildFilter())
+                    onDismiss()
                 }) {
-                    Text("Reset", color = Cyan, fontSize = 14.sp)
-                }
-            }
-
-            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
-
-            // ── Time range ────────────────────────────────────────────────────
-            Text(
-                text     = "Time range",
-                color    = TextSecondary,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            )
-            FlowRow(
-                modifier            = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.medium),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement   = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(6 to "6H", 12 to "12H", 24 to "1D", 72 to "3D", 168 to "1W", 720 to "1M", null to "All")
-                    .forEach { (hours, label) ->
-                        FilterChip(
-                            label    = label,
-                            selected = sinceHours == hours,
-                            onClick  = { sinceHours = hours },
-                        )
-                    }
-            }
-
-            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
-
-            // ── Engagement filters ────────────────────────────────────────────
-            Text(
-                text     = "Must have",
-                color    = TextSecondary,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            )
-            FlowRow(
-                modifier              = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.medium),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement   = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterChip("Reposts",   requireReposts)   { requireReposts   = !requireReposts }
-                FilterChip("Reactions", requireReactions) { requireReactions = !requireReactions }
-                FilterChip("Comments",  requireReplies)   { requireReplies   = !requireReplies }
-                FilterChip("Zaps",      requireZaps)      { requireZaps      = !requireZaps }
-            }
-
-            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
-
-            // ── Content types ───────────────────────────────────────────────
-            Text(
-                text     = "Content types",
-                color    = TextSecondary,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            )
-            FlowRow(
-                modifier              = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Spacing.medium)
-                    .padding(bottom = Spacing.medium),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement   = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterChip("Notes",    showKind1)     { showKind1     = !showKind1 }
-                FilterChip("Reposts",  showKind6)     { showKind6     = !showKind6 }
-                FilterChip("Pictures", showKind20)    { showKind20    = !showKind20 }
-                FilterChip("Videos",   showKind21)    { showKind21    = !showKind21 }
-                FilterChip("Articles", showKind30023) { showKind30023 = !showKind30023 }
-            }
-
-            // ── Apply button ──────────────────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = Spacing.medium, vertical = Spacing.medium),
-            ) {
-                Button(
-                    onClick = {
-                        onApply(
-                            FeedFilter(
-                                showKind1        = showKind1,
-                                showKind6        = showKind6,
-                                showKind20       = showKind20,
-                                showKind21       = showKind21,
-                                showKind30023    = showKind30023,
-                                sinceHours       = sinceHours,
-                                requireReposts   = requireReposts,
-                                requireReactions = requireReactions,
-                                requireReplies   = requireReplies,
-                                requireZaps      = requireZaps,
-                            )
-                        )
-                        onDismiss()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Cyan),
-                ) {
-                    Text("Apply", color = Black, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("Apply", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text       = text,
+        color      = Color(0xFF555555),
+        fontSize   = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.sp,
+        modifier   = Modifier.padding(start = 16.dp, bottom = 8.dp),
+    )
+}
+
+@Composable
+private fun EngagementSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    displayValue: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text  = label,
+            color = Color(0xFFBBBBBB),
+            fontSize = 13.sp,
+            modifier = Modifier.width(110.dp),
+        )
+        Slider(
+            value         = value,
+            onValueChange = onValueChange,
+            valueRange    = range,
+            steps         = steps,
+            modifier      = Modifier.weight(1f),
+            colors        = SliderDefaults.colors(
+                thumbColor            = Cyan,
+                activeTrackColor      = Cyan,
+                inactiveTrackColor    = Color(0xFF333333),
+                activeTickColor       = Color.Transparent,
+                inactiveTickColor     = Color.Transparent,
+            ),
+        )
+        Text(
+            text  = displayValue,
+            color = if (value > 0f) Cyan else Color(0xFF666666),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(48.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+        )
     }
 }
 

@@ -97,11 +97,10 @@ interface EventDao {
                   )
               )))
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
-          AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
-              OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
-              OR (:requireReactions = 1 AND COALESCE(s.reaction_count, 0) >= 1)
-              OR (:requireReplies   = 1 AND COALESCE(s.reply_count, 0)    >= 1)
-              OR (:requireZaps      = 1 AND COALESCE(s.zap_count, 0)      >= 1))
+          AND COALESCE(s.reply_count, 0)    >= :minReplies
+          AND COALESCE(s.repost_count, 0)   >= :minReposts
+          AND COALESCE(s.reaction_count, 0) >= :minReactions
+          AND COALESCE(s.zap_total_sats, 0) >= :minZapSats
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -110,10 +109,10 @@ interface EventDao {
         kinds: List<Int>,
         sinceTimestamp: Long,
         contentFilter: Int,
-        requireReposts: Int,
-        requireReactions: Int,
-        requireReplies: Int,
-        requireZaps: Int,
+        minReplies: Int,
+        minReposts: Int,
+        minReactions: Int,
+        minZapSats: Long,
         limit: Int = 300,
     ): Flow<List<FeedRow>>
 
@@ -160,11 +159,10 @@ interface EventDao {
               ))
           )
           AND (:sinceTimestamp = 0 OR e.created_at > :sinceTimestamp)
-          AND ((:requireReposts = 0 AND :requireReactions = 0 AND :requireReplies = 0 AND :requireZaps = 0)
-               OR (:requireReposts   = 1 AND COALESCE(s.repost_count, 0)   >= 1)
-               OR (:requireReactions = 1 AND COALESCE(s.reaction_count, 0) >= 1)
-               OR (:requireReplies   = 1 AND COALESCE(s.reply_count, 0)    >= 1)
-               OR (:requireZaps      = 1 AND COALESCE(s.zap_count, 0)      >= 1))
+          AND COALESCE(s.reply_count, 0)    >= :minReplies
+          AND COALESCE(s.repost_count, 0)   >= :minReposts
+          AND COALESCE(s.reaction_count, 0) >= :minReactions
+          AND COALESCE(s.zap_total_sats, 0) >= :minZapSats
         ORDER BY e.created_at DESC
         LIMIT :limit
     """)
@@ -172,10 +170,10 @@ interface EventDao {
         kinds: List<Int>,
         sinceTimestamp: Long,
         contentFilter: Int,
-        requireReposts: Int,
-        requireReactions: Int,
-        requireReplies: Int,
-        requireZaps: Int,
+        minReplies: Int,
+        minReposts: Int,
+        minReactions: Int,
+        minZapSats: Long,
         limit: Int = 300,
     ): Flow<List<FeedRow>>
 
