@@ -50,7 +50,13 @@ sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
-    data class  SingleRelay(val url: String, val label: String) : FeedType()
+    data class  SingleRelay(val url: String, val label: String) : FeedType() {
+        /** User-facing name — friendly aliases for known relay URLs. */
+        val displayLabel: String get() = when {
+            url.contains("antiprimal.net/hot") -> "Popular"
+            else -> label
+        }
+    }
 }
 
 enum class FeedContentFilter(val value: Int) {
@@ -217,7 +223,7 @@ class FeedViewModel @Inject constructor(
         is FeedType.Global    -> "Global"
         is FeedType.Following -> "Following"
         is FeedType.RelaySet    -> t.name
-        is FeedType.SingleRelay -> t.label
+        is FeedType.SingleRelay -> t.displayLabel
     }
 
     /** Reactively tracks whether follows exist — used by buildFeedList and the feed sheet. */
