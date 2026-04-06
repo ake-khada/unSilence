@@ -31,6 +31,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -86,6 +87,7 @@ fun FeedScreen(
 
     // ── New-post flash animation tracking ──────────────────────────────────────
     val events = reducerState.visibleEvents
+    val currentEvents by rememberUpdatedState(events)
     val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
     var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(events) {
@@ -321,10 +323,11 @@ fun FeedScreen(
                         if (!isScrolling && wasScrolling) controller.onScrollStopped()
                         wasScrolling = isScrolling
 
-                        val visibleEvents = events.filter { it.id in visibleIds }
+                        val latestEvents = currentEvents
+                        val visibleEvents = latestEvents.filter { it.id in visibleIds }
                         controller.onScrollFrame(
                             visibleItems = visibleEvents,
-                            allEvents = events,
+                            allEvents = latestEvents,
                             scrollPixelOffset = scrollOffset,
                             isScrollInProgress = isScrolling,
                         )

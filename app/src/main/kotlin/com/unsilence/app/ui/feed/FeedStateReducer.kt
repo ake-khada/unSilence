@@ -109,15 +109,20 @@ class FeedStateReducer(private val feedKey: String) {
 
         val current = _state.value
 
-        // Structural dedup: skip if event IDs are unchanged.
+        // Structural dedup: skip if event IDs AND data are unchanged.
         // Room re-emits on ANY joined-table write (profile resolve, engagement update,
-        // relay provenance, etc.) even when the event list itself hasn't changed.
-        // Profile data and engagement counts flow to Compose reactively via Room Flows.
+        // relay provenance, etc.) — let engagement/profile data changes through.
         if (allEvents.size == current.visibleEvents.size) {
-            val unchanged = allEvents.indices.all { i ->
+            val sameIds = allEvents.indices.all { i ->
                 allEvents[i].id == current.visibleEvents[i].id
             }
-            if (unchanged) return
+            if (sameIds) {
+                // IDs match — refresh data in-place (engagement counts, profile, etc.)
+                if (allEvents != current.visibleEvents) {
+                    _state.value = current.copy(visibleEvents = allEvents)
+                }
+                return
+            }
         }
 
         if (current.visibleEvents.isEmpty() || isAtTop) {
@@ -137,15 +142,12 @@ class FeedStateReducer(private val feedKey: String) {
                 val leadingNew = allEvents.takeWhile { it.id !in knownIds }
 
                 if (leadingNew.isEmpty()) {
-                    // Quick check: are there any new IDs to append?
-                    // If not, this is just an engagement/profile refresh — skip allocation.
                     val existingIds = cur.visibleEvents.map { it.id }.toSet()
-                    val hasNewItems = allEvents.any { it.id !in existingIds }
-                    if (!hasNewItems) return@update cur  // no allocation needed
-
                     val latestMap = allEvents.associateBy { it.id }
                     val refreshed = cur.visibleEvents.map { row -> latestMap[row.id] ?: row }
                     val appended = allEvents.filter { it.id !in existingIds }
+                    // Nothing changed — skip allocation
+                    if (appended.isEmpty() && refreshed == cur.visibleEvents) return@update cur
                     if (appended.isNotEmpty()) {
                         lastAppendTime = System.currentTimeMillis()
                         Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${refreshed.size + appended.size}")
