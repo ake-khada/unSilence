@@ -129,12 +129,12 @@ fun NotificationEventRow(
                 )
             }
 
-            // Compact embedded note preview — plain text for replies, grey box otherwise
+            // Compact embedded note preview — plain text for replies/reactions, grey box for reposts/zaps/mentions
             if (row.targetNoteContent.isNotBlank()) {
-                if (row.notifType == "reply") {
+                if (row.notifType == "reply" || row.notifType == "reaction") {
                     Text(
                         text = row.targetNoteContent.trim(),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (row.notifType == "reply") 0.85f else 0.7f),
                         fontSize = 13.sp,
                         lineHeight = 18.sp,
                         maxLines = 4,
@@ -175,8 +175,8 @@ private fun CompactNotePreview(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFF0D0D0D))
-            .border(0.5.dp, Color(0xFF222222), RoundedCornerShape(6.dp))
+            .background(Color(0xFF080808))
+            .border(0.5.dp, Color(0xFF141414), RoundedCornerShape(6.dp))
             .padding(horizontal = Spacing.small, vertical = 6.dp),
     ) {
         Text(

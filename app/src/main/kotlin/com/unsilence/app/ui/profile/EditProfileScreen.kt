@@ -159,7 +159,7 @@ fun EditProfileScreen(
                         .fillMaxWidth()
                         .height(EDIT_BANNER_HEIGHT)
                         .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                        .background(Color(0xFF1A1A1A)),
+                        .background(Color(0xFF0A0A0A)),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (picture.isNotBlank()) {
@@ -185,7 +185,7 @@ fun EditProfileScreen(
                     modifier = Modifier
                         .size(EDIT_AVATAR_SIZE)
                         .clip(CircleShape)
-                        .border(2.dp, Color(0xFF333333), CircleShape),
+                        .border(2.dp, Color(0xFF1A1A1A), CircleShape),
                 ) {
                     viewModel.pubkeyHex?.let {
                         IdentIcon(pubkey = it, modifier = Modifier.fillMaxSize())

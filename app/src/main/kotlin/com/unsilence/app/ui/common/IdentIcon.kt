@@ -27,7 +27,7 @@ fun IdentIcon(
 
     Canvas(modifier = modifier.clip(CircleShape)) {
         // Background fill (AMOLED black)
-        drawRect(Color(0xFF111111))
+        drawRect(Color(0xFF080808))
 
         val cellW = size.width  / GRID_SIZE
         val cellH = size.height / GRID_SIZE

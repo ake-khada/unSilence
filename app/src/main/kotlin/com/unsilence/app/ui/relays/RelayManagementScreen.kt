@@ -146,7 +146,7 @@ fun RelayManagementScreen(
                         )
                     }
                 },
-                divider = { HorizontalDivider(color = Color(0xFF222222)) },
+                divider = { HorizontalDivider(color = Color(0xFF141414)) },
             ) {
                 TabLabels.forEachIndexed { index, label ->
                     Tab(

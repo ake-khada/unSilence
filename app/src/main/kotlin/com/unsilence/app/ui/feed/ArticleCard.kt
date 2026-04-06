@@ -57,7 +57,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-private val ArticleCardBackground = Color(0xFF0D0D0D)
+private val ArticleCardBackground = Color(0xFF080808)
 
 /** Parses the first value for [key] from a NIP-23 tags JSON string. */
 private fun tagValue(tagsJson: String, key: String): String? = runCatching {

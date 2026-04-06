@@ -73,7 +73,7 @@ fun ConnectWalletDialog(
                     modifier      = Modifier
                         .fillMaxWidth()
                         .background(Black, RoundedCornerShape(8.dp))
-                        .border(1.dp, Color(0xFF333333), RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     decorationBox = { inner ->
                         if (uri.isEmpty()) {
@@ -141,7 +141,7 @@ fun ZapAmountDialog(
                             modifier  = Modifier
                                 .weight(1f)
                                 .background(
-                                    color = if (isSelected) ZapAmber else Color(0xFF1A1A1A),
+                                    color = if (isSelected) ZapAmber else Color(0xFF0A0A0A),
                                     shape = RoundedCornerShape(8.dp),
                                 )
                                 .clickable { selected = amount; custom = "" }
@@ -164,7 +164,7 @@ fun ZapAmountDialog(
                     modifier     = Modifier
                         .fillMaxWidth()
                         .background(Black, RoundedCornerShape(8.dp))
-                        .border(1.dp, Color(0xFF333333), RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     decorationBox = { inner ->
                         if (custom.isEmpty()) {
