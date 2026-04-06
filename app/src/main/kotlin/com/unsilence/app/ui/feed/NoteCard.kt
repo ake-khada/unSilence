@@ -259,6 +259,15 @@ fun NoteCard(
         ?: fetchedRepostEvent?.content
         ?: row.content
 
+    // For bridge reposts without p-tag, resolve the original author from the fetched event
+    val resolvedRepostAuthor by produceState<UserEntity?>(originalAuthorProfile, effectivePubkey, fetchedRepostEvent) {
+        if (originalAuthorProfile != null || lookupProfile == null) { value = originalAuthorProfile; return@produceState }
+        if (row.kind == 6 && (boostedJson != null || fetchedRepostEvent != null)) {
+            value = lookupProfile.invoke(effectivePubkey)
+        }
+    }
+    val repostProfile = originalAuthorProfile ?: resolvedRepostAuthor
+
     // For kind-6 reposts, navigate to the referenced event, not the wrapper
     val navigateId = if (row.kind == 6) repostTargetId ?: row.id else row.id
 
@@ -377,7 +386,7 @@ fun NoteCard(
                 AvatarImage(
                     pubkey   = effectivePubkey,
                     picture  = if (boostedJson == null && fetchedRepostEvent == null) row.authorPicture
-                               else originalAuthorProfile?.picture,
+                               else repostProfile?.picture,
                     modifier = Modifier.size(Sizing.avatar),
                 )
                 Spacer(Modifier.width(Spacing.small))
@@ -387,8 +396,8 @@ fun NoteCard(
                 ) {
                     Text(
                         text       = if (boostedJson != null || fetchedRepostEvent != null) {
-                            originalAuthorProfile?.displayName?.takeIf { it.isNotBlank() }
-                                ?: originalAuthorProfile?.name?.takeIf { it.isNotBlank() }
+                            repostProfile?.displayName?.takeIf { it.isNotBlank() }
+                                ?: repostProfile?.name?.takeIf { it.isNotBlank() }
                                 ?: "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"
                         } else {
                             row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
@@ -400,7 +409,9 @@ fun NoteCard(
                         overflow   = TextOverflow.Ellipsis,
                         modifier   = Modifier.weight(1f, fill = false),
                     )
-                    if (boostedJson == null && fetchedRepostEvent == null && !row.authorNip05.isNullOrBlank()) {
+                    val nip05 = if (boostedJson == null && fetchedRepostEvent == null) row.authorNip05
+                               else repostProfile?.nip05
+                    if (!nip05.isNullOrBlank()) {
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             imageVector        = Icons.Filled.Verified,
@@ -410,7 +421,7 @@ fun NoteCard(
                         )
                         Spacer(Modifier.width(3.dp))
                         Text(
-                            text     = nip05Domain(row.authorNip05),
+                            text     = nip05Domain(nip05),
                             color    = TextSecondary,
                             fontSize = 11.sp,
                             maxLines = 1,

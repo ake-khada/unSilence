@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -78,6 +79,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
@@ -111,6 +113,16 @@ fun UserProfileScreen(
 
     val listState = rememberLazyListState()
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // Intercept avatar tap: same pubkey → scroll to top, different → navigate
+    val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
+        if (tappedPubkey == pubkey) {
+            scope.launch { listState.animateScrollToItem(0) }
+        } else {
+            onAuthorClick(tappedPubkey)
+        }
+    }
 
     // ── Shared video playback — replaces ~80 lines of duplicated state ────────
     val videoScope = rememberVideoPlaybackScope(
@@ -129,7 +141,7 @@ fun UserProfileScreen(
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
-        onAuthorClick = onAuthorClick,
+        onAuthorClick = interceptedAuthorClick,
         onArticleClick = { articleRow = it },
         react = { id, pk -> actionsViewModel.react(id, pk) },
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
@@ -326,7 +338,7 @@ fun UserProfileScreen(
                     NostrRichText(
                         content       = about,
                         lookupProfile = actionsViewModel::lookupProfile,
-                        onAuthorClick = onAuthorClick,
+                        onAuthorClick = interceptedAuthorClick,
                         onTextClick   = {},
                         maxLines      = 3,
                         overflow      = TextOverflow.Ellipsis,
