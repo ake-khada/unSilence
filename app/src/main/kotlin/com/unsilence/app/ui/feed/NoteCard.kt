@@ -117,7 +117,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 internal val ActionTint = Color(0xFF555555)
-private val MediaPlaceholder = Color(0xFF1A1A1A)
+private val MediaPlaceholder = Color(0xFF0A0A0A)
 
 // Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
 private val IMAGE_URL_REGEX = Regex(
@@ -671,7 +671,7 @@ private fun ShimmerBox(modifier: Modifier = Modifier) {
     )
     Box(modifier = modifier
         .height(200.dp)
-        .background(lerp(Color(0xFF1A1A1A), Color(0xFF2A2A2A), progress))
+        .background(lerp(Color(0xFF0A0A0A), Color(0xFF141414), progress))
     )
 }
 
@@ -1517,7 +1517,7 @@ private fun EmbeddedQuoteCard(
                             .fillMaxWidth()
                             .height(120.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF1A1A1A)),
+                            .background(Color(0xFF0A0A0A)),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -1760,8 +1760,8 @@ private fun MentionChip(
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xFF1A1A1A))
-            .border(1.dp, Color(0xFF333333), RoundedCornerShape(20.dp))
+            .background(Color(0xFF0A0A0A))
+            .border(1.dp, Color(0xFF1A1A1A), RoundedCornerShape(20.dp))
             .clickable { onAuthorClick(pubkeyHex) }
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
@@ -1795,8 +1795,8 @@ private fun LinkPreviewCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(Color(0xFF0D0D0D))
-                .border(0.5.dp, Color(0xFF333333), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .background(Color(0xFF080808))
+                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } }
                 .padding(Spacing.small),
             verticalAlignment = Alignment.CenterVertically,

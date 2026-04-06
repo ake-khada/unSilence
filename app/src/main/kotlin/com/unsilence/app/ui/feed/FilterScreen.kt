@@ -116,7 +116,7 @@ fun FilterScreen(
                 }
             }
 
-            HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
+            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
 
             // ── Time range ────────────────────────────────────────────────────
             Text(
@@ -143,7 +143,7 @@ fun FilterScreen(
                     }
             }
 
-            HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
+            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
 
             // ── Engagement filters ────────────────────────────────────────────
             Text(
@@ -166,7 +166,7 @@ fun FilterScreen(
                 FilterChip("Zaps",      requireZaps)      { requireZaps      = !requireZaps }
             }
 
-            HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
+            HorizontalDivider(color = Color(0xFF141414), thickness = 0.5.dp)
 
             // ── Content types ───────────────────────────────────────────────
             Text(

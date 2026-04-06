@@ -41,7 +41,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
 
-private val MediaPlaceholder = Color(0xFF1A1A1A)
+private val MediaPlaceholder = Color(0xFF0A0A0A)
 
 /**
  * Composable that shows a video thumbnail: imeta poster if available,

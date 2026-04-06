@@ -722,7 +722,7 @@ private fun FeedSelectorSheet(
             }
 
             Spacer(Modifier.height(12.dp))
-            HorizontalDivider(color = Color(0xFF1A1A1A), thickness = 1.dp)
+            HorizontalDivider(color = Color(0xFF0A0A0A), thickness = 1.dp)
             Spacer(Modifier.height(4.dp))
 
             // ── Actions ──
@@ -773,7 +773,7 @@ private fun FeedSelectorSheet(
                     Text("Cancel", color = Cyan)
                 }
             },
-            containerColor = Color(0xFF1A1A1A),
+            containerColor = Color(0xFF0A0A0A),
         )
     }
 }

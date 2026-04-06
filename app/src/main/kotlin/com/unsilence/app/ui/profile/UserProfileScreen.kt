@@ -242,7 +242,7 @@ fun UserProfileScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color(0xFF1A1A1A)),
+                                    .background(Color(0xFF0A0A0A)),
                             )
                         }
                     }

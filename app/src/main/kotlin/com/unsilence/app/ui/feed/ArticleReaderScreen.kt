@@ -200,7 +200,7 @@ fun ArticleReaderScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF0D0D0D))
+                        .background(Color(0xFF080808))
                         .navigationBarsPadding()
                         .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                     horizontalArrangement = Arrangement.SpaceEvenly,
