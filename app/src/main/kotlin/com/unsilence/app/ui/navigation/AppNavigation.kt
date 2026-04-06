@@ -168,7 +168,7 @@ fun AppNavigation(onLogout: () -> Unit) {
         buildList {
             if (hasFollows) add(FeedType.Following to "Following")
             add(FeedType.Global to "Global")
-            pinnedRelays.forEach { add(it as FeedType to it.label) }
+            pinnedRelays.forEach { add(it as FeedType to it.displayLabel) }
             userSets.forEach { set ->
                 val name = set.title ?: set.dTag
                 add(FeedType.RelaySet(set.dTag, name) as FeedType to name)
@@ -817,7 +817,7 @@ private fun FeedSelectorSheet(
             if (pinnedRelays.isNotEmpty()) {
                 SectionLabel("Favorite Relays")
                 for (relay in pinnedRelays) {
-                    SheetItem(relay.label, relay)
+                    SheetItem(relay.displayLabel, relay)
                 }
             }
 
