@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 6, 2026 (P0.5 engagement timing fix, engagement count double-counting fix, Bluesky CDN URL rewrite, quoted post full postcard rendering)
+**Last updated:** April 6, 2026 (scroll perf + engagement pipeline: SLOW_SCROLL hard cap, deferred fan-out, 3-layer engagement, Room v15)
 **Repository:** https://github.com/ake-khada/unSilence
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
@@ -72,7 +72,7 @@ Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
 
 Every screen renders instantly from Room cache. Network fetches happen in the background. The user never waits for a relay response to see content.
 
-### Room Database — v14
+### Room Database — v15
 
 12 tables:
 
@@ -82,7 +82,7 @@ Every screen renders instantly from Room cache. Network fetches happen in the ba
 | users | Profile metadata (kind 0) |
 | follows | Contact list (kind 3 p-tags) |
 | reactions | Kind 7 reactions |
-| event_stats | Denormalized counters (reply/repost/reaction/zap count + zap sats) |
+| event_stats | Denormalized counters (reply/repost/reaction/zap count + zap sats + updated_at timestamp) |
 | tags | Normalized event tags (replaces JSON parsing) |
 | event_relays | Which relay delivered each event (provenance) |
 | relay_configs | NIP-51 relay kinds (10002/10006/10007/10012) |
@@ -116,9 +116,9 @@ Auth spam suppression: `authFailedRelays` set, warning logged once then suppress
 
 **VideoPlaybackScope** — Shared ExoPlayer instance at screen level. Active video detected via viewport center from `snapshotFlow` on `LazyListState` with visibility thresholds: activate at >=60% visible, deactivate below 35% (hysteresis prevents oscillation). 500ms debounce for activation stability + 1s deactivation delay (prevents surface churn during quick scroll). Only active video creates SurfaceView — all others render thumbnail-only. Muted by default. 500ms buffer threshold (`DefaultLoadControl`). CDN preconnect at startup (HEAD requests to 7 common Nostr CDN hosts).
 
-**FeedHydrationController** — Single zone-aware scroll state machine replacing 5 independent fetch systems (engagement channel, CardHydrator debounce, ProfileResolver scroll path, loadMore trigger, FeedStateReducer velocity awareness). 4-state machine: WARM_CATCHUP (profiles only for visible items, 3s timeout gate), SLOW_SCROLL (profiles first + refs for warm zone next 15 items, auto-starts 500ms idle timer for IDLE transition without requiring user scroll), IDLE (profiles + refs + engagement network fetch + 2s recheck + 30s stale refresh), FAST_SCROLL (total blackout, zero new requests). Two-phase hydration priority: Phase 1 (profiles/identity) always fires before Phase 2 (refs/thumbnails) — avatars appear before engagement counts. Separate tracking sets (`profileHydratedIds`, `refHydratedIds`) and jobs (`profileJob`, `refJob`). Velocity detection via 6-frame sliding window with hysteresis (enter FAST >2500px/s, exit <1200px/s). 200ms minimum hold time per state prevents oscillation at velocity boundaries (IDLE exempt — has own 500ms timer). All transitions routed through `transitionTo()`. Constructed in FeedViewModel with viewModelScope, not Hilt-injected. Fed every frame from FeedScreen snapshotFlow (uses `rememberUpdatedState` for events to avoid stale lambda capture). Calls CardHydrator as stateless worker. Phase 2 debounce: state-dependent — 500ms in IDLE, 2000ms in SLOW_SCROLL (user is browsing, refs can wait). FAST_SCROLL entry cancels all in-flight hydration jobs. `reset()` starts catchup timeout immediately (ensures state machine progresses even without scroll frames).
+**FeedHydrationController** — Single zone-aware scroll state machine with three-layer engagement pipeline. 4-state machine: WARM_CATCHUP (profiles only, indexer relays, 3s timeout gate), SLOW_SCROLL (max 4 profiles + 2 refs per pass sorted by viewport proximity, indexer-only, engagement freshness pre-check for warm zone), IDLE (full fan-out for new items + deferred fan-out for scroll items, engagement freshness check for visible+warm zone, background backfill drip), FAST_SCROLL (total blackout, cancel all jobs). **Three-layer engagement:** Layer 1 (background backfill) — slow drip of 15 events/2.5s covering entire feed, starts 5s after launch; Layer 2 (warm zone pre-check) — freshness check via Room `event_stats.updated_at`, max 5 stale items fetched per pass; Layer 3 (hot zone read-only) — visible items read from Room only, zero network calls. **Profile fan-out deferral:** SLOW_SCROLL/WARM_CATCHUP use `hydrateProfiles(fanOut=false)` (indexer only); source/hint relay fan-out batched to IDLE via `CardHydrator.fanOutProfiles()`. **Per-frame caps:** SLOW_SCROLL limited to 4 profiles + 2 refs sorted by viewport center proximity. Velocity detection via 6-frame sliding window with hysteresis (enter FAST >2500px/s, exit <1200px/s). 200ms minimum hold time per state. Constructed in FeedViewModel with viewModelScope. Fed every frame from FeedScreen snapshotFlow (uses `rememberUpdatedState` for events). `reset()` starts catchup timeout + cancels backfill.
 
-**CardHydrator** — Stateless card hydration worker with two-phase API. `hydrateProfiles(events)` (Phase 1): resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag), nprofile relay hints, source relay profile fetching (queries the relay each event came from) — fires instantly with no delay. `hydrateRefs(events)` (Phase 2): referenced events for reposts (kind 6 e-tag with relay hint extraction via `extractRepostTargetRelay`) and quotes (nostr:nevent/note), referenced event author profiles, video thumbnail prefetch (max 3 per batch) — includes 1500ms delay for relay responses. Repost relay hints: `extractRepostTargetRelay()` extracts index-2 relay hint from e-tags, enabling targeted fetches to bridge relays (mostr.pub events only exist on specific relays like relay.ditto.pub). `hydrateVisibleCards(events)` calls both sequentially. No internal state tracking — FeedHydrationController decides what items to hydrate and when. ProfileResolver handles 200ms batching and in-flight dedup. Note: @Singleton is called from multiple scopes concurrently (feed + profile screens) — never use shared mutable collections.
+**CardHydrator** — Stateless card hydration worker with two-phase API. `hydrateProfiles(events, fanOut)` (Phase 1): resolves author profiles (kind 0), repost original-author profiles (NIP-18 p-tag); when `fanOut=true` also does nprofile relay hints + source relay fetching — fires instantly with no delay. `fanOutProfiles(events)`: deferred fan-out for source relay + hint relay profile fetches (called from IDLE for items hydrated with `fanOut=false` during scroll). `hydrateRefs(events)` (Phase 2): referenced events for reposts (kind 6 e-tag with relay hint extraction via `extractRepostTargetRelay`) and quotes (nostr:nevent/note), referenced event author profiles, video thumbnail prefetch (max 3 per batch) — includes 1500ms delay for relay responses. No internal state tracking — FeedHydrationController decides what items to hydrate and when. Note: @Singleton is called from multiple scopes concurrently (feed + profile screens) — never use shared mutable collections.
 
 **FeedViewModel** — Manages feed type (Following/Global/SingleRelay), content filter (Notes/Conversations). Feed query: tri-state `combine(_feedType, _filter, _contentFilter)`. Infinite scroll via loadMore() at 50% scroll (1s timestamp cooldown, displayLimit capped at 300 to prevent OOM). Init relay connection runs on Dispatchers.IO to avoid startup jank. Feed switch starts with displayLimit=50 (grows via loadMore). Per-feed state persistence: `SavedFeedState` map (capped at 10) saves/restores displayLimit, lastOldestTimestamp, and scroll position per feedKey on feed switches. Owns `FeedHydrationController` instance (constructed with viewModelScope, cardHydrator, relayPool, userDao); controller.reset() guarded by `lastResetFeedKey` — fires ONCE per actual feed key change, not on every Room re-emission.
 
@@ -337,6 +337,11 @@ Bridged repost: kind 6 empty content → produceState(e-tag target + relay hint)
 | CardHydrator collection reuse | Reverted — @Singleton called from multiple scopes concurrently (ConcurrentModificationException). Local variables are correct. |
 | FeedStateReducer data-aware dedup | ID-only dedup + full data equality check — refreshes engagement/profile in-place when IDs unchanged but data changed, skips only when fully identical |
 | Engagement count dedup | insertOrIgnoreBatch returns row IDs; only newly inserted events (row ID != -1) trigger stat increments — prevents double-counting when duplicates arrive across app restarts or seenIds cache trimming. Bootstrap Phase 3 recalculateCounts() fixes inflated stats from correlated subqueries. |
+| SLOW_SCROLL hard cap | Max 4 profiles + 2 refs per pass, sorted by viewport center proximity — reduces frame competition |
+| Profile fan-out deferral | SLOW_SCROLL/WARM_CATCHUP use indexer-only profile resolution; source/hint relay fan-out batched to IDLE via fanOutProfiles() |
+| Background engagement backfill | Low-priority drip (15 events / 2.5s) covers entire feed starting 5s after launch — engagement appears without opening threads |
+| Warm zone engagement freshness | Room event_stats.updated_at column; checkEngagementFreshness() in SLOW_SCROLL+IDLE fetches max 5 stale items per pass |
+| Hot zone read-only | Visible viewport does zero network calls — reads from Room JOIN only. Background backfill + warm zone pre-check fill engagement before items reach viewport |
 
 ---
 
@@ -387,7 +392,7 @@ Bridged repost: kind 6 empty content → produceState(e-tag target + relay hint)
 
 ## In Progress (Claude Code working)
 
-- (none — FeedHydrationController shipped)
+- (none — three-layer engagement pipeline shipped)
 
 ---
 
