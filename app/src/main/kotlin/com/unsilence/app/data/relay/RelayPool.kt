@@ -129,6 +129,9 @@ class RelayPool @Inject constructor(
     /** Relays that sent CLOSED auth-required without a prior AUTH challenge — suppress repeated warnings. */
     private val authFailedRelays = ConcurrentHashMap.newKeySet<String>()
 
+    /** Last time each relay received a message — used for idle eviction. */
+    private val connectionLastActivity = ConcurrentHashMap<String, Long>()
+
     /** Active one-shot subscriptions in flight (tracked by unique sub-ID, not per-relay). */
     private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
 
@@ -140,6 +143,7 @@ class RelayPool @Inject constructor(
     // the limit, new one-shot REQs are queued and sent as CLOSE events free slots.
     companion object {
         const val MAX_CONCURRENT_REQS_PER_RELAY = 10
+        const val IDLE_EVICTION_THRESHOLD_MS = 60_000L
     }
     /** Active one-shot sub count per relay URL. */
     private val relayOneShotCount = ConcurrentHashMap<String, AtomicInteger>()
@@ -174,6 +178,41 @@ class RelayPool @Inject constructor(
             conn.send(req)
             Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
         }
+    }
+
+    /**
+     * Try to evict one idle BROWSE or OUTBOX connection to make room for a new one.
+     * Returns true if a connection was evicted.
+     */
+    private fun evictIdleConnection(): Boolean {
+        val now = System.currentTimeMillis()
+        // Find BROWSE/OUTBOX-only connections idle for 60+ seconds
+        val candidate = connections.entries
+            .filter { (url, _) ->
+                !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
+                (hasPurpose(url, ConnectionPurpose.BROWSE) || hasPurpose(url, ConnectionPurpose.OUTBOX))
+            }
+            .filter { (url, _) ->
+                val lastActive = connectionLastActivity[url] ?: 0L
+                (now - lastActive) >= IDLE_EVICTION_THRESHOLD_MS
+            }
+            .maxByOrNull { (url, _) ->
+                // Evict the most idle connection first
+                now - (connectionLastActivity[url] ?: 0L)
+            }
+        if (candidate != null) {
+            val (url, conn) = candidate
+            val idleSec = (now - (connectionLastActivity[url] ?: 0L)) / 1000
+            connections.remove(url)
+            conn.close()
+            connectionPurposes.remove(url)
+            connectionLastActivity.remove(url)
+            relayOneShotCount.remove(url)
+            relayReqQueue.remove(url)
+            Log.d(TAG, "Evicted idle connection $url (idle ${idleSec}s, at cap)")
+            return true
+        }
+        return false
     }
 
     // Evict stale entries every 5 minutes to prevent unbounded growth.
@@ -280,16 +319,19 @@ class RelayPool @Inject constructor(
             }
             if (connections.containsKey(url)) continue
             if (connections.size >= 13) {
-                // Browse connections get up to 3 extra slots above the general cap
-                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-                val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
-                if (!isBrowse || browseCount >= 3) {
-                    Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                    continue
+                // Try evicting an idle connection before giving up
+                if (!evictIdleConnection()) {
+                    val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+                    val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
+                    if (!isBrowse || browseCount >= 3) {
+                        Log.d(TAG, "Connection cap (13) reached — skipping $url")
+                        continue
+                    }
                 }
             }
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
+            connectionLastActivity[url] = System.currentTimeMillis()
             conn.connect()
             scope.launch { listenForEvents(conn) }
             newConns.add(conn)
@@ -367,12 +409,14 @@ class RelayPool @Inject constructor(
             }
             if (connections.containsKey(url)) continue
             if (connections.size + newUrls.size >= 13) {
-                // Browse connections get up to 3 extra slots above the general cap
-                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-                val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
-                if (!isBrowse || browseCount >= 3) {
-                    Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                    continue
+                // Try evicting an idle connection before giving up
+                if (!evictIdleConnection()) {
+                    val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+                    val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
+                    if (!isBrowse || browseCount >= 3) {
+                        Log.d(TAG, "Connection cap (13) reached — skipping $url")
+                        continue
+                    }
                 }
             }
             newUrls.add(url)
@@ -387,6 +431,7 @@ class RelayPool @Inject constructor(
         for (url in newUrls) {
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
+            connectionLastActivity[url] = System.currentTimeMillis()
             scope.launch {
                 conn.connect()
                 if (!hasPurpose(url, ConnectionPurpose.PERSISTENT)) {
@@ -449,6 +494,7 @@ class RelayPool @Inject constructor(
     private suspend fun listenForEvents(conn: RelayConnection) {
         try {
             conn.messages.consumeEach { raw ->
+                connectionLastActivity[conn.url] = System.currentTimeMillis()
                 // Fix 3: intercept EOSE before EventProcessor so we can send CLOSE
                 // for one-shot subscriptions. EventProcessor's process() would already
                 // early-return for non-EVENT strings, but we need the relay URL here.
@@ -831,16 +877,19 @@ class RelayPool @Inject constructor(
             return
         }
         if (connections.size >= 13) {
-            // Browse connections get up to 3 extra slots above the general cap
-            val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-            val isBrowse = hasPurpose(relayUrl, ConnectionPurpose.BROWSE)
-            if (!isBrowse || browseCount >= 3) {
-                Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
-                return
+            // Try evicting an idle connection before giving up
+            if (!evictIdleConnection()) {
+                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
+                val isBrowse = hasPurpose(relayUrl, ConnectionPurpose.BROWSE)
+                if (!isBrowse || browseCount >= 3) {
+                    Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
+                    return
+                }
             }
         }
         val conn = RelayConnection(relayUrl, okHttpClient)
         connections[relayUrl] = conn
+        connectionLastActivity[relayUrl] = System.currentTimeMillis()
         conn.connect()
         scope.launch {
             conn.send(req)
@@ -1488,6 +1537,7 @@ class RelayPool @Inject constructor(
                 authFailedRelays.remove(url)
                 val conn = RelayConnection(url, okHttpClient)
                 connections[url] = conn
+                connectionLastActivity[url] = System.currentTimeMillis()
                 conn.connect()
 
                 // Wait briefly for connection to establish
@@ -1657,6 +1707,7 @@ class RelayPool @Inject constructor(
         authFailedRelays.clear()
         relayOneShotCount.clear()
         relayReqQueue.clear()
+        connectionLastActivity.clear()
         Log.d(TAG, "disconnectAll: all connections, purposes, and auth state cleared")
     }
 }
