@@ -38,6 +38,8 @@ class FeedHydrationController(
         const val REF_DEBOUNCE_SLOW_SCROLL_MS = 2000L  // SLOW_SCROLL — refs can wait while browsing
         const val SLOW_SCROLL_PROFILE_CAP = 4          // max profiles per SLOW_SCROLL pass
         const val SLOW_SCROLL_REF_CAP = 2              // max refs per SLOW_SCROLL pass
+        const val BACKFILL_BATCH_SIZE = 15             // engagement backfill batch size
+        const val BACKFILL_DELAY_MS = 2500L            // delay between backfill batches
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -54,6 +56,7 @@ class FeedHydrationController(
     private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
     private val engagementFetchedIds = mutableSetOf<String>()
     private val fanOutPendingIds = mutableSetOf<String>()     // indexer-only, needs fan-out in IDLE
+    private val backfillFetchedIds = mutableSetOf<String>()  // background engagement accumulation
     private var lastEngagementRefreshTime = 0L
     private var lastRefStartTime = 0L           // Phase 2 debounce
 
@@ -63,6 +66,7 @@ class FeedHydrationController(
     private var profileJob: Job? = null     // Phase 1: profiles
     private var refJob: Job? = null         // Phase 2: refs + thumbnails
     private var engagementJob: Job? = null
+    private var backfillJob: Job? = null    // Background engagement accumulation
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -87,8 +91,14 @@ class FeedHydrationController(
 
         // Store latest data
         lastVisibleItems = visibleItems
+        val feedGrew = allEvents.size > lastAllEvents.size
         lastAllEvents = allEvents
         lastVisibleIds = visibleItems.map { it.id }.toSet()
+
+        // Start/restart backfill when feed data arrives or grows
+        if (feedGrew && allEvents.size >= 3 && backfillJob?.isActive != true) {
+            startBackfill()
+        }
 
         // State transitions
         val candidate = nextState(isScrollInProgress)
@@ -114,10 +124,12 @@ class FeedHydrationController(
         profileJob?.cancel()
         refJob?.cancel()
         engagementJob?.cancel()
+        backfillJob?.cancel()
         profileHydratedIds.clear()
         refHydratedIds.clear()
         engagementFetchedIds.clear()
         fanOutPendingIds.clear()
+        backfillFetchedIds.clear()
         scrollSamples.clear()
         velocityPxPerSec = 0f
         lastVisibleItems = emptyList()
@@ -385,6 +397,39 @@ class FeedHydrationController(
             relayPool.fetchEngagementBatch(novelIds)
             lastEngagementRefreshTime = System.currentTimeMillis()
             Log.d(TAG, "Engagement fetch: ${novelIds.size} items")
+        }
+    }
+
+    // ── Background engagement accumulation ─────────────────────────────
+
+    /**
+     * Starts a low-priority background drip that slowly accumulates engagement
+     * data for all feed events. NOT tied to scroll state — runs as long as the
+     * feed is active. One batch every 2.5s. Cancelled and restarted on feed switch.
+     */
+    fun startBackfill() {
+        backfillJob?.cancel()
+        backfillJob = scope.launch(Dispatchers.IO) {
+            // Initial delay — let WARM_CATCHUP + IDLE fetch visible engagement first
+            delay(5_000L)
+            Log.d(TAG, "Backfill: starting (${lastAllEvents.size} feed events)")
+
+            while (true) {
+                val allIds = lastAllEvents.map { it.id }
+                val novel = allIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
+                if (novel.isEmpty()) {
+                    Log.d(TAG, "Backfill: complete — all ${allIds.size} events covered")
+                    break
+                }
+
+                val batch = novel.take(BACKFILL_BATCH_SIZE)
+                backfillFetchedIds.addAll(batch)
+                engagementFetchedIds.addAll(batch)
+                relayPool.fetchEngagementBatch(batch)
+                Log.d(TAG, "Backfill: batch ${batch.size} items (${novel.size - batch.size} remaining)")
+
+                delay(BACKFILL_DELAY_MS)
+            }
         }
     }
 
