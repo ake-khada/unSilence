@@ -6,7 +6,9 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.db.dao.RelayTrustScoreDao
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetMemberEntity
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.relay.RelayPool
@@ -17,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,6 +36,7 @@ class RelayManagementViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
+    private val relayTrustScoreDao: RelayTrustScoreDao,
 ) : ViewModel() {
 
     val ownerPubkey: String? get() = keyManager.getPublicKeyHex()
@@ -55,6 +59,12 @@ class RelayManagementViewModel @Inject constructor(
     /** Kind 30002 relay sets. */
     val relaySets: Flow<List<NostrRelaySetEntity>> =
         ownerPubkey?.let { nostrRelaySetDao.getAllSets(it) } ?: emptyFlow()
+
+    /** Relay trust scores keyed by URL for quick lookup. */
+    val trustScores: Flow<Map<String, RelayTrustScoreEntity>> =
+        relayTrustScoreDao.allScoresFlow().map { list ->
+            list.associateBy { it.relayUrl }
+        }
 
     val publishing = MutableStateFlow(false)
     private val publishMutex = Mutex()

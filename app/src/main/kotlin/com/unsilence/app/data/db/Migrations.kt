@@ -59,6 +59,26 @@ val MIGRATION_14_15 = object : Migration(14, 15) {
     }
 }
 
+val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `relay_trust_scores` (
+                `relay_url` TEXT NOT NULL PRIMARY KEY,
+                `score` INTEGER NOT NULL,
+                `reliability` INTEGER NOT NULL,
+                `quality` INTEGER NOT NULL,
+                `accessibility` INTEGER NOT NULL,
+                `confidence` TEXT NOT NULL,
+                `observations` INTEGER NOT NULL,
+                `policy` TEXT,
+                `country_code` TEXT,
+                `operator_verified` TEXT,
+                `updated_at` INTEGER NOT NULL
+            )
+        """)
+    }
+}
+
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── Step 1: Migrate non-built-in relay sets to NIP-51 nostr_relay_sets ──

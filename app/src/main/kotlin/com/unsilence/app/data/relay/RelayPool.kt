@@ -883,6 +883,47 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch kind 30385 (Trusted Relay Assertions) from [providerPubkeyHex].
+     * Events are processed by [EventProcessor] which upserts them into Room.
+     * Sends REQ to all connected relays plus the provider's known publishing relays.
+     */
+    fun fetchTrustScores(providerPubkeyHex: String) {
+        val subId = "trust-scores-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30385)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(providerPubkeyHex)) })
+                put("limit", JsonPrimitive(500))
+            })
+        }.toString()
+        _activeOneShotSubs.add(subId)
+        // Send to all connected relays
+        for (conn in connections.values) {
+            sendOneShotToRelay(conn, req)
+        }
+        // Also ensure the provider's known publishing relays get the REQ
+        val providerRelays = listOf(
+            "wss://relay.damus.io", "wss://nos.lol",
+            "wss://relay.primal.net", "wss://relay.ditto.pub",
+        )
+        for (rawUrl in providerRelays) {
+            val url = normalizeRelayUrl(rawUrl) ?: continue
+            if (connections.containsKey(url)) continue // already sent above
+            val conn = RelayConnection(url, okHttpClient)
+            connections[url] = conn
+            connectionLastActivity[url] = System.currentTimeMillis()
+            conn.connect()
+            scope.launch {
+                conn.send(req)
+                listenForEvents(conn)
+            }
+        }
+        Log.d(TAG, "Fetching kind 30385 trust scores from ${connections.size} relays")
+    }
+
+    /**
      * Open (or reuse) a connection to [relayUrl] and subscribe to kind 1/6/20/21 events
      * filtered to [authorPubkeys] only — used by the outbox routing for the Following feed.
      *

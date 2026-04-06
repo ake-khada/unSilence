@@ -83,6 +83,7 @@ class EventProcessor @Inject constructor(
     private val tagDao: TagDao,
     private val eventRelayDao: EventRelayDao,
     private val outboxRouter: dagger.Lazy<OutboxRouter>,
+    private val relayTrustScoreDao: com.unsilence.app.data.db.dao.RelayTrustScoreDao,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
@@ -120,6 +121,7 @@ class EventProcessor @Inject constructor(
         10007 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10007) },
         10012 to { obj -> outboxRouter.get().handleFavoriteRelays(obj) },
         30002 to { obj -> outboxRouter.get().handleRelaySet(obj) },
+        30385 to { obj -> handleTrustScore(obj) },
     )
 
     private var drainerJob: Job? = null
@@ -270,6 +272,37 @@ class EventProcessor @Inject constructor(
         // Launched in a new coroutine so that a slow handler (e.g. OutboxRouter doing
         // Room writes or opening relay connections) never blocks the relay message loop.
         kindHandlers[kind]?.let { handler -> scope.launch { handler(obj) } }
+    }
+
+    // ── Kind 30385: Trusted Relay Assertions ───────────────────────────────────
+
+    private suspend fun handleTrustScore(obj: JsonObject) {
+        val tags = obj["tags"]?.jsonArray ?: return
+        fun tag(name: String): String? = tags.firstOrNull {
+            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == name
+        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+
+        val relayUrl = tag("d") ?: return
+        val score = tag("score")?.toIntOrNull() ?: return
+        val reliability = tag("reliability")?.toIntOrNull() ?: return
+        val quality = tag("quality")?.toIntOrNull() ?: return
+        val accessibility = tag("accessibility")?.toIntOrNull() ?: return
+        val confidence = tag("confidence") ?: return
+        val observations = tag("observations")?.toIntOrNull() ?: 0
+
+        val entity = com.unsilence.app.data.db.entity.RelayTrustScoreEntity(
+            relayUrl = relayUrl,
+            score = score,
+            reliability = reliability,
+            quality = quality,
+            accessibility = accessibility,
+            confidence = confidence,
+            observations = observations,
+            policy = tag("policy"),
+            countryCode = tag("country_code"),
+            operatorVerified = tag("operator_verified"),
+        )
+        relayTrustScoreDao.upsertAll(listOf(entity))
     }
 
     // ── Entity builders (no DB access — just data class construction) ─────────
