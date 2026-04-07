@@ -1197,8 +1197,12 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
-        connections.values.take(3).forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${minOf(connections.size, 3)} relay(s)")
+        // Skip indexer relays — they only store profile metadata (kind 0, 10002)
+        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+            .mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val targets = connections.values.filter { it.url !in indexerUrls }.take(3)
+        targets.forEach { sendOneShotToRelay(it, req) }
+        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${targets.size} relay(s)")
     }
 
     /** Single-ID overload — delegates to batch. */
@@ -1233,10 +1237,13 @@ class RelayPool @Inject constructor(
                 .forEach { sendOneShotToRelay(it, req) }
         }
 
-        // Also broadcast to all connected relays as fallback — bridge events
-        // may only exist on relays not listed in the hint
-        connections.values.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchEventById: $eventId → hints=${relayHints.size} + ${connections.size} connected")
+        // Also broadcast to non-indexer connected relays as fallback — bridge events
+        // may only exist on relays not listed in the hint. Skip indexers (kind 0 only).
+        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+            .mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val fallbackTargets = connections.values.filter { it.url !in indexerUrls }
+        fallbackTargets.forEach { sendOneShotToRelay(it, req) }
+        Log.d(TAG, "fetchEventById: $eventId → hints=${relayHints.size} + ${fallbackTargets.size} connected")
     }
 
     fun publish(eventJson: String) {
