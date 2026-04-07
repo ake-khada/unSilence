@@ -56,6 +56,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -204,12 +205,28 @@ fun AppNavigation(onLogout: () -> Unit) {
         label         = "contentBottomPadding",
     )
 
+    // Accumulated scroll distance — requires committed drag before toggling bars.
+    // Prevents jittery show/hide on micro-scrolls and the "back jerk" when
+    // contentTopPadding animates on a barely-moved finger.
+    val scrollAccumulator = remember { mutableFloatStateOf(0f) }
     val nestedScrollConnection = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if ((dy < 0 && scrollAccumulator.floatValue > 0) ||
+                    (dy > 0 && scrollAccumulator.floatValue < 0)) {
+                    scrollAccumulator.floatValue = 0f  // direction reversed — reset
+                }
+                scrollAccumulator.floatValue += dy
                 when {
-                    available.y < -0.5f -> barsVisible = false
-                    available.y >  0.5f -> barsVisible = true
+                    scrollAccumulator.floatValue < -60f && barsVisible -> {
+                        barsVisible = false
+                        scrollAccumulator.floatValue = 0f
+                    }
+                    scrollAccumulator.floatValue > 30f && !barsVisible -> {
+                        barsVisible = true
+                        scrollAccumulator.floatValue = 0f
+                    }
                 }
                 return Offset.Zero
             }
