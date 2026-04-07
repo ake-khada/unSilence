@@ -22,6 +22,19 @@ private const val TAG = "CardHydrator"
 
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
+/** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
+object Nip19FailureCache {
+    private val failures = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private const val MAX_SIZE = 500
+
+    fun isKnownBad(uri: String): Boolean = failures.containsKey(uri)
+
+    fun markBad(uri: String) {
+        if (failures.size >= MAX_SIZE) failures.clear()
+        failures[uri] = true
+    }
+}
+
 /**
  * Unified card hydration: resolves ALL missing data for visible cards.
  *
@@ -228,13 +241,14 @@ fun extractRepostTargetId(tagsJson: String): String? {
 fun extractQuotedEventIds(content: String): List<String> {
     if (!content.contains("nostr:")) return emptyList()
     return NOSTR_URI_REGEX.findAll(content).mapNotNull { match ->
+        if (Nip19FailureCache.isKnownBad(match.value)) return@mapNotNull null
         runCatching {
             when (val entity = Nip19Parser.uriToRoute(match.value)?.entity) {
                 is NEvent -> entity.hex
                 is NNote -> entity.hex
                 else -> null
             }
-        }.getOrNull()
+        }.onFailure { Nip19FailureCache.markBad(match.value) }.getOrNull()
     }.toList()
 }
 
@@ -243,12 +257,13 @@ fun extractProfileHints(content: String): Map<String, List<String>> {
     if (!content.contains("nostr:")) return emptyMap()
     val hints = mutableMapOf<String, List<String>>()
     NOSTR_URI_REGEX.findAll(content).forEach { match ->
+        if (Nip19FailureCache.isKnownBad(match.value)) return@forEach
         runCatching {
             val entity = Nip19Parser.uriToRoute(match.value)?.entity
             if (entity is NProfile && entity.relay.isNotEmpty()) {
                 hints[entity.hex] = entity.relay.map { it.url }
             }
-        }
+        }.onFailure { Nip19FailureCache.markBad(match.value) }
     }
     return hints
 }

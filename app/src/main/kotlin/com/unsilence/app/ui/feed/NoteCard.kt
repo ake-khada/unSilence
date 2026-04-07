@@ -85,6 +85,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.ImetaMedia
@@ -165,16 +166,19 @@ private sealed class NostrRef {
     data class AddressRef(val kind: Int, val author: String, val dTag: String, val relayHints: List<String> = emptyList()) : NostrRef()
 }
 
-private fun decodeNostrRef(uri: String): NostrRef? = runCatching {
-    when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
-        is NEvent   -> NostrRef.EventRef(entity.hex, entity.relay.map { it.url })
-        is NNote    -> NostrRef.EventRef(entity.hex)
-        is NAddress -> NostrRef.AddressRef(entity.kind, entity.author, entity.dTag, entity.relay.map { it.url })
-        is NPub     -> NostrRef.ProfileRef(entity.hex)
-        is NProfile -> NostrRef.ProfileRef(entity.hex, entity.relay.map { it.url })
-        else        -> null
-    }
-}.getOrNull()
+private fun decodeNostrRef(uri: String): NostrRef? {
+    if (Nip19FailureCache.isKnownBad(uri)) return null
+    return runCatching {
+        when (val entity = Nip19Parser.uriToRoute(uri)?.entity) {
+            is NEvent   -> NostrRef.EventRef(entity.hex, entity.relay.map { it.url })
+            is NNote    -> NostrRef.EventRef(entity.hex)
+            is NAddress -> NostrRef.AddressRef(entity.kind, entity.author, entity.dTag, entity.relay.map { it.url })
+            is NPub     -> NostrRef.ProfileRef(entity.hex)
+            is NProfile -> NostrRef.ProfileRef(entity.hex, entity.relay.map { it.url })
+            else        -> null
+        }
+    }.onFailure { Nip19FailureCache.markBad(uri) }.getOrNull()
+}
 
 /** Extract relay hints from q-tags: eventId → list of relay URLs. */
 private fun extractQTagHints(tagsJson: String): Map<String, List<String>> {
