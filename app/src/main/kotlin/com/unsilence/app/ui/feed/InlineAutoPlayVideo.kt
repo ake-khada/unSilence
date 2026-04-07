@@ -34,6 +34,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -65,6 +66,13 @@ internal fun VideoThumbnailImage(
             contentDescription = null,
             contentScale = ContentScale.Fit,
             modifier = modifier,
+            onSuccess = { state ->
+                val w = state.result.image.width
+                val h = state.result.image.height
+                if (w > 0 && h > 0) {
+                    onAspectRatioResolved?.invoke(w.toFloat() / h)
+                }
+            },
         )
     } else if (thumbnailCache != null) {
         // Seed from cache synchronously — no blank frame on recomposition
@@ -190,11 +198,21 @@ fun InlineVideoPlayer(
     // Reset first-frame flag when the video URL changes
     LaunchedEffect(model.videoUrl) { isFirstFrameRendered = false }
 
-    // Listen for first rendered frame to hide poster
+    // Listen for first rendered frame + actual video dimensions
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 isFirstFrameRendered = true
+            }
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    val ratio = videoSize.width.toFloat() / videoSize.height
+                    if (!forceSquare && !imetaKnown) {
+                        displayAspect = feedVideoAspectRatio(ratio, false)
+                    }
+                    // Persist so future preview cards and re-entries use correct ratio
+                    thumbnailCache?.resolvedAspectRatios?.put(model.videoUrl, ratio)
+                }
             }
         }
         exoPlayer.addListener(listener)
