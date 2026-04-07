@@ -277,11 +277,11 @@ class FeedHydrationController(
         if (toProfile.isEmpty()) return
 
         if (profileJob?.isActive == true) return
+        val ids = toProfile.map { it.id }
+        profileHydratedIds.addAll(ids)
+        fanOutPendingIds.addAll(ids)
         profileJob = scope.launch(Dispatchers.IO) {
             cardHydrator.hydrateProfiles(toProfile, fanOut = false)
-            val ids = toProfile.map { it.id }
-            profileHydratedIds.addAll(ids)
-            fanOutPendingIds.addAll(ids)
             Log.d(TAG, "WARM_CATCHUP: profiles for ${toProfile.size} visible items (indexer-only)")
         }
     }
@@ -301,12 +301,13 @@ class FeedHydrationController(
             .sortedByProximity(combined, viewportCenter)
             .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
+            val totalUnhydrated = combined.count { it.id !in profileHydratedIds }
+            val ids = toProfile.map { it.id }
+            profileHydratedIds.addAll(ids)
+            fanOutPendingIds.addAll(ids)
             profileJob = scope.launch(Dispatchers.IO) {
                 cardHydrator.hydrateProfiles(toProfile, fanOut = false)
-                val ids = toProfile.map { it.id }
-                profileHydratedIds.addAll(ids)
-                fanOutPendingIds.addAll(ids)
-                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (indexer-only, capped from ${combined.count { it.id !in profileHydratedIds }})")
+                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (indexer-only, capped from $totalUnhydrated)")
             }
         }
 
@@ -317,10 +318,10 @@ class FeedHydrationController(
             .take(SLOW_SCROLL_REF_CAP)
         if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
             lastRefStartTime = now
+            refHydratedIds.addAll(toRef.map { it.id })
             refJob = scope.launch(Dispatchers.IO) {
                 if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
                 cardHydrator.hydrateRefs(toRef)
-                refHydratedIds.addAll(toRef.map { it.id })
                 Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
             }
         }
@@ -340,9 +341,9 @@ class FeedHydrationController(
         // Phase 1: profiles for anything not yet done (full fan-out)
         val toProfile = combined.filter { it.id !in profileHydratedIds }
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
+            profileHydratedIds.addAll(toProfile.map { it.id })
             profileJob = scope.launch(Dispatchers.IO) {
                 cardHydrator.hydrateProfiles(toProfile, fanOut = true)
-                profileHydratedIds.addAll(toProfile.map { it.id })
                 Log.d(TAG, "IDLE: profiles for ${toProfile.size} items (full fan-out)")
             }
         }
@@ -353,10 +354,10 @@ class FeedHydrationController(
         val toRef = combined.filter { it.id !in refHydratedIds }
         if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
             lastRefStartTime = now
+            refHydratedIds.addAll(toRef.map { it.id })
             refJob = scope.launch(Dispatchers.IO) {
                 if (state == ScrollState.FAST_SCROLL) return@launch
                 cardHydrator.hydrateRefs(toRef)
-                refHydratedIds.addAll(toRef.map { it.id })
                 Log.d(TAG, "IDLE: refs for ${toRef.size} items")
             }
         }
@@ -380,12 +381,14 @@ class FeedHydrationController(
             .filter { it !in engagementFetchedIds }
         if (candidateTargetIds.isEmpty()) return
 
+        // Pre-mark candidates to prevent re-submission from concurrent frames.
+        // Ids that turn out to be fresh in Room are harmless — they just won't be fetched.
+        engagementFetchedIds.addAll(candidateTargetIds)
         warmEngagementJob = scope.launch(Dispatchers.IO) {
             val threshold = System.currentTimeMillis() - ENGAGEMENT_STALE_MS
             val freshIds = eventStatsDao.getFreshEngagementIds(candidateTargetIds, threshold).toSet()
             val staleIds = candidateTargetIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
             if (staleIds.isNotEmpty()) {
-                engagementFetchedIds.addAll(staleIds)
                 relayPool.fetchEngagementBatch(staleIds)
                 Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateTargetIds.size - freshIds.size - staleIds.size} deferred)")
             }
