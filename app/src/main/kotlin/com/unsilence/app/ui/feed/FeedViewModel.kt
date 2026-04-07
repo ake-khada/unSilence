@@ -171,6 +171,9 @@ class FeedViewModel @Inject constructor(
     private var lastOldestTimestamp = 0L
     private var lastLoadMoreTime = 0L
 
+    // Log dedup: only log feed emissions when size or boundary IDs change
+    private var lastLoggedEmissionSig: Triple<Int, String?, String?> = Triple(0, null, null)
+
     // ── Per-feed saved state (scroll position + displayLimit) ────────────
     private data class SavedFeedState(
         val displayLimit: Int = 50,
@@ -473,7 +476,11 @@ class FeedViewModel @Inject constructor(
                 .distinctUntilChanged()
                 .collectLatest { rows ->
                     _isLoadingMore.value = false
-                    Log.d("FeedVM", "Feed emission: size=${rows.size} feedKey=$currentFeedKey")
+                    val sig = Triple(rows.size, rows.firstOrNull()?.id, rows.lastOrNull()?.id)
+                    if (sig != lastLoggedEmissionSig) {
+                        Log.d("FeedVM", "Feed emission: size=${rows.size} feedKey=$currentFeedKey")
+                        lastLoggedEmissionSig = sig
+                    }
                     _activeReducer.value.onNewEvents(rows)
 
                     // Browse feeds: keep LOADING until events arrive (timeout handles failure).
