@@ -305,8 +305,13 @@ fun FeedScreen(
                     }
                 }
 
-                // Hydration controller: feeds scroll state every frame
+                // Queue gate: pause discretionary hydration when items are pending
                 val controller = viewModel.hydrationController
+                LaunchedEffect(reducerState.unreadCount) {
+                    controller.onPendingCountChanged(reducerState.unreadCount)
+                }
+
+                // Hydration controller: feeds scroll state every frame
                 LaunchedEffect(listState) {
                     var wasScrolling = false
                     snapshotFlow {
