@@ -783,7 +783,7 @@ class RelayPool @Inject constructor(
      *                                src-profiles-, search-, older-, relay-ecosystem-,
      *                                thread-event-, thread-replies-, thread-reactions-,
      *                                thread-zaps-, user-posts-, user-longform-,
-     *                                user-engagement-, hint-event-,
+     *                                user-engagement-, hint-event-, trust-scores-,
      *                                engagement-replies-, engagement-reactions-, engagement-zaps-
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
@@ -807,7 +807,8 @@ class RelayPool @Inject constructor(
         subId.startsWith("engagement-replies-")     ||
         subId.startsWith("engagement-reactions-")   ||
         subId.startsWith("engagement-zaps-")        ||
-        subId.startsWith("batch-events-")
+        subId.startsWith("batch-events-")           ||
+        subId.startsWith("trust-scores-")
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
