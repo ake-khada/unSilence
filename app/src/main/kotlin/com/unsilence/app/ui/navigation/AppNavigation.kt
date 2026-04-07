@@ -169,7 +169,11 @@ fun AppNavigation(onLogout: () -> Unit) {
         buildList {
             if (hasFollows) add(FeedType.Following to "Following")
             add(FeedType.Global to "Global")
-            pinnedRelays.forEach { add(it as FeedType to it.displayLabel) }
+            add(FeedType.Popular to "Popular")
+            for (relay in pinnedRelays) {
+                if (relay.url == FeedType.Popular.url) continue
+                add(relay as FeedType to relay.displayLabel)
+            }
             userSets.forEach { set ->
                 val name = set.title ?: set.dTag
                 add(FeedType.RelaySet(set.dTag, name) as FeedType to name)
@@ -471,7 +475,10 @@ fun AppNavigation(onLogout: () -> Unit) {
                     eventId       = eventId,
                     onDismiss     = { threadEventId = null },
                     onQuote       = { noteId -> quoteNoteId = noteId },
-                    onAuthorClick = onAuthorClick,
+                    onAuthorClick = { pubkey ->
+                        threadEventId = null      // dismiss thread so profile is visible
+                        userProfilePubkey = pubkey
+                    },
                 )
             }
 
@@ -829,11 +836,13 @@ private fun FeedSelectorSheet(
             SectionLabel("Feeds")
             if (hasFollows) SheetItem("Following", FeedType.Following)
             SheetItem("Global", FeedType.Global)
+            SheetItem("Popular", FeedType.Popular)
 
             // ── Pinned relays ──
-            if (pinnedRelays.isNotEmpty()) {
+            val visiblePinned = pinnedRelays.filter { it.url != FeedType.Popular.url }
+            if (visiblePinned.isNotEmpty()) {
                 SectionLabel("Favorite Relays")
-                for (relay in pinnedRelays) {
+                for (relay in visiblePinned) {
                     SheetItem(relay.displayLabel, relay)
                 }
             }

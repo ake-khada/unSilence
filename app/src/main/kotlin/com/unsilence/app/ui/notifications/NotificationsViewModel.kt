@@ -34,7 +34,7 @@ class NotificationsViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(NotificationsUiState())
     val uiState: StateFlow<NotificationsUiState> = _uiState.asStateFlow()
 
-    private val _filter = MutableStateFlow(NotifFilter.Following)
+    private val _filter = MutableStateFlow(NotifFilter.Global)
     val filter: StateFlow<NotifFilter> = _filter.asStateFlow()
 
     private var collectJob: Job? = null

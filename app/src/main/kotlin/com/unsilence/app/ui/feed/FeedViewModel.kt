@@ -58,6 +58,11 @@ sealed class FeedType {
             else -> label
         }
     }
+
+    companion object {
+        /** Built-in Popular feed — always present in carousel. */
+        val Popular = SingleRelay("wss://antiprimal.net/hot", "Popular")
+    }
 }
 
 enum class FeedContentFilter(val value: Int) {
@@ -238,7 +243,11 @@ class FeedViewModel @Inject constructor(
         val list = mutableListOf<FeedType>()
         if (_hasFollows.value) list.add(FeedType.Following)
         list.add(FeedType.Global)
-        for (relay in pinnedRelays.value) list.add(relay)
+        list.add(FeedType.Popular)
+        for (relay in pinnedRelays.value) {
+            if (relay.url == FeedType.Popular.url) continue  // already included as built-in
+            list.add(relay)
+        }
         for (set in (userSetsFlow.value)) {
             list.add(FeedType.RelaySet(set.dTag, set.title ?: set.dTag))
         }
