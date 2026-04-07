@@ -50,7 +50,7 @@ import com.unsilence.app.data.db.entity.UserEntity
         PinnedRelayEntity::class,
         RelayTrustScoreEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

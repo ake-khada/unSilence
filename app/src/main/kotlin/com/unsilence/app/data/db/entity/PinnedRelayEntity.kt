@@ -2,17 +2,23 @@ package com.unsilence.app.data.db.entity
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room.Index
 
-@Entity(tableName = "pinned_relays")
+@Entity(
+    tableName = "pinned_relays",
+    primaryKeys = ["pubkey", "url"],
+    indices = [Index("pubkey")],
+)
 data class PinnedRelayEntity(
-    @PrimaryKey
-    @ColumnInfo(name = "relay_url")
-    val relayUrl: String,
+    @ColumnInfo(name = "pubkey")
+    val pubkey: String,
 
-    @ColumnInfo(name = "label")
-    val label: String,
+    @ColumnInfo(name = "url")
+    val url: String,
 
-    @ColumnInfo(name = "added_at", defaultValue = "0")
+    @ColumnInfo(name = "display_label")
+    val displayLabel: String?,
+
+    @ColumnInfo(name = "added_at")
     val addedAt: Long = System.currentTimeMillis() / 1000,
 )

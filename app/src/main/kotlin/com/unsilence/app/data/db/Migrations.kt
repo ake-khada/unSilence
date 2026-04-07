@@ -79,6 +79,24 @@ val MIGRATION_15_16 = object : Migration(15, 16) {
     }
 }
 
+val MIGRATION_16_17 = object : Migration(16, 17) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Wipe existing pinned relays — they're un-attributed and we cannot
+        // safely guess which pubkey added them. Users will re-add on first run.
+        db.execSQL("DROP TABLE IF EXISTS `pinned_relays`")
+        db.execSQL("""
+            CREATE TABLE `pinned_relays` (
+                `pubkey` TEXT NOT NULL,
+                `url` TEXT NOT NULL,
+                `display_label` TEXT,
+                `added_at` INTEGER NOT NULL,
+                PRIMARY KEY (`pubkey`, `url`)
+            )
+        """)
+        db.execSQL("CREATE INDEX `index_pinned_relays_pubkey` ON `pinned_relays`(`pubkey`)")
+    }
+}
+
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // ── Step 1: Migrate non-built-in relay sets to NIP-51 nostr_relay_sets ──

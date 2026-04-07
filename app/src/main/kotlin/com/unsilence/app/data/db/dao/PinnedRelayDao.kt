@@ -10,12 +10,12 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface PinnedRelayDao {
 
-    @Query("SELECT * FROM pinned_relays ORDER BY added_at ASC")
-    fun allFlow(): Flow<List<PinnedRelayEntity>>
+    @Query("SELECT * FROM pinned_relays WHERE pubkey = :pubkey ORDER BY added_at ASC")
+    fun pinnedFor(pubkey: String): Flow<List<PinnedRelayEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(entity: PinnedRelayEntity)
+    suspend fun upsert(relay: PinnedRelayEntity)
 
-    @Query("DELETE FROM pinned_relays WHERE relay_url = :url")
-    suspend fun deleteByUrl(url: String)
+    @Query("DELETE FROM pinned_relays WHERE pubkey = :pubkey AND url = :url")
+    suspend fun delete(pubkey: String, url: String)
 }
