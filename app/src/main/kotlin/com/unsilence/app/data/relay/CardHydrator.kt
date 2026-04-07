@@ -177,6 +177,8 @@ class CardHydrator @Inject constructor(
                     withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
                     thumbnailCount++
                     Log.d(TAG, "Prefetched thumbnail: ${model.videoUrl.take(60)}")
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "Thumbnail prefetch failed: ${e.message}")
                 }
