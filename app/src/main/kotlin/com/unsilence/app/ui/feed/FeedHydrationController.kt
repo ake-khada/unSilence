@@ -81,6 +81,10 @@ class FeedHydrationController(
     // ── Queue gate ─────────────────────────────────────────────────
     private var pendingQueueSize: Int = 0
 
+    // ── Window dedup ────────────────────────────────────────────────
+    private var lastProcessedWindowHash: Int = 0
+    private var lastProcessedWindowSize: Int = 0
+
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
     private var lastAllEvents: List<FeedRow> = emptyList()
@@ -155,6 +159,8 @@ class FeedHydrationController(
         lastRefStartTime = 0L
         lastTransitionTime = 0L
         pendingQueueSize = 0
+        lastProcessedWindowHash = 0
+        lastProcessedWindowSize = 0
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -273,6 +279,9 @@ class FeedHydrationController(
                 // Cancel all hydration work immediately — total blackout
                 profileJob?.cancel()
                 refJob?.cancel()
+                // Reset window hash so we reprocess when exiting FAST_SCROLL
+                lastProcessedWindowHash = 0
+                lastProcessedWindowSize = 0
             }
         }
     }
@@ -304,6 +313,7 @@ class FeedHydrationController(
      */
     private fun handleSlowScroll() {
         val warmZone = computeWarmZone()
+        if (isWindowUnchanged(lastVisibleItems, warmZone)) return
         val combined = lastVisibleItems + warmZone
         val viewportCenter = lastVisibleItems.size / 2
 
@@ -349,6 +359,7 @@ class FeedHydrationController(
      */
     private fun handleIdle() {
         val warmZone = computeWarmZone()
+        if (isWindowUnchanged(lastVisibleItems, warmZone)) return
         val combined = lastVisibleItems + warmZone
 
         // Phase 1: profiles for anything not yet done (full fan-out)
@@ -439,6 +450,9 @@ class FeedHydrationController(
                 delay(ENGAGEMENT_REFRESH_INTERVAL_MS)
                 if (state != ScrollState.IDLE) break
                 engagementFetchedIds.clear()
+                // Reset window hash so handleIdle re-evaluates engagement freshness
+                lastProcessedWindowHash = 0
+                lastProcessedWindowSize = 0
                 Log.d(TAG, "IDLE: stale refresh — cleared engagement dedup for re-check")
             }
         }
@@ -563,6 +577,24 @@ class FeedHydrationController(
     /** For kind 6 reposts, engagement targets the original event (root_id), not the wrapper. */
     private fun engagementTargetId(row: FeedRow): String =
         if (row.kind == 6 && row.rootId != null) row.rootId else row.id
+
+    // ── Window dedup ──────────────────────────────────────────────────
+
+    /**
+     * Returns true if the visible + warm zone window is structurally identical
+     * to the last processed tick (same IDs in same order). When true, skip the
+     * entire handler body — no filtering, sorting, or job launch needed.
+     */
+    private fun isWindowUnchanged(visible: List<FeedRow>, warmZone: List<FeedRow>): Boolean {
+        var h = 0
+        for (row in visible) h = h * 31 + row.id.hashCode()
+        for (row in warmZone) h = h * 31 + row.id.hashCode()
+        val size = visible.size + warmZone.size
+        if (h == lastProcessedWindowHash && size == lastProcessedWindowSize) return true
+        lastProcessedWindowHash = h
+        lastProcessedWindowSize = size
+        return false
+    }
 
     // ── Zone computation ──────────────────────────────────────────────
 
