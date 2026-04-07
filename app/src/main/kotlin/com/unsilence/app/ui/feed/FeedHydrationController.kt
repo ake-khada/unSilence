@@ -78,6 +78,9 @@ class FeedHydrationController(
     // ── Engagement coalescing ────────────────────────────────────────
     private val pendingEngagementIds = mutableSetOf<String>()
 
+    // ── Queue gate ─────────────────────────────────────────────────
+    private var pendingQueueSize: Int = 0
+
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
     private var lastAllEvents: List<FeedRow> = emptyList()
@@ -151,6 +154,7 @@ class FeedHydrationController(
         lastEngagementRefreshTime = 0L
         lastRefStartTime = 0L
         lastTransitionTime = 0L
+        pendingQueueSize = 0
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -318,18 +322,20 @@ class FeedHydrationController(
             }
         }
 
-        // Phase 2: refs — max 2 per pass, 2000ms debounce
-        val now = System.currentTimeMillis()
-        val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
-            .sortedByProximity(combined, viewportCenter)
-            .take(SLOW_SCROLL_REF_CAP)
-        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
-            lastRefStartTime = now
-            refHydratedIds.addAll(toRef.map { it.id })
-            refJob = scope.launch(Dispatchers.IO) {
-                if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
-                cardHydrator.hydrateRefs(toRef)
-                Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
+        // Phase 2: refs — max 2 per pass, 2000ms debounce (gated by queue)
+        if (pendingQueueSize == 0) {
+            val now = System.currentTimeMillis()
+            val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
+                .sortedByProximity(combined, viewportCenter)
+                .take(SLOW_SCROLL_REF_CAP)
+            if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
+                lastRefStartTime = now
+                refHydratedIds.addAll(toRef.map { it.id })
+                refJob = scope.launch(Dispatchers.IO) {
+                    if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
+                    cardHydrator.hydrateRefs(toRef)
+                    Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
+                }
             }
         }
 
@@ -355,17 +361,19 @@ class FeedHydrationController(
             }
         }
 
-        // Phase 2: refs + thumbnails
+        // Phase 2: refs + thumbnails (gated by queue — discretionary)
         // Debounced — minimum 500ms between Phase 2 runs
-        val now = System.currentTimeMillis()
-        val toRef = combined.filter { it.id !in refHydratedIds }
-        if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
-            lastRefStartTime = now
-            refHydratedIds.addAll(toRef.map { it.id })
-            refJob = scope.launch(Dispatchers.IO) {
-                if (state == ScrollState.FAST_SCROLL) return@launch
-                cardHydrator.hydrateRefs(toRef)
-                Log.d(TAG, "IDLE: refs for ${toRef.size} items")
+        if (pendingQueueSize == 0) {
+            val now = System.currentTimeMillis()
+            val toRef = combined.filter { it.id !in refHydratedIds }
+            if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
+                lastRefStartTime = now
+                refHydratedIds.addAll(toRef.map { it.id })
+                refJob = scope.launch(Dispatchers.IO) {
+                    if (state == ScrollState.FAST_SCROLL) return@launch
+                    cardHydrator.hydrateRefs(toRef)
+                    Log.d(TAG, "IDLE: refs for ${toRef.size} items")
+                }
             }
         }
 
@@ -403,6 +411,11 @@ class FeedHydrationController(
     }
 
     private fun startIdleEngagement() {
+        if (pendingQueueSize > 0) {
+            Log.d(TAG, "Skipping IDLE engagement — queue=$pendingQueueSize")
+            return
+        }
+
         // Deferred fan-out: batch source + hint relay fetches for items that got
         // indexer-only profile resolution during scroll. Fires once on IDLE entry.
         if (fanOutPendingIds.isNotEmpty()) {
@@ -446,6 +459,13 @@ class FeedHydrationController(
             Log.d(TAG, "Backfill: starting (${lastAllEvents.size} feed events)")
 
             while (true) {
+                // Pause backfill while user has pending items queued
+                if (pendingQueueSize > 0) {
+                    Log.d(TAG, "Backfill: paused — queue=$pendingQueueSize")
+                    delay(BACKFILL_DELAY_MS)
+                    continue
+                }
+
                 val allTargetIds = lastAllEvents.map { engagementTargetId(it) }.distinct()
                 val novel = allTargetIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
                 if (novel.isEmpty()) {
@@ -492,6 +512,11 @@ class FeedHydrationController(
 
     fun onScrollStarted() {
         idleTimerJob?.cancel()
+    }
+
+    /** Called from FeedScreen when ReducerState.unreadCount changes. */
+    fun onPendingCountChanged(count: Int) {
+        pendingQueueSize = count
     }
 
     // ── Proximity sorting ────────────────────────────────────────────
