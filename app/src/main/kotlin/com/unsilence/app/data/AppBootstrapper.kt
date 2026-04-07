@@ -29,12 +29,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -59,9 +54,9 @@ private val DEFAULT_SEARCH_URLS = listOf(
     "wss://relay.ditto.pub",
 )
 
-/** Pubkey of the trustedrelays.xyz operator who publishes kind 30385 events (Geektoshi). */
+/** Pubkey of the trustedrelays.xyz operator who publishes kind 30385 events. */
 private const val TRUST_SCORE_PROVIDER_PUBKEY =
-    "daa41bedb68591363bf4407f687cb9789cc543ed024bb77c22d2c84d88f54153"
+    "ad3cdbe9fb09b8edf7b3e0e5286d66e58b58eaa64d061bbcf3a935edf8abf421"
 
 @Singleton
 class AppBootstrapper @Inject constructor(
@@ -197,64 +192,13 @@ class AppBootstrapper @Inject constructor(
         // Fetch relay trust scores if stale (24 h cache)
         val lastTrustUpdate = relayTrustScoreDao.lastUpdatedAt() ?: 0L
         if (System.currentTimeMillis() - lastTrustUpdate > 24 * 60 * 60 * 1000L) {
-            // Try kind 30385 via Nostr protocol first
             relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY)
             Log.d(TAG, "Phase3: fetching relay trust scores (kind 30385)")
-            // Wait briefly for events to arrive, then fall back to HTTP API
-            delay(5_000L)
-            val gotScores = relayTrustScoreDao.lastUpdatedAt()?.let {
-                it > lastTrustUpdate
-            } == true
-            if (!gotScores) {
-                fetchTrustScoresHttp()
-            }
         }
 
         MediaPreconnect.warmUp(okHttpClient)
 
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
-    }
-
-    /**
-     * TEMPORARY fallback: fetch trust scores from the trustedrelays.xyz HTTP API.
-     * TODO: Remove once the provider's kind 30385 pubkey is confirmed and events
-     * are reliably available on relays. The kind 30385 path above is the correct
-     * Nostr-native approach.
-     */
-    private suspend fun fetchTrustScoresHttp() = withContext(Dispatchers.IO) {
-        try {
-            val request = okhttp3.Request.Builder()
-                .url("https://trustedrelays.xyz/api/relays")
-                .build()
-            val body = okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext
-                response.body?.string() ?: return@withContext
-            }
-            val root = kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
-            val arr = root["data"]?.jsonArray ?: return@withContext
-            val entities = arr.mapNotNull { elem ->
-                val obj = elem.jsonObject
-                val url = obj["url"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val score = obj["score"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-                com.unsilence.app.data.db.entity.RelayTrustScoreEntity(
-                    relayUrl = url,
-                    score = score,
-                    reliability = obj["reliability"]?.jsonPrimitive?.intOrNull ?: 0,
-                    quality = obj["quality"]?.jsonPrimitive?.intOrNull ?: 0,
-                    accessibility = obj["accessibility"]?.jsonPrimitive?.intOrNull ?: 0,
-                    confidence = obj["confidence"]?.jsonPrimitive?.content ?: "low",
-                    observations = obj["observations"]?.jsonPrimitive?.intOrNull ?: 0,
-                    policy = obj["policy"]?.jsonPrimitive?.content,
-                    countryCode = obj["countryCode"]?.jsonPrimitive?.content,
-                )
-            }
-            if (entities.isNotEmpty()) {
-                relayTrustScoreDao.upsertAll(entities)
-                Log.d(TAG, "Phase3: HTTP fallback loaded ${entities.size} trust scores")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Phase3: HTTP trust score fallback failed: ${e.message}")
-        }
     }
 
     /**
