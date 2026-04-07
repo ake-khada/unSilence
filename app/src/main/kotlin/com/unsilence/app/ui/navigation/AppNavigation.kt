@@ -5,6 +5,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,6 +39,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
@@ -86,6 +88,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
@@ -159,6 +162,7 @@ fun AppNavigation(onLogout: () -> Unit) {
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
+    val trustScores   by relayManagementVm.trustScores.collectAsStateWithLifecycle(initialValue = emptyMap())
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
@@ -413,10 +417,12 @@ fun AppNavigation(onLogout: () -> Unit) {
                     hasFollows      = hasFollows,
                     userSets        = userSets,
                     pinnedRelays    = pinnedRelays,
+                    trustScores     = trustScores,
                     onFeedChanged   = { type ->
                         feedViewModel.setFeedType(type)
                         showFeedSheet = false
                     },
+                    onRemoveFavorite = { url -> feedViewModel.removePinnedRelay(url) },
                     onNewRelaySet   = { showFeedSheet = false; showCreateRelaySet = true },
                     onRelaySettings = { showFeedSheet = false; showRelaySettings = true },
                     onDeleteSet     = { dTag ->
@@ -762,7 +768,9 @@ private fun FeedSelectorSheet(
     hasFollows: Boolean,
     userSets: List<NostrRelaySetEntity>,
     pinnedRelays: List<FeedType.SingleRelay>,
+    trustScores: Map<String, RelayTrustScoreEntity>,
     onFeedChanged: (FeedType) -> Unit,
+    onRemoveFavorite: (String) -> Unit,
     onNewRelaySet: () -> Unit,
     onRelaySettings: () -> Unit,
     onDeleteSet: (String) -> Unit,
@@ -843,7 +851,44 @@ private fun FeedSelectorSheet(
             if (visiblePinned.isNotEmpty()) {
                 SectionLabel("Favorite Relays")
                 for (relay in visiblePinned) {
-                    SheetItem(relay.displayLabel, relay)
+                    val selected = isSelected(relay)
+                    val trustScore = trustScores[relay.url]?.score
+                    val dotColor = when {
+                        trustScore == null -> Color(0xFF666666)
+                        trustScore >= 70   -> Color(0xFF4CAF50)
+                        trustScore >= 40   -> Color(0xFFFFC107)
+                        else               -> Color(0xFFFF5252)
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 2.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) Cyan.copy(alpha = 0.08f) else Color.Transparent)
+                            .clickable { onFeedChanged(relay) }
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Canvas(modifier = Modifier.size(8.dp)) {
+                            drawCircle(color = dotColor)
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        Text(
+                            text       = relay.displayLabel,
+                            color      = if (selected) Cyan else Color(0xFFDDDDDD),
+                            fontSize   = 15.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier   = Modifier.weight(1f),
+                        )
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Remove favorite",
+                            tint = Color(0xFF555555),
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clickable { onRemoveFavorite(relay.url) },
+                        )
+                    }
                 }
             }
 
