@@ -44,6 +44,7 @@ class FeedHydrationController(
         const val BACKFILL_DELAY_MS = 2500L            // delay between backfill batches
         const val ENGAGEMENT_STALE_MS = 5 * 60 * 1000L // 5 minutes — warm zone freshness threshold
         const val WARM_ZONE_ENGAGEMENT_CAP = 5         // max warm zone engagement fetches per pass
+        const val ENGAGEMENT_COALESCE_MS = 750L          // coalesce window for engagement batches
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -72,6 +73,10 @@ class FeedHydrationController(
     private var engagementJob: Job? = null
     private var backfillJob: Job? = null    // Background engagement accumulation
     private var warmEngagementJob: Job? = null // Warm zone engagement pre-check
+    private var engagementCoalesceJob: Job? = null // Coalescing window for engagement batches
+
+    // ── Engagement coalescing ────────────────────────────────────────
+    private val pendingEngagementIds = mutableSetOf<String>()
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -131,6 +136,8 @@ class FeedHydrationController(
         engagementJob?.cancel()
         backfillJob?.cancel()
         warmEngagementJob?.cancel()
+        engagementCoalesceJob?.cancel()
+        pendingEngagementIds.clear()
         profileHydratedIds.clear()
         refHydratedIds.clear()
         engagementFetchedIds.clear()
@@ -389,7 +396,7 @@ class FeedHydrationController(
             val freshIds = eventStatsDao.getFreshEngagementIds(candidateTargetIds, threshold).toSet()
             val staleIds = candidateTargetIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
             if (staleIds.isNotEmpty()) {
-                relayPool.fetchEngagementBatch(staleIds)
+                queueEngagementFetch(staleIds)
                 Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateTargetIds.size - freshIds.size - staleIds.size} deferred)")
             }
         }
@@ -449,7 +456,7 @@ class FeedHydrationController(
                 val batch = novel.take(BACKFILL_BATCH_SIZE)
                 backfillFetchedIds.addAll(batch)
                 engagementFetchedIds.addAll(batch)
-                relayPool.fetchEngagementBatch(batch)
+                queueEngagementFetch(batch)
                 Log.d(TAG, "Backfill: batch ${batch.size} items (${novel.size - batch.size} remaining)")
 
                 delay(BACKFILL_DELAY_MS)
@@ -502,6 +509,27 @@ class FeedHydrationController(
         return sortedBy { item ->
             val pos = positionMap[item.id] ?: Int.MAX_VALUE
             kotlin.math.abs(pos - centerIndex)
+        }
+    }
+
+    // ── Engagement coalescing ───────────────────────────────────────
+
+    /**
+     * Coalesces engagement fetches into fat batches. Multiple call sites
+     * (checkEngagementFreshness, startBackfill) dump IDs here; a single
+     * 750ms timer flushes them all in one relay round-trip.
+     */
+    private fun queueEngagementFetch(ids: List<String>) {
+        pendingEngagementIds.addAll(ids)
+        if (engagementCoalesceJob?.isActive == true) return
+        engagementCoalesceJob = scope.launch(Dispatchers.IO) {
+            delay(ENGAGEMENT_COALESCE_MS)
+            val batch = pendingEngagementIds.toList()
+            pendingEngagementIds.clear()
+            if (batch.isNotEmpty()) {
+                relayPool.fetchEngagementBatch(batch)
+                Log.d(TAG, "Engagement batch (coalesced): ${batch.size} items")
+            }
         }
     }
 
