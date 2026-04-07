@@ -109,19 +109,23 @@ class FeedViewModel @Inject constructor(
 
     /** Favorite relays pinned to the feed picker — backed by Room for persistence. */
     val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
-        pinnedRelayDao.allFlow()
-            .map { entities -> entities.map { FeedType.SingleRelay(it.relayUrl, it.label) } }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        keyManager.getPublicKeyHex()?.let { pk ->
+            pinnedRelayDao.pinnedFor(pk)
+                .map { entities -> entities.map { FeedType.SingleRelay(it.url, it.displayLabel ?: it.url) } }
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        } ?: MutableStateFlow(emptyList())
 
     fun addPinnedRelay(url: String, label: String) {
+        val pk = keyManager.getPublicKeyHex() ?: return
         viewModelScope.launch {
-            pinnedRelayDao.insert(PinnedRelayEntity(relayUrl = url, label = label))
+            pinnedRelayDao.upsert(PinnedRelayEntity(pubkey = pk, url = url, displayLabel = label))
         }
     }
 
     fun removePinnedRelay(url: String) {
+        val pk = keyManager.getPublicKeyHex() ?: return
         viewModelScope.launch {
-            pinnedRelayDao.deleteByUrl(url)
+            pinnedRelayDao.delete(pk, url)
         }
     }
 
