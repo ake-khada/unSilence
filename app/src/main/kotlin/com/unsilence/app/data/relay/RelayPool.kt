@@ -183,8 +183,13 @@ class RelayPool @Inject constructor(
             state.tokens.updateAndGet { (it + refillCount).coerceAtMost(RATE_LIMIT_MAX_TOKENS) }
             state.lastRefill.set(now)
         }
-        // Consume token
-        return state.tokens.updateAndGet { if (it > 0) it - 1 else 0 } > 0
+        // Consume token — getAndUpdate returns the PRE-update value.
+        // If pre-update > 0, we had a token to spend → allowed.
+        val had = state.tokens.getAndUpdate { if (it > 0) it - 1 else 0 }
+        if (had <= 0) {
+            Log.d(TAG, "Rate limit: token exhausted for $url (throttling)")
+        }
+        return had > 0
     }
 
     private fun markRelayRateLimited(url: String) {
