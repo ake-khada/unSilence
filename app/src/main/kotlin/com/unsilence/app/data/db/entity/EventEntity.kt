@@ -14,6 +14,7 @@ import androidx.room.PrimaryKey
         Index("root_id", "created_at"),
         Index("pubkey", "kind", "created_at"),
         Index("created_at"),
+        Index("first_seen_at"),
     ],
 )
 data class EventEntity(
@@ -65,4 +66,8 @@ data class EventEntity(
     /** Aggregated zap amount in sats from kind-9735 receipts */
     @ColumnInfo(name = "zap_total_sats")
     val zapTotalSats: Long = 0,
+
+    /** When WE first received this event (epoch ms). Used for "new since last visit". */
+    @ColumnInfo(name = "first_seen_at")
+    val firstSeenAt: Long = 0,
 )

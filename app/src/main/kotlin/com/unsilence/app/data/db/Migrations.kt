@@ -79,6 +79,23 @@ val MIGRATION_15_16 = object : Migration(15, 16) {
     }
 }
 
+val MIGRATION_17_18 = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Per-subscription sync timestamps (foreground and future background)
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `sync_state` (
+                `subscription_key` TEXT NOT NULL PRIMARY KEY,
+                `last_sync_at` INTEGER NOT NULL,
+                `last_event_count` INTEGER NOT NULL DEFAULT 0,
+                `source` TEXT NOT NULL
+            )
+        """)
+        // Track when WE first received each event (separate from Nostr created_at)
+        db.execSQL("ALTER TABLE events ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_events_first_seen_at` ON events(first_seen_at)")
+    }
+}
+
 val MIGRATION_16_17 = object : Migration(16, 17) {
     override fun migrate(db: SupportSQLiteDatabase) {
         // Wipe existing pinned relays — they're un-attributed and we cannot

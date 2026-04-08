@@ -1,7 +1,15 @@
 package com.unsilence.app.data
 
+import android.content.Context
 import android.util.Log
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.work.BackgroundSyncWorker
+import java.util.concurrent.TimeUnit
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.EventDao
@@ -60,6 +68,7 @@ private const val TRUST_SCORE_PROVIDER_PUBKEY =
 
 @Singleton
 class AppBootstrapper @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val eventProcessor: EventProcessor,
@@ -198,7 +207,26 @@ class AppBootstrapper @Inject constructor(
 
         MediaPreconnect.warmUp(okHttpClient)
 
+        scheduleBackgroundSync()
+
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
+    }
+
+    private fun scheduleBackgroundSync() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiresBatteryNotLow(true)
+            .build()
+        val request = PeriodicWorkRequestBuilder<BackgroundSyncWorker>(30, TimeUnit.MINUTES)
+            .setConstraints(constraints)
+            .build()
+        WorkManager.getInstance(context)
+            .enqueueUniquePeriodicWork(
+                BackgroundSyncWorker.WORK_NAME,
+                ExistingPeriodicWorkPolicy.KEEP,
+                request,
+            )
+        Log.d(TAG, "Background sync worker scheduled (30min interval, stub implementation)")
     }
 
     /**

@@ -14,6 +14,7 @@ import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelayTrustScoreDao
+import com.unsilence.app.data.db.dao.SyncStateDao
 import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.CoverageEntity
@@ -29,6 +30,7 @@ import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.db.entity.RelayListEntity
 import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
+import com.unsilence.app.data.db.entity.SyncStateEntity
 import com.unsilence.app.data.db.entity.TagEntity
 import com.unsilence.app.data.db.entity.UserEntity
 
@@ -49,8 +51,9 @@ import com.unsilence.app.data.db.entity.UserEntity
         CoverageEntity::class,
         PinnedRelayEntity::class,
         RelayTrustScoreEntity::class,
+        SyncStateEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -68,4 +71,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun coverageDao(): CoverageDao
     abstract fun pinnedRelayDao(): PinnedRelayDao
     abstract fun relayTrustScoreDao(): RelayTrustScoreDao
+    abstract fun syncStateDao(): SyncStateDao
 }
