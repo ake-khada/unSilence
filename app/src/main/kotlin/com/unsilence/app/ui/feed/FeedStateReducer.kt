@@ -143,16 +143,15 @@ class FeedStateReducer(private val feedKey: String) {
 
                 if (leadingNew.isEmpty()) {
                     val existingIds = cur.visibleEvents.map { it.id }.toSet()
-                    val latestMap = allEvents.associateBy { it.id }
-                    val refreshed = cur.visibleEvents.map { row -> latestMap[row.id] ?: row }
                     val appended = allEvents.filter { it.id !in existingIds }
-                    // Nothing changed — skip allocation
-                    if (appended.isEmpty() && refreshed == cur.visibleEvents) return@update cur
-                    if (appended.isNotEmpty()) {
-                        lastAppendTime = System.currentTimeMillis()
-                        Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${refreshed.size + appended.size}")
-                    }
-                    cur.copy(visibleEvents = refreshed + appended)
+                    // No new items — skip entirely. Data-only refreshes (engagement
+                    // counts, profile pictures) are deferred to the next MERGE when
+                    // the user scrolls back to top. This avoids rebuilding a 500+
+                    // item list on every Room re-emission while scrolled down.
+                    if (appended.isEmpty()) return@update cur
+                    lastAppendTime = System.currentTimeMillis()
+                    Log.d(TAG, "feedKey=$feedKey atTop=false action=APPEND count=${appended.size} total=${cur.visibleEvents.size + appended.size}")
+                    cur.copy(visibleEvents = cur.visibleEvents + appended)
                 } else {
                     pendingIds = pendingIds + leadingNew.map { it.id }.toSet()
                     val unread = pendingIds.size

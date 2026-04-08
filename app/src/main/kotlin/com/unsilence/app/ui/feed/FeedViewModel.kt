@@ -175,6 +175,11 @@ class FeedViewModel @Inject constructor(
     private var lastOldestTimestamp = 0L
     private var lastLoadMoreTime = 0L
 
+    // Pagination cursor — advances backward only, never forward.
+    // Tracks the oldest timestamp we've paginated to, independent of
+    // the reducer's mutable visibleEvents list.
+    private var paginationCursor: Long = Long.MAX_VALUE
+
     // Log dedup: only log feed emissions when size or boundary IDs change
     private var lastLoggedEmissionSig: Triple<Int, String?, String?> = Triple(0, null, null)
 
@@ -307,15 +312,24 @@ class FeedViewModel @Inject constructor(
     fun loadMore() {
         val now = System.currentTimeMillis()
         if (now - lastLoadMoreTime < 1000) return  // 1s cooldown — immune to Flow resets
-        val events = _activeReducer.value.state.value.visibleEvents
-        val oldest = events.lastOrNull()?.createdAt ?: return
+
+        // Find the actual oldest timestamp in the visible list. Can't use
+        // lastOrNull() because the list isn't maintained in sorted order —
+        // trickle APPEND of real-time events puts newer items at the tail.
+        // Clamp to the monotonic pagination cursor so we never re-request
+        // time ranges we already paginated past.
+        val visibleOldest = _activeReducer.value.state.value.visibleEvents
+            .minOfOrNull { it.createdAt } ?: return
+        val oldest = minOf(visibleOldest, paginationCursor)
+
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
+        paginationCursor = oldest  // advance the cursor backward
         lastLoadMoreTime = now
         _isLoadingMore.value = true  // For spinner UI
-        _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(300)
+        _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
         relayPool.fetchOlderEvents(currentRelayUrls, oldest)
-        Log.d("FeedViewModel", "loadMore: fired, new limit=${_displayLimit.value} relays=${currentRelayUrls.size}")
+        Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=${_displayLimit.value}, relays=${currentRelayUrls.size}")
     }
 
     /** Read kind-10002 read relays from Room, falling back to hardcoded defaults. */
@@ -385,6 +399,7 @@ class FeedViewModel @Inject constructor(
                         lastOldestTimestamp = 0L
                         _displayLimit.value = 50
                     }
+                    paginationCursor = Long.MAX_VALUE
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
                     // Only reset controller on actual feed switch, not on every Room re-emission
