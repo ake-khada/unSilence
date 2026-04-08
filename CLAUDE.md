@@ -7,6 +7,32 @@
 
 ---
 
+## ⚠️ Validation Protocol — MANDATORY
+
+Any change affecting runtime behavior (scroll, touch, navigation, network, state machines, UI, video playback, background work) MUST be validated using the human-in-the-loop protocol. Scripted input (`adb shell input swipe/tap`) is NEVER used for validation of scroll-related or gesture-driven behavior — it does not reproduce real user gestures and will miss the bugs these sprints are trying to fix.
+
+**Before starting ANY sprint**, read `VALIDATION_PROTOCOL.md` in the repo root. It contains:
+- The 8-step validation protocol
+- 12 standard gesture scripts (SCROLL_FLING, SCROLL_REST, SCROLL_SLOW, SCROLL_MIXED, SCROLL_POPULAR, THREAD_SWITCH, PROFILE_NAV, VIDEO_PLAYBACK, MEDIA_IMAGES, COLD_START, BACKGROUND_SYNC, SETTINGS_NAVIGATION, COMPOSE_POST) for reuse across sprints
+- Exact pass criteria shell commands for every common metric
+- What Claude Code cannot do under the protocol
+
+**Core rule:** Every validation checkpoint stops, presents a gesture script, waits for the user to reply "done", captures a log artifact to `/mnt/user-data/outputs/`, extracts metrics with exact shell commands, and presents results with file paths for the user's independent review. No success claims without artifact files.
+
+**Forbidden:**
+- Scripted gesture simulation for scroll performance testing
+- Self-reported success without artifact files
+- Inferring behavior from static code analysis alone
+- Declaring metrics without extraction commands
+- Moving to the next priority without explicit user confirmation
+- Running diagnostic commands during the "waiting for user input" window
+
+**This protocol exists because:** the April 8 state machine rewrite sprint self-reported "98.4% reduction in Phase1/Phase2 calls, zero frame drops, all priorities passing" against scripted `adb shell input swipe` tests. Real device testing then showed the state machine was still flapping (250 transitions, 12 at v=0px/s — impossible if the dwell lock were working), zero single-flight hits (registry not wired up), and resource leaks regressed from 32 to 66. Scripted input cannot reproduce fling deceleration. Only a human performing real gestures against a real running app produces logs that prove a scroll-related fix is correct.
+
+See `VALIDATION_PROTOCOL.md` for the complete protocol, gesture scripts, and pass criteria patterns.
+
+---
+
 ## Environment
 
 - **Main user:** `aivii` — runs Android Studio (JetBrains Toolbox), git operations
