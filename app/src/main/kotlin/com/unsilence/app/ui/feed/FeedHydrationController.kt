@@ -60,6 +60,7 @@ class FeedHydrationController(
     // ── Velocity tracking ─────────────────────────────────────────────
     private val scrollSamples = ArrayDeque<Pair<Long, Int>>(VELOCITY_WINDOW_FRAMES + 2)
     private var velocityPxPerSec = 0f
+    private var smoothedVelocity = 0f   // low-pass filtered — used for state decisions
 
     // ── Hydration tracking ────────────────────────────────────────────
     private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done (event IDs)
@@ -119,6 +120,7 @@ class FeedHydrationController(
         scrollSamples.addLast(now to scrollPixelOffset)
         if (scrollSamples.size > VELOCITY_WINDOW_FRAMES + 1) scrollSamples.removeFirst()
         velocityPxPerSec = computeVelocity()
+        smoothedVelocity = 0.3f * velocityPxPerSec + 0.7f * smoothedVelocity
 
         // Store latest data
         lastVisibleItems = visibleItems
@@ -177,6 +179,7 @@ class FeedHydrationController(
         backfillFetchedIds.clear()
         scrollSamples.clear()
         velocityPxPerSec = 0f
+        smoothedVelocity = 0f
         lastVisibleItems = emptyList()
         lastAllEvents = emptyList()
         lastVisibleIds = emptySet()
@@ -210,14 +213,12 @@ class FeedHydrationController(
     // ── State machine transitions ─────────────────────────────────────
 
     private fun nextState(isScrollInProgress: Boolean): ScrollState {
-        // Hard dwell lock: ignore velocity-based transitions within STATE_DWELL_MS of last transition.
-        // User gestures (handled separately in onScrollFrame/onScrollStarted) bypass this.
-        val now = System.currentTimeMillis()
-        val dwellLocked = now - lastTransitionTime < STATE_DWELL_MS
-
+        // Velocity-based state decisions use smoothedVelocity (low-pass filtered)
+        // to prevent noisy per-frame spikes from causing rapid state oscillation.
+        // The dwell lock is enforced inside transitionTo() as a second layer.
         return when (state) {
             ScrollState.WARM_CATCHUP -> {
-                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (smoothedVelocity > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (catchupGateMet()) {
                     ScrollState.SLOW_SCROLL
@@ -226,14 +227,14 @@ class FeedHydrationController(
                 }
             }
             ScrollState.SLOW_SCROLL -> {
-                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (smoothedVelocity > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else {
                     ScrollState.SLOW_SCROLL
                 }
             }
             ScrollState.IDLE -> {
-                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (smoothedVelocity > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (isScrollInProgress) {
                     ScrollState.SLOW_SCROLL
@@ -242,7 +243,7 @@ class FeedHydrationController(
                 }
             }
             ScrollState.FAST_SCROLL -> {
-                if (!dwellLocked && velocityPxPerSec < FAST_SCROLL_EXIT_PX_S) {
+                if (smoothedVelocity < FAST_SCROLL_EXIT_PX_S) {
                     ScrollState.WARM_CATCHUP
                 } else {
                     ScrollState.FAST_SCROLL
@@ -270,12 +271,26 @@ class FeedHydrationController(
 
     private fun transitionTo(newState: ScrollState, isUserGesture: Boolean = false) {
         if (newState == state) return
+
+        val now = System.currentTimeMillis()
+
+        // Hard dwell lock — BLOCKS all transitions within STATE_DWELL_MS of the last one.
+        // Only user gestures and reset() bypass this. Timer-based transitions (IDLE→REST,
+        // SLOW_SCROLL→IDLE, catchup timeout) are gated just like velocity-based ones.
+        if (!isUserGesture) {
+            val sinceLastTransition = now - lastTransitionTime
+            if (sinceLastTransition < STATE_DWELL_MS) {
+                Log.d(TAG, "Dwell lock: blocked ${state.name} → ${newState.name} (v=${velocityPxPerSec.toInt()}px/s, ${sinceLastTransition}ms since last)")
+                return
+            }
+        }
+
         // REST minimum dwell: non-user exits must wait REST_MINIMUM_DWELL_MS
         if (state == ScrollState.REST && !isUserGesture) {
-            val restElapsed = System.currentTimeMillis() - stateEnteredAt
+            val restElapsed = now - stateEnteredAt
             if (restElapsed < REST_MINIMUM_DWELL_MS) return
         }
-        val now = System.currentTimeMillis()
+
         lastTransitionTime = now
         val previousState = state
         state = newState
@@ -283,7 +298,7 @@ class FeedHydrationController(
     }
 
     private fun onStateTransition(from: ScrollState, to: ScrollState) {
-        Log.d(TAG, "Transition: $from → $to (v=${velocityPxPerSec.toInt()}px/s)")
+        Log.d(TAG, "Transition: $from → $to (v=${smoothedVelocity.toInt()}px/s, raw=${velocityPxPerSec.toInt()}px/s)")
         stateEnteredAt = System.currentTimeMillis()
 
         // Cancel state-specific jobs
