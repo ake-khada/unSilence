@@ -19,6 +19,7 @@ enum class ScrollState {
     SLOW_SCROLL,
     IDLE,
     FAST_SCROLL,
+    REST,
 }
 
 class FeedHydrationController(
@@ -45,6 +46,9 @@ class FeedHydrationController(
         const val ENGAGEMENT_STALE_MS = 5 * 60 * 1000L // 5 minutes — warm zone freshness threshold
         const val WARM_ZONE_ENGAGEMENT_CAP = 5         // max warm zone engagement fetches per pass
         const val ENGAGEMENT_COALESCE_MS = 750L          // coalesce window for engagement batches
+        const val STATE_DWELL_MS = 200L                    // hard lock: ignore velocity transitions for this duration
+        const val IDLE_TO_REST_DWELL_MS = 1000L            // how long in IDLE before transitioning to REST
+        const val REST_MINIMUM_DWELL_MS = 3000L            // minimum time to stay in REST before non-user exit
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -68,6 +72,7 @@ class FeedHydrationController(
 
     // ── Jobs ──────────────────────────────────────────────────────────
     private var idleTimerJob: Job? = null
+    private var idleToRestJob: Job? = null
     private var catchupTimeoutJob: Job? = null
     private var profileJob: Job? = null     // Phase 1: profiles
     private var refJob: Job? = null         // Phase 2: refs + thumbnails
@@ -116,12 +121,20 @@ class FeedHydrationController(
         lastAllEvents = allEvents
         lastVisibleIds = visibleItems.map { it.id }.toSet()
 
+        // REST: user scroll exits immediately — user intent wins
+        if (state == ScrollState.REST && isScrollInProgress) {
+            transitionTo(ScrollState.SLOW_SCROLL, isUserGesture = true)
+        }
+
+        // REST: no discretionary work
+        if (state == ScrollState.REST) return
+
         // Start/restart backfill when feed data arrives or grows
         if (feedGrew && allEvents.size >= 3 && backfillJob?.isActive != true) {
             startBackfill()
         }
 
-        // State transitions
+        // State transitions (velocity-based — gated by hard dwell lock)
         val candidate = nextState(isScrollInProgress)
         if (candidate != state) {
             transitionTo(candidate)
@@ -133,6 +146,7 @@ class FeedHydrationController(
             ScrollState.SLOW_SCROLL -> handleSlowScroll()
             ScrollState.IDLE -> handleIdle()
             ScrollState.FAST_SCROLL -> { /* blackout — do nothing */ }
+            ScrollState.REST -> { /* no work */ }
         }
     }
 
@@ -141,6 +155,7 @@ class FeedHydrationController(
      */
     fun reset() {
         idleTimerJob?.cancel()
+        idleToRestJob?.cancel()
         catchupTimeoutJob?.cancel()
         profileJob?.cancel()
         refJob?.cancel()
@@ -188,9 +203,14 @@ class FeedHydrationController(
     // ── State machine transitions ─────────────────────────────────────
 
     private fun nextState(isScrollInProgress: Boolean): ScrollState {
+        // Hard dwell lock: ignore velocity-based transitions within STATE_DWELL_MS of last transition.
+        // User gestures (handled separately in onScrollFrame/onScrollStarted) bypass this.
+        val now = System.currentTimeMillis()
+        val dwellLocked = now - lastTransitionTime < STATE_DWELL_MS
+
         return when (state) {
             ScrollState.WARM_CATCHUP -> {
-                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (catchupGateMet()) {
                     ScrollState.SLOW_SCROLL
@@ -199,14 +219,14 @@ class FeedHydrationController(
                 }
             }
             ScrollState.SLOW_SCROLL -> {
-                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else {
                     ScrollState.SLOW_SCROLL
                 }
             }
             ScrollState.IDLE -> {
-                if (velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
+                if (!dwellLocked && velocityPxPerSec > FAST_SCROLL_ENTER_PX_S) {
                     ScrollState.FAST_SCROLL
                 } else if (isScrollInProgress) {
                     ScrollState.SLOW_SCROLL
@@ -215,11 +235,15 @@ class FeedHydrationController(
                 }
             }
             ScrollState.FAST_SCROLL -> {
-                if (velocityPxPerSec < FAST_SCROLL_EXIT_PX_S) {
+                if (!dwellLocked && velocityPxPerSec < FAST_SCROLL_EXIT_PX_S) {
                     ScrollState.WARM_CATCHUP
                 } else {
                     ScrollState.FAST_SCROLL
                 }
+            }
+            ScrollState.REST -> {
+                // REST exits only via user gesture (handled in onScrollFrame) or reset()
+                ScrollState.REST
             }
         }
     }
@@ -237,9 +261,14 @@ class FeedHydrationController(
         return lastVisibleItems.all { it.id in profileHydratedIds || it.pubkey in profileHydratedPubkeys }
     }
 
-    private fun transitionTo(newState: ScrollState) {
+    private fun transitionTo(newState: ScrollState, isUserGesture: Boolean = false) {
+        if (newState == state) return
+        // REST minimum dwell: non-user exits must wait REST_MINIMUM_DWELL_MS
+        if (state == ScrollState.REST && !isUserGesture) {
+            val restElapsed = System.currentTimeMillis() - stateEnteredAt
+            if (restElapsed < REST_MINIMUM_DWELL_MS) return
+        }
         val now = System.currentTimeMillis()
-        if (now - lastTransitionTime < 200 && newState != ScrollState.IDLE) return
         lastTransitionTime = now
         val previousState = state
         state = newState
@@ -254,6 +283,7 @@ class FeedHydrationController(
         when (from) {
             ScrollState.IDLE -> {
                 idleTimerJob?.cancel()
+                idleToRestJob?.cancel()
                 engagementJob?.cancel()
             }
             ScrollState.WARM_CATCHUP -> {
@@ -263,12 +293,25 @@ class FeedHydrationController(
                 // Entering from FAST_SCROLL → cancel any stale Phase 2 work
                 refJob?.cancel()
             }
+            ScrollState.REST -> {
+                // Exiting REST — nothing to cancel (REST does no work)
+            }
             else -> {}
         }
 
         // Set up new state
         when (to) {
-            ScrollState.IDLE -> startIdleEngagement()
+            ScrollState.IDLE -> {
+                startIdleEngagement()
+                // Start IDLE → REST timer
+                idleToRestJob?.cancel()
+                idleToRestJob = scope.launch {
+                    delay(IDLE_TO_REST_DWELL_MS)
+                    if (state == ScrollState.IDLE) {
+                        transitionTo(ScrollState.REST)
+                    }
+                }
+            }
             ScrollState.WARM_CATCHUP -> startCatchupTimeout()
             ScrollState.SLOW_SCROLL -> {
                 // Auto-start idle timer so engagement fetches even without user scrolling.
@@ -289,6 +332,11 @@ class FeedHydrationController(
                 lastProcessedWindowHash = 0
                 lastProcessedWindowSize = 0
                 lastBackfillBatchHash = 0
+            }
+            ScrollState.REST -> {
+                // Absolute rest — no discretionary work. Do NOT cancel in-flight work
+                // (let existing HTTP requests complete), just prevent NEW work from starting.
+                Log.d(TAG, "Entering REST — no discretionary work")
             }
         }
     }
@@ -483,9 +531,8 @@ class FeedHydrationController(
             Log.d(TAG, "Backfill: starting (${lastAllEvents.size} feed events)")
 
             while (true) {
-                // Pause backfill while user has pending items queued
-                if (pendingQueueSize > 0) {
-                    Log.d(TAG, "Backfill: paused — queue=$pendingQueueSize")
+                // Pause backfill during REST or while user has pending items queued
+                if (state == ScrollState.REST || pendingQueueSize > 0) {
                     delay(BACKFILL_DELAY_MS)
                     continue
                 }
@@ -547,6 +594,11 @@ class FeedHydrationController(
 
     fun onScrollStarted() {
         idleTimerJob?.cancel()
+        idleToRestJob?.cancel()
+        // Exit REST immediately on user gesture — user intent wins
+        if (state == ScrollState.REST) {
+            transitionTo(ScrollState.SLOW_SCROLL, isUserGesture = true)
+        }
     }
 
     /** Called from FeedScreen when ReducerState.unreadCount changes. */
