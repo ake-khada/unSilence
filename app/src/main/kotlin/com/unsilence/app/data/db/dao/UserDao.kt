@@ -77,9 +77,9 @@ abstract class UserDao {
     @Query("SELECT * FROM users WHERE pubkey IN (:pubkeys)")
     abstract suspend fun getUsersByPubkeys(pubkeys: List<String>): List<UserEntity>
 
-    /** Batch existence check — returns only the pubkeys that already exist in Room. */
-    @Query("SELECT pubkey FROM users WHERE pubkey IN (:pubkeys)")
-    abstract suspend fun getExistingPubkeys(pubkeys: List<String>): List<String>
+    /** Batch freshness check — returns pubkeys that exist in Room AND were updated within the staleness window. */
+    @Query("SELECT pubkey FROM users WHERE pubkey IN (:pubkeys) AND updated_at > :freshnessThreshold")
+    abstract suspend fun getFreshPubkeys(pubkeys: List<String>, freshnessThreshold: Long): List<String>
 
     @Query("SELECT pubkey FROM users")
     abstract suspend fun allPubkeys(): List<String>

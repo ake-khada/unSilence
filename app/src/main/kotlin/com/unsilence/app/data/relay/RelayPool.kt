@@ -1294,11 +1294,12 @@ class RelayPool @Inject constructor(
     fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
 
     /**
-     * Fetch a single event by ID, connecting to [relayHints] first.
-     * Sends to hint relays AND broadcasts to connected relays as fallback
-     * (hint relay connections may not be open yet when REQ is sent).
+     * Fetch a single event by ID using relay hints. Hints-first strategy:
+     * when hints exist, connectAndAwait to ensure the WebSocket is open,
+     * then send REQ only to hint relays — no broadcast fallback.
+     * When no hints exist, sends to at most 3 random non-indexer relays.
      */
-    fun fetchEventById(eventId: String, relayHints: List<String>) {
+    suspend fun fetchEventById(eventId: String, relayHints: List<String>) {
         val now = System.currentTimeMillis()
         val last = eventFetchInFlight[eventId]
         if (last != null && (now - last) <= 30_000) return
@@ -1315,20 +1316,37 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // Send to hint relays (may still be connecting — REQ could be silently dropped)
+        val indexerUrls = relayConfigDao.get().getIndexerRelayUrls()
+            .mapNotNull { normalizeRelayUrl(it) }.toSet()
+
         if (relayHints.isNotEmpty()) {
-            connect(relayHints)
-            relayHints.mapNotNull { connections[normalizeRelayUrl(it)] }
-                .forEach { sendOneShotToRelay(it, req) }
+            // Hints-first: connect and wait for WebSocket readiness, then send REQ
+            // only to hint relays. No broadcast fallback — if all hints fail, the
+            // event stays unfetched until the next hydration pass retries (30s TTL).
+            val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
+                .filter { it !in indexerUrls && it !in blockedUrls }
+            if (hintTargets.isNotEmpty()) {
+                connectAndAwait(hintTargets, timeoutMs = 2_000)
+                var sent = 0
+                hintTargets.forEach { url ->
+                    connections[url]?.let { conn ->
+                        sendOneShotToRelay(conn, req)
+                        sent++
+                    }
+                }
+                Log.d(TAG, "fetchEventById: $eventId → $sent hint relay(s)")
+                return
+            }
         }
 
-        // Also broadcast to non-indexer connected relays as fallback — bridge events
-        // may only exist on relays not listed in the hint. Skip indexers (kind 0 only).
-        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
-            .mapNotNull { normalizeRelayUrl(it) }.toSet()
-        val fallbackTargets = connections.values.filter { it.url !in indexerUrls }
+        // No hints (or all hints were indexer/blocked) — capped fallback.
+        // 3 random non-indexer relays. eventFetchInFlight prevents retry within 30s.
+        val fallbackTargets = connections.values
+            .filter { it.url !in indexerUrls }
+            .shuffled()
+            .take(3)
         fallbackTargets.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchEventById: $eventId → hints=${relayHints.size} + ${fallbackTargets.size} connected")
+        Log.d(TAG, "fetchEventById: $eventId → ${fallbackTargets.size} fallback relay(s) (no hints)")
     }
 
     fun publish(eventJson: String) {
