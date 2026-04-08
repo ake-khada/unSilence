@@ -88,6 +88,20 @@ class ProfileResolver @Inject constructor(
         scope.launch { processBatch(pubkeys, maxRelays) }
     }
 
+    /**
+     * Returns the subset of [pubkeys] that do NOT have a profile in Room.
+     * Batch-queries Room with a single SELECT — safe to call on every hydration launch.
+     * Used by CardHydrator to skip orchestration for already-cached pubkeys.
+     */
+    suspend fun filterUnresolved(pubkeys: Set<String>): Set<String> {
+        if (pubkeys.isEmpty()) return emptySet()
+        val cached = mutableSetOf<String>()
+        for (chunk in pubkeys.chunked(999)) {
+            cached.addAll(userDao.getExistingPubkeys(chunk))
+        }
+        return pubkeys - cached
+    }
+
     /** Cancel work, drain queued requests, clear caches. Called on logout. */
     @Synchronized
     fun clear() {
