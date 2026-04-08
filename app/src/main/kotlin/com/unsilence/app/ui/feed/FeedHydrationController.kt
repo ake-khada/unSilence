@@ -57,7 +57,8 @@ class FeedHydrationController(
     private var velocityPxPerSec = 0f
 
     // ── Hydration tracking ────────────────────────────────────────────
-    private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done
+    private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done (event IDs)
+    private val profileHydratedPubkeys = mutableSetOf<String>() // Phase 1 done (author pubkeys)
     private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
     private val engagementFetchedIds = mutableSetOf<String>()
     private val fanOutPendingIds = mutableSetOf<String>()     // indexer-only, needs fan-out in IDLE
@@ -84,6 +85,9 @@ class FeedHydrationController(
     // ── Window dedup ────────────────────────────────────────────────
     private var lastProcessedWindowHash: Int = 0
     private var lastProcessedWindowSize: Int = 0
+
+    // ── Backfill batch dedup ─────────────────────────────────────────
+    private var lastBackfillBatchHash: Int = 0
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -146,6 +150,7 @@ class FeedHydrationController(
         engagementCoalesceJob?.cancel()
         pendingEngagementIds.clear()
         profileHydratedIds.clear()
+        profileHydratedPubkeys.clear()
         refHydratedIds.clear()
         engagementFetchedIds.clear()
         fanOutPendingIds.clear()
@@ -161,6 +166,7 @@ class FeedHydrationController(
         pendingQueueSize = 0
         lastProcessedWindowHash = 0
         lastProcessedWindowSize = 0
+        lastBackfillBatchHash = 0
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -228,7 +234,7 @@ class FeedHydrationController(
         val elapsed = System.currentTimeMillis() - stateEnteredAt
         if (elapsed >= WARM_CATCHUP_TIMEOUT_MS) return true
         if (lastVisibleItems.isEmpty()) return false
-        return lastVisibleItems.all { it.id in profileHydratedIds }
+        return lastVisibleItems.all { it.id in profileHydratedIds || it.pubkey in profileHydratedPubkeys }
     }
 
     private fun transitionTo(newState: ScrollState) {
@@ -279,9 +285,10 @@ class FeedHydrationController(
                 // Cancel all hydration work immediately — total blackout
                 profileJob?.cancel()
                 refJob?.cancel()
-                // Reset window hash so we reprocess when exiting FAST_SCROLL
+                // Reset window + backfill hash so we reprocess when exiting FAST_SCROLL
                 lastProcessedWindowHash = 0
                 lastProcessedWindowSize = 0
+                lastBackfillBatchHash = 0
             }
         }
     }
@@ -293,12 +300,13 @@ class FeedHydrationController(
      * No refs, no thumbnails, no engagement. Avatars appear first.
      */
     private fun handleWarmCatchup() {
-        val toProfile = lastVisibleItems.filter { it.id !in profileHydratedIds }
+        val toProfile = lastVisibleItems.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
         if (toProfile.isEmpty()) return
 
         if (profileJob?.isActive == true) return
         val ids = toProfile.map { it.id }
         profileHydratedIds.addAll(ids)
+        profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
         fanOutPendingIds.addAll(ids)
         profileJob = scope.launch(Dispatchers.IO) {
             cardHydrator.hydrateProfiles(toProfile, fanOut = false)
@@ -318,13 +326,14 @@ class FeedHydrationController(
         val viewportCenter = lastVisibleItems.size / 2
 
         // Phase 1: profiles — max 4 per pass, closest to viewport center first
-        val toProfile = combined.filter { it.id !in profileHydratedIds }
+        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
             .sortedByProximity(combined, viewportCenter)
             .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
-            val totalUnhydrated = combined.count { it.id !in profileHydratedIds }
+            val totalUnhydrated = combined.count { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
             val ids = toProfile.map { it.id }
             profileHydratedIds.addAll(ids)
+            profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
             fanOutPendingIds.addAll(ids)
             profileJob = scope.launch(Dispatchers.IO) {
                 cardHydrator.hydrateProfiles(toProfile, fanOut = false)
@@ -363,9 +372,10 @@ class FeedHydrationController(
         val combined = lastVisibleItems + warmZone
 
         // Phase 1: profiles for anything not yet done (full fan-out)
-        val toProfile = combined.filter { it.id !in profileHydratedIds }
+        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
             profileHydratedIds.addAll(toProfile.map { it.id })
+            profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
             profileJob = scope.launch(Dispatchers.IO) {
                 cardHydrator.hydrateProfiles(toProfile, fanOut = true)
                 Log.d(TAG, "IDLE: profiles for ${toProfile.size} items (full fan-out)")
@@ -481,6 +491,17 @@ class FeedHydrationController(
                 }
 
                 val allTargetIds = lastAllEvents.map { engagementTargetId(it) }.distinct()
+
+                // P0: skip if feed structure unchanged since last iteration
+                var feedHash = 0
+                for (id in allTargetIds) feedHash = feedHash * 31 + id.hashCode()
+                if (feedHash == lastBackfillBatchHash) {
+                    Log.d(TAG, "Backfill: batch unchanged, skipping iteration")
+                    delay(BACKFILL_DELAY_MS)
+                    continue
+                }
+                lastBackfillBatchHash = feedHash
+
                 val novel = allTargetIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
                 if (novel.isEmpty()) {
                     Log.d(TAG, "Backfill: complete — all ${allTargetIds.size} events covered")

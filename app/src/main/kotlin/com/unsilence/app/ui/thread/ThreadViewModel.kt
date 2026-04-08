@@ -103,8 +103,16 @@ class ThreadViewModel @Inject constructor(
         }
     }
 
+    /** Wipe stale state so next open doesn't flash old content. */
+    fun clearThread() {
+        eventIdFlow.value = null
+        _uiState.value = ThreadUiState()
+    }
+
     fun loadThread(eventId: String) {
         published = false  // Always reset so LaunchedEffect won't auto-dismiss
+        // Clear stale state immediately — prevents flash of old thread content
+        _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
             // Resolve thread root: if the tapped event is a reply, load from its root
             val event = eventRepository.getEventById(eventId)
@@ -113,7 +121,6 @@ class ThreadViewModel @Inject constructor(
             if (eventIdFlow.value == rootId) return@launch  // Already showing this thread
 
             eventIdFlow.value = rootId
-            _uiState.value = ThreadUiState(loading = true)
 
             val readRelays = relayConfigDao.getAllReadWriteRelays()
                 .filter { it.marker == null || it.marker == "read" }
