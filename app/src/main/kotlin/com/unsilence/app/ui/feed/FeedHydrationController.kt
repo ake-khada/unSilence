@@ -11,7 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
+
 
 private const val TAG = "HydrationCtrl"
 
@@ -95,10 +95,6 @@ class FeedHydrationController(
 
     // ── Backfill batch dedup ─────────────────────────────────────────
     private var lastBackfillBatchHash: Int = 0
-
-    // ── Single-flight registry ──────────────────────────────────────
-    private val inFlightProfiles = ConcurrentHashMap<Int, Job>()
-    private val inFlightRefs = ConcurrentHashMap<Int, Job>()
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -190,8 +186,6 @@ class FeedHydrationController(
         lastProcessedWindowHash = 0
         lastProcessedWindowSize = 0
         lastBackfillBatchHash = 0
-        inFlightProfiles.clear()
-        inFlightRefs.clear()
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -655,55 +649,26 @@ class FeedHydrationController(
     private fun engagementTargetId(row: FeedRow): String =
         if (row.kind == 6 && row.rootId != null) row.rootId else row.id
 
-    // ── Single-flight hydration ─────────────────────────────────────
-
-    private fun computeSliceKey(items: List<FeedRow>): Int {
-        var h = 0
-        for (row in items) h = h * 31 + row.id.hashCode()
-        return h
-    }
+    // ── Hydration launchers ───────────────────────────────────────────
+    // Dedup is via profileJob?.isActive / refJob?.isActive guards at call sites.
+    // Each handler checks the active-job guard before calling these methods,
+    // so overlapping launches are prevented without a separate registry.
 
     private fun launchProfileHydration(items: List<FeedRow>, fanOut: Boolean, tag: String): Job? {
         if (items.isEmpty()) return null
-        val key = computeSliceKey(items)
-        inFlightProfiles[key]?.let { existing ->
-            if (existing.isActive) {
-                Log.d(TAG, "$tag: profile slice already in flight, skipping")
-                return existing
-            }
+        return scope.launch(Dispatchers.IO) {
+            cardHydrator.hydrateProfiles(items, fanOut = fanOut)
+            Log.d(TAG, "$tag: profiles for ${items.size} items (fanOut=$fanOut)")
         }
-        val job = scope.launch(Dispatchers.IO) {
-            try {
-                cardHydrator.hydrateProfiles(items, fanOut = fanOut)
-                Log.d(TAG, "$tag: profiles for ${items.size} items (fanOut=$fanOut)")
-            } finally {
-                inFlightProfiles.remove(key)
-            }
-        }
-        inFlightProfiles[key] = job
-        return job
     }
 
     private fun launchRefHydration(items: List<FeedRow>, tag: String): Job? {
         if (items.isEmpty()) return null
-        val key = computeSliceKey(items)
-        inFlightRefs[key]?.let { existing ->
-            if (existing.isActive) {
-                Log.d(TAG, "$tag: ref slice already in flight, skipping")
-                return existing
-            }
+        return scope.launch(Dispatchers.IO) {
+            if (state == ScrollState.FAST_SCROLL) return@launch
+            cardHydrator.hydrateRefs(items)
+            Log.d(TAG, "$tag: refs for ${items.size} items")
         }
-        val job = scope.launch(Dispatchers.IO) {
-            try {
-                if (state == ScrollState.FAST_SCROLL) return@launch
-                cardHydrator.hydrateRefs(items)
-                Log.d(TAG, "$tag: refs for ${items.size} items")
-            } finally {
-                inFlightRefs.remove(key)
-            }
-        }
-        inFlightRefs[key] = job
-        return job
     }
 
     // ── Window dedup ──────────────────────────────────────────────────
