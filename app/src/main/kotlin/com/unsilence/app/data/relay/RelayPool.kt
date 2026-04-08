@@ -32,6 +32,7 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -147,6 +148,9 @@ class RelayPool @Inject constructor(
         const val OUTBOX_IDLE_EVICTION_MS = 30_000L
         const val STEADY_STATE_DELAY_MS = 30_000L
         const val STEADY_STATE_CAP = 10
+        const val RATE_LIMIT_MAX_TOKENS = 5
+        const val RATE_LIMIT_REFILL_MS = 1000L
+        const val RATE_LIMIT_COOLDOWN_MS = 30_000L
     }
 
     /** After bootstrap settles (30s), tighten cap to [STEADY_STATE_CAP] for non-PERSISTENT. */
@@ -156,11 +160,57 @@ class RelayPool @Inject constructor(
     /** Queued REQs per relay — sent when slots free up. */
     private val relayReqQueue = ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<String>>()
 
+    // ── Per-relay rate limiter (token bucket + cooldown) ──────────────
+    private data class RateLimitState(
+        val tokens: AtomicInteger = AtomicInteger(RATE_LIMIT_MAX_TOKENS),
+        val lastRefill: AtomicLong = AtomicLong(System.currentTimeMillis()),
+        val cooldownUntil: AtomicLong = AtomicLong(0),
+    )
+    private val rateLimiters = ConcurrentHashMap<String, RateLimitState>()
+    /** Log cooldown drops once per relay per cooldown window. */
+    private val cooldownLogged = ConcurrentHashMap<String, Long>()
+
+    private fun canSendToRelay(url: String): Boolean {
+        val state = rateLimiters.getOrPut(url) { RateLimitState() }
+        val now = System.currentTimeMillis()
+        // Cooldown check
+        if (now < state.cooldownUntil.get()) return false
+        // Refill tokens
+        val elapsed = now - state.lastRefill.get()
+        if (elapsed >= RATE_LIMIT_REFILL_MS) {
+            val refillCount = (elapsed / RATE_LIMIT_REFILL_MS).toInt().coerceAtMost(RATE_LIMIT_MAX_TOKENS)
+            state.tokens.updateAndGet { (it + refillCount).coerceAtMost(RATE_LIMIT_MAX_TOKENS) }
+            state.lastRefill.set(now)
+        }
+        // Consume token
+        return state.tokens.updateAndGet { if (it > 0) it - 1 else 0 } > 0
+    }
+
+    private fun markRelayRateLimited(url: String) {
+        val state = rateLimiters.getOrPut(url) { RateLimitState() }
+        val until = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+        state.cooldownUntil.set(until)
+        Log.w(TAG, "Relay $url marked for cooldown until ${java.util.Date(until)} (rate-limited)")
+    }
+
     /**
      * Send a one-shot REQ to a relay, queuing if the relay is at its concurrent sub limit.
+     * Drops REQs when the relay is in rate-limit cooldown or token-starved.
      * Call this instead of conn.send(req) for all one-shot subscription REQs.
      */
     private fun sendOneShotToRelay(conn: RelayConnection, req: String) {
+        if (!canSendToRelay(conn.url)) {
+            val rlState = rateLimiters[conn.url]
+            val cooldownUntil = rlState?.cooldownUntil?.get() ?: 0
+            if (cooldownUntil > 0) {
+                val lastLogged = cooldownLogged[conn.url] ?: 0
+                if (cooldownUntil > lastLogged) {
+                    Log.w(TAG, "Dropping REQ to ${conn.url}: cooldown until ${java.util.Date(cooldownUntil)}")
+                    cooldownLogged[conn.url] = cooldownUntil
+                }
+            }
+            return
+        }
         val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
         if (count.get() >= MAX_CONCURRENT_REQS_PER_RELAY) {
             val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
@@ -582,6 +632,10 @@ class RelayPool @Inject constructor(
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached (suppressing future warnings)")
                                 authFailedRelays.add(conn.url)
                             }
+                        } else if (reason.contains("rate-limit", ignoreCase = true) ||
+                               reason.contains("too many", ignoreCase = true)) {
+                            markRelayRateLimited(conn.url)
+                            Log.w(TAG, "CLOSED rate-limited sub '$closedSubId' on ${conn.url}: $reason")
                         } else {
                             Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
                         }
