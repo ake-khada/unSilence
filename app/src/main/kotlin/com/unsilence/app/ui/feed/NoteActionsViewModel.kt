@@ -216,13 +216,12 @@ class NoteActionsViewModel @Inject constructor(
         eventRepository.getEventById(eventId)?.let { return it }
 
         // Trigger relay fetch only once per event ID
-        synchronized(fetchedQuoteIds) {
-            if (fetchedQuoteIds.add(eventId)) {
-                if (relayHints.isNotEmpty()) {
-                    relayPool.fetchEventById(eventId, relayHints)
-                } else {
-                    relayPool.fetchEventById(eventId)
-                }
+        val shouldFetch = synchronized(fetchedQuoteIds) { fetchedQuoteIds.add(eventId) }
+        if (shouldFetch) {
+            if (relayHints.isNotEmpty()) {
+                relayPool.fetchEventById(eventId, relayHints)
+            } else {
+                relayPool.fetchEventById(eventId)
             }
         }
 

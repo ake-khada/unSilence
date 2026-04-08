@@ -89,17 +89,20 @@ class ProfileResolver @Inject constructor(
     }
 
     /**
-     * Returns the subset of [pubkeys] that do NOT have a profile in Room.
+     * Returns the subset of [pubkeys] that do NOT have a fresh profile in Room.
+     * "Fresh" = exists AND updated_at within STALE_THRESHOLD_SECONDS (6h).
      * Batch-queries Room with a single SELECT — safe to call on every hydration launch.
-     * Used by CardHydrator to skip orchestration for already-cached pubkeys.
+     * Used by CardHydrator to skip orchestration for already-resolved pubkeys.
      */
     suspend fun filterUnresolved(pubkeys: Set<String>): Set<String> {
         if (pubkeys.isEmpty()) return emptySet()
-        val cached = mutableSetOf<String>()
+        // Threshold in epoch seconds — matches users.updated_at column convention
+        val freshnessThreshold = System.currentTimeMillis() / 1000 - STALE_THRESHOLD_SECONDS
+        val fresh = mutableSetOf<String>()
         for (chunk in pubkeys.chunked(999)) {
-            cached.addAll(userDao.getExistingPubkeys(chunk))
+            fresh.addAll(userDao.getFreshPubkeys(chunk, freshnessThreshold))
         }
-        return pubkeys - cached
+        return pubkeys - fresh
     }
 
     /** Cancel work, drain queued requests, clear caches. Called on logout. */
