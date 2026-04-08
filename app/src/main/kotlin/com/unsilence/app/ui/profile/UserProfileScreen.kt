@@ -462,17 +462,10 @@ fun UserProfileScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.small),
+                    .padding(horizontal = Spacing.medium),
                 verticalAlignment     = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Start,
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint               = Color.White,
-                    )
-                }
                 Text(
                     text       = "Profile",
                     color      = Color.White,

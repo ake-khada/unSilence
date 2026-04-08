@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -76,6 +77,7 @@ fun ThreadScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
+    DisposableEffect(Unit) { onDispose { viewModel.clearThread() } }
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
     LaunchedEffect(viewModel.published) {
         if (viewModel.published) onDismiss()
