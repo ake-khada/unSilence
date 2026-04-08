@@ -19,6 +19,7 @@ import com.unsilence.app.data.db.MIGRATION_13_14
 import com.unsilence.app.data.db.MIGRATION_14_15
 import com.unsilence.app.data.db.MIGRATION_15_16
 import com.unsilence.app.data.db.MIGRATION_16_17
+import com.unsilence.app.data.db.MIGRATION_17_18
 import com.unsilence.app.data.db.dao.CoverageDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.EventDao
@@ -31,6 +32,7 @@ import com.unsilence.app.data.db.dao.ReactionDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.dao.RelayTrustScoreDao
+import com.unsilence.app.data.db.dao.SyncStateDao
 import com.unsilence.app.data.db.dao.TagDao
 import com.unsilence.app.data.db.dao.UserDao
 import androidx.room.RoomDatabase
@@ -56,6 +58,7 @@ object DatabaseModule {
                 MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
                 MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
                 MIGRATION_16_17,
+                MIGRATION_17_18,
             )
             .build()
 
@@ -73,4 +76,5 @@ object DatabaseModule {
     @Provides fun provideCoverageDao(db: AppDatabase): CoverageDao = db.coverageDao()
     @Provides fun providePinnedRelayDao(db: AppDatabase): PinnedRelayDao = db.pinnedRelayDao()
     @Provides fun provideRelayTrustScoreDao(db: AppDatabase): RelayTrustScoreDao = db.relayTrustScoreDao()
+    @Provides fun provideSyncStateDao(db: AppDatabase): SyncStateDao = db.syncStateDao()
 }

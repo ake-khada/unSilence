@@ -369,6 +369,7 @@ class EventProcessor @Inject constructor(
                 hasContentWarning    = hasCw,
                 contentWarningReason = cwReason,
                 cachedAt             = nowSeconds,
+                firstSeenAt          = System.currentTimeMillis(),
             )
         )
     }

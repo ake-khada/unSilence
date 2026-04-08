@@ -70,6 +70,7 @@ class RelayPool @Inject constructor(
     private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
     private val coverageRepository: dagger.Lazy<com.unsilence.app.data.repository.CoverageRepository>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
+    private val syncStateDao: dagger.Lazy<com.unsilence.app.data.db.dao.SyncStateDao>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -721,6 +722,21 @@ class RelayPool @Inject constructor(
             }
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
+        // Update sync_state for persistent subs (foundation for background sync)
+        mapSubIdToSyncKey(subId)?.let { syncKey ->
+            scope.launch {
+                try {
+                    syncStateDao.get().upsert(
+                        com.unsilence.app.data.db.entity.SyncStateEntity(
+                            subscriptionKey = syncKey,
+                            lastSyncAt = System.currentTimeMillis(),
+                            lastEventCount = 0,
+                            source = "foreground",
+                        )
+                    )
+                } catch (_: Exception) { }
+            }
+        }
         // Notify coverage registry — returns handle only when ALL lanes resolved
         val terminalHandle = subscriptionRegistry.get().onEose(subId, conn.url)
         if (terminalHandle != null) {
@@ -729,6 +745,15 @@ class RelayPool @Inject constructor(
                 subscriptionRegistry.get().cleanup(terminalHandle.handleId)
             }
         }
+    }
+
+    /** Map persistent subscription IDs to sync_state keys. */
+    private fun mapSubIdToSyncKey(subId: String): String? = when {
+        subId.startsWith("feed-following") -> "following-feed"
+        subId.startsWith("feed-global")    -> "global-feed"
+        subId.startsWith("notifs-")        -> "own-engagement"
+        subId.startsWith("follows-")       -> "follow-list"
+        else -> null
     }
 
     /**
