@@ -52,6 +52,7 @@ class CardHydrator @Inject constructor(
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
+    private val profileResolver: ProfileResolver,
 ) {
     /**
      * Phase 1: Profile resolution only — avatar, name, identity.
@@ -81,21 +82,31 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        if (pubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(pubkeys.toList())
+        if (pubkeys.isEmpty()) return
 
-            if (fanOut) {
-                val sourceRelays = events.map { it.relayUrl }.distinct()
-                if (sourceRelays.isNotEmpty()) {
-                    relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
+        // Pre-filter: drop pubkeys already cached in Room — avoids launching
+        // orchestration (relay REQs, ProfileResolver batching, logging) for pubkeys
+        // that will immediately resolve to "all fresh, skipping."
+        val unresolved = profileResolver.filterUnresolved(pubkeys)
+        if (unresolved.isEmpty()) return
+
+        userRepository.fetchMissingProfiles(unresolved.toList())
+
+        if (fanOut) {
+            val sourceRelays = events.map { it.relayUrl }.distinct()
+            if (sourceRelays.isNotEmpty()) {
+                relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
+            }
+            if (profileHints.isNotEmpty()) {
+                // Only fan out hints for unresolved pubkeys
+                val unresolvedHints = profileHints.filterKeys { it in unresolved }
+                if (unresolvedHints.isNotEmpty()) {
+                    relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
                 }
             }
         }
-        if (fanOut && profileHints.isNotEmpty()) {
-            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
-        }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${pubkeys.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
+        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
     }
 
     /**
@@ -152,6 +163,10 @@ class CardHydrator @Inject constructor(
             }
             extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
         }
+
+        // Short-circuit: if no refs to resolve, skip the entire pipeline
+        // (Room lookups, relay fetches, 1500ms delay, author resolution, thumbnails).
+        if (referencedIds.isEmpty()) return
 
         // Fetch missing referenced events
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
