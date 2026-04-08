@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "HydrationCtrl"
 
@@ -93,6 +94,10 @@ class FeedHydrationController(
 
     // ── Backfill batch dedup ─────────────────────────────────────────
     private var lastBackfillBatchHash: Int = 0
+
+    // ── Single-flight registry ──────────────────────────────────────
+    private val inFlightProfiles = ConcurrentHashMap<Int, Job>()
+    private val inFlightRefs = ConcurrentHashMap<Int, Job>()
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -182,6 +187,8 @@ class FeedHydrationController(
         lastProcessedWindowHash = 0
         lastProcessedWindowSize = 0
         lastBackfillBatchHash = 0
+        inFlightProfiles.clear()
+        inFlightRefs.clear()
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -356,10 +363,7 @@ class FeedHydrationController(
         profileHydratedIds.addAll(ids)
         profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
         fanOutPendingIds.addAll(ids)
-        profileJob = scope.launch(Dispatchers.IO) {
-            cardHydrator.hydrateProfiles(toProfile, fanOut = false)
-            Log.d(TAG, "WARM_CATCHUP: profiles for ${toProfile.size} visible items (indexer-only)")
-        }
+        profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "WARM_CATCHUP")
     }
 
     /**
@@ -378,15 +382,11 @@ class FeedHydrationController(
             .sortedByProximity(combined, viewportCenter)
             .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
-            val totalUnhydrated = combined.count { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
             val ids = toProfile.map { it.id }
             profileHydratedIds.addAll(ids)
             profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
             fanOutPendingIds.addAll(ids)
-            profileJob = scope.launch(Dispatchers.IO) {
-                cardHydrator.hydrateProfiles(toProfile, fanOut = false)
-                Log.d(TAG, "SLOW_SCROLL: profiles for ${toProfile.size} items (indexer-only, capped from $totalUnhydrated)")
-            }
+            profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "SLOW_SCROLL")
         }
 
         // Phase 2: refs — max 2 per pass, 2000ms debounce (gated by queue)
@@ -398,11 +398,7 @@ class FeedHydrationController(
             if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
                 lastRefStartTime = now
                 refHydratedIds.addAll(toRef.map { it.id })
-                refJob = scope.launch(Dispatchers.IO) {
-                    if (state == ScrollState.FAST_SCROLL) return@launch  // yield if scrolling resumed
-                    cardHydrator.hydrateRefs(toRef)
-                    Log.d(TAG, "SLOW_SCROLL: refs for ${toRef.size} items")
-                }
+                refJob = launchRefHydration(toRef, tag = "SLOW_SCROLL")
             }
         }
 
@@ -424,10 +420,7 @@ class FeedHydrationController(
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
             profileHydratedIds.addAll(toProfile.map { it.id })
             profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
-            profileJob = scope.launch(Dispatchers.IO) {
-                cardHydrator.hydrateProfiles(toProfile, fanOut = true)
-                Log.d(TAG, "IDLE: profiles for ${toProfile.size} items (full fan-out)")
-            }
+            profileJob = launchProfileHydration(toProfile, fanOut = true, tag = "IDLE")
         }
 
         // Phase 2: refs + thumbnails (gated by queue — discretionary)
@@ -438,11 +431,7 @@ class FeedHydrationController(
             if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
                 lastRefStartTime = now
                 refHydratedIds.addAll(toRef.map { it.id })
-                refJob = scope.launch(Dispatchers.IO) {
-                    if (state == ScrollState.FAST_SCROLL) return@launch
-                    cardHydrator.hydrateRefs(toRef)
-                    Log.d(TAG, "IDLE: refs for ${toRef.size} items")
-                }
+                refJob = launchRefHydration(toRef, tag = "IDLE")
             }
         }
 
@@ -650,6 +639,57 @@ class FeedHydrationController(
     /** For kind 6 reposts, engagement targets the original event (root_id), not the wrapper. */
     private fun engagementTargetId(row: FeedRow): String =
         if (row.kind == 6 && row.rootId != null) row.rootId else row.id
+
+    // ── Single-flight hydration ─────────────────────────────────────
+
+    private fun computeSliceKey(items: List<FeedRow>): Int {
+        var h = 0
+        for (row in items) h = h * 31 + row.id.hashCode()
+        return h
+    }
+
+    private fun launchProfileHydration(items: List<FeedRow>, fanOut: Boolean, tag: String): Job? {
+        if (items.isEmpty()) return null
+        val key = computeSliceKey(items)
+        inFlightProfiles[key]?.let { existing ->
+            if (existing.isActive) {
+                Log.d(TAG, "$tag: profile slice already in flight, skipping")
+                return existing
+            }
+        }
+        val job = scope.launch(Dispatchers.IO) {
+            try {
+                cardHydrator.hydrateProfiles(items, fanOut = fanOut)
+                Log.d(TAG, "$tag: profiles for ${items.size} items (fanOut=$fanOut)")
+            } finally {
+                inFlightProfiles.remove(key)
+            }
+        }
+        inFlightProfiles[key] = job
+        return job
+    }
+
+    private fun launchRefHydration(items: List<FeedRow>, tag: String): Job? {
+        if (items.isEmpty()) return null
+        val key = computeSliceKey(items)
+        inFlightRefs[key]?.let { existing ->
+            if (existing.isActive) {
+                Log.d(TAG, "$tag: ref slice already in flight, skipping")
+                return existing
+            }
+        }
+        val job = scope.launch(Dispatchers.IO) {
+            try {
+                if (state == ScrollState.FAST_SCROLL) return@launch
+                cardHydrator.hydrateRefs(items)
+                Log.d(TAG, "$tag: refs for ${items.size} items")
+            } finally {
+                inFlightRefs.remove(key)
+            }
+        }
+        inFlightRefs[key] = job
+        return job
+    }
 
     // ── Window dedup ──────────────────────────────────────────────────
 
