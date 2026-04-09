@@ -27,3 +27,6 @@ _audit_dump/
 
 # Session notes
 unsilence-session-*.md
+
+# Validation artifacts — ephemeral diagnostic logs, not source
+validation_logs/
