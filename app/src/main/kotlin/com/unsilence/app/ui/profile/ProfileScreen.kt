@@ -322,6 +322,7 @@ fun ProfileScreen(
                         onTextClick   = {},
                         maxLines      = 3,
                         overflow      = TextOverflow.Ellipsis,
+                        textAlign     = TextAlign.Center,
                         modifier      = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),

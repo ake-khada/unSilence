@@ -60,6 +60,7 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
@@ -1767,6 +1768,7 @@ internal fun NostrRichText(
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
+    textAlign: TextAlign? = null,
 ) {
     // Parse mention positions and resolved pubkeys (stable for same content)
     val mentions = remember(content) {
@@ -1785,6 +1787,7 @@ internal fun NostrRichText(
             lineHeight = 22.sp,
             maxLines   = maxLines,
             overflow   = overflow,
+            textAlign  = textAlign,
             modifier   = modifier.clickable { onTextClick() },
         )
         return
@@ -1846,6 +1849,7 @@ internal fun NostrRichText(
         lineHeight = 22.sp,
         maxLines   = maxLines,
         overflow   = overflow,
+        textAlign  = textAlign,
         modifier   = modifier.clickable { onTextClick() },
     )
 }

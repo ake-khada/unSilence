@@ -155,6 +155,9 @@ class ProfileViewModel @Inject constructor(
                     return@launch
                 }
 
+                // Ensure antiprimal.net is connected before sending COUNT — it may have been
+                // evicted by the 60s idle timer or not yet connected at this point.
+                relayPool.connectAndAwait(listOf("wss://antiprimal.net"), timeoutMs = 3_000, forceEvict = true)
                 val count = relayPool.sendCount(
                     relayUrl = "wss://antiprimal.net",
                     filter = buildJsonObject {
