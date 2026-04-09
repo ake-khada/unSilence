@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.db.dao.NotificationRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.Cyan
@@ -83,7 +84,7 @@ fun NotificationEventRow(
                 IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
                 if (!row.actorPicture.isNullOrBlank()) {
                     AsyncImage(
-                        model = row.actorPicture,
+                        model = rememberAvatarImageRequest(row.actorPicture, Sizing.avatar),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                     )

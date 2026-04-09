@@ -88,6 +88,7 @@ import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
 import com.unsilence.app.ui.compose.ComposeScreen
@@ -384,7 +385,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                                         .clip(CircleShape),
                                 ) {
                                     AsyncImage(
-                                        model = userAvatarUrl,
+                                        model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
                                         contentDescription = "Profile",
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),

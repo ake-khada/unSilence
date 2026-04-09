@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.Black
@@ -117,7 +119,7 @@ fun ArticleCard(
                     IdentIcon(pubkey = row.pubkey, modifier = Modifier.fillMaxSize())
                     if (!row.authorPicture.isNullOrBlank()) {
                         AsyncImage(
-                            model              = row.authorPicture,
+                            model              = rememberAvatarImageRequest(row.authorPicture, Sizing.avatar),
                             contentDescription = null,
                             modifier           = Modifier.fillMaxSize(),
                         )
@@ -169,7 +171,7 @@ fun ArticleCard(
         // ── Banner image (16:9) ──────────────────────────────────────────────
         if (!image.isNullOrBlank()) {
             SubcomposeAsyncImage(
-                model              = image,
+                model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
                 contentDescription = null,
                 contentScale       = ContentScale.Crop,
                 modifier           = Modifier

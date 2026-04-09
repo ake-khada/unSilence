@@ -50,6 +50,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -59,6 +61,8 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
@@ -232,8 +236,12 @@ fun UserProfileScreen(
                     ) {
                         val bannerUrl = user?.banner
                         if (!bannerUrl.isNullOrBlank()) {
+                            val bannerDensity = LocalDensity.current
+                            val bannerConfig = LocalConfiguration.current
+                            val bannerWidthPx = with(bannerDensity) { bannerConfig.screenWidthDp.dp.roundToPx() }
+                            val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
                             AsyncImage(
-                                model              = bannerUrl,
+                                model              = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
                                 contentDescription = null,
                                 contentScale       = ContentScale.Crop,
                                 modifier           = Modifier.fillMaxSize(),
@@ -258,7 +266,7 @@ fun UserProfileScreen(
                         }
                         if (!user?.picture.isNullOrBlank()) {
                             AsyncImage(
-                                model              = user?.picture,
+                                model              = rememberAvatarImageRequest(user?.picture, 85.dp),
                                 contentDescription = null,
                                 contentScale       = ContentScale.Crop,
                                 modifier           = Modifier.fillMaxSize(),

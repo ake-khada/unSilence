@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.ShimmerNoteCard
@@ -280,7 +281,7 @@ private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.fillMaxSize())
             if (!user.picture.isNullOrBlank()) {
                 AsyncImage(
-                    model              = user.picture,
+                    model              = rememberAvatarImageRequest(user.picture, Sizing.avatar + 8.dp),
                     contentDescription = null,
                     modifier           = Modifier.fillMaxSize(),
                 )

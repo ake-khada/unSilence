@@ -50,7 +50,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -60,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -82,6 +85,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.Image
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
@@ -400,6 +406,7 @@ fun NoteCard(
                     pubkey   = row.pubkey,
                     picture  = row.authorPicture,
                     modifier = Modifier.size(16.dp),
+                    sizeDp   = 16.dp,
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
@@ -724,12 +731,17 @@ private fun ShimmerBox(modifier: Modifier = Modifier) {
  * If the network load fails, the IdentIcon underneath remains visible.
  */
 @Composable
-internal fun AvatarImage(pubkey: String, picture: String?, modifier: Modifier = Modifier) {
+internal fun AvatarImage(
+    pubkey: String,
+    picture: String?,
+    modifier: Modifier = Modifier,
+    sizeDp: Dp = Sizing.avatar,
+) {
     Box(modifier = modifier.clip(CircleShape)) {
         IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
         if (!picture.isNullOrBlank()) {
             AsyncImage(
-                model              = picture,
+                model              = rememberAvatarImageRequest(picture, sizeDp),
                 contentDescription = null,
                 modifier           = Modifier.fillMaxSize(),
             )
@@ -836,7 +848,7 @@ private fun MediaImage(
         .clickable { onImageClick(url) }
 
     SubcomposeAsyncImage(
-        model              = url,
+        model              = rememberFullWidthImageRequest(url, aspectRatio = displayAspect),
         contentDescription = null,
         loading            = { ShimmerBox(modifier = Modifier.fillMaxSize()) },
         error              = {
@@ -1293,7 +1305,7 @@ private fun VideoThumbnailCard(
     ) {
         if (!posterUrl.isNullOrBlank()) {
             AsyncImage(
-                model = posterUrl,
+                model = rememberFullWidthImageRequest(posterUrl, aspectRatio = displayAspect),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.matchParentSize(),
@@ -1475,6 +1487,7 @@ private fun EmbeddedQuoteCard(
                         pubkey   = loadedEvent.pubkey,
                         picture  = author?.picture,
                         modifier = Modifier.size(24.dp),
+                        sizeDp   = 24.dp,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -1547,10 +1560,17 @@ private fun EmbeddedQuoteCard(
 
                 // All images (grid for 2+, single full-width for 1)
                 if (quotedImages.isNotEmpty()) {
+                    val quoteDensity = LocalDensity.current
+                    val quoteConfig = LocalConfiguration.current
+                    val quoteWidthPx = with(quoteDensity) { quoteConfig.screenWidthDp.dp.roundToPx() }
+                    val quoteMaxHeightPx = with(quoteDensity) { 300.dp.roundToPx() }
+                    val quoteCellWidthPx = with(quoteDensity) { (quoteConfig.screenWidthDp.dp / 2).roundToPx() }
+                    val quoteCellHeightPx = with(quoteDensity) { 150.dp.roundToPx() }
+
                     Spacer(Modifier.height(6.dp))
                     if (quotedImages.size == 1) {
                         AsyncImage(
-                            model              = quotedImages.first(),
+                            model              = rememberSizedImageRequest(quotedImages.first(), quoteWidthPx, quoteMaxHeightPx),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier
@@ -1565,7 +1585,7 @@ private fun EmbeddedQuoteCard(
                             for (rowIdx in gridImages.indices step 2) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                                     AsyncImage(
-                                        model              = gridImages[rowIdx],
+                                        model              = rememberSizedImageRequest(gridImages[rowIdx], quoteCellWidthPx, quoteCellHeightPx),
                                         contentDescription = null,
                                         contentScale       = ContentScale.Crop,
                                         modifier           = Modifier
@@ -1575,7 +1595,7 @@ private fun EmbeddedQuoteCard(
                                     )
                                     if (rowIdx + 1 < gridImages.size) {
                                         AsyncImage(
-                                            model              = gridImages[rowIdx + 1],
+                                            model              = rememberSizedImageRequest(gridImages[rowIdx + 1], quoteCellWidthPx, quoteCellHeightPx),
                                             contentDescription = null,
                                             contentScale       = ContentScale.Crop,
                                             modifier           = Modifier
@@ -1696,6 +1716,7 @@ private fun EmbeddedAddressCard(
                     pubkey   = addrRef.author,
                     picture  = author?.picture,
                     modifier = Modifier.size(24.dp),
+                    sizeDp   = 24.dp,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
@@ -1893,8 +1914,9 @@ private fun LinkPreviewCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank()) {
+                val thumbPx = with(LocalDensity.current) { 72.dp.roundToPx() }
                 SubcomposeAsyncImage(
-                    model              = loadedOg.imageUrl,
+                    model              = rememberSizedImageRequest(loadedOg.imageUrl, thumbPx, thumbPx),
                     contentDescription = null,
                     contentScale       = ContentScale.Crop,
                     loading            = {

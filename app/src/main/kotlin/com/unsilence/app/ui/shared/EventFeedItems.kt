@@ -199,6 +199,7 @@ internal fun ThreadParentCard(
                 pubkey = event.pubkey,
                 picture = author?.picture,
                 modifier = Modifier.size(24.dp),
+                sizeDp = 24.dp,
             )
             Spacer(Modifier.width(6.dp))
             Text(
