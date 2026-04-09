@@ -82,10 +82,16 @@ class OgFetcher @Inject constructor(
             val ct = response.header("Content-Type") ?: ""
             if (ct.isNotBlank() && !ct.contains("text/html", ignoreCase = true)
                 && !ct.contains("application/xhtml", ignoreCase = true)) return null
-            // Read at most 50KB
+            // Read up to MAX_BODY_SIZE bytes. A single source.read() may return
+            // less than requested on network sources (first TCP segment only),
+            // so loop until we've accumulated MAX_BODY_SIZE or hit EOF.
             val source = response.body.source()
             val buf = okio.Buffer()
-            source.read(buf, MAX_BODY_SIZE)
+            while (buf.size < MAX_BODY_SIZE) {
+                val remaining = MAX_BODY_SIZE - buf.size
+                val read = source.read(buf, remaining)
+                if (read == -1L) break  // EOF
+            }
             val body = buf.readUtf8()
             parseOgTags(body, url)
         }
