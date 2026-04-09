@@ -25,12 +25,17 @@ private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
 object Nip19FailureCache {
     private val failures = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    private const val MAX_SIZE = 500
+    private const val MAX_SIZE = 10_000 // ~400KB at 40-byte avg string length
 
     fun isKnownBad(uri: String): Boolean = failures.containsKey(uri)
 
     fun markBad(uri: String) {
-        if (failures.size >= MAX_SIZE) failures.clear()
+        // Soft cap — remove one arbitrary entry instead of wiping the whole cache.
+        // Known-bad strings persist across the session.
+        if (failures.size >= MAX_SIZE) {
+            val victim = failures.keys.firstOrNull()
+            if (victim != null) failures.remove(victim)
+        }
         failures[uri] = true
     }
 }
