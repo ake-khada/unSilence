@@ -1908,39 +1908,45 @@ private fun LinkPreviewCard(
 
     val loadedOg = og
     if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
-        // Rich preview card
-        Row(
+        // Rich preview card — image on top, text below (standard OG card layout)
+        var imageLoadFailed by remember { mutableStateOf(false) }
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(Color(0xFF080808))
                 .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
-                .clickable { runCatching { uriHandler.openUri(url) } }
-                .padding(Spacing.small),
-            verticalAlignment = Alignment.CenterVertically,
+                .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
-            if (!loadedOg.imageUrl.isNullOrBlank()) {
-                val thumbPx = with(LocalDensity.current) { 72.dp.roundToPx() }
+            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
+                val density = LocalDensity.current
+                val config = LocalConfiguration.current
+                val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
+                val heightPx = with(density) { 160.dp.roundToPx() }
                 SubcomposeAsyncImage(
-                    model              = rememberSizedImageRequest(loadedOg.imageUrl, thumbPx, thumbPx),
+                    model              = rememberSizedImageRequest(loadedOg.imageUrl, widthPx, heightPx),
                     contentDescription = null,
                     contentScale       = ContentScale.Crop,
                     loading            = {
                         Box(
                             modifier = Modifier
-                                .size(72.dp)
+                                .fillMaxWidth()
+                                .height(160.dp)
                                 .background(MediaPlaceholder),
                         )
                     },
-                    error              = { /* Hide broken thumbnail silently */ },
+                    error              = { imageLoadFailed = true },
                     modifier           = Modifier
-                        .size(72.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .clip(RoundedCornerShape(
+                            topStart = Sizing.mediaCornerRadius,
+                            topEnd = Sizing.mediaCornerRadius,
+                        ))
                         .background(MediaPlaceholder),
                 )
-                Spacer(Modifier.width(Spacing.small))
             }
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(Spacing.small)) {
                 if (!loadedOg.title.isNullOrBlank()) {
                     Text(
                         text       = loadedOg.title,
