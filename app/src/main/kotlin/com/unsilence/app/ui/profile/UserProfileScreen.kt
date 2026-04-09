@@ -350,6 +350,7 @@ fun UserProfileScreen(
                         onTextClick   = {},
                         maxLines      = 3,
                         overflow      = TextOverflow.Ellipsis,
+                        textAlign     = TextAlign.Center,
                         modifier      = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
@@ -392,26 +393,22 @@ fun UserProfileScreen(
                 }
 
                 // Following / Followers stats row
-                if (followingCount != null || followerCount != null) {
-                    Spacer(Modifier.height(Spacing.small))
-                    Row(
-                        modifier              = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium),
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        followingCount?.let { count ->
-                            Text("$count", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Spacer(Modifier.width(4.dp))
-                            Text("Following", color = TextSecondary, fontSize = 14.sp)
-                        }
-                        Spacer(Modifier.width(Spacing.large))
-                        followerCount?.let { count ->
-                            Text("~${count.toCompactSats()}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Spacer(Modifier.width(4.dp))
-                            Text("Followers", color = TextSecondary, fontSize = 14.sp)
-                        }
-                    }
+                Spacer(Modifier.height(Spacing.small))
+                Row(
+                    modifier              = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    StatLabel(
+                        label = "Following",
+                        value = followingCount?.let { "$it" } ?: "—",
+                    )
+                    Spacer(Modifier.size(Spacing.large))
+                    StatLabel(
+                        label = "Followers",
+                        value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+                    )
                 }
 
                 Spacer(Modifier.height(Spacing.medium))
@@ -504,6 +501,24 @@ fun UserProfileScreen(
         FullScreenVideoDialog(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
+        )
+    }
+}
+
+@Composable
+private fun StatLabel(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text       = value,
+            color      = Color.White,
+            fontSize   = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.size(4.dp))
+        Text(
+            text     = label,
+            color    = TextSecondary,
+            fontSize = 13.sp,
         )
     }
 }

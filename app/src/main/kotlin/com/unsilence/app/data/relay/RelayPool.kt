@@ -280,6 +280,39 @@ class RelayPool @Inject constructor(
         return false
     }
 
+    /**
+     * Force-evict the most idle OUTBOX connection regardless of idle threshold.
+     * Falls back to the most idle non-home-feed connection if no OUTBOX candidates exist.
+     * Used by [connectAndAwait] with forceEvict=true for critical one-shot queries
+     * (e.g., NIP-45 COUNT) when the pool is at cap and normal eviction fails.
+     */
+    private fun forceEvictMostIdle(): Boolean {
+        val now = System.currentTimeMillis()
+        // Prefer OUTBOX-only connections (expendable profile-specific connections)
+        val candidate = connections.entries
+            .filter { (url, _) ->
+                hasPurpose(url, ConnectionPurpose.OUTBOX) &&
+                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
+            }
+            .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
+            ?: connections.entries
+                .filter { (url, _) -> !hasPurpose(url, ConnectionPurpose.PERSISTENT) }
+                .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
+        if (candidate != null) {
+            val (url, conn) = candidate
+            val idleSec = (now - (connectionLastActivity[url] ?: 0L)) / 1000
+            connections.remove(url)
+            conn.close()
+            connectionPurposes.remove(url)
+            connectionLastActivity.remove(url)
+            relayOneShotCount.remove(url)
+            relayReqQueue.remove(url)
+            Log.d(TAG, "Force-evicted connection $url (idle ${idleSec}s) for one-shot query")
+            return true
+        }
+        return false
+    }
+
     // Evict stale entries every 5 minutes to prevent unbounded growth.
     init {
         scope.launch {
@@ -390,7 +423,11 @@ class RelayPool @Inject constructor(
      * one connection is ready OR [timeoutMs] elapses. Does NOT send any subscriptions —
      * the caller sends requests after this returns.
      */
-    suspend fun connectAndAwait(relayUrls: List<String>, timeoutMs: Long = 5_000): Int {
+    suspend fun connectAndAwait(
+        relayUrls: List<String>,
+        timeoutMs: Long = 5_000,
+        forceEvict: Boolean = false,
+    ): Int {
         val newConns = mutableListOf<RelayConnection>()
         for (rawUrl in relayUrls) {
             val url = normalizeRelayUrl(rawUrl) ?: continue
@@ -401,7 +438,7 @@ class RelayPool @Inject constructor(
             if (connections.containsKey(url)) continue
             if (connections.size >= 13) {
                 // Try evicting an idle connection before giving up
-                if (!evictIdleConnection()) {
+                if (!evictIdleConnection() && !(forceEvict && forceEvictMostIdle())) {
                     val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
                     val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
                     if (!isBrowse || browseCount >= 3) {
@@ -823,8 +860,10 @@ class RelayPool @Inject constructor(
                 val deferred = CompletableDeferred<String?>()
                 eventTagsCallbacks[subId] = deferred
 
-                // Send to indexer relays (faster) or first 3 connections
+                // Ensure indexer relays are connected before sending the kind-3 REQ —
+                // they may have been evicted by idle timer or not yet connected on navigation.
                 val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+                connectAndAwait(indexerUrls, timeoutMs = 3_000, forceEvict = true)
                 val targets = indexerUrls.mapNotNull { connections[it] }
                     .ifEmpty { connections.values.take(3).toList() }
                 targets.forEach { it.send(req) }

@@ -250,18 +250,22 @@ class UserProfileViewModel @Inject constructor(
 
             if (cached != null && cachedAt != null && cachedAt > oneDayAgo) {
                 followerCount.value = cached
-            } else {
-                val count = relayPool.sendCount(
-                    relayUrl = "wss://antiprimal.net",
-                    filter = buildJsonObject {
-                        put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                        put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                    },
-                )
-                if (count != null) {
-                    followerCount.value = count
-                    userDao.updateFollowerCount(pubkey, count, System.currentTimeMillis() / 1000)
-                }
+                return@launch
+            }
+            // Ensure antiprimal.net is connected before sending COUNT — it may have been
+            // evicted by the 60s idle timer or not yet connected on fresh navigation.
+            // forceEvict=true because the pool may be at cap with all PERSISTENT connections.
+            relayPool.connectAndAwait(listOf("wss://antiprimal.net"), timeoutMs = 3_000, forceEvict = true)
+            val count = relayPool.sendCount(
+                relayUrl = "wss://antiprimal.net",
+                filter = buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                    put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                },
+            )
+            if (count != null) {
+                followerCount.value = count
+                userDao.updateFollowerCount(pubkey, count, System.currentTimeMillis() / 1000)
             }
         }
 
