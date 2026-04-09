@@ -48,8 +48,6 @@ object Nip19FailureCache {
  *  - Repost original-author profiles (NIP-18 p-tag)
  *  - Referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note)
  *  - Referenced event author profiles
- *
- * Stateless — give it a batch, it hydrates them.
  */
 @Singleton
 class CardHydrator @Inject constructor(
@@ -59,6 +57,8 @@ class CardHydrator @Inject constructor(
     private val thumbnailCache: VideoThumbnailCache,
     private val profileResolver: ProfileResolver,
 ) {
+    /** Event IDs that were fetched from relays but never arrived — stop retrying. */
+    private val missingRefCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     /**
      * Phase 1: Profile resolution only — avatar, name, identity.
      * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
@@ -173,6 +173,10 @@ class CardHydrator @Inject constructor(
         // (Room lookups, relay fetches, 1500ms delay, author resolution, thumbnails).
         if (referencedIds.isEmpty()) return
 
+        // Skip refs already known to be permanently missing (negative cache)
+        referencedIds.removeAll(missingRefCache.keys)
+        if (referencedIds.isEmpty()) return
+
         // Fetch missing referenced events
         val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
         if (missingRefs.isNotEmpty()) {
@@ -188,7 +192,11 @@ class CardHydrator @Inject constructor(
         // After ref events arrive, resolve their authors
         if (missingRefs.isNotEmpty()) {
             delay(1500)
-            val refAuthors = missingRefs.mapNotNull { eventDao.getEventById(it)?.pubkey }
+            val stillMissing = missingRefs.filter { eventDao.getEventById(it) == null }
+            // Negative-cache refs that didn't arrive after relay round-trip
+            for (id in stillMissing) { missingRefCache[id] = true }
+            val refAuthors = missingRefs.filter { it !in stillMissing }
+                .mapNotNull { eventDao.getEventById(it)?.pubkey }
             if (refAuthors.isNotEmpty()) {
                 userRepository.fetchMissingProfiles(refAuthors)
             }
