@@ -5,7 +5,9 @@ import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.crossfade
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
 import javax.inject.Inject
@@ -21,6 +23,12 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, Configuration.
             .build()
     override fun newImageLoader(context: coil3.PlatformContext): ImageLoader {
         return ImageLoader.Builder(context)
+            .memoryCache {
+                MemoryCache.Builder()
+                    .maxSizeBytes(64L * 1024 * 1024)  // 64MB cap — was unbounded (25% of app heap default)
+                    .build()
+            }
+            .crossfade(true)
             .components {
                 add(
                     OkHttpNetworkFetcherFactory(

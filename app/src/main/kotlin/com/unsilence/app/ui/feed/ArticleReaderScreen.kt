@@ -53,6 +53,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
@@ -128,7 +129,7 @@ fun ArticleReaderScreen(
                     // ── Banner image (16:9, magazine-style header) ─────────────
                     if (!image.isNullOrBlank()) {
                         SubcomposeAsyncImage(
-                            model              = image,
+                            model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier
