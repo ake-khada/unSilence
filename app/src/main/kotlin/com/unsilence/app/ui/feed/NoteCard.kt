@@ -312,16 +312,18 @@ fun NoteCard(
     // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
     // Merge relay hints from q-tags into nevent-derived EventRefs
     val qTagHints = remember(row.tags) { extractQTagHints(row.tags) }
-    val nostrRefs = NOSTR_URI_REGEX.findAll(effectiveContent)
-        .mapNotNull { decodeNostrRef(it.value) }
-        .map { ref ->
-            if (ref is NostrRef.EventRef) {
-                val extra = qTagHints[ref.eventId].orEmpty()
-                if (extra.isNotEmpty()) ref.copy(relayHints = (ref.relayHints + extra).distinct())
-                else ref
-            } else ref
-        }
-        .toList()
+    val nostrRefs = remember(effectiveContent, qTagHints) {
+        NOSTR_URI_REGEX.findAll(effectiveContent)
+            .mapNotNull { decodeNostrRef(it.value) }
+            .map { ref ->
+                if (ref is NostrRef.EventRef) {
+                    val extra = qTagHints[ref.eventId].orEmpty()
+                    if (extra.isNotEmpty()) ref.copy(relayHints = (ref.relayHints + extra).distinct())
+                    else ref
+                } else ref
+            }
+            .toList()
+    }
     val contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim()
 
     // ── Media extraction: regex from content + imeta from tags ────────────────
