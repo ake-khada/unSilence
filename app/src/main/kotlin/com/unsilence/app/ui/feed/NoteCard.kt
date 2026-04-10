@@ -2,6 +2,9 @@ package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -32,6 +35,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -269,7 +274,7 @@ fun NoteCard(
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
-    var fullscreenImageUrl by remember { mutableStateOf<String?>(null) }
+    var fullscreenImageIndex by remember { mutableIntStateOf(-1) }
     val uriHandler = LocalUriHandler.current
 
     // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
@@ -563,7 +568,7 @@ fun NoteCard(
             MediaGrid(
                 imageUrls  = imageUrls,
                 imetaMedia = imetaMedia,
-                onImageClick = { url -> fullscreenImageUrl = url },
+                onImageClick = { url -> fullscreenImageIndex = imageUrls.indexOf(url).coerceAtLeast(0) },
                 modifier   = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -699,10 +704,11 @@ fun NoteCard(
     }
 
     // ── Fullscreen image viewer ────────────────────────────────────────────
-    fullscreenImageUrl?.let { url ->
+    if (fullscreenImageIndex >= 0 && imageUrls.isNotEmpty()) {
         FullScreenImageDialog(
-            imageUrl  = url,
-            onDismiss = { fullscreenImageUrl = null },
+            imageUrls    = imageUrls,
+            initialIndex = fullscreenImageIndex,
+            onDismiss    = { fullscreenImageIndex = -1 },
         )
     }
 }
@@ -1413,8 +1419,10 @@ fun FullScreenVideoDialog(
 
 /** Full-screen image viewer dialog. */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun FullScreenImageDialog(
-    imageUrl: String,
+    imageUrls: List<String>,
+    initialIndex: Int = 0,
     onDismiss: () -> Unit,
 ) {
     Dialog(
@@ -1422,20 +1430,71 @@ private fun FullScreenImageDialog(
         properties       = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier         = Modifier.fillMaxSize().background(Color.Black).clickable { onDismiss() },
-            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { onDismiss() },
         ) {
-            SubcomposeAsyncImage(
-                model              = imageUrl,
-                contentDescription = null,
-                contentScale       = ContentScale.Fit,
-                modifier           = Modifier.fillMaxSize(),
+            val pagerState = rememberPagerState(
+                initialPage = initialIndex,
+                pageCount   = { imageUrls.size },
             )
+
+            HorizontalPager(
+                state    = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                SubcomposeAsyncImage(
+                    model              = imageUrls[page],
+                    contentDescription = null,
+                    contentScale       = ContentScale.Fit,
+                    loading = {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(color = Color.White)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { /* consume click so background dismiss doesn't fire */ },
+                )
+            }
+
+            // Dot indicators — only for multi-image posts
+            if (imageUrls.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    repeat(imageUrls.size) { index ->
+                        Box(
+                            modifier = Modifier
+                                .size(if (pagerState.currentPage == index) 8.dp else 6.dp)
+                                .background(
+                                    color = if (pagerState.currentPage == index) Color.White else Color.White.copy(alpha = 0.4f),
+                                    shape = CircleShape,
+                                ),
+                        )
+                    }
+                }
+            }
+
+            // Close button
             IconButton(
                 onClick  = onDismiss,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(8.dp),
+                    .padding(16.dp),
             ) {
                 Icon(
                     imageVector        = Icons.Filled.Close,
