@@ -37,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -86,13 +87,13 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
             // ── Menu items ─────────────────────────────────────────────────────
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                 SettingsItem(icon = Icons.Filled.Dns,          label = "Relays",       onClick = { showRelays = true })
-                SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {})
-                SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {})
-                SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {})
-                SettingsItem(icon = Icons.Filled.Security,     label = "Safety",       onClick = {})
-                SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {})
-                SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {})
-                SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {})
+                SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.Security,     label = "Safety",       onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {}, enabled = false, subtitle = "Coming soon")
 
                 Spacer(Modifier.height(Spacing.large))
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
@@ -126,12 +127,15 @@ private fun SettingsItem(
     icon: ImageVector,
     label: String,
     onClick: () -> Unit,
+    enabled: Boolean = true,
+    subtitle: String? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(52.dp)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .alpha(if (enabled) 1f else 0.4f)
             .padding(horizontal = Spacing.medium),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -142,11 +146,20 @@ private fun SettingsItem(
             modifier           = Modifier.size(Sizing.navIcon),
         )
         Spacer(Modifier.width(Spacing.medium))
-        Text(
-            text     = label,
-            color    = Color.White,
-            fontSize = 16.sp,
-        )
+        Column {
+            Text(
+                text     = label,
+                color    = Color.White,
+                fontSize = 16.sp,
+            )
+            if (subtitle != null) {
+                Text(
+                    text     = subtitle,
+                    color    = Color(0xFF666666),
+                    fontSize = 12.sp,
+                )
+            }
+        }
     }
     HorizontalDivider(
         color     = MaterialTheme.colorScheme.surfaceVariant,

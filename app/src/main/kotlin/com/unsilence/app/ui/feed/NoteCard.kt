@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -53,9 +55,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import android.content.Intent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -107,6 +111,10 @@ import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.data.relay.extractRepostTargetId
 import com.unsilence.app.data.relay.extractRepostTargetRelay
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalShowSnackbar
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.launch
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -260,6 +268,9 @@ fun NoteCard(
     onNewPostAnimated: () -> Unit = {},
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
+    isZapLoading: Boolean = false,
+    extraZapSats: Long = 0L,
+    zapResultFlow: SharedFlow<Pair<String, Result<Long>>>? = null,
 ) {
     // Subtle flash animation for newly arrived posts
     val flashAlpha = remember { Animatable(if (isNewPost) 1f else 0f) }
@@ -276,6 +287,22 @@ fun NoteCard(
     var showZapPicker     by remember { mutableStateOf(false) }
     var fullscreenImageIndex by remember { mutableIntStateOf(-1) }
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+    val showSnackbar = LocalShowSnackbar.current
+
+    // ── Zap result collection: flash animation + failure snackbar ─────────
+    var zapFlashTrigger by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        zapResultFlow?.collect { (id, result) ->
+            if (id == row.id) {
+                if (result.isSuccess) {
+                    zapFlashTrigger++
+                } else {
+                    showSnackbar("Zap failed: ${result.exceptionOrNull()?.message ?: "unknown error"}")
+                }
+            }
+        }
+    }
 
     // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
     val boostedJson = if (row.kind == 6 && row.content.isNotBlank()) {
@@ -648,7 +675,7 @@ fun NoteCard(
                 ) {
                     DropdownMenuItem(
                         text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
-                        onClick = { onRepost(); showRepostMenu = false },
+                        onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
                     )
                     DropdownMenuItem(
                         text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
@@ -664,10 +691,12 @@ fun NoteCard(
                 onClick            = onReact,
             )
             ZapButton(
-                sats          = row.zapTotalSats,
+                sats          = row.zapTotalSats + extraZapSats,
                 hasZapped     = hasZapped,
+                isLoading     = isZapLoading,
+                flashTrigger  = zapFlashTrigger,
                 onTap         = {
-                    if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
                 },
                 onLongPress   = {
                     if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
@@ -677,6 +706,13 @@ fun NoteCard(
                 icon               = Icons.Filled.Share,
                 count              = 0,
                 contentDescription = "Share",
+                onClick            = {
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                        type = "text/plain"
+                    }
+                    context.startActivity(Intent.createChooser(sendIntent, null))
+                },
             )
         }
 
@@ -794,38 +830,84 @@ internal fun ActionButton(
     }
 }
 
-/** Zap button: Amber when sats > 0 or user has zapped, supports single tap and long-press. */
+/** Zap button: Amber when user has zapped, loading spinner during payment, energy pulse on success. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ZapButton(
     sats: Long,
     hasZapped: Boolean,
+    isLoading: Boolean = false,
+    flashTrigger: Int = 0,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
-    val tint = if (sats > 0 || hasZapped) ZapAmber else ActionTint
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier          = Modifier
-            .defaultMinSize(minWidth = 48.dp)
-            .combinedClickable(
-                onClick     = onTap,
-                onLongClick = onLongPress,
-            ),
-    ) {
-        Icon(
-            imageVector        = Icons.Filled.ElectricBolt,
-            contentDescription = "Zap",
-            tint               = tint,
-            modifier           = Modifier.size(Sizing.actionIcon),
-        )
-        if (sats > 0) {
-            Spacer(Modifier.width(Spacing.micro))
-            Text(
-                text     = sats.toCompactSats(),
-                color    = tint,
-                fontSize = 12.sp,
-            )
+    // ── Animation: punchy bounce + white→amber flash ──────────────────────
+    val iconScale = remember { Animatable(1f) }
+    val flashAlpha = remember { Animatable(0f) }
+
+    LaunchedEffect(flashTrigger) {
+        if (flashTrigger > 0) {
+            coroutineScope {
+                launch {
+                    iconScale.snapTo(1.8f)
+                    iconScale.animateTo(
+                        1f,
+                        spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessLow,
+                        ),
+                    )
+                }
+                launch {
+                    flashAlpha.snapTo(1f)
+                    flashAlpha.animateTo(0f, tween(400))
+                }
+            }
+        }
+    }
+
+    val baseTint = if (hasZapped) ZapAmber else ActionTint
+    val tint = if (flashAlpha.value > 0f) {
+        lerp(baseTint, Color.White, flashAlpha.value)
+    } else baseTint
+
+    Box(contentAlignment = Alignment.Center) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier          = Modifier
+                .defaultMinSize(minWidth = 48.dp)
+                .combinedClickable(
+                    onClick     = onTap,
+                    onLongClick = onLongPress,
+                ),
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    color       = Cyan,
+                    modifier    = Modifier.size(12.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(
+                    imageVector        = Icons.Filled.ElectricBolt,
+                    contentDescription = "Zap",
+                    tint               = tint,
+                    modifier           = Modifier
+                        .size(Sizing.actionIcon)
+                        .graphicsLayer {
+                            scaleX = iconScale.value
+                            scaleY = iconScale.value
+                        },
+                )
+            }
+            if (sats > 0) {
+                Spacer(Modifier.width(Spacing.micro))
+                Text(
+                    text     = sats.toCompactSats(),
+                    color    = tint,
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 }

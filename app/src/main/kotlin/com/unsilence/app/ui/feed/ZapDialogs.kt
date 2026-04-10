@@ -38,7 +38,7 @@ import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.ZapAmber
 
-private val PRESET_AMOUNTS = listOf(21L, 100L, 500L, 1_000L, 5_000L)
+private val PRESET_AMOUNTS = listOf(21L, 100L, 500L, 1_000L, 5_000L, 10_000L, 50_000L, 100_000L)
 
 /**
  * Dialog shown when the user taps ⚡ without a configured NWC wallet.
@@ -109,7 +109,7 @@ fun ZapAmountDialog(
     onZap: (amountSats: Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var selected by remember { mutableStateOf<Long?>(1_000L) }
+    var selected by remember { mutableStateOf<Long?>(21L) }
     var custom   by remember { mutableStateOf("") }
 
     val effectiveAmount: Long? = if (custom.isNotBlank()) {

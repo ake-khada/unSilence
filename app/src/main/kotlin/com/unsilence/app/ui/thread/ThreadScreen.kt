@@ -87,6 +87,8 @@ fun ThreadScreen(
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val zapLoadingIds   by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
+    val optimisticSats  by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     var replyText by remember { mutableStateOf("") }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -138,6 +140,16 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
+                                Box(
+                                    modifier = Modifier.drawBehind {
+                                        drawLine(
+                                            color       = Color.Cyan,
+                                            start       = Offset(0f, 0f),
+                                            end         = Offset(0f, size.height),
+                                            strokeWidth = 2.dp.toPx(),
+                                        )
+                                    },
+                                ) {
                                 if (note.kind == 30023) {
                                     ArticleCard(
                                         row             = note,
@@ -151,6 +163,9 @@ fun ThreadScreen(
                                         hasReposted     = note.engagementId in repostedIds,
                                         hasZapped       = note.engagementId in zappedIds,
                                         isNwcConfigured = isNwcConfigured,
+                                        isZapLoading    = note.id in zapLoadingIds,
+                                        extraZapSats    = optimisticSats[note.id] ?: 0L,
+                                        zapResultFlow   = actionsViewModel.zapResult,
                                     )
                                 } else {
                                     NoteCard(
@@ -169,7 +184,11 @@ fun ThreadScreen(
                                         lookupProfile   = actionsViewModel::lookupProfile,
                                         lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                                        isZapLoading    = note.id in zapLoadingIds,
+                                        extraZapSats    = optimisticSats[note.id] ?: 0L,
+                                        zapResultFlow   = actionsViewModel.zapResult,
                                     )
+                                }
                                 }
                             }
                         }
@@ -224,6 +243,9 @@ fun ThreadScreen(
                                         lookupProfile   = actionsViewModel::lookupProfile,
                                         lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+                                        isZapLoading    = reply.id in zapLoadingIds,
+                                        extraZapSats    = optimisticSats[reply.id] ?: 0L,
+                                        zapResultFlow   = actionsViewModel.zapResult,
                                     )
                                 }
                             }
@@ -319,6 +341,9 @@ fun ThreadScreen(
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
+            isZapLoading    = row.id in zapLoadingIds,
+            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            zapResultFlow   = actionsViewModel.zapResult,
         )
     }
 }
