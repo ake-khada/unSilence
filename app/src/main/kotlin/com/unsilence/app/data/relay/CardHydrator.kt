@@ -68,7 +68,7 @@ class CardHydrator @Inject constructor(
      *   Source relay and hint relay fetches are skipped — use [fanOutProfiles]
      *   later in IDLE to catch up.
      */
-    suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true) {
+    suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
 
         val pubkeys = mutableSetOf<String>()
@@ -99,6 +99,7 @@ class CardHydrator @Inject constructor(
 
         if (fanOut) {
             val sourceRelays = events.map { it.relayUrl }.distinct()
+                .filter { it != excludeSourceRelay }
             if (sourceRelays.isNotEmpty()) {
                 relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
             }
@@ -119,7 +120,7 @@ class CardHydrator @Inject constructor(
      * that were previously hydrated with fanOut=false during scroll.
      * Called from IDLE to catch up on profiles that only exist on non-indexer relays.
      */
-    suspend fun fanOutProfiles(events: List<FeedRow>) {
+    suspend fun fanOutProfiles(events: List<FeedRow>, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
 
         val pubkeys = mutableSetOf<String>()
@@ -138,6 +139,7 @@ class CardHydrator @Inject constructor(
 
         if (pubkeys.isNotEmpty()) {
             val sourceRelays = events.map { it.relayUrl }.distinct()
+                .filter { it != excludeSourceRelay }
             if (sourceRelays.isNotEmpty()) {
                 relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
             }

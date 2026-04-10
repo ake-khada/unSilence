@@ -405,6 +405,7 @@ class FeedViewModel @Inject constructor(
                     // Only reset controller on actual feed switch, not on every Room re-emission
                     if (newKey != lastResetFeedKey) {
                         lastResetFeedKey = newKey
+                        hydrationController.feedRelayUrl = (type as? FeedType.SingleRelay)?.url
                         hydrationController.reset()
                     }
 

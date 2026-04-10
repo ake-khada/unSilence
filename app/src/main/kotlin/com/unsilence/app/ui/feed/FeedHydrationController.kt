@@ -30,6 +30,8 @@ class FeedHydrationController(
     private val userDao: UserDao,
     private val eventStatsDao: EventStatsDao,
 ) {
+    /** When non-null, source-relay fan-out skips this URL (single-relay feed optimization). */
+    var feedRelayUrl: String? = null
     companion object {
         const val FAST_SCROLL_ENTER_PX_S = 2500f   // must exceed to enter FAST
         const val FAST_SCROLL_EXIT_PX_S  = 1200f   // must drop below to leave FAST
@@ -492,8 +494,9 @@ class FeedHydrationController(
             val pendingItems = combined.filter { it.id in fanOutPendingIds }
             if (pendingItems.isNotEmpty()) {
                 fanOutPendingIds.removeAll(pendingItems.map { it.id }.toSet())
+                val excludeRelay = feedRelayUrl
                 scope.launch(Dispatchers.IO) {
-                    cardHydrator.fanOutProfiles(pendingItems)
+                    cardHydrator.fanOutProfiles(pendingItems, excludeSourceRelay = excludeRelay)
                     Log.d(TAG, "IDLE: deferred fan-out for ${pendingItems.size} items")
                 }
             }
@@ -658,8 +661,9 @@ class FeedHydrationController(
 
     private fun launchProfileHydration(items: List<FeedRow>, fanOut: Boolean, tag: String): Job? {
         if (items.isEmpty()) return null
+        val excludeRelay = feedRelayUrl
         return scope.launch(Dispatchers.IO) {
-            cardHydrator.hydrateProfiles(items, fanOut = fanOut)
+            cardHydrator.hydrateProfiles(items, fanOut = fanOut, excludeSourceRelay = excludeRelay)
             Log.d(TAG, "$tag: profiles for ${items.size} items (fanOut=$fanOut)")
         }
     }
