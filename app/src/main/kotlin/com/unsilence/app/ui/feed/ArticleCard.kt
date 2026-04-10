@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import android.content.Intent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,7 +28,9 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -36,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -43,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
@@ -51,6 +56,7 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -86,6 +92,9 @@ fun ArticleCard(
     hasReposted: Boolean = false,
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
+    isZapLoading: Boolean = false,
+    extraZapSats: Long = 0L,
+    zapResultFlow: SharedFlow<Pair<String, Result<Long>>>? = null,
 ) {
     val title   = tagValue(row.tags, "title")
     val summary = tagValue(row.tags, "summary")
@@ -94,9 +103,24 @@ fun ArticleCard(
 
     val authorLabel = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
 
+    val context = LocalContext.current
+    val showSnackbar = LocalShowSnackbar.current
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
+
+    var zapFlashTrigger by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        zapResultFlow?.collect { (id, result) ->
+            if (id == row.id) {
+                if (result.isSuccess) {
+                    zapFlashTrigger++
+                } else {
+                    showSnackbar("Zap failed: ${result.exceptionOrNull()?.message ?: "unknown error"}")
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -258,10 +282,12 @@ fun ArticleCard(
                 onClick            = onReact,
             )
             ZapButton(
-                sats          = row.zapTotalSats,
+                sats          = row.zapTotalSats + extraZapSats,
                 hasZapped     = hasZapped,
+                isLoading     = isZapLoading,
+                flashTrigger  = zapFlashTrigger,
                 onTap         = {
-                    if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
                 },
                 onLongPress   = {
                     if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
@@ -271,6 +297,13 @@ fun ArticleCard(
                 icon               = Icons.Filled.Share,
                 count              = 0,
                 contentDescription = "Share",
+                onClick            = {
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                        type = "text/plain"
+                    }
+                    context.startActivity(Intent.createChooser(sendIntent, null))
+                },
             )
         }
         } // end card body Column

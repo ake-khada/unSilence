@@ -36,7 +36,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,7 +57,9 @@ import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.Black
+import kotlinx.coroutines.flow.SharedFlow
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import kotlinx.serialization.json.Json
@@ -80,14 +84,30 @@ fun ArticleReaderScreen(
     hasReposted: Boolean = false,
     hasZapped: Boolean = false,
     isNwcConfigured: Boolean = false,
+    isZapLoading: Boolean = false,
+    extraZapSats: Long = 0L,
+    zapResultFlow: SharedFlow<Pair<String, Result<Long>>>? = null,
 ) {
     val title = articleTagValue(row.tags, "title")
     val image = articleTagValue(row.tags, "image")
     val context = LocalContext.current
+    val showSnackbar = LocalShowSnackbar.current
 
     val bodyHtml = remember(row.content) { markdownToHtml(row.content) }
 
     var showRepostMenu    by remember { mutableStateOf(false) }
+    var zapFlashTrigger by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        zapResultFlow?.collect { (id, result) ->
+            if (id == row.id) {
+                if (result.isSuccess) {
+                    zapFlashTrigger++
+                } else {
+                    showSnackbar("Zap failed: ${result.exceptionOrNull()?.message ?: "unknown error"}")
+                }
+            }
+        }
+    }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
 
@@ -244,10 +264,12 @@ fun ArticleReaderScreen(
                         onClick            = onReact,
                     )
                     ZapButton(
-                        sats        = row.zapTotalSats,
-                        hasZapped   = hasZapped,
-                        onTap       = {
-                            if (isNwcConfigured) onZap(1_000L) else showConnectWallet = true
+                        sats         = row.zapTotalSats + extraZapSats,
+                        hasZapped    = hasZapped,
+                        isLoading    = isZapLoading,
+                        flashTrigger = zapFlashTrigger,
+                        onTap        = {
+                            if (isNwcConfigured) onZap(21L) else showConnectWallet = true
                         },
                         onLongPress = {
                             if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
@@ -257,6 +279,13 @@ fun ArticleReaderScreen(
                         icon               = Icons.Filled.Share,
                         count              = 0,
                         contentDescription = "Share",
+                        onClick            = {
+                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                                type = "text/plain"
+                            }
+                            context.startActivity(Intent.createChooser(sendIntent, null))
+                        },
                     )
                 }
             }

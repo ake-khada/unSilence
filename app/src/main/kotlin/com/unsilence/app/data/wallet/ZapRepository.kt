@@ -36,6 +36,14 @@ class ZapRepository @Inject constructor(
     private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
+    /** LNURL metadata cache: lud16 → (callbackUrl, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
+    private val lnurlCache = mutableMapOf<String, Pair<String, Long>>()
+    private val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 minutes
+
+    private fun getCachedCallback(lud16: String): String? {
+        val (url, expiresAt) = lnurlCache[lud16] ?: return null
+        return if (System.currentTimeMillis() < expiresAt) url else { lnurlCache.remove(lud16); null }
+    }
 
     /**
      * Zap a note.
@@ -49,22 +57,27 @@ class ZapRepository @Inject constructor(
         eventPubkey: String,
         relayUrl: String,
         amountSats: Long,
-    ): Result<Unit> {
+    ): Result<Event> {
+        val t0 = System.currentTimeMillis()
+
         // ── 1. Get lightning address from author's profile ────────────────────
         val lud16 = userRepository.getUserLud16(eventPubkey)
         if (lud16.isNullOrBlank()) {
-            return Result.failure(Exception("Author has no lightning address (lud16) set"))
+            return Result.failure(Exception("Author has no lightning address"))
         }
 
-        // ── 2. Resolve LNURL endpoint from lud16 ─────────────────────────────
-        val lnurlEndpoint = lud16ToUrl(lud16)
-            ?: return Result.failure(Exception("Cannot resolve lud16: $lud16"))
-
-        val lnurlMeta = fetchLnurlMeta(lnurlEndpoint)
-            ?: return Result.failure(Exception("LNURL fetch failed for $lnurlEndpoint"))
-
-        val callbackUrl = lnurlMeta["callback"]?.jsonPrimitive?.content
-            ?: return Result.failure(Exception("LNURL response has no callback"))
+        // ── 2. Resolve LNURL callback (cached for 5 min per lud16) ───────────
+        val callbackUrl = getCachedCallback(lud16) ?: run {
+            val lnurlEndpoint = lud16ToUrl(lud16)
+                ?: return Result.failure(Exception("Invalid lightning address"))
+            val lnurlMeta = fetchLnurlMeta(lnurlEndpoint)
+                ?: return Result.failure(Exception("Lightning service unreachable"))
+            val cb = lnurlMeta["callback"]?.jsonPrimitive?.content
+                ?: return Result.failure(Exception("Lightning service misconfigured"))
+            lnurlCache[lud16] = cb to (System.currentTimeMillis() + CACHE_TTL_MS)
+            cb
+        }
+        Log.d(TAG, "LNURL resolved in ${System.currentTimeMillis() - t0}ms")
 
         // ── 3. Build kind-9734 zap request event ─────────────────────────────
         val msats      = amountSats * 1000L
@@ -82,20 +95,29 @@ class ZapRepository @Inject constructor(
             content = "",
         )
         val zapRequest = signingManager.sign(template)
-            ?: return Result.failure(IllegalStateException("Signing failed or timed out"))
+            ?: return Result.failure(IllegalStateException("Signing failed"))
 
         // Publish the zap request to the relay so the recipient's wallet can see it
         relayPool.publish(toEventJson(zapRequest))
 
-        // ── 4. Fetch bolt11 invoice from LNURL callback ───────────────────────
+        // ── 4. Fetch bolt11 + warm up NWC WebSocket IN PARALLEL ───────────────
+        val warmSocket = nwcManager.warmUp()
+            ?: return Result.failure(Exception("Wallet not configured"))
+
         val zapRequestJson = toEventJson(zapRequest)
         val bolt11 = fetchBolt11(callbackUrl, msats, zapRequestJson)
-            ?: return Result.failure(Exception("LNURL callback did not return an invoice"))
+        if (bolt11 == null) {
+            warmSocket.ws.close(1000, "no invoice")
+            return Result.failure(Exception("Could not get invoice from lightning service"))
+        }
 
-        Log.d(TAG, "Got bolt11 for $amountSats sats, paying via NWC…")
+        Log.d(TAG, "bolt11 obtained in ${System.currentTimeMillis() - t0}ms for $amountSats sats")
 
-        // ── 5. Pay via NWC ────────────────────────────────────────────────────
-        return nwcManager.payInvoice(bolt11)
+        // ── 5. Pay on the already-connected WebSocket ─────────────────────────
+        val payResult = nwcManager.sendPayment(warmSocket, bolt11)
+        Log.d(TAG, "Zap total: ${System.currentTimeMillis() - t0}ms, success=${payResult.isSuccess}")
+        return if (payResult.isSuccess) Result.success(zapRequest)
+               else Result.failure(payResult.exceptionOrNull() ?: Exception("Payment failed"))
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

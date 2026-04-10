@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.UserEntity
@@ -27,12 +28,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -54,6 +60,7 @@ class NoteActionsViewModel @Inject constructor(
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
+    private val eventStatsDao: EventStatsDao,
     val sharedPlayerHolder: SharedPlayerHolder,
     val videoThumbnailCache: VideoThumbnailCache,
 ) : ViewModel() {
@@ -90,14 +97,25 @@ class NoteActionsViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
         } ?: MutableStateFlow(emptySet())
 
-    /** Optimistic zap state: event IDs zapped in this session before Room confirms. */
+    /** Optimistic zap state: event IDs zapped in this session after NWC confirms. */
     private val _optimisticZaps = MutableStateFlow(emptySet<String>())
+
+    /** Optimistic sats: per-event amount to add on top of Room's zapTotalSats. */
+    private val _optimisticZapSats = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val optimisticZapSats: StateFlow<Map<String, Long>> = _optimisticZapSats.asStateFlow()
+
+    /** Event IDs currently being zapped (payment in flight). */
+    private val _zapLoading = MutableStateFlow<Set<String>>(emptySet())
+    val zapLoading: StateFlow<Set<String>> = _zapLoading.asStateFlow()
+
+    /** Zap results: eventId → success(amountSats) or failure. */
+    private val _zapResult = MutableSharedFlow<Pair<String, Result<Long>>>(extraBufferCapacity = 10)
+    val zapResult: SharedFlow<Pair<String, Result<Long>>> = _zapResult.asSharedFlow()
 
     /**
      * Set of event IDs the current user has zapped.
      * Combines Room-backed storage with in-session optimistic updates so the
-     * zap icon turns amber immediately after tapping, without waiting for the
-     * NWC round-trip.
+     * zap icon turns amber after NWC confirms payment.
      */
     val zappedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
@@ -181,10 +199,41 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     fun zap(eventId: String, eventPubkey: String, relayUrl: String, amountSats: Long) {
-        // Optimistic update: icon turns amber immediately, before NWC confirms.
-        _optimisticZaps.value = _optimisticZaps.value + eventId
+        _zapLoading.value = _zapLoading.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
-            zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
+            val result = zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
+            if (result.isSuccess) {
+                // Persist the kind-9734 zap request so Room's zappedEventIds survives restarts
+                val signed = result.getOrThrow()
+                eventRepository.insertEvent(
+                    EventEntity(
+                        id        = signed.id,
+                        pubkey    = signed.pubKey,
+                        kind      = signed.kind,
+                        content   = signed.content,
+                        createdAt = signed.createdAt,
+                        tags      = tagsToJson(signed.tags),
+                        sig       = signed.sig,
+                        relayUrl  = relayUrl,
+                        rootId    = eventId,
+                        cachedAt  = System.currentTimeMillis() / 1000L,
+                    )
+                )
+                // Increment zap sats in event_stats so the count survives restarts
+                eventStatsDao.incrementZapStats(eventId, amountSats)
+            }
+            withContext(Dispatchers.Main) {
+                _zapLoading.value = _zapLoading.value - eventId
+                if (result.isSuccess) {
+                    _optimisticZapSats.value = _optimisticZapSats.value +
+                        (eventId to ((_optimisticZapSats.value[eventId] ?: 0L) + amountSats))
+                    _zapResult.emit(eventId to Result.success(amountSats))
+                } else {
+                    _zapResult.emit(eventId to Result.failure(
+                        result.exceptionOrNull() ?: Exception("Zap failed")
+                    ))
+                }
+            }
         }
     }
 

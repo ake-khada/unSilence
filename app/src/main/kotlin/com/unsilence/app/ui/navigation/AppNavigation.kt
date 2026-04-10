@@ -52,9 +52,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -105,6 +108,7 @@ import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -142,6 +146,11 @@ private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
 
 @Composable
 fun AppNavigation(onLogout: () -> Unit) {
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val showSnackbar: (String) -> Unit = { message ->
+        scope.launch { snackbarHostState.showSnackbar(message) }
+    }
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
     var showCompose          by remember { mutableStateOf(false) }
@@ -241,6 +250,7 @@ fun AppNavigation(onLogout: () -> Unit) {
         }
     }
 
+    CompositionLocalProvider(LocalShowSnackbar provides showSnackbar) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -513,7 +523,14 @@ fun AppNavigation(onLogout: () -> Unit) {
                     onDismiss   = { quoteNoteId = null },
                 )
             }
+
+            // ── Snackbar host ────────────────────────────────────────────────
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier  = Modifier.align(Alignment.BottomCenter),
+            )
         }
+    } // CompositionLocalProvider
 }
 
 // ── Feed carousel ─────────────────────────────────────────────────────────

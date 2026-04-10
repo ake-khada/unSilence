@@ -62,6 +62,7 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
@@ -101,8 +102,11 @@ fun ProfileScreen(
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val zapLoadingIds   by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
+    val optimisticSats  by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
+    val showSnackbar     = LocalShowSnackbar.current
 
     var showEditProfile by remember { mutableStateOf(false) }
     var showSettings    by remember { mutableStateOf(false) }
@@ -133,6 +137,9 @@ fun ProfileScreen(
         repostedIds = repostedIds,
         zappedIds = zappedIds,
         isNwcConfigured = isNwcConfigured,
+        zapLoadingIds = zapLoadingIds,
+        optimisticZapSats = optimisticSats,
+        zapResultFlow = actionsViewModel.zapResult,
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
@@ -268,6 +275,7 @@ fun ProfileScreen(
                             .clickable {
                                 viewModel.npub?.let { full ->
                                     clipboard.setText(AnnotatedString(full))
+                                    showSnackbar("Copied npub")
                                 }
                             }
                             .padding(horizontal = Spacing.medium, vertical = 2.dp),
@@ -467,6 +475,9 @@ fun ProfileScreen(
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
+            isZapLoading    = row.id in zapLoadingIds,
+            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            zapResultFlow   = actionsViewModel.zapResult,
         )
     }
 

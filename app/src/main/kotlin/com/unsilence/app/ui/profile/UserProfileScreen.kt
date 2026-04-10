@@ -65,6 +65,7 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.feed.ArticleReaderScreen
@@ -108,8 +109,11 @@ fun UserProfileScreen(
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val zapLoadingIds   by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
+    val optimisticSats  by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
+    val showSnackbar     = LocalShowSnackbar.current
     val isFollowing    by viewModel.isFollowing.collectAsStateWithLifecycle(initialValue = false)
     val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
     val followerCount  by viewModel.followerCount.collectAsStateWithLifecycle()
@@ -142,6 +146,9 @@ fun UserProfileScreen(
         repostedIds = repostedIds,
         zappedIds = zappedIds,
         isNwcConfigured = isNwcConfigured,
+        zapLoadingIds = zapLoadingIds,
+        optimisticZapSats = optimisticSats,
+        zapResultFlow = actionsViewModel.zapResult,
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
@@ -298,6 +305,7 @@ fun UserProfileScreen(
                             .clickable {
                                 viewModel.npub?.let { full ->
                                     clipboard.setText(AnnotatedString(full))
+                                    showSnackbar("Copied npub")
                                 }
                             }
                             .padding(horizontal = Spacing.medium, vertical = 2.dp),
@@ -373,7 +381,7 @@ fun UserProfileScreen(
                         )
                     } else if (isFollowing) {
                         OutlinedButton(
-                            onClick = { viewModel.toggleFollow() },
+                            onClick = { viewModel.toggleFollow(); showSnackbar("Unfollowed") },
                             border  = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
                                 brush = androidx.compose.ui.graphics.SolidColor(Cyan),
                             ),
@@ -383,7 +391,7 @@ fun UserProfileScreen(
                         }
                     } else {
                         Button(
-                            onClick  = { viewModel.toggleFollow() },
+                            onClick  = { viewModel.toggleFollow(); showSnackbar("Following") },
                             colors   = ButtonDefaults.buttonColors(containerColor = Cyan),
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
@@ -494,6 +502,9 @@ fun UserProfileScreen(
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
+            isZapLoading    = row.id in zapLoadingIds,
+            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            zapResultFlow   = actionsViewModel.zapResult,
         )
     }
 

@@ -84,6 +84,8 @@ fun FeedScreen(
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
+    val zapLoadingIds by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
+    val optimisticSats by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
@@ -128,6 +130,9 @@ fun FeedScreen(
         repostedIds = repostedIds,
         zappedIds = zappedIds,
         isNwcConfigured = isNwcConfigured,
+        zapLoadingIds = zapLoadingIds,
+        optimisticZapSats = optimisticSats,
+        zapResultFlow = actionsViewModel.zapResult,
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
@@ -392,6 +397,9 @@ fun FeedScreen(
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
+            isZapLoading    = row.id in zapLoadingIds,
+            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            zapResultFlow   = actionsViewModel.zapResult,
         )
     }
 
