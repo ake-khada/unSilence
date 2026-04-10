@@ -2,6 +2,7 @@ package com.unsilence.app.ui.notifications
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -33,6 +35,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun NotificationsScreen(
     onNoteClick: (String) -> Unit = {},
+    staticTopPadding: Dp = 0.dp,
     viewModel: NotificationsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -60,7 +63,10 @@ fun NotificationsScreen(
             }
 
             else -> {
-                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(top = staticTopPadding),
+                ) {
                     items(state.items, key = { it.id }) { row ->
                         NotificationEventRow(
                             row         = row,
