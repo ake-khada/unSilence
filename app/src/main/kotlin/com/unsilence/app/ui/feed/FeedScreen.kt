@@ -9,11 +9,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +21,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,7 +41,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,7 +48,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.CoverageStatus
+import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.RenderContext
@@ -207,53 +208,21 @@ fun FeedScreen(
             }
 
             "empty" -> {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text       = "No posts yet.\nTap to retry.",
-                        color      = TextSecondary,
-                        fontSize   = 15.sp,
-                        textAlign  = TextAlign.Center,
-                        lineHeight = 22.sp,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Retry",
-                        tint = Cyan,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clickable { viewModel.refresh() },
-                    )
-                }
+                EmptyState(
+                    icon    = Icons.Outlined.Forum,
+                    message = "No posts yet",
+                    hint    = "Tap to retry",
+                    modifier = Modifier.clickable { viewModel.refresh() },
+                )
             }
 
             "failed" -> {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text       = "All relays failed.\nTap to retry.",
-                        color      = TextSecondary,
-                        fontSize   = 15.sp,
-                        textAlign  = TextAlign.Center,
-                        lineHeight = 22.sp,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Retry",
-                        tint = Cyan,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clickable { viewModel.refresh() },
-                    )
-                }
+                EmptyState(
+                    icon    = Icons.Filled.CloudOff,
+                    message = "All relays failed",
+                    hint    = "Tap to retry",
+                    modifier = Modifier.clickable { viewModel.refresh() },
+                )
             }
 
             else -> {
@@ -441,7 +410,7 @@ private fun FeedContentTabs(
                 Text(
                     text = label,
                     color = if (isSelected) White else White.copy(alpha = 0.4f),
-                    fontSize = 14.sp,
+                    fontSize = AppType.body,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                 )
             }

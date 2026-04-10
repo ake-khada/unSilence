@@ -2,6 +2,9 @@ package com.unsilence.app.ui.notifications
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Notifications
+import com.unsilence.app.ui.common.EmptyState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -54,11 +57,10 @@ fun NotificationsScreen(
             }
 
             state.items.isEmpty() -> {
-                Text(
-                    text     = "No notifications yet",
-                    color    = TextSecondary,
-                    fontSize = 15.sp,
-                    modifier = Modifier.align(Alignment.Center),
+                EmptyState(
+                    icon    = Icons.Outlined.Notifications,
+                    message = "No notifications yet",
+                    hint    = "Interactions will appear here",
                 )
             }
 

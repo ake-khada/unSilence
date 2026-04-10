@@ -58,10 +58,12 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import kotlinx.coroutines.flow.SharedFlow
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.SurfaceVariant
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -168,7 +170,7 @@ fun ArticleReaderScreen(
                             text       = title,
                             color      = Color.White,
                             fontWeight = FontWeight.Bold,
-                            fontSize   = 22.sp,
+                            fontSize   = AppType.title,
                             lineHeight = 30.sp,
                             modifier   = Modifier
                                 .fillMaxWidth()
@@ -221,72 +223,81 @@ fun ArticleReaderScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF080808))
+                        .background(SurfaceVariant)
                         .navigationBarsPadding()
-                        .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment     = Alignment.CenterVertically,
+                        .padding(vertical = Spacing.small),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    ActionButton(
-                        icon               = Icons.AutoMirrored.Filled.Chat,
-                        count              = row.replyCount,
-                        contentDescription = "Replies",
-                        onClick            = { onNoteClick(row.id) },
-                    )
-                    Box {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                         ActionButton(
-                            icon               = Icons.Filled.Repeat,
-                            count              = row.repostCount,
-                            contentDescription = "Reposts",
-                            highlighted        = hasReposted,
-                            onClick            = { showRepostMenu = true },
+                            icon               = Icons.AutoMirrored.Filled.Chat,
+                            count              = row.replyCount,
+                            contentDescription = "Replies",
+                            onClick            = { onNoteClick(row.id) },
                         )
-                        DropdownMenu(
-                            expanded         = showRepostMenu,
-                            onDismissRequest = { showRepostMenu = false },
-                            modifier         = Modifier.background(Black),
-                        ) {
-                            DropdownMenuItem(
-                                text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
-                                onClick = { onRepost(); showRepostMenu = false },
+                    }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        Box {
+                            ActionButton(
+                                icon               = Icons.Filled.Repeat,
+                                count              = row.repostCount,
+                                contentDescription = "Reposts",
+                                highlighted        = hasReposted,
+                                onClick            = { showRepostMenu = true },
                             )
-                            DropdownMenuItem(
-                                text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
-                                onClick = { onQuote(row.id); showRepostMenu = false },
-                            )
+                            DropdownMenu(
+                                expanded         = showRepostMenu,
+                                onDismissRequest = { showRepostMenu = false },
+                                modifier         = Modifier.background(Black),
+                            ) {
+                                DropdownMenuItem(
+                                    text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
+                                    onClick = { onRepost(); showRepostMenu = false },
+                                )
+                                DropdownMenuItem(
+                                    text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
+                                    onClick = { onQuote(row.id); showRepostMenu = false },
+                                )
+                            }
                         }
                     }
-                    ActionButton(
-                        icon               = Icons.Filled.Favorite,
-                        count              = row.reactionCount,
-                        contentDescription = "Reactions",
-                        highlighted        = hasReacted,
-                        onClick            = onReact,
-                    )
-                    ZapButton(
-                        sats         = row.zapTotalSats + extraZapSats,
-                        hasZapped    = hasZapped,
-                        isLoading    = isZapLoading,
-                        flashTrigger = zapFlashTrigger,
-                        onTap        = {
-                            if (isNwcConfigured) onZap(21L) else showConnectWallet = true
-                        },
-                        onLongPress = {
-                            if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
-                        },
-                    )
-                    ActionButton(
-                        icon               = Icons.Filled.Share,
-                        count              = 0,
-                        contentDescription = "Share",
-                        onClick            = {
-                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
-                                type = "text/plain"
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, null))
-                        },
-                    )
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        ActionButton(
+                            icon               = Icons.Filled.Favorite,
+                            count              = row.reactionCount,
+                            contentDescription = "Reactions",
+                            highlighted        = hasReacted,
+                            onClick            = onReact,
+                        )
+                    }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        ZapButton(
+                            sats         = row.zapTotalSats + extraZapSats,
+                            hasZapped    = hasZapped,
+                            isLoading    = isZapLoading,
+                            flashTrigger = zapFlashTrigger,
+                            onTap        = {
+                                if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                            },
+                            onLongPress = {
+                                if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                            },
+                        )
+                    }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        ActionButton(
+                            icon               = Icons.Filled.Share,
+                            count              = 0,
+                            contentDescription = "Share",
+                            onClick            = {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                                    type = "text/plain"
+                                }
+                                context.startActivity(Intent.createChooser(sendIntent, null))
+                            },
+                        )
+                    }
                 }
             }
         }

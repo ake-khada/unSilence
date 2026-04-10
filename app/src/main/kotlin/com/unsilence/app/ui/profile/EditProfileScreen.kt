@@ -45,6 +45,7 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 
 private val EDIT_AVATAR_SIZE = 72.dp
@@ -159,7 +160,7 @@ fun EditProfileScreen(
                         .fillMaxWidth()
                         .height(EDIT_BANNER_HEIGHT)
                         .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                        .background(Color(0xFF0A0A0A)),
+                        .background(Surface1),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (picture.isNotBlank()) {

@@ -20,6 +20,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SearchOff
+import com.unsilence.app.ui.common.EmptyState
+import com.unsilence.app.ui.theme.AppType
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -108,7 +112,7 @@ fun SearchScreen(
             BasicTextField(
                 value         = state.query,
                 onValueChange = { viewModel.search(it) },
-                textStyle     = TextStyle(color = Color.White, fontSize = 15.sp),
+                textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
                 cursorBrush   = SolidColor(Cyan),
                 singleLine    = true,
                 modifier      = Modifier.weight(1f),
@@ -117,7 +121,7 @@ fun SearchScreen(
                         Text(
                             text     = "Search notes and people…",
                             color    = TextSecondary,
-                            fontSize = 15.sp,
+                            fontSize = AppType.bodyLarge,
                         )
                     }
                     inner()
@@ -136,7 +140,7 @@ fun SearchScreen(
                     Text(
                         text       = label,
                         color      = if (selectedTab == index) Cyan else TextSecondary,
-                        fontSize   = 14.sp,
+                        fontSize   = AppType.body,
                         fontWeight = if (selectedTab == index) FontWeight.SemiBold else FontWeight.Normal,
                     )
                 }
@@ -149,11 +153,9 @@ fun SearchScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             when {
                 !state.hasSearched -> {
-                    Text(
-                        text     = "Search for notes and people",
-                        color    = TextSecondary,
-                        fontSize = 15.sp,
-                        modifier = Modifier.align(Alignment.Center),
+                    EmptyState(
+                        icon    = Icons.Outlined.Search,
+                        message = "Search for notes and people",
                     )
                 }
 
@@ -170,7 +172,7 @@ fun SearchScreen(
                                 strokeWidth = 2.dp,
                             )
                             Spacer(Modifier.width(Spacing.small))
-                            Text("Searching relays\u2026", color = TextSecondary, fontSize = 14.sp)
+                            Text("Searching relays\u2026", color = TextSecondary, fontSize = AppType.body)
                         }
                     } else {
                         // Notes tab loading
@@ -182,11 +184,9 @@ fun SearchScreen(
 
                 selectedTab == 0 -> {
                     if (state.peopleResults.isEmpty()) {
-                        Text(
-                            text     = "No results for \"${state.query}\"",
-                            color    = TextSecondary,
-                            fontSize = 14.sp,
-                            modifier = Modifier.align(Alignment.Center),
+                        EmptyState(
+                            icon    = Icons.Outlined.SearchOff,
+                            message = "No results for \"${state.query}\"",
                         )
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -203,11 +203,9 @@ fun SearchScreen(
 
                 else -> {  // Notes tab
                     if (state.noteResults.isEmpty()) {
-                        Text(
-                            text     = "No results for \"${state.query}\"",
-                            color    = TextSecondary,
-                            fontSize = 14.sp,
-                            modifier = Modifier.align(Alignment.Center),
+                        EmptyState(
+                            icon    = Icons.Outlined.SearchOff,
+                            message = "No results for \"${state.query}\"",
                         )
                     } else {
                         val engagement = EngagementSnapshot(
@@ -306,7 +304,7 @@ private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
                     text       = displayName,
                     color      = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize   = 14.sp,
+                    fontSize   = AppType.body,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
                 )
@@ -314,13 +312,13 @@ private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
             Text(
                 text     = "${user.pubkey.take(6)}…${user.pubkey.takeLast(4)}",
                 color    = TextSecondary,
-                fontSize = 12.sp,
+                fontSize = AppType.footnote,
             )
             if (!user.about.isNullOrBlank()) {
                 Text(
                     text     = user.about,
                     color    = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),

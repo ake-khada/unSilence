@@ -113,6 +113,7 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.thread.ThreadScreen
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -378,7 +379,7 @@ fun AppNavigation(onLogout: () -> Unit) {
             ) {
                 TABS.forEachIndexed { index, tab ->
                     val isSelected = index == selectedTab
-                    val iconSize   = if (isSelected) Sizing.navIconSelected else Sizing.navIcon
+                    val iconSize   = 24.dp  // constant — selection via tint only
 
                     IconButton(onClick = {
                         if (index == 0 && selectedTab == 0) {
@@ -394,7 +395,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                                     modifier = Modifier
                                         .size(iconSize)
                                         .then(
-                                            if (isSelected) Modifier.border(1.5.dp, Cyan, CircleShape)
+                                            if (isSelected) Modifier.border(1.5.dp, Color.White, CircleShape)
                                             else Modifier
                                         )
                                         .clip(CircleShape),
@@ -410,7 +411,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                                 Icon(
                                     imageVector        = tab.icon,
                                     contentDescription = tab.contentDescription,
-                                    tint               = if (isSelected) Cyan else NavUnselected,
+                                    tint               = if (isSelected) Color.White else NavUnselected,
                                     modifier           = Modifier.size(iconSize),
                                 )
                             }
@@ -862,7 +863,7 @@ private fun FeedSelectorSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState       = sheetState,
-        containerColor   = Color(0xFF0E0E0E),
+        containerColor   = Surface1,
         shape            = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         dragHandle       = {
             Box(
@@ -939,7 +940,7 @@ private fun FeedSelectorSheet(
             }
 
             Spacer(Modifier.height(12.dp))
-            HorizontalDivider(color = Color(0xFF0A0A0A), thickness = 1.dp)
+            HorizontalDivider(color = Surface1, thickness = 1.dp)
             Spacer(Modifier.height(4.dp))
 
             // ── Actions ──
@@ -990,7 +991,7 @@ private fun FeedSelectorSheet(
                     Text("Cancel", color = Cyan)
                 }
             },
-            containerColor = Color(0xFF0A0A0A),
+            containerColor = Surface1,
         )
     }
 }
