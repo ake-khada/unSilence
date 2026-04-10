@@ -1922,23 +1922,23 @@ private fun LinkPreviewCard(
                 val density = LocalDensity.current
                 val config = LocalConfiguration.current
                 val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
-                val heightPx = with(density) { 160.dp.roundToPx() }
+                val heightPx = (widthPx * 3) / 4
                 SubcomposeAsyncImage(
                     model              = rememberSizedImageRequest(loadedOg.imageUrl, widthPx, heightPx),
                     contentDescription = null,
-                    contentScale       = ContentScale.Crop,
+                    contentScale       = ContentScale.Fit,
                     loading            = {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(160.dp)
+                                .aspectRatio(4f / 3f)
                                 .background(MediaPlaceholder),
                         )
                     },
                     error              = { imageLoadFailed = true },
                     modifier           = Modifier
                         .fillMaxWidth()
-                        .height(160.dp)
+                        .aspectRatio(4f / 3f)
                         .clip(RoundedCornerShape(
                             topStart = Sizing.mediaCornerRadius,
                             topEnd = Sizing.mediaCornerRadius,
