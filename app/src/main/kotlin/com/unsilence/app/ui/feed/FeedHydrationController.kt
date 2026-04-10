@@ -360,11 +360,13 @@ class FeedHydrationController(
     // ── State handlers ────────────────────────────────────────────────
 
     /**
-     * WARM_CATCHUP: Phase 1 ONLY — profiles for visible items.
+     * WARM_CATCHUP: Phase 1 ONLY — profiles for visible + warm zone items.
      * No refs, no thumbnails, no engagement. Avatars appear first.
      */
     private fun handleWarmCatchup() {
-        val toProfile = lastVisibleItems.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
+        val warmZone = computeWarmZone()
+        val combined = (lastVisibleItems + warmZone).distinctBy { it.id }
+        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
         if (toProfile.isEmpty()) return
 
         if (profileJob?.isActive == true) return
