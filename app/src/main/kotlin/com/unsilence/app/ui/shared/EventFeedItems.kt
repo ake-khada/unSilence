@@ -39,6 +39,7 @@ import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.relativeTime
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -212,7 +213,7 @@ internal fun ThreadParentCard(
                     ?: "${event.pubkey.take(6)}…${event.pubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp,
+                fontSize = AppType.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -221,7 +222,7 @@ internal fun ThreadParentCard(
             Text(
                 text = relativeTime(event.createdAt),
                 color = Color.White.copy(alpha = 0.4f),
-                fontSize = 13.sp,
+                fontSize = AppType.bodySmall,
             )
         }
         if (event.content.isNotBlank()) {
@@ -229,7 +230,7 @@ internal fun ThreadParentCard(
             Text(
                 text = event.content.trim(),
                 color = Color.White.copy(alpha = 0.7f),
-                fontSize = 14.sp,
+                fontSize = AppType.body,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )

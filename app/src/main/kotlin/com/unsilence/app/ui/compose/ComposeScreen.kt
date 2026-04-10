@@ -105,8 +105,8 @@ fun ComposeScreen(
                     colors   = ButtonDefaults.buttonColors(
                         containerColor         = Color.White,
                         contentColor           = Black,
-                        disabledContainerColor = Color(0xFF004D59),
-                        disabledContentColor   = Color(0xFF007A8A),
+                        disabledContainerColor = Color.White.copy(alpha = 0.38f),
+                        disabledContentColor   = Black.copy(alpha = 0.38f),
                     ),
                     modifier = Modifier.height(36.dp),
                 ) {

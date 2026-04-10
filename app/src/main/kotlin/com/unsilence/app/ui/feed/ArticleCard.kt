@@ -51,10 +51,12 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.serialization.json.Json
@@ -65,7 +67,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-private val ArticleCardBackground = Color(0xFF080808)
+private val ArticleCardBackground = SurfaceVariant
 
 /** Parses the first value for [key] from a NIP-23 tags JSON string. */
 private fun tagValue(tagsJson: String, key: String): String? = runCatching {
@@ -132,7 +134,7 @@ fun ArticleCard(
         Row(
             modifier          = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = Spacing.small),
+                .padding(horizontal = Spacing.micro, vertical = Spacing.small),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
@@ -154,24 +156,24 @@ fun ArticleCard(
                     text       = authorLabel,
                     color      = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize   = 13.sp,
+                    fontSize   = AppType.bodySmall,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
                     modifier   = Modifier.weight(1f, fill = false),
                 )
                 if (!row.authorNip05.isNullOrBlank()) {
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(Spacing.micro))
                     Icon(
                         imageVector        = Icons.Filled.Verified,
                         contentDescription = "NIP-05 verified",
                         tint               = Cyan,
                         modifier           = Modifier.size(14.dp),
                     )
-                    Spacer(Modifier.width(3.dp))
+                    Spacer(Modifier.width(Spacing.micro))
                     Text(
                         text     = nip05Domain(row.authorNip05),
                         color    = TextSecondary,
-                        fontSize = 11.sp,
+                        fontSize = AppType.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -181,7 +183,7 @@ fun ArticleCard(
             Text(
                 text     = articleRelativeTime(row.createdAt),
                 color    = TextSecondary,
-                fontSize = 12.sp,
+                fontSize = AppType.footnote,
             )
         }
 
@@ -210,14 +212,14 @@ fun ArticleCard(
                 text       = title,
                 color      = Color.White,
                 fontWeight = FontWeight.Bold,
-                fontSize   = 16.sp,
+                fontSize   = AppType.subheading,
                 lineHeight = 22.sp,
                 maxLines   = 2,
                 overflow   = TextOverflow.Ellipsis,
                 modifier   = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = Spacing.medium)
-                    .padding(bottom = 4.dp),
+                    .padding(top = Spacing.small, bottom = Spacing.micro),
             )
         }
 
@@ -226,7 +228,7 @@ fun ArticleCard(
             Text(
                 text     = summary,
                 color    = TextSecondary,
-                fontSize = 14.sp,
+                fontSize = AppType.body,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
@@ -240,71 +242,79 @@ fun ArticleCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = Spacing.medium)
                 .padding(bottom = Spacing.small),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment     = Alignment.CenterVertically,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            ActionButton(
-                icon               = Icons.AutoMirrored.Filled.Chat,
-                count              = row.replyCount,
-                contentDescription = "Replies",
-                onClick            = { onNoteClick(row.id) },
-            )
-            Box {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 ActionButton(
-                    icon               = Icons.Filled.Repeat,
-                    count              = row.repostCount,
-                    contentDescription = "Reposts",
-                    highlighted        = hasReposted,
-                    onClick            = { showRepostMenu = true },
+                    icon               = Icons.AutoMirrored.Filled.Chat,
+                    count              = row.replyCount,
+                    contentDescription = "Replies",
+                    onClick            = { onNoteClick(row.id) },
                 )
-                DropdownMenu(
-                    expanded         = showRepostMenu,
-                    onDismissRequest = { showRepostMenu = false },
-                    modifier         = Modifier.background(Black),
-                ) {
-                    DropdownMenuItem(
-                        text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
-                        onClick = { onRepost(); showRepostMenu = false },
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Box {
+                    ActionButton(
+                        icon               = Icons.Filled.Repeat,
+                        count              = row.repostCount,
+                        contentDescription = "Reposts",
+                        highlighted        = hasReposted,
+                        onClick            = { showRepostMenu = true },
                     )
-                    DropdownMenuItem(
-                        text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
-                        onClick = { onQuote(row.id); showRepostMenu = false },
-                    )
+                    DropdownMenu(
+                        expanded         = showRepostMenu,
+                        onDismissRequest = { showRepostMenu = false },
+                        modifier         = Modifier.background(Black),
+                    ) {
+                        DropdownMenuItem(
+                            text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onRepost(); showRepostMenu = false },
+                        )
+                        DropdownMenuItem(
+                            text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onQuote(row.id); showRepostMenu = false },
+                        )
+                    }
                 }
             }
-            ActionButton(
-                icon               = Icons.Filled.Favorite,
-                count              = row.reactionCount,
-                contentDescription = "Reactions",
-                highlighted        = hasReacted,
-                onClick            = onReact,
-            )
-            ZapButton(
-                sats          = row.zapTotalSats + extraZapSats,
-                hasZapped     = hasZapped,
-                isLoading     = isZapLoading,
-                flashTrigger  = zapFlashTrigger,
-                onTap         = {
-                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
-                },
-                onLongPress   = {
-                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
-                },
-            )
-            ActionButton(
-                icon               = Icons.Filled.Share,
-                count              = 0,
-                contentDescription = "Share",
-                onClick            = {
-                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
-                        type = "text/plain"
-                    }
-                    context.startActivity(Intent.createChooser(sendIntent, null))
-                },
-            )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ActionButton(
+                    icon               = Icons.Filled.Favorite,
+                    count              = row.reactionCount,
+                    contentDescription = "Reactions",
+                    highlighted        = hasReacted,
+                    onClick            = onReact,
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ZapButton(
+                    sats          = row.zapTotalSats + extraZapSats,
+                    hasZapped     = hasZapped,
+                    isLoading     = isZapLoading,
+                    flashTrigger  = zapFlashTrigger,
+                    onTap         = {
+                        if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                    },
+                    onLongPress   = {
+                        if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                    },
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ActionButton(
+                    icon               = Icons.Filled.Share,
+                    count              = 0,
+                    contentDescription = "Share",
+                    onClick            = {
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                            type = "text/plain"
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, null))
+                    },
+                )
+            }
         }
         } // end card body Column
     }

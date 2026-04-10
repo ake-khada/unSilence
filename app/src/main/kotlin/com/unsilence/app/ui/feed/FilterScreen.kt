@@ -39,8 +39,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Surface1
 
 // ── Zap slider breakpoints (sats) ───────────────────────────────────────────
 private val ZAP_BREAKPOINTS = longArrayOf(
@@ -99,7 +101,7 @@ fun FilterBottomSheet(
             onDismiss()
         },
         sheetState     = sheetState,
-        containerColor = Color(0xFF0E0E0E),
+        containerColor = Surface1,
         shape          = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         dragHandle     = {
             Box(
@@ -212,13 +214,13 @@ fun FilterBottomSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 TextButton(onClick = { reset() }) {
-                    Text("Reset", color = Color(0xFF888888), fontSize = 14.sp)
+                    Text("Reset", color = Color(0xFF888888), fontSize = AppType.body)
                 }
                 TextButton(onClick = {
                     onApply(buildFilter())
                     onDismiss()
                 }) {
-                    Text("Apply", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Apply", color = Cyan, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -230,7 +232,7 @@ private fun SectionLabel(text: String) {
     Text(
         text       = text,
         color      = Color(0xFF555555),
-        fontSize   = 11.sp,
+        fontSize   = AppType.caption,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
         modifier   = Modifier.padding(start = 16.dp, bottom = 8.dp),
@@ -253,7 +255,7 @@ private fun EngagementSlider(
         Text(
             text  = label,
             color = Color(0xFFBBBBBB),
-            fontSize = 13.sp,
+            fontSize = AppType.bodySmall,
             modifier = Modifier.width(110.dp),
         )
         Slider(
@@ -273,7 +275,7 @@ private fun EngagementSlider(
         Text(
             text  = displayValue,
             color = if (value > 0f) Cyan else Color(0xFF666666),
-            fontSize = 13.sp,
+            fontSize = AppType.bodySmall,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.width(48.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
@@ -295,7 +297,7 @@ private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
         Text(
             text       = label,
             color      = if (selected) Black else Color.White,
-            fontSize   = 13.sp,
+            fontSize   = AppType.bodySmall,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }

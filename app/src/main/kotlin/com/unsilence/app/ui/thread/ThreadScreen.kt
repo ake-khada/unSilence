@@ -62,6 +62,7 @@ import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -120,7 +121,7 @@ fun ThreadScreen(
                 Text(
                     text     = "Thread",
                     color    = Color.White,
-                    fontSize = 16.sp,
+                    fontSize = AppType.subheading,
                 )
             }
 
@@ -140,16 +141,7 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
-                                Box(
-                                    modifier = Modifier.drawBehind {
-                                        drawLine(
-                                            color       = Color.Cyan,
-                                            start       = Offset(0f, 0f),
-                                            end         = Offset(0f, size.height),
-                                            strokeWidth = 2.dp.toPx(),
-                                        )
-                                    },
-                                ) {
+                                Box {
                                 if (note.kind == 30023) {
                                     ArticleCard(
                                         row             = note,
@@ -198,7 +190,7 @@ fun ThreadScreen(
                                 Text(
                                     text     = "${state.replies.size} ${if (state.replies.size == 1) "reply" else "replies"}",
                                     color    = TextSecondary,
-                                    fontSize = 12.sp,
+                                    fontSize = AppType.footnote,
                                     modifier = Modifier.padding(
                                         horizontal = Spacing.medium,
                                         vertical   = Spacing.small,
@@ -208,15 +200,15 @@ fun ThreadScreen(
                             items(state.replies, key = { it.row.id }) { depthRow ->
                                 val reply = depthRow.row
                                 val depth = depthRow.depth
-                                val indent = (depth * 20).dp
-                                val lineColor = Color.White.copy(alpha = 0.06f)
+                                val indent = (depth * 16).dp
+                                val lineColor = Color.White.copy(alpha = 0.10f)
 
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .drawBehind {
                                             for (d in 1..depth) {
-                                                val x = (d * 20).dp.toPx()
+                                                val x = (d * 16).dp.toPx()
                                                 drawLine(
                                                     color       = lineColor,
                                                     start       = Offset(x, 0f),
@@ -288,12 +280,12 @@ fun ThreadScreen(
                 BasicTextField(
                     value         = replyText,
                     onValueChange = { replyText = it },
-                    textStyle     = TextStyle(color = Color.White, fontSize = 15.sp),
+                    textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
                     cursorBrush   = SolidColor(Cyan),
                     modifier      = Modifier.weight(1f),
                     decorationBox = { inner ->
                         if (replyText.isEmpty()) {
-                            Text("Reply…", color = TextSecondary, fontSize = 15.sp)
+                            Text("Reply…", color = TextSecondary, fontSize = AppType.bodyLarge)
                         }
                         inner()
                     },

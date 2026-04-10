@@ -78,10 +78,16 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.RenderContext
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import androidx.compose.material.icons.automirrored.outlined.Reply
+import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.Chat
+import com.unsilence.app.ui.common.EmptyState
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -257,16 +263,18 @@ fun UserProfileScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color(0xFF0A0A0A)),
+                                    .background(Surface1),
                             )
                         }
                     }
 
+                    val avatarBorderColor = if (user?.banner.isNullOrBlank())
+                        Color.White.copy(alpha = 0.2f) else Black
                     Box(
                         modifier = Modifier
                             .size(PROFILE_AVATAR_SIZE)
                             .clip(CircleShape)
-                            .border(2.dp, Black, CircleShape),
+                            .border(1.dp, avatarBorderColor, CircleShape),
                     ) {
                         if (pubkeyHex != null) {
                             IdentIcon(pubkey = pubkeyHex!!, modifier = Modifier.fillMaxSize())
@@ -288,7 +296,7 @@ fun UserProfileScreen(
                     Text(
                         text       = displayName,
                         color      = Color.White,
-                        fontSize   = 18.sp,
+                        fontSize   = AppType.heading,
                         fontWeight = FontWeight.Bold,
                         textAlign  = TextAlign.Center,
                         modifier   = Modifier
@@ -315,7 +323,7 @@ fun UserProfileScreen(
                         Text(
                             text     = npubShort,
                             color    = TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = AppType.bodySmall,
                         )
                         Spacer(Modifier.width(4.dp))
                         Icon(
@@ -344,7 +352,7 @@ fun UserProfileScreen(
                         Text(
                             text     = nip05,
                             color    = TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = AppType.bodySmall,
                         )
                     }
                 }
@@ -387,7 +395,7 @@ fun UserProfileScreen(
                             ),
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
-                            Text("Following", color = Cyan, fontSize = 14.sp)
+                            Text("Following", color = Cyan, fontSize = AppType.body)
                         }
                     } else {
                         Button(
@@ -395,7 +403,7 @@ fun UserProfileScreen(
                             colors   = ButtonDefaults.buttonColors(containerColor = Cyan),
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
-                            Text("Follow", color = Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Follow", color = Black, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -435,17 +443,18 @@ fun UserProfileScreen(
                 items(3) { ShimmerNoteCard(showMedia = it == 0) }
             } else if (posts.isEmpty()) {
                 item {
-                    Text(
-                        text     = when (selectedTab) {
+                    EmptyState(
+                        icon    = when (selectedTab) {
+                            ProfileTab.NOTES    -> Icons.Outlined.Chat
+                            ProfileTab.REPLIES  -> Icons.AutoMirrored.Outlined.Reply
+                            ProfileTab.LONGFORM -> Icons.Outlined.Article
+                        },
+                        message = when (selectedTab) {
                             ProfileTab.NOTES    -> "No notes yet"
                             ProfileTab.REPLIES  -> "No replies yet"
                             ProfileTab.LONGFORM -> "No articles yet"
                         },
-                        color    = TextSecondary,
-                        fontSize = 14.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(Spacing.medium),
+                        modifier = Modifier.height(200.dp),
                     )
                 }
             } else {
@@ -482,7 +491,7 @@ fun UserProfileScreen(
                 Text(
                     text       = "Profile",
                     color      = Color.White,
-                    fontSize   = 16.sp,
+                    fontSize   = AppType.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -522,14 +531,14 @@ private fun StatLabel(label: String, value: String) {
         Text(
             text       = value,
             color      = Color.White,
-            fontSize   = 13.sp,
+            fontSize   = AppType.bodySmall,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.size(4.dp))
         Text(
             text     = label,
             color    = TextSecondary,
-            fontSize = 13.sp,
+            fontSize = AppType.bodySmall,
         )
     }
 }

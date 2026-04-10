@@ -32,8 +32,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.ZapAmber
@@ -62,22 +64,22 @@ fun ConnectWalletDialog(
                 Text(
                     text     = "Paste a nostr+walletconnect:// URI to enable one-tap zaps.",
                     color    = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                 )
                 Spacer(Modifier.height(12.dp))
                 BasicTextField(
                     value         = uri,
                     onValueChange = { uri = it },
-                    textStyle     = TextStyle(color = Color.White, fontSize = 13.sp),
+                    textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodySmall),
                     cursorBrush   = SolidColor(Cyan),
                     modifier      = Modifier
                         .fillMaxWidth()
                         .background(Black, RoundedCornerShape(8.dp))
-                        .border(1.dp, Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
+                        .border(1.dp, Surface1, RoundedCornerShape(8.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     decorationBox = { inner ->
                         if (uri.isEmpty()) {
-                            Text("nostr+walletconnect://…", color = TextSecondary, fontSize = 13.sp)
+                            Text("nostr+walletconnect://…", color = TextSecondary, fontSize = AppType.bodySmall)
                         }
                         inner()
                     },
@@ -136,12 +138,12 @@ fun ZapAmountDialog(
                         Text(
                             text      = formatPreset(amount),
                             color     = if (isSelected) Black else ZapAmber,
-                            fontSize  = 13.sp,
+                            fontSize  = AppType.bodySmall,
                             textAlign = TextAlign.Center,
                             modifier  = Modifier
                                 .weight(1f)
                                 .background(
-                                    color = if (isSelected) ZapAmber else Color(0xFF0A0A0A),
+                                    color = if (isSelected) ZapAmber else Surface1,
                                     shape = RoundedCornerShape(8.dp),
                                 )
                                 .clickable { selected = amount; custom = "" }
@@ -156,7 +158,7 @@ fun ZapAmountDialog(
                     onValueChange = { custom = it.filter { c -> c.isDigit() } },
                     textStyle     = TextStyle(
                         color     = Color.White,
-                        fontSize  = 14.sp,
+                        fontSize  = AppType.body,
                         textAlign = TextAlign.Start,
                     ),
                     cursorBrush  = SolidColor(ZapAmber),
@@ -164,11 +166,11 @@ fun ZapAmountDialog(
                     modifier     = Modifier
                         .fillMaxWidth()
                         .background(Black, RoundedCornerShape(8.dp))
-                        .border(1.dp, Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
+                        .border(1.dp, Surface1, RoundedCornerShape(8.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     decorationBox = { inner ->
                         if (custom.isEmpty()) {
-                            Text("Custom amount…", color = TextSecondary, fontSize = 14.sp)
+                            Text("Custom amount…", color = TextSecondary, fontSize = AppType.body)
                         }
                         inner()
                     },
@@ -178,7 +180,7 @@ fun ZapAmountDialog(
                     Text(
                         text     = "⚡ $amt sats",
                         color    = ZapAmber,
-                        fontSize = 13.sp,
+                        fontSize = AppType.bodySmall,
                         modifier = Modifier.align(Alignment.CenterHorizontally),
                     )
                 }

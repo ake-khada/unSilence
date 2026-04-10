@@ -130,7 +130,11 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Surface2
+import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.ZapAmber
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -138,7 +142,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 internal val ActionTint = Color(0xFF555555)
-private val MediaPlaceholder = Color(0xFF0A0A0A)
+private val MediaPlaceholder = Surface1
 
 // Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
 private val IMAGE_URL_REGEX = Regex(
@@ -427,7 +431,7 @@ fun NoteCard(
                     .fillMaxWidth()
                     .clickable { onNoteClick(navigateId) }
                     .padding(horizontal = Spacing.medium)
-                    .padding(top = 4.dp),
+                    .padding(top = Spacing.micro),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -436,18 +440,18 @@ fun NoteCard(
                     tint               = TextSecondary,
                     modifier           = Modifier.size(14.dp),
                 )
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(Spacing.micro))
                 AvatarImage(
                     pubkey   = row.pubkey,
                     picture  = row.authorPicture,
                     modifier = Modifier.size(16.dp),
                     sizeDp   = 16.dp,
                 )
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(Spacing.micro))
                 Text(
                     text     = "$reposterLabel boosted · ${relativeTime(row.createdAt)}",
                     color    = TextSecondary,
-                    fontSize = 12.sp,
+                    fontSize = AppType.footnote,
                 )
             }
         }
@@ -488,7 +492,7 @@ fun NoteCard(
                         },
                         color      = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize   = 14.sp,
+                        fontSize   = AppType.body,
                         maxLines   = 1,
                         overflow   = TextOverflow.Ellipsis,
                         modifier   = Modifier.weight(1f, fill = false),
@@ -507,7 +511,7 @@ fun NoteCard(
                         Text(
                             text     = nip05Domain(nip05),
                             color    = TextSecondary,
-                            fontSize = 11.sp,
+                            fontSize = AppType.caption,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -518,7 +522,7 @@ fun NoteCard(
             Text(
                 text     = relativeTime(effectiveCreatedAt),
                 color    = TextSecondary,
-                fontSize = 12.sp,
+                fontSize = AppType.footnote,
                 modifier = Modifier.clickable { onNoteClick(navigateId) },
             )
         }
@@ -548,16 +552,16 @@ fun NoteCard(
                 modifier      = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = Spacing.medium)
-                    .padding(bottom = if (isLong) 2.dp else 4.dp),
+                    .padding(bottom = Spacing.micro),
             )
             if (isLong) {
                 Text(
                     text     = if (expanded) "Show less" else "Show more",
                     color    = Cyan,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                     modifier = Modifier
                         .padding(horizontal = Spacing.medium)
-                        .padding(bottom = 4.dp)
+                        .padding(bottom = Spacing.micro)
                         .clickable { expanded = !expanded },
                 )
             }
@@ -650,70 +654,78 @@ fun NoteCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onNoteClick(navigateId) }
-                .padding(horizontal = Spacing.medium)
                 .padding(bottom = Spacing.small),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment     = Alignment.CenterVertically,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            ActionButton(
-                icon               = Icons.AutoMirrored.Filled.Chat,
-                count              = row.replyCount,
-                contentDescription = "Replies",
-            )
-            Box {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 ActionButton(
-                    icon               = Icons.Filled.Repeat,
-                    count              = row.repostCount,
-                    contentDescription = "Reposts",
-                    highlighted        = hasReposted,
-                    onClick            = { showRepostMenu = true },
+                    icon               = Icons.AutoMirrored.Filled.Chat,
+                    count              = row.replyCount,
+                    contentDescription = "Replies",
                 )
-                DropdownMenu(
-                    expanded         = showRepostMenu,
-                    onDismissRequest = { showRepostMenu = false },
-                    modifier         = Modifier.background(Black),
-                ) {
-                    DropdownMenuItem(
-                        text    = { Text("Boost", color = Color.White, fontSize = 14.sp) },
-                        onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Box {
+                    ActionButton(
+                        icon               = Icons.Filled.Repeat,
+                        count              = row.repostCount,
+                        contentDescription = "Reposts",
+                        highlighted        = hasReposted,
+                        onClick            = { showRepostMenu = true },
                     )
-                    DropdownMenuItem(
-                        text    = { Text("Quote", color = Color.White, fontSize = 14.sp) },
-                        onClick = { onQuote(row.id); showRepostMenu = false },
-                    )
+                    DropdownMenu(
+                        expanded         = showRepostMenu,
+                        onDismissRequest = { showRepostMenu = false },
+                        modifier         = Modifier.background(Black),
+                    ) {
+                        DropdownMenuItem(
+                            text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
+                        )
+                        DropdownMenuItem(
+                            text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onQuote(row.id); showRepostMenu = false },
+                        )
+                    }
                 }
             }
-            ActionButton(
-                icon               = Icons.Filled.Favorite,
-                count              = row.reactionCount,
-                contentDescription = "Reactions",
-                highlighted        = hasReacted,
-                onClick            = onReact,
-            )
-            ZapButton(
-                sats          = row.zapTotalSats + extraZapSats,
-                hasZapped     = hasZapped,
-                isLoading     = isZapLoading,
-                flashTrigger  = zapFlashTrigger,
-                onTap         = {
-                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
-                },
-                onLongPress   = {
-                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
-                },
-            )
-            ActionButton(
-                icon               = Icons.Filled.Share,
-                count              = 0,
-                contentDescription = "Share",
-                onClick            = {
-                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
-                        type = "text/plain"
-                    }
-                    context.startActivity(Intent.createChooser(sendIntent, null))
-                },
-            )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ActionButton(
+                    icon               = Icons.Filled.Favorite,
+                    count              = row.reactionCount,
+                    contentDescription = "Reactions",
+                    highlighted        = hasReacted,
+                    onClick            = onReact,
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ZapButton(
+                    sats          = row.zapTotalSats + extraZapSats,
+                    hasZapped     = hasZapped,
+                    isLoading     = isZapLoading,
+                    flashTrigger  = zapFlashTrigger,
+                    onTap         = {
+                        if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                    },
+                    onLongPress   = {
+                        if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                    },
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                ActionButton(
+                    icon               = Icons.Filled.Share,
+                    count              = 0,
+                    contentDescription = "Share",
+                    onClick            = {
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                            type = "text/plain"
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, null))
+                    },
+                )
+            }
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
@@ -766,7 +778,7 @@ private fun ShimmerBox(modifier: Modifier = Modifier) {
     )
     Box(modifier = modifier
         .height(200.dp)
-        .background(lerp(Color(0xFF0A0A0A), Color(0xFF141414), progress))
+        .background(lerp(Surface1, Surface2, progress))
     )
 }
 
@@ -805,13 +817,14 @@ internal fun ActionButton(
 ) {
     val tint = if (highlighted) Cyan else ActionTint
     val rowModifier = if (onClick != null)
-        Modifier.defaultMinSize(minWidth = 48.dp).clickable(onClick = onClick)
+        Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).clickable(onClick = onClick)
     else
-        Modifier.defaultMinSize(minWidth = 48.dp)
+        Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
 
     Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier          = rowModifier,
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier              = rowModifier,
     ) {
         Icon(
             imageVector        = icon,
@@ -824,7 +837,7 @@ internal fun ActionButton(
             Text(
                 text     = formatCount(count),
                 color    = tint,
-                fontSize = 12.sp,
+                fontSize = AppType.footnote,
             )
         }
     }
@@ -873,9 +886,10 @@ internal fun ZapButton(
 
     Box(contentAlignment = Alignment.Center) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier          = Modifier
-                .defaultMinSize(minWidth = 48.dp)
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier              = Modifier
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                 .combinedClickable(
                     onClick     = onTap,
                     onLongClick = onLongPress,
@@ -905,7 +919,7 @@ internal fun ZapButton(
                 Text(
                     text     = sats.toCompactSats(),
                     color    = tint,
-                    fontSize = 12.sp,
+                    fontSize = AppType.footnote,
                 )
             }
         }
@@ -1103,7 +1117,7 @@ private fun MediaGrid(
                                 Text(
                                     text     = "+$overflow",
                                     color    = Color.White,
-                                    fontSize = 24.sp,
+                                    fontSize = AppType.display,
                                     fontWeight = FontWeight.Bold,
                                 )
                             }
@@ -1357,7 +1371,7 @@ private fun VideoGrid(
                                 Text(
                                     text       = "+$overflow",
                                     color      = Color.White,
-                                    fontSize   = 24.sp,
+                                    fontSize   = AppType.display,
                                     fontWeight = FontWeight.Bold,
                                 )
                             }
@@ -1640,7 +1654,7 @@ private fun EmbeddedQuoteCard(
                             ?: "${loadedEvent.pubkey.take(6)}…${loadedEvent.pubkey.takeLast(4)}",
                         color    = Color.White.copy(alpha = 0.7f),
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
+                        fontSize = AppType.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -1649,7 +1663,7 @@ private fun EmbeddedQuoteCard(
                     Text(
                         text     = relativeTime(loadedEvent.createdAt),
                         color    = TextSecondary,
-                        fontSize = 11.sp,
+                        fontSize = AppType.caption,
                     )
                 }
                 Spacer(Modifier.height(4.dp))
@@ -1697,7 +1711,7 @@ private fun EmbeddedQuoteCard(
                     Text(
                         text     = displayText,
                         color    = Color.White.copy(alpha = 0.85f),
-                        fontSize = 14.sp,
+                        fontSize = AppType.body,
                         lineHeight = 20.sp,
                     )
                 }
@@ -1762,7 +1776,7 @@ private fun EmbeddedQuoteCard(
                             .fillMaxWidth()
                             .height(150.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF0A0A0A)),
+                            .background(Surface1),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -1818,7 +1832,7 @@ private fun EmbeddedQuoteCard(
                 Text(
                     text     = "Quoted post unavailable",
                     color    = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                 )
             }
         }
@@ -1869,7 +1883,7 @@ private fun EmbeddedAddressCard(
                         ?: "${addrRef.author.take(6)}…${addrRef.author.takeLast(4)}",
                     color    = Color.White.copy(alpha = 0.7f),
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -1879,7 +1893,7 @@ private fun EmbeddedAddressCard(
             Text(
                 text     = kindLabel,
                 color    = Cyan,
-                fontSize = 12.sp,
+                fontSize = AppType.footnote,
                 fontWeight = FontWeight.Medium,
             )
             if (addrRef.dTag.isNotBlank()) {
@@ -1887,7 +1901,7 @@ private fun EmbeddedAddressCard(
                 Text(
                     text     = addrRef.dTag.replace("-", " "),
                     color    = Color.White.copy(alpha = 0.7f),
-                    fontSize = 14.sp,
+                    fontSize = AppType.body,
                     lineHeight = 18.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -1924,7 +1938,7 @@ internal fun NostrRichText(
         Text(
             text       = content,
             color      = MaterialTheme.colorScheme.onSurface,
-            fontSize   = 15.sp,
+            fontSize   = AppType.bodyLarge,
             lineHeight = 22.sp,
             maxLines   = maxLines,
             overflow   = overflow,
@@ -1986,7 +2000,7 @@ internal fun NostrRichText(
     Text(
         text       = annotatedText,
         color      = MaterialTheme.colorScheme.onSurface,
-        fontSize   = 15.sp,
+        fontSize   = AppType.bodyLarge,
         lineHeight = 22.sp,
         maxLines   = maxLines,
         overflow   = overflow,
@@ -2019,7 +2033,7 @@ private fun MentionChip(
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xFF0A0A0A))
+            .background(Surface1)
             .border(1.dp, Color(0xFF1A1A1A), RoundedCornerShape(20.dp))
             .clickable { onAuthorClick(pubkeyHex) }
             .padding(horizontal = 10.dp, vertical = 4.dp),
@@ -2027,7 +2041,7 @@ private fun MentionChip(
         Text(
             text     = if (displayText.startsWith("@")) displayText else "@$displayText",
             color    = Cyan,
-            fontSize = 12.sp,
+            fontSize = AppType.footnote,
         )
     }
 }
@@ -2055,7 +2069,7 @@ private fun LinkPreviewCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(Color(0xFF080808))
+                .background(SurfaceVariant)
                 .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
@@ -2093,7 +2107,7 @@ private fun LinkPreviewCard(
                         text       = loadedOg.title,
                         color      = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize   = 13.sp,
+                        fontSize   = AppType.bodySmall,
                         lineHeight = 17.sp,
                         maxLines   = 2,
                         overflow   = TextOverflow.Ellipsis,
@@ -2103,7 +2117,7 @@ private fun LinkPreviewCard(
                     Text(
                         text     = loadedOg.description,
                         color    = TextSecondary,
-                        fontSize = 12.sp,
+                        fontSize = AppType.footnote,
                         lineHeight = 16.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -2113,7 +2127,7 @@ private fun LinkPreviewCard(
                 Text(
                     text     = loadedOg.siteName ?: domain,
                     color    = TextSecondary,
-                    fontSize = 11.sp,
+                    fontSize = AppType.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),
@@ -2143,7 +2157,7 @@ private fun LinkChip(url: String) {
         Text(
             text     = domain,
             color    = Cyan,
-            fontSize = 12.sp,
+            fontSize = AppType.footnote,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

@@ -9,6 +9,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import com.unsilence.app.ui.theme.SurfaceVariant
 
 /**
  * Pubkey-derived identicon — Compose Canvas implementation.
@@ -27,7 +28,7 @@ fun IdentIcon(
 
     Canvas(modifier = modifier.clip(CircleShape)) {
         // Background fill (AMOLED black)
-        drawRect(Color(0xFF080808))
+        drawRect(SurfaceVariant)
 
         val cellW = size.width  / GRID_SIZE
         val cellH = size.height / GRID_SIZE

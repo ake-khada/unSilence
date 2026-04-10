@@ -135,7 +135,7 @@ private fun SettingsItem(
             .fillMaxWidth()
             .height(52.dp)
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .alpha(if (enabled) 1f else 0.4f)
+            .alpha(if (enabled) 1f else 0.38f)
             .padding(horizontal = Spacing.medium),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -41,8 +41,9 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
+import com.unsilence.app.ui.theme.Surface1
 
-private val MediaPlaceholder = Color(0xFF0A0A0A)
+private val MediaPlaceholder = Surface1
 
 /**
  * Composable that shows a video thumbnail: imeta poster if available,

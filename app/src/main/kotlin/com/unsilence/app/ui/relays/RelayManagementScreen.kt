@@ -73,6 +73,7 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -155,7 +156,7 @@ fun RelayManagementScreen(
                         )
                     }
                 },
-                divider = { HorizontalDivider(color = Color(0xFF141414)) },
+                divider = { HorizontalDivider(color = Surface2) },
             ) {
                 TabLabels.forEachIndexed { index, label ->
                     Tab(

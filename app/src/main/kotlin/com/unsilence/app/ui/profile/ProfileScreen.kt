@@ -75,10 +75,16 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.RenderContext
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import androidx.compose.material.icons.automirrored.outlined.Reply
+import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.Chat
+import com.unsilence.app.ui.common.EmptyState
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
@@ -235,19 +241,21 @@ fun ProfileScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color(0xFF0A0A0A)),
+                                    .background(Surface1),
                             )
                         }
                     }
 
                     // Avatar overlapping banner bottom
+                    val avatarBorderColor = if (user?.banner.isNullOrBlank())
+                        Color.White.copy(alpha = 0.2f) else Black
                     ProfileAvatar(
                         pubkeyHex  = viewModel.pubkeyHex,
                         pictureUrl = user?.picture,
                         modifier   = Modifier
                             .size(PROFILE_AVATAR_SIZE)
                             .clip(CircleShape)
-                            .border(2.dp, Black, CircleShape),
+                            .border(1.dp, avatarBorderColor, CircleShape),
                     )
                 }
 
@@ -258,7 +266,7 @@ fun ProfileScreen(
                     Text(
                         text       = displayName,
                         color      = Color.White,
-                        fontSize   = 18.sp,
+                        fontSize   = AppType.heading,
                         fontWeight = FontWeight.Bold,
                         textAlign  = TextAlign.Center,
                         modifier   = Modifier
@@ -285,7 +293,7 @@ fun ProfileScreen(
                         Text(
                             text     = npubShort,
                             color    = TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = AppType.bodySmall,
                         )
                         Spacer(Modifier.width(4.dp))
                         Icon(
@@ -315,7 +323,7 @@ fun ProfileScreen(
                         Text(
                             text     = nip05,
                             color    = TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = AppType.bodySmall,
                         )
                     }
                 }
@@ -369,17 +377,18 @@ fun ProfileScreen(
                 items(3) { ShimmerNoteCard(showMedia = it == 0) }
             } else if (posts.isEmpty()) {
                 item {
-                    Text(
-                        text     = when (selectedTab) {
+                    EmptyState(
+                        icon    = when (selectedTab) {
+                            ProfileTab.NOTES    -> Icons.Outlined.Chat
+                            ProfileTab.REPLIES  -> Icons.AutoMirrored.Outlined.Reply
+                            ProfileTab.LONGFORM -> Icons.Outlined.Article
+                        },
+                        message = when (selectedTab) {
                             ProfileTab.NOTES    -> "No notes yet"
                             ProfileTab.REPLIES  -> "No replies yet"
                             ProfileTab.LONGFORM -> "No articles yet"
                         },
-                        color    = TextSecondary,
-                        fontSize = 14.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(Spacing.medium),
+                        modifier = Modifier.height(200.dp),
                     )
                 }
             } else {
@@ -435,7 +444,7 @@ fun ProfileScreen(
                     Text(
                         text     = "Edit Profile",
                         color    = Cyan,
-                        fontSize = 14.sp,
+                        fontSize = AppType.body,
                     )
                 }
                 IconButton(onClick = { showSettings = true }) {
@@ -520,14 +529,14 @@ private fun StatLabel(label: String, value: String) {
         Text(
             text       = value,
             color      = Color.White,
-            fontSize   = 13.sp,
+            fontSize   = AppType.bodySmall,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.size(4.dp))
         Text(
             text     = label,
             color    = TextSecondary,
-            fontSize = 13.sp,
+            fontSize = AppType.bodySmall,
         )
     }
 }

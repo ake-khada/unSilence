@@ -26,9 +26,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Surface2
 
-private val ShimmerDark = Color(0xFF0A0A0A)
-private val ShimmerLight = Color(0xFF141414)
+private val ShimmerDark = Surface1
+private val ShimmerLight = Surface2
 
 @Composable
 fun ShimmerNoteCard(showMedia: Boolean = true) {

@@ -38,9 +38,12 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.db.dao.NotificationRow
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface2
+import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.ZapAmber
 import java.text.SimpleDateFormat
@@ -109,7 +112,7 @@ fun NotificationEventRow(
                     text = actorLabel,
                     color = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
@@ -118,7 +121,7 @@ fun NotificationEventRow(
                 Text(
                     text = actionText,
                     color = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = AppType.bodySmall,
                 )
             }
 
@@ -136,7 +139,7 @@ fun NotificationEventRow(
                     Text(
                         text = row.targetNoteContent.trim(),
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (row.notifType == "reply") 0.85f else 0.7f),
-                        fontSize = 13.sp,
+                        fontSize = AppType.bodySmall,
                         lineHeight = 18.sp,
                         maxLines = 4,
                         overflow = TextOverflow.Ellipsis,
@@ -157,7 +160,7 @@ fun NotificationEventRow(
         Text(
             text = relativeTime(row.createdAt),
             color = TextSecondary,
-            fontSize = 11.sp,
+            fontSize = AppType.caption,
         )
     }
 }
@@ -176,14 +179,14 @@ private fun CompactNotePreview(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFF080808))
-            .border(0.5.dp, Color(0xFF141414), RoundedCornerShape(6.dp))
+            .background(SurfaceVariant)
+            .border(0.5.dp, Surface2, RoundedCornerShape(6.dp))
             .padding(horizontal = Spacing.small, vertical = 6.dp),
     ) {
         Text(
             text = content,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-            fontSize = 13.sp,
+            fontSize = AppType.bodySmall,
             lineHeight = 18.sp,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,

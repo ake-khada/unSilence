@@ -5,6 +5,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 // Golden ratio spacing system: 360dp / φ^n
 object Spacing {
@@ -16,11 +17,23 @@ object Spacing {
     val xxl    = 52.dp   // φ⁴ — bar heights
 }
 
+// Typography scale — named sizes replacing ad-hoc sp values
+object AppType {
+    val caption     = 11.sp  // section labels, NIP-05 domains, tiny metadata
+    val footnote    = 12.sp  // timestamps, secondary info
+    val bodySmall   = 13.sp  // compact body: author names, action counts
+    val body        = 14.sp  // standard body text, buttons, summaries
+    val bodyLarge   = 15.sp  // input fields, emphasized body
+    val subheading  = 16.sp  // card titles, section headers
+    val heading     = 18.sp  // profile display names
+    val title       = 22.sp  // article reader titles
+    val display     = 24.sp  // onboarding hero text
+}
+
 object Sizing {
     val avatar            = 32.dp
-    val actionIcon        = 16.dp
-    val navIcon           = 20.dp   // φ⁶ — bottom nav icons
-    val navIconSelected   = 32.dp   // φ⁵ — selected bottom nav icons (one step up)
+    val actionIcon        = 20.dp
+    val navIcon           = 20.dp   // φ⁶ — top bar action icons
     val topBarHeight      = 52.dp
     val bottomNavHeight   = 52.dp
     val mediaCornerRadius = 8.dp
