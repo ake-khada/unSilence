@@ -168,7 +168,8 @@ fun AppNavigation(onLogout: () -> Unit) {
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
-    val notifFilter   by notifViewModel.filter.collectAsStateWithLifecycle()
+    val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
+    val hasNewNotifications by notifViewModel.hasNewNotifications.collectAsStateWithLifecycle()
 
     // Build the ordered feed list for the carousel
     val feedList = remember(hasFollows, pinnedRelays, userSets) {
@@ -204,11 +205,8 @@ fun AppNavigation(onLogout: () -> Unit) {
         animationSpec = animSpec,
         label         = "bottomBarOffset",
     )
-    val contentTopPadding by animateDpAsState(
-        targetValue   = if (topBarShown) Sizing.topBarHeight + statusBarHeight else 0.dp,
-        animationSpec = animSpec,
-        label         = "contentTopPadding",
-    )
+    // Constant: top spacing moved to LazyColumn contentPadding (no animation = no jerk).
+    val staticTopPadding = Sizing.topBarHeight + statusBarHeight
     val contentBottomPadding by animateDpAsState(
         targetValue   = if (bottomBarShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
@@ -251,27 +249,33 @@ fun AppNavigation(onLogout: () -> Unit) {
     ) {
 
             // ── Content ───────────────────────────────────────────────────────
+            // No top padding — FeedScreen uses LazyColumn contentPadding instead
+            // (prevents jerk when bar hides). Other screens get constant padding.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = contentTopPadding, bottom = contentBottomPadding),
+                    .padding(bottom = contentBottomPadding),
             ) {
                 when (selectedTab) {
                     0    -> FeedScreen(
                         scrollToTopTrigger = scrollToTopTrigger,
                         topBarShown        = topBarShown,
+                        staticTopPadding   = staticTopPadding,
                         onNoteClick        = { eventId -> threadEventId = eventId },
                         onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                     )
-                    1    -> SearchScreen(
-                        onNoteClick   = { eventId -> threadEventId = eventId },
-                        onAuthorClick = onAuthorClick,
-                        onQuote       = { noteId  -> quoteNoteId   = noteId  },
-                    )
+                    1    -> Box(Modifier.padding(top = staticTopPadding)) {
+                        SearchScreen(
+                            onNoteClick   = { eventId -> threadEventId = eventId },
+                            onAuthorClick = onAuthorClick,
+                            onQuote       = { noteId  -> quoteNoteId   = noteId  },
+                        )
+                    }
                     2    -> NotificationsScreen(
-                        onNoteClick = { eventId -> threadEventId = eventId },
-                        viewModel   = notifViewModel,
+                        onNoteClick      = { eventId -> threadEventId = eventId },
+                        staticTopPadding = staticTopPadding,
+                        viewModel        = notifViewModel,
                     )
                     3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick)
                     else -> PlaceholderScreen()
@@ -371,6 +375,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                             scrollToTopTrigger++
                             feedViewModel.clearNewTopPost()
                         }
+                        if (index == 2) notifViewModel.markSeen()
                         selectedTab = index
                     }) {
                         Box(contentAlignment = Alignment.Center) {
@@ -400,6 +405,14 @@ fun AppNavigation(onLogout: () -> Unit) {
                                 )
                             }
                             if (index == 0 && feedViewModel.hasNewTopPost) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .align(Alignment.TopEnd)
+                                        .background(Cyan, CircleShape),
+                                )
+                            }
+                            if (index == 2 && hasNewNotifications) {
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)

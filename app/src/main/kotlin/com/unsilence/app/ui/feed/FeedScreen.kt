@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.Crossfade
@@ -13,9 +14,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -39,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -52,6 +56,7 @@ import com.unsilence.app.ui.shared.RenderContext
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
@@ -66,6 +71,7 @@ import androidx.compose.foundation.lazy.items
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
     topBarShown: Boolean = true,
+    staticTopPadding: Dp = 0.dp,
     onNoteClick: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
@@ -142,27 +148,20 @@ fun FeedScreen(
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
     }
 
+    // Tab row: constant height, slides via offset (no height-collapse jerk)
+    val tabRowHeight = 48.dp
+    val totalTopPadding = staticTopPadding + tabRowHeight
+    val tabRowOffset by animateDpAsState(
+        targetValue   = if (topBarShown) 0.dp else -(totalTopPadding + 8.dp),
+        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+        label         = "tabRowOffset",
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Black),
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-        // ── Notes / Conversations tab row (hides with immersive scroll) ─
-        val tabHeight by animateDpAsState(
-            targetValue = if (topBarShown) 48.dp else 0.dp,
-            animationSpec = tween(durationMillis = 200),
-            label = "tabRowHeight",
-        )
-        if (tabHeight > 0.dp) {
-            Box(modifier = Modifier.height(tabHeight).fillMaxWidth()) {
-                FeedContentTabs(
-                    selected = contentFilter,
-                    onSelect = { viewModel.setContentFilter(it) },
-                )
-            }
-        }
-
         // ── Swipe left/right to switch Notes ↔ Conversations ──────────
         val swipeDrag = remember { mutableFloatStateOf(0f) }
 
@@ -178,7 +177,7 @@ fun FeedScreen(
             },
             label = "feedState",
             modifier = Modifier
-                .weight(1f)
+                .fillMaxSize()
                 .pointerInput(contentFilter) {
                     detectHorizontalDragGestures(
                         onDragEnd = {
@@ -256,6 +255,7 @@ fun FeedScreen(
                 LazyColumn(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(top = totalTopPadding),
                 ) {
                     eventFeedItems(
                         events = events,
@@ -361,9 +361,21 @@ fun FeedScreen(
             }
         }
         } // Crossfade
-        } // Column
 
-        // Blue dot on home icon (AppNavigation) is the only new-post indicator now
+        // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .offset(y = staticTopPadding + tabRowOffset)
+                .fillMaxWidth()
+                .height(tabRowHeight)
+                .background(Black),
+        ) {
+            FeedContentTabs(
+                selected = contentFilter,
+                onSelect = { viewModel.setContentFilter(it) },
+            )
+        }
     }
 
     articleRow?.let { row ->
