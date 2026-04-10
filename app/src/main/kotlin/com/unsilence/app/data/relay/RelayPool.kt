@@ -599,9 +599,9 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        registerPersistentSub(postsSubId, postsReq)
-        registerPersistentSub(mediaSubId, mediaReq)
-        registerPersistentSub(longformSubId, longformReq)
+        registerPersistentSub(postsSubId, postsReq, targetRelayUrl = conn.url)
+        registerPersistentSub(mediaSubId, mediaReq, targetRelayUrl = conn.url)
+        registerPersistentSub(longformSubId, longformReq, targetRelayUrl = conn.url)
 
         conn.send(postsReq)
         conn.send(mediaReq)
@@ -1059,7 +1059,7 @@ class RelayPool @Inject constructor(
         val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: return
         val req = buildAuthorsReq(relayUrl, authorPubkeys)
         val subId = "follows-${relayUrl.hashCode()}"
-        registerPersistentSub(subId, req)
+        registerPersistentSub(subId, req, targetRelayUrl = relayUrl)
         val existing = connections[relayUrl]
         if (existing != null) {
             existing.send(req)
@@ -1172,7 +1172,7 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val hintConns = allHintUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+        val hintConns = allHintUrls.mapNotNull { normalizeRelayUrl(it)?.let { url -> connections[url] } }
         hintConns.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${hintConns.size} hinted relay(s)")
     }
