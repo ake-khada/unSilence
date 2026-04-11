@@ -303,10 +303,7 @@ class FeedHydrationController(
         // SLOW_SCROLL→IDLE, catchup timeout) are gated just like velocity-based ones.
         if (!isUserGesture) {
             val sinceLastTransition = now - lastTransitionTime
-            if (sinceLastTransition < STATE_DWELL_MS) {
-                Log.d(TAG, "Dwell lock: blocked ${state.name} → ${newState.name} (v=${velocityPxPerSec.toInt()}px/s, ${sinceLastTransition}ms since last)")
-                return
-            }
+            if (sinceLastTransition < STATE_DWELL_MS) return
         }
 
         // REST minimum dwell: non-user exits must wait REST_MINIMUM_DWELL_MS

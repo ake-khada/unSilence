@@ -62,8 +62,11 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.items
@@ -285,9 +288,22 @@ fun FeedScreen(
                     controller.onPendingCountChanged(reducerState.unreadCount)
                 }
 
-                // Hydration controller: feeds scroll state every frame
+                // Hydration controller: sampled at 16 Hz (60ms) to avoid
+                // running the state machine at display refresh rate (120 Hz).
+                // Scroll start/stop edges fire immediately via a separate flow.
                 LaunchedEffect(listState) {
-                    var wasScrolling = false
+                    // Immediate edge detection — fires only on actual changes
+                    launch {
+                        snapshotFlow { listState.isScrollInProgress }
+                            .distinctUntilChanged()
+                            .collect { isScrolling ->
+                                if (isScrolling) controller.onScrollStarted()
+                                else controller.onScrollStopped()
+                            }
+                    }
+
+                    // Sampled layout snapshot — 16 Hz max
+                    @OptIn(kotlinx.coroutines.FlowPreview::class)
                     snapshotFlow {
                         Triple(
                             listState.firstVisibleItemScrollOffset,
@@ -296,12 +312,9 @@ fun FeedScreen(
                                 .mapNotNull { it.key as? String }
                                 .toSet()
                         )
-                    }.collect { (scrollOffset, isScrolling, visibleIds) ->
-                        // Detect scroll start/stop for idle timer
-                        if (isScrolling && !wasScrolling) controller.onScrollStarted()
-                        if (!isScrolling && wasScrolling) controller.onScrollStopped()
-                        wasScrolling = isScrolling
-
+                    }
+                    .sample(60)
+                    .collect { (scrollOffset, isScrolling, visibleIds) ->
                         val latestEvents = currentEvents
                         val visibleEvents = latestEvents.filter { it.id in visibleIds }
                         controller.onScrollFrame(
