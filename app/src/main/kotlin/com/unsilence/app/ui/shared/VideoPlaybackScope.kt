@@ -23,11 +23,9 @@ import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlin.math.abs
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /**
@@ -42,6 +40,15 @@ class VideoPlaybackScope(
     private val holder: SharedPlayerHolder,
     private val ownerId: String,
 ) {
+    companion object {
+        /** A candidate must hold ≥60% visibility for this long before activation. */
+        internal const val ACTIVATION_CONFIRMATION_MS = 250L
+        /** After visible item count changes, freeze detection for this long. */
+        internal const val LAYOUT_SHIFT_COOLDOWN_MS = 500L
+        /** Block A→B→A bounce-back transitions within this window. */
+        internal const val OSCILLATION_BLOCK_MS = 3000L
+    }
+
     var activeVideoNoteId by mutableStateOf<String?>(null)
         internal set
     var isMuted by mutableStateOf(true)
@@ -53,6 +60,12 @@ class VideoPlaybackScope(
     /** Pre-computed video render models keyed by event ID. */
     var videoRenderModels by mutableStateOf<Map<String, List<VideoRenderModel>>>(emptyMap())
         internal set
+
+    // Detector state — written only from the detection coroutine (main thread)
+    internal var lastActiveTransitionAt: Long = 0L
+    internal var previousActiveId: String? = null
+    internal var lastVisibleItemCount: Int = -1
+    internal var lastLayoutShiftAt: Long = 0L
 
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
 
@@ -76,7 +89,7 @@ class VideoPlaybackScope(
  * playback transitions, and active-video detection — all the plumbing
  * that was previously duplicated per screen.
  */
-@OptIn(kotlinx.coroutines.FlowPreview::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Composable
 fun rememberVideoPlaybackScope(
     ownerId: String,
@@ -148,13 +161,43 @@ fun rememberVideoPlaybackScope(
 
     // Active video detection via scroll position with visibility thresholds.
     // Activate at >=60% visible; deactivate below 35% (hysteresis prevents oscillation).
+    //
+    // Three layers of flap protection:
+    //   1. Layout shift cooldown: for 500ms after visible item count changes,
+    //      the detector returns the current active (no change). Catches
+    //      hydration-induced reflow without blocking normal scroll.
+    //   2. Confirmation: a candidate must hold for 250ms continuous before
+    //      promotion. flatMapLatest cancels stale candidates automatically.
+    //   3. Oscillation detection: in collect, block A→B→A bounce-back
+    //      transitions within OSCILLATION_BLOCK_MS. Targets the specific
+    //      pathology (13 alternating transitions in 12s) without suppressing
+    //      normal sequential transitions A→B→C.
     val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
     LaunchedEffect(Unit) {
         snapshotFlow { listState.layoutInfo }
             .map { layoutInfo ->
+                // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value
+
+                // Layout shift cooldown — only while stationary. During scroll,
+                // visible item count changes are expected (items of different
+                // heights enter/leave viewport). While stationary, count changes
+                // indicate hydration-induced reflow — the actual flap trigger.
+                val now = System.currentTimeMillis()
+                val visibleCount = layoutInfo.visibleItemsInfo.size
+                if (!listState.isScrollInProgress) {
+                    if (visibleCount != scope.lastVisibleItemCount && scope.lastVisibleItemCount >= 0) {
+                        scope.lastLayoutShiftAt = now
+                    }
+                    if (now - scope.lastLayoutShiftAt < VideoPlaybackScope.LAYOUT_SHIFT_COOLDOWN_MS) {
+                        scope.lastVisibleItemCount = visibleCount
+                        return@map activeRef.value
+                    }
+                }
+                scope.lastVisibleItemCount = visibleCount
+
                 val currentIds = noteIdsRef.value
                 val viewportStart = layoutInfo.viewportStartOffset
                 val viewportEnd = layoutInfo.viewportEndOffset
@@ -187,25 +230,46 @@ fun rememberVideoPlaybackScope(
                     else -> null
                 }
             }
-            .debounce(500)  // require 500ms stability before activation
             .distinctUntilChanged()
             .flatMapLatest { candidate ->
-                if (candidate == null && activeRef.value != null) {
-                    // Delay nullification — avoid surface churn during quick scroll
-                    flow {
-                        delay(1000)
-                        emit(null as String?)
+                flow {
+                    val current = activeRef.value
+
+                    // Null deactivation or no change: immediate pass-through
+                    if (candidate == null || candidate == current) {
+                        emit(candidate)
+                        return@flow
                     }
-                } else {
-                    flowOf(candidate)
+
+                    // Confirmation window — candidate must hold 250ms.
+                    // If a different candidate arrives, flatMapLatest cancels this
+                    // coroutine and starts a new one for the new candidate.
+                    delay(VideoPlaybackScope.ACTIVATION_CONFIRMATION_MS)
+
+                    emit(candidate)
                 }
             }
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (scope.activeVideoNoteId != newActiveId) {
+                    val now = System.currentTimeMillis()
+
+                    // Oscillation detection: block A→B→A bounce-back within
+                    // OSCILLATION_BLOCK_MS. This targets layout-shift-induced
+                    // flap (13 alternations in 12s) without blocking normal
+                    // sequential transitions or legitimate scroll-back.
+                    if (newActiveId != null && newActiveId == scope.previousActiveId) {
+                        val elapsed = now - scope.lastActiveTransitionAt
+                        if (elapsed < VideoPlaybackScope.OSCILLATION_BLOCK_MS) {
+                            return@collect
+                        }
+                    }
+
                     val oldId = scope.activeVideoNoteId
                     Log.d("VideoScope", "Active video: ${oldId?.take(8) ?: "none"} → ${newActiveId?.take(8) ?: "none"}")
+                    scope.previousActiveId = oldId
                     scope.activeVideoNoteId = newActiveId
+                    scope.lastActiveTransitionAt = now
                     if (newActiveId == null) {
                         exoPlayer.playWhenReady = false
                     }
