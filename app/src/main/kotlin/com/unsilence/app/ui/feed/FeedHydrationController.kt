@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 
 private const val TAG = "HydrationCtrl"
@@ -52,6 +53,12 @@ class FeedHydrationController(
         const val STATE_DWELL_MS = 200L                    // hard lock: ignore velocity transitions for this duration
         const val IDLE_TO_REST_DWELL_MS = 1000L            // how long in IDLE before transitioning to REST
         const val REST_MINIMUM_DWELL_MS = 3000L            // minimum time to stay in REST before non-user exit
+
+        // Hydration ledger bitmask phases
+        const val PHASE_PROFILE    = 1
+        const val PHASE_REFS       = 2
+        const val PHASE_ENGAGEMENT = 4
+        const val PHASE_FULL       = 7
     }
 
     // ── State machine ─────────────────────────────────────────────────
@@ -64,10 +71,32 @@ class FeedHydrationController(
     private var velocityPxPerSec = 0f
     private var smoothedVelocity = 0f   // low-pass filtered — used for state decisions
 
-    // ── Hydration tracking ────────────────────────────────────────────
-    private val profileHydratedIds = mutableSetOf<String>()   // Phase 1 done (event IDs)
-    private val profileHydratedPubkeys = mutableSetOf<String>() // Phase 1 done (author pubkeys)
-    private val refHydratedIds = mutableSetOf<String>()       // Phase 2 done
+    // ── Hydration ledger (bitmask per event ID) ─────────────────────────
+    private val hydrated = ConcurrentHashMap<String, Int>()
+
+    private fun isHydrated(id: String, what: Int): Boolean =
+        ((hydrated[id] ?: 0) and what) == what
+
+    private fun markHydrated(id: String, what: Int) {
+        hydrated.merge(id, what) { old, new -> old or new }
+    }
+
+    private fun retainOnly(activeIds: Set<String>) {
+        hydrated.keys.retainAll(activeIds)
+    }
+
+    private fun clearPhase(what: Int) {
+        val mask = what.inv()
+        for (key in hydrated.keys) {
+            hydrated.computeIfPresent(key) { _, v ->
+                val result = v and mask
+                if (result == 0) null else result
+            }
+        }
+    }
+
+    // ── Hydration tracking (non-bitmask) ─────────────────────────────────
+    private val profileHydratedPubkeys = mutableSetOf<String>() // Phase 1 done (author pubkeys — cross-event dedup)
     private val engagementFetchedIds = mutableSetOf<String>()
     private val fanOutPendingIds = mutableSetOf<String>()     // indexer-only, needs fan-out in IDLE
     private val backfillFetchedIds = mutableSetOf<String>()  // background engagement accumulation
@@ -169,9 +198,8 @@ class FeedHydrationController(
         warmEngagementJob?.cancel()
         engagementCoalesceJob?.cancel()
         pendingEngagementIds.clear()
-        profileHydratedIds.clear()
+        hydrated.clear()
         profileHydratedPubkeys.clear()
-        refHydratedIds.clear()
         engagementFetchedIds.clear()
         fanOutPendingIds.clear()
         backfillFetchedIds.clear()
@@ -262,7 +290,7 @@ class FeedHydrationController(
         val elapsed = System.currentTimeMillis() - stateEnteredAt
         if (elapsed >= WARM_CATCHUP_TIMEOUT_MS) return true
         if (lastVisibleItems.isEmpty()) return false
-        return lastVisibleItems.all { it.id in profileHydratedIds || it.pubkey in profileHydratedPubkeys }
+        return lastVisibleItems.all { isHydrated(it.id, PHASE_PROFILE) || it.pubkey in profileHydratedPubkeys }
     }
 
     private fun transitionTo(newState: ScrollState, isUserGesture: Boolean = false) {
@@ -352,9 +380,14 @@ class FeedHydrationController(
                 lastBackfillBatchHash = 0
             }
             ScrollState.REST -> {
-                // Absolute rest — no discretionary work. Do NOT cancel in-flight work
-                // (let existing HTTP requests complete), just prevent NEW work from starting.
-                Log.d(TAG, "Entering REST — no discretionary work")
+                // Absolute rest — cancel all in-flight discretionary work
+                profileJob?.cancel()
+                refJob?.cancel()
+                engagementJob?.cancel()
+                warmEngagementJob?.cancel()
+                engagementCoalesceJob?.cancel()
+                backfillJob?.cancel()
+                Log.d(TAG, "Entering REST — cancelled all in-flight work")
             }
         }
     }
@@ -368,15 +401,17 @@ class FeedHydrationController(
     private fun handleWarmCatchup() {
         val warmZone = computeWarmZone()
         val combined = (lastVisibleItems + warmZone).distinctBy { it.id }
-        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
+        val toProfile = combined.filter { !isHydrated(it.id, PHASE_PROFILE) && it.pubkey !in profileHydratedPubkeys }
         if (toProfile.isEmpty()) return
 
         if (profileJob?.isActive == true) return
-        val ids = toProfile.map { it.id }
-        profileHydratedIds.addAll(ids)
+        toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
         profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
-        fanOutPendingIds.addAll(ids)
+        fanOutPendingIds.addAll(toProfile.map { it.id })
         profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "WARM_CATCHUP")
+
+        // Evict ledger entries for items no longer in visible + warm zone
+        retainOnly(combined.map { it.id }.toSet())
     }
 
     /**
@@ -391,26 +426,25 @@ class FeedHydrationController(
         val viewportCenter = lastVisibleItems.size / 2
 
         // Phase 1: profiles — max 4 per pass, closest to viewport center first
-        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
+        val toProfile = combined.filter { !isHydrated(it.id, PHASE_PROFILE) && it.pubkey !in profileHydratedPubkeys }
             .sortedByProximity(combined, viewportCenter)
             .take(SLOW_SCROLL_PROFILE_CAP)
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
-            val ids = toProfile.map { it.id }
-            profileHydratedIds.addAll(ids)
+            toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
             profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
-            fanOutPendingIds.addAll(ids)
+            fanOutPendingIds.addAll(toProfile.map { it.id })
             profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "SLOW_SCROLL")
         }
 
         // Phase 2: refs — max 2 per pass, 2000ms debounce (gated by queue)
         if (pendingQueueSize == 0) {
             val now = System.currentTimeMillis()
-            val toRef = combined.filter { it.id in profileHydratedIds && it.id !in refHydratedIds }
+            val toRef = combined.filter { isHydrated(it.id, PHASE_PROFILE) && !isHydrated(it.id, PHASE_REFS) }
                 .sortedByProximity(combined, viewportCenter)
                 .take(SLOW_SCROLL_REF_CAP)
             if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
                 lastRefStartTime = now
-                refHydratedIds.addAll(toRef.map { it.id })
+                toRef.forEach { markHydrated(it.id, PHASE_REFS) }
                 refJob = launchRefHydration(toRef, tag = "SLOW_SCROLL")
             }
         }
@@ -429,9 +463,9 @@ class FeedHydrationController(
         val combined = lastVisibleItems + warmZone
 
         // Phase 1: profiles for anything not yet done (full fan-out)
-        val toProfile = combined.filter { it.id !in profileHydratedIds && it.pubkey !in profileHydratedPubkeys }
+        val toProfile = combined.filter { !isHydrated(it.id, PHASE_PROFILE) && it.pubkey !in profileHydratedPubkeys }
         if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
-            profileHydratedIds.addAll(toProfile.map { it.id })
+            toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
             profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
             profileJob = launchProfileHydration(toProfile, fanOut = true, tag = "IDLE")
         }
@@ -440,10 +474,10 @@ class FeedHydrationController(
         // Debounced — minimum 500ms between Phase 2 runs
         if (pendingQueueSize == 0) {
             val now = System.currentTimeMillis()
-            val toRef = combined.filter { it.id !in refHydratedIds }
+            val toRef = combined.filter { !isHydrated(it.id, PHASE_REFS) }
             if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_MS) {
                 lastRefStartTime = now
-                refHydratedIds.addAll(toRef.map { it.id })
+                toRef.forEach { markHydrated(it.id, PHASE_REFS) }
                 refJob = launchRefHydration(toRef, tag = "IDLE")
             }
         }
@@ -462,13 +496,20 @@ class FeedHydrationController(
      */
     private fun checkEngagementFreshness(items: List<FeedRow>) {
         if (items.isEmpty() || warmEngagementJob?.isActive == true) return
-        val candidateTargetIds = items.map { engagementTargetId(it) }
+        // Pre-filter: skip items already marked in the hydration ledger
+        val unflagged = items.filter { !isHydrated(it.id, PHASE_ENGAGEMENT) }
+        if (unflagged.isEmpty()) return
+        val candidateTargetIds = unflagged.map { engagementTargetId(it) }
             .distinct()
             .filter { it !in engagementFetchedIds }
-        if (candidateTargetIds.isEmpty()) return
+        if (candidateTargetIds.isEmpty()) {
+            // All target IDs already covered — mark the event IDs so we skip faster next time
+            unflagged.forEach { markHydrated(it.id, PHASE_ENGAGEMENT) }
+            return
+        }
 
         // Pre-mark candidates to prevent re-submission from concurrent frames.
-        // Ids that turn out to be fresh in Room are harmless — they just won't be fetched.
+        unflagged.forEach { markHydrated(it.id, PHASE_ENGAGEMENT) }
         engagementFetchedIds.addAll(candidateTargetIds)
         warmEngagementJob = scope.launch(Dispatchers.IO) {
             val threshold = System.currentTimeMillis() - ENGAGEMENT_STALE_MS
@@ -496,6 +537,7 @@ class FeedHydrationController(
                 fanOutPendingIds.removeAll(pendingItems.map { it.id }.toSet())
                 val excludeRelay = feedRelayUrl
                 scope.launch(Dispatchers.IO) {
+                    if (state == ScrollState.REST) return@launch
                     cardHydrator.fanOutProfiles(pendingItems, excludeSourceRelay = excludeRelay)
                     Log.d(TAG, "IDLE: deferred fan-out for ${pendingItems.size} items")
                 }
@@ -511,6 +553,7 @@ class FeedHydrationController(
                 delay(ENGAGEMENT_REFRESH_INTERVAL_MS)
                 if (state != ScrollState.IDLE) break
                 engagementFetchedIds.clear()
+                clearPhase(PHASE_ENGAGEMENT)
                 // Reset window hash so handleIdle re-evaluates engagement freshness
                 lastProcessedWindowHash = 0
                 lastProcessedWindowSize = 0
@@ -663,6 +706,7 @@ class FeedHydrationController(
         if (items.isEmpty()) return null
         val excludeRelay = feedRelayUrl
         return scope.launch(Dispatchers.IO) {
+            if (state == ScrollState.FAST_SCROLL || state == ScrollState.REST) return@launch
             cardHydrator.hydrateProfiles(items, fanOut = fanOut, excludeSourceRelay = excludeRelay)
             Log.d(TAG, "$tag: profiles for ${items.size} items (fanOut=$fanOut)")
         }
@@ -671,7 +715,7 @@ class FeedHydrationController(
     private fun launchRefHydration(items: List<FeedRow>, tag: String): Job? {
         if (items.isEmpty()) return null
         return scope.launch(Dispatchers.IO) {
-            if (state == ScrollState.FAST_SCROLL) return@launch
+            if (state == ScrollState.FAST_SCROLL || state == ScrollState.REST) return@launch
             cardHydrator.hydrateRefs(items)
             Log.d(TAG, "$tag: refs for ${items.size} items")
         }
