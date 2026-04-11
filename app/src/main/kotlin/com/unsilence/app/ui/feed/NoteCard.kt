@@ -44,6 +44,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -262,6 +263,7 @@ fun NoteCard(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     isActiveVideo: Boolean = false,
+    isFullscreen: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
     videoRenderModels: List<VideoRenderModel> = emptyList(),
     thumbnailCache: VideoThumbnailCache? = null,
@@ -613,6 +615,7 @@ fun NoteCard(
                 imetaMedia        = imetaMedia,
                 videoRenderModels = videoRenderModels,
                 isActiveVideo     = isActiveVideo,
+                isFullscreen      = isFullscreen,
                 onOpenFullscreen  = onOpenFullscreen,
                 exoPlayer         = exoPlayer,
                 isMuted           = isMuted,
@@ -1192,6 +1195,7 @@ private fun VideoGrid(
     imetaMedia: List<ImetaMedia>,
     videoRenderModels: List<VideoRenderModel>,
     isActiveVideo: Boolean,
+    isFullscreen: Boolean,
     onOpenFullscreen: () -> Unit,
     exoPlayer: ExoPlayer?,
     isMuted: Boolean,
@@ -1210,13 +1214,14 @@ private fun VideoGrid(
     /**
      * Primary video cell: active → InlineVideoPlayer (one AndroidView),
      * inactive → VideoPreviewCard (pure Compose, zero SurfaceView).
+     * When fullscreen is open, inline player detaches its surface so
+     * fullscreen dialog has exclusive surface ownership.
      */
     @Composable
     fun PrimaryVideoCell(url: String, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
         val model = videoRenderModels.firstOrNull { it.videoUrl == url }
         if (model != null && isDirectVideoUrl(url)) {
             if (isActiveVideo && exoPlayer != null) {
-                // ONE AndroidView — only for the active video
                 InlineVideoPlayer(
                     model            = model,
                     exoPlayer        = exoPlayer,
@@ -1225,10 +1230,10 @@ private fun VideoGrid(
                     onOpenFullscreen = onOpenFullscreen,
                     forceSquare      = forceSquare,
                     thumbnailCache   = thumbnailCache,
+                    isFullscreen     = isFullscreen,
                     modifier         = cellModifier,
                 )
             } else {
-                // Pure Compose — no AndroidView, no SurfaceView
                 VideoPreviewCard(
                     model            = model,
                     onOpenFullscreen = onOpenFullscreen,
@@ -1487,12 +1492,17 @@ fun FullScreenVideoDialog(
         properties       = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            // Belt-and-suspenders: explicitly detach player when dialog leaves composition
+            var dialogView by remember { mutableStateOf<PlayerView?>(null) }
+            DisposableEffect(Unit) {
+                onDispose { dialogView?.player = null }
+            }
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
                         player = exoPlayer
                         useController = true
-                    }
+                    }.also { dialogView = it }
                 },
                 update = { view -> view.player = exoPlayer },
                 modifier = Modifier.fillMaxSize(),

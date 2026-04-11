@@ -72,8 +72,8 @@ Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
 - **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
 - **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, structural dedup
-- **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter
-- **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis)
+- **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs
+- **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection: layout shift cooldown (500ms, stationary only), 250ms confirmation window (flatMapLatest cancellation), oscillation detection (A→B→A block within 3s). Fullscreen handoff: inline player detaches surface via `isFullscreen` flag, dialog gets exclusive surface ownership
 - **AppBootstrapper** — 3-phase staggered init, BackgroundSyncWorker (skeleton)
 
 ### Room v18 Tables
@@ -133,13 +133,15 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_config
 ## Critical Rules
 
 1. **NEVER touch video** (InlineAutoPlayVideo.kt, VideoPlaybackScope.kt, NoteCard media section) without permission
-2. **Verify bugs on device** before fixing — stale bug lists caused regressions
-3. **Diagnose before prescribing** — read actual code first
-4. **Prefer caller-side guards** over time-based debounce (distinctUntilChanged, empty-set returns, state guards)
-5. **key(feedKey) on LazyListState kills video autoplay** — never do this
-6. **Two pointerInput modifiers conflict** — use single awaitEachGesture block
-7. **.commit() not .apply()** before exitProcess (async write loses race)
-8. **Never carry stale bugs forward** — verify each bug exists on current HEAD
+2. **If video heat returns, check detector rate FIRST** — codec realloc per distinct video URL is normal; codec realloc per second is a detector flap bug. Look at `VideoScope: Active video` log frequency, not the player or codec lifecycle
+3. **SurfaceView ignores parent View alpha** — `Modifier.alpha(0f)` does NOT hide a SurfaceView's hardware surface. Never use persistent SurfaceView with alpha gating; use conditional rendering (InlineVideoPlayer when active, VideoPreviewCard when inactive)
+4. **Verify bugs on device** before fixing — stale bug lists caused regressions
+5. **Diagnose before prescribing** — read actual code first
+6. **Prefer caller-side guards** over time-based debounce (distinctUntilChanged, empty-set returns, state guards)
+7. **key(feedKey) on LazyListState kills video autoplay** — never do this
+8. **Two pointerInput modifiers conflict** — use single awaitEachGesture block
+9. **.commit() not .apply()** before exitProcess (async write loses race)
+10. **Never carry stale bugs forward** — verify each bug exists on current HEAD
 
 ---
 
@@ -177,7 +179,7 @@ app/src/main/kotlin/com/unsilence/app/
 │   ├── profile/     ProfileScreen, UserProfileScreen, EditProfileScreen, SettingsScreen
 │   ├── search/      SearchScreen
 │   ├── relays/      RelayManagementScreen, CreateRelaySetScreen
-│   ├── shared/      EventFeedItems, NotificationEventRow, ThreadParentCard
+│   ├── shared/      EventFeedItems, NotificationEventRow, ThreadParentCard, VideoPlaybackScope
 │   ├── thread/      ThreadScreen, ThreadViewModel
 │   └── theme/       Color.kt (Surface0/1/2, Cyan, ZapAmber), Theme.kt (Spacing, Sizing, AppType)
 └── util/

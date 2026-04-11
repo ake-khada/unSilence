@@ -182,6 +182,7 @@ fun InlineVideoPlayer(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
+    isFullscreen: Boolean = false,
 ) {
     // Use imeta dimensions as authoritative aspect ratio when available.
     // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
@@ -239,14 +240,12 @@ fun InlineVideoPlayer(
             )
         }
 
-        // Stable AndroidView — created once, player swapped via update lambda.
-        // NO key(videoUrl) — media source is swapped in VideoPlaybackScope.
-        // Hidden (alpha 0) until first frame renders so the opaque SurfaceView
-        // doesn't cover the poster with a black rectangle while buffering.
+        // Stateless factory — player attached via update lambda.
+        // When fullscreen is open, player detaches from inline surface so
+        // fullscreen dialog's PlayerView has exclusive surface ownership.
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
-                    player = exoPlayer
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -254,7 +253,7 @@ fun InlineVideoPlayer(
                 }
             },
             update = { view ->
-                view.player = exoPlayer
+                view.player = if (!isFullscreen) exoPlayer else null
                 view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },

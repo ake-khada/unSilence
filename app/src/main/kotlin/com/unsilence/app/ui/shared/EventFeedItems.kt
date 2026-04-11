@@ -305,6 +305,7 @@ private fun EventFeedItem(
             isMuted = videoScope?.isMuted ?: true,
             onToggleMute = { videoScope?.toggleMute() },
             isActiveVideo = showVideo && videoScope.isActiveVideo(row.id),
+            isFullscreen = videoScope?.showFullscreenVideo ?: false,
             onOpenFullscreen = { videoScope?.openFullscreen(row.id) },
             videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
             thumbnailCache = thumbnailCache,
