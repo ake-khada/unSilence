@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -136,6 +137,7 @@ class RelayPool @Inject constructor(
 
     /** Active one-shot subscriptions in flight (tracked by unique sub-ID, not per-relay). */
     private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
+    private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
     /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
     fun activeOneShotCount(): Int = _activeOneShotSubs.size
@@ -152,6 +154,7 @@ class RelayPool @Inject constructor(
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
+        const val SEARCH_TIMEOUT_MS = 10_000L
     }
 
     /** After bootstrap settles (30s), tighten cap to [STEADY_STATE_CAP] for non-PERSISTENT. */
@@ -1266,6 +1269,20 @@ class RelayPool @Inject constructor(
                 }
             }
         }
+        // Safety-net timeout: auto-close after 10s regardless of EOSE state.
+        // Protects against relays that treat NIP-50 search as a streaming subscription
+        // and never send EOSE (e.g. relay.ditto.pub for search-notes sub-IDs).
+        searchTimeoutJobs[token] = scope.launch {
+            delay(SEARCH_TIMEOUT_MS)
+            val stillActive = _activeOneShotSubs.contains(notesSubId) || _activeOneShotSubs.contains(profileSubId)
+            if (stillActive) {
+                Log.d(TAG, "searchNotes: 10s timeout elapsed for token=$token, force-closing leaked sub")
+                closeSearch(token)
+            } else {
+                Log.d(TAG, "searchNotes: 10s timeout elapsed for token=$token, already closed by EOSE")
+            }
+        }
+
         Log.d(TAG, "Queued NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
     }
 
@@ -1275,6 +1292,8 @@ class RelayPool @Inject constructor(
      * query supersedes the previous one or when the search screen is dismissed.
      */
     fun closeSearch(token: Long) {
+        searchTimeoutJobs.remove(token)?.cancel()
+
         val profileSubId = "search-profiles-$token"
         val notesSubId = "search-notes-$token"
         _activeOneShotSubs.remove(profileSubId)
