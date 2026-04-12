@@ -69,10 +69,10 @@ Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
 
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
-- **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
+- **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard. Staleness filter is applied at EVERY call site BEFORE launching orchestration via `profileResolver.filterUnresolved()` (or `userRepository.fetchMissingProfiles`, which wraps it). Early-return on empty result prevents batch allocation and relay queue entry. ProfileResolver still filters internally as defense-in-depth, but the log line "Batch N → all fresh, skipping" should never fire. If it does, a new caller was added without the pre-filter
 - **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, structural dedup
-- **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs
+- **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs. Sampled at 60ms (16 Hz) via Flow.sample in FeedScreen's snapshotFlow wiring — the state machine has natural transition rates of hundreds of milliseconds; per-frame evaluation at display refresh rate (120 Hz on Pixel 9 Pro XL) is wasteful and produces frame drops. Scroll edge detection (onScrollStarted/onScrollStopped) uses a separate snapshotFlow with distinctUntilChanged() to capture edges immediately without sampling delay
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection: layout shift cooldown (500ms, stationary only), 250ms confirmation window (flatMapLatest cancellation), oscillation detection (A→B→A block within 3s). Fullscreen handoff: inline player detaches surface via `isFullscreen` flag, dialog gets exclusive surface ownership
 - **AppBootstrapper** — 3-phase staggered init, BackgroundSyncWorker (skeleton)
 
@@ -142,6 +142,16 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_config
 8. **Two pointerInput modifiers conflict** — use single awaitEachGesture block
 9. **.commit() not .apply()** before exitProcess (async write loses race)
 10. **Never carry stale bugs forward** — verify each bug exists on current HEAD
+11. **If sustained heat returns during scroll, check controller rate FIRST** — run `grep ' PID  PID ' logcat | grep -c HydrationCtrl` on a session logcat. Per-minute rate above 50 indicates the sample throttle is broken or removed. The controller should never run at display refresh rate. Frame drops correlate with main-thread controller activity — both should be near zero during a healthy session
+12. **When adding a new ProfileResolver call site, MUST use `userRepository.fetchMissingProfiles` (preferred) or explicitly pre-filter with `profileResolver.filterUnresolved()`** — grep logs for `Batch.*all fresh, skipping` — any non-zero count indicates a bypass
+
+---
+
+## Performance Audit Methodology
+
+Code reading does not measure runtime cost. Always grab a real session logcat and analyze it before proposing performance fixes. Use `grep ' PID  PID '` to filter to main-thread events, count by tag with `awk`/`sort`/`uniq -c`, measure inter-event deltas to identify hot paths firing at display refresh rate. The morning audit on Apr 11 used three parallel agents to read code and produced a confident 9-item plan based on speculation; the log analysis found the actual bug (controller at 120 Hz on main thread) in 5 minutes. Always measure first.
+
+Rate-limit exhaustion counts per relay (`grep "token exhausted" | grep -oE "wss://[^ ]+" | sort | uniq -c | sort -rn`) are a reliable signal for "something is hammering this relay." Always check which sub-ID prefix appears before the exhaustion to identify the responsible call site.
 
 ---
 

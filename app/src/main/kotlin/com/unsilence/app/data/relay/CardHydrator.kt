@@ -137,18 +137,23 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        if (pubkeys.isNotEmpty()) {
-            val sourceRelays = events.map { it.relayUrl }.distinct()
-                .filter { it != excludeSourceRelay }
-            if (sourceRelays.isNotEmpty()) {
-                relayPool.fetchProfilesFromSourceRelays(pubkeys.toList(), sourceRelays)
-            }
+        // Pre-filter: skip source/hint relay fan-out for already-fresh profiles
+        val unresolved = profileResolver.filterUnresolved(pubkeys)
+        if (unresolved.isEmpty()) return
+
+        val sourceRelays = events.map { it.relayUrl }.distinct()
+            .filter { it != excludeSourceRelay }
+        if (sourceRelays.isNotEmpty()) {
+            relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
         }
         if (profileHints.isNotEmpty()) {
-            relayPool.fetchProfilesFromHints(profileHints.mapValues { it.value.distinct() })
+            val unresolvedHints = profileHints.filterKeys { it in unresolved }
+            if (unresolvedHints.isNotEmpty()) {
+                relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
+            }
         }
 
-        Log.d(TAG, "Fan-out profiles: ${events.size} cards → ${pubkeys.size} pubkeys, ${events.map { it.relayUrl }.distinct().size} source relays")
+        Log.d(TAG, "Fan-out profiles: ${events.size} cards → ${unresolved.size}/${pubkeys.size} unresolved, ${events.map { it.relayUrl }.distinct().size} source relays")
     }
 
     /**

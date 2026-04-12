@@ -169,8 +169,11 @@ class AppBootstrapper @Inject constructor(
         delay(1000L)
 
         val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
-        profileResolver.request(followPubkeys.distinct())
-        Log.d(TAG, "Phase2: requested ${followPubkeys.size} profiles")
+        val staleFollows = profileResolver.filterUnresolved(followPubkeys.distinct().toSet())
+        if (staleFollows.isNotEmpty()) {
+            profileResolver.request(staleFollows.toList())
+        }
+        Log.d(TAG, "Phase2: ${staleFollows.size}/${followPubkeys.size} profiles need fetch")
 
         relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
