@@ -39,8 +39,9 @@ class FeedStateReducer(private val feedKey: String) {
     /** IDs already counted as pending — prevents double-counting on repeated Room emissions. */
     private var pendingIds: Set<String> = emptySet()
 
-    private var isAtTop: Boolean = true
+    @Volatile private var isAtTop: Boolean = true
     private var lastAppendTime = 0L
+    @Volatile private var pendingDataRefresh = false
 
     // Coalesce MERGE updates: fixed 200ms window batches rapid Room emissions.
     // First emission opens the window; subsequent emissions update pendingMerge
@@ -83,6 +84,50 @@ class FeedStateReducer(private val feedKey: String) {
         }
     }
 
+    // Data-only refresh coalescing. Unlike emitCoalesced, this ALWAYS emits
+    // at window end because the whole point is to push new field values
+    // (profile pictures, engagement counts) even when IDs are unchanged.
+    // The MERGE path's ID dedup would defeat the purpose.
+    //
+    // Safety guard: if a MERGE occurred during the window (IDs changed),
+    // the pending data is stale and gets discarded.
+    @Volatile
+    private var pendingDataMerge: ReducerState? = null
+    @Volatile
+    private var dataCoalesceWindowOpen = false
+    private val flushPendingData = Runnable {
+        synchronized(this) {
+            val pending = pendingDataMerge ?: run {
+                dataCoalesceWindowOpen = false
+                return@Runnable
+            }
+            pendingDataMerge = null
+            dataCoalesceWindowOpen = false
+            pendingDataRefresh = false
+
+            val current = _state.value
+            // If IDs changed since we queued this (a MERGE occurred),
+            // the pending data is stale — discard.
+            if (current.visibleEvents.size != pending.visibleEvents.size ||
+                !current.visibleEvents.indices.all { i -> current.visibleEvents[i].id == pending.visibleEvents[i].id }) {
+                return@Runnable
+            }
+            if (current.visibleEvents != pending.visibleEvents) {
+                _state.value = pending
+            }
+        }
+    }
+
+    private fun emitCoalescedDataRefresh(newState: ReducerState) {
+        synchronized(this) {
+            pendingDataMerge = newState
+            if (!dataCoalesceWindowOpen) {
+                dataCoalesceWindowOpen = true
+                coalesceHandler.postDelayed(flushPendingData, 200)
+            }
+        }
+    }
+
     /**
      * Called when the list scroll position changes.
      * Top = index 0 AND offset 0 (fully scrolled to the very top).
@@ -92,8 +137,19 @@ class FeedStateReducer(private val feedKey: String) {
         isAtTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
             && (System.currentTimeMillis() - lastAppendTime > 500)
 
-        if (isAtTop && !wasAtTop && _state.value.showDot) {
-            flush("TOP_REACHED")
+        if (isAtTop && !wasAtTop) {
+            if (_state.value.showDot) {
+                flush("TOP_REACHED")
+            } else if (pendingDataRefresh) {
+                // No queued events, but hydration updated data while scrolled down.
+                // Emit the latest rows so profile pictures and engagement counts refresh.
+                pendingDataRefresh = false
+                val rows = latestRows
+                if (rows.isNotEmpty()) {
+                    Log.d(TAG, "feedKey=$feedKey action=DATA_FLUSH count=${rows.size}")
+                    emitCoalescedDataRefresh(ReducerState(visibleEvents = rows))
+                }
+            }
         }
     }
 
@@ -111,15 +167,23 @@ class FeedStateReducer(private val feedKey: String) {
 
         // Structural dedup: skip if event IDs AND data are unchanged.
         // Room re-emits on ANY joined-table write (profile resolve, engagement update,
-        // relay provenance, etc.) — let engagement/profile data changes through.
+        // relay provenance, etc.). Data-only refreshes are coalesced or dropped to
+        // break the hydration feedback loop (writes → re-emit → re-hydrate → writes).
         if (allEvents.size == current.visibleEvents.size) {
             val sameIds = allEvents.indices.all { i ->
                 allEvents[i].id == current.visibleEvents[i].id
             }
             if (sameIds) {
-                // IDs match — refresh data in-place (engagement counts, profile, etc.)
+                // IDs match — data-only refresh (engagement counts, profile pictures).
                 if (allEvents != current.visibleEvents) {
-                    _state.value = current.copy(visibleEvents = allEvents)
+                    if (isAtTop) {
+                        // At top: coalesce into 200ms window, always emit at window end.
+                        emitCoalescedDataRefresh(current.copy(visibleEvents = allEvents))
+                    } else {
+                        // Scrolled down: drop. latestRows (line 108) has the fresh data.
+                        // Next flush() or scroll-to-top picks it up.
+                        pendingDataRefresh = true
+                    }
                 }
                 return
             }
@@ -130,6 +194,7 @@ class FeedStateReducer(private val feedKey: String) {
             // Coalesced via fixed 200ms window in emitCoalesced.
             // Dedup check moved to flushPending (runs once per window, not per emission).
             pendingIds = emptySet()
+            pendingDataRefresh = false
             Log.d(TAG, "feedKey=$feedKey atTop=$isAtTop action=MERGE count=${allEvents.size}")
             emitCoalesced(ReducerState(visibleEvents = allEvents))
         } else {
@@ -175,6 +240,7 @@ class FeedStateReducer(private val feedKey: String) {
         val rows = latestRows
         if (rows.isEmpty()) return
         pendingIds = emptySet()
+        pendingDataRefresh = false
         Log.d(TAG, "flush feedKey=$feedKey count=${rows.size} reason=$reason")
         _state.value = ReducerState(visibleEvents = rows)
         isAtTop = true
