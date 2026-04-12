@@ -74,6 +74,7 @@ Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, structural dedup
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs. Sampled at 60ms (16 Hz) via Flow.sample in FeedScreen's snapshotFlow wiring — the state machine has natural transition rates of hundreds of milliseconds; per-frame evaluation at display refresh rate (120 Hz on Pixel 9 Pro XL) is wasteful and produces frame drops. Scroll edge detection (onScrollStarted/onScrollStopped) uses a separate snapshotFlow with distinctUntilChanged() to capture edges immediately without sampling delay
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection: layout shift cooldown (500ms, stationary only), 250ms confirmation window (flatMapLatest cancellation), oscillation detection (A→B→A block within 3s). Fullscreen handoff: inline player detaches surface via `isFullscreen` flag, dialog gets exclusive surface ownership
+- **SearchViewModel** — NIP-50 search with 1000ms debounce, min 3-char filter, distinctUntilChanged, collectLatest cancellation. Token-based session tracking: each new query generates a token, `relayPool.closeSearch(token)` sends CLOSE frames for prior search subs before issuing new REQs. Search sub-IDs (`search-profiles-$token`, `search-notes-$token`) registered in `_activeOneShotSubs` so EOSE auto-closes work. `onCleared()` sends final CLOSE
 - **AppBootstrapper** — 3-phase staggered init, BackgroundSyncWorker (skeleton)
 
 ### Room v18 Tables
@@ -144,6 +145,7 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_config
 10. **Never carry stale bugs forward** — verify each bug exists on current HEAD
 11. **If sustained heat returns during scroll, check controller rate FIRST** — run `grep ' PID  PID ' logcat | grep -c HydrationCtrl` on a session logcat. Per-minute rate above 50 indicates the sample throttle is broken or removed. The controller should never run at display refresh rate. Frame drops correlate with main-thread controller activity — both should be near zero during a healthy session
 12. **When adding a new ProfileResolver call site, MUST use `userRepository.fetchMissingProfiles` (preferred) or explicitly pre-filter with `profileResolver.filterUnresolved()`** — grep logs for `Batch.*all fresh, skipping` — any non-zero count indicates a bypass
+13. **Search subscriptions MUST send CLOSE frames when superseded** — every `relayPool.searchNotes()` call must be preceded by `relayPool.closeSearch(priorToken)`. Search sub-IDs must be registered in `_activeOneShotSubs`. Verify with `grep closeSearch logcat` — count must equal or exceed NIP-50 query count minus 1
 
 ---
 

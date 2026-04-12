@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -51,7 +53,7 @@ class SearchViewModel @Inject constructor(
     private val _searchResultEventIds = MutableStateFlow<Set<String>>(emptySet())
 
     /** Token of the current search session — late results from old tokens are dropped. */
-    private val _currentSearchToken = MutableStateFlow(0L)
+    private var currentSearchToken: Long? = null
 
     fun search(query: String) {
         _queryFlow.value = query
@@ -64,7 +66,7 @@ class SearchViewModel @Inject constructor(
         // late arrivals from previous queries are silently dropped.
         viewModelScope.launch {
             relayPool.searchResults.collect { result ->
-                if (result.token == _currentSearchToken.value) {
+                if (result.token == currentSearchToken) {
                     _searchResultEventIds.update { it + result.eventId }
                 }
             }
@@ -72,9 +74,15 @@ class SearchViewModel @Inject constructor(
 
         viewModelScope.launch {
             _queryFlow
-                .debounce(300)
+                .debounce(1000)
+                .filter { it.isEmpty() || it.length >= 3 }
+                .distinctUntilChanged()
                 .collectLatest { query ->
-                    if (query.isBlank()) {
+                    // Close prior search sub-IDs on relays before doing anything else.
+                    currentSearchToken?.let { relayPool.closeSearch(it) }
+
+                    if (query.isEmpty()) {
+                        currentSearchToken = null
                         _searchResultEventIds.value = emptySet()
                         _uiState.update {
                             it.copy(
@@ -96,7 +104,7 @@ class SearchViewModel @Inject constructor(
                     // Generate token and set it BEFORE sending any REQ so the collector
                     // is ready to accept the first fast result.
                     val token = System.currentTimeMillis()
-                    _currentSearchToken.value = token
+                    currentSearchToken = token
                     _searchResultEventIds.value = emptySet()
 
                     // Send NIP-50 REQ to search relays — results flow into Room via EventProcessor.
@@ -138,6 +146,11 @@ class SearchViewModel @Inject constructor(
                         }
                 }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        currentSearchToken?.let { relayPool.closeSearch(it) }
     }
 
     companion object {

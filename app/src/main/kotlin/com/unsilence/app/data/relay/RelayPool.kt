@@ -1221,9 +1221,14 @@ class RelayPool @Inject constructor(
         if (query.isBlank()) return
         val searchRelayUrls = rawSearchRelayUrls.mapNotNull { normalizeRelayUrl(it) }
 
+        val profileSubId = "search-profiles-$token"
+        val notesSubId = "search-notes-$token"
+        _activeOneShotSubs.add(profileSubId)
+        _activeOneShotSubs.add(notesSubId)
+
         val profileReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("search-profiles-$token"))
+            add(JsonPrimitive(profileSubId))
             add(buildJsonObject {
                 put("kinds",  buildJsonArray { add(JsonPrimitive(0)) })
                 put("search", JsonPrimitive(query))
@@ -1233,7 +1238,7 @@ class RelayPool @Inject constructor(
 
         val notesReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("search-notes-$token"))
+            add(JsonPrimitive(notesSubId))
             add(buildJsonObject {
                 put("kinds",  buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(30023)) })
                 put("search", JsonPrimitive(query))
@@ -1262,6 +1267,31 @@ class RelayPool @Inject constructor(
             }
         }
         Log.d(TAG, "Queued NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
+    }
+
+    /**
+     * Close an active search by sending CLOSE frames for both sub-IDs (search-profiles
+     * and search-notes) to every connected relay. Called by SearchViewModel when a new
+     * query supersedes the previous one or when the search screen is dismissed.
+     */
+    fun closeSearch(token: Long) {
+        val profileSubId = "search-profiles-$token"
+        val notesSubId = "search-notes-$token"
+        _activeOneShotSubs.remove(profileSubId)
+        _activeOneShotSubs.remove(notesSubId)
+
+        val closeProfile = """["CLOSE","$profileSubId"]"""
+        val closeNotes = """["CLOSE","$notesSubId"]"""
+
+        var relayCount = 0
+        for (conn in connections.values) {
+            if (conn.isConnected) {
+                conn.send(closeProfile)
+                conn.send(closeNotes)
+                relayCount++
+            }
+        }
+        Log.d(TAG, "closeSearch: sent CLOSE for token=$token on $relayCount relay(s)")
     }
 
     /**
