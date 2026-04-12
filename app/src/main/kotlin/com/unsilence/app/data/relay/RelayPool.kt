@@ -1269,18 +1269,15 @@ class RelayPool @Inject constructor(
                 }
             }
         }
-        // Safety-net timeout: auto-close after 10s regardless of EOSE state.
-        // Protects against relays that treat NIP-50 search as a streaming subscription
-        // and never send EOSE (e.g. relay.ditto.pub for search-notes sub-IDs).
+        // Safety-net timeout: unconditionally force-close after 10s.
+        // closeSearch is idempotent — harmless if EOSE already closed all relays.
+        // Must be unconditional because _activeOneShotSubs.remove fires per-relay
+        // on EOSE: 4/5 relays completing removes the sub-ID, but the 5th may still
+        // be streaming. The old stillActive check was dead code in that scenario.
         searchTimeoutJobs[token] = scope.launch {
             delay(SEARCH_TIMEOUT_MS)
-            val stillActive = _activeOneShotSubs.contains(notesSubId) || _activeOneShotSubs.contains(profileSubId)
-            if (stillActive) {
-                Log.d(TAG, "searchNotes: 10s timeout elapsed for token=$token, force-closing leaked sub")
-                closeSearch(token)
-            } else {
-                Log.d(TAG, "searchNotes: 10s timeout elapsed for token=$token, already closed by EOSE")
-            }
+            Log.d(TAG, "searchNotes: 10s timeout elapsed for token=$token, issuing force-close")
+            closeSearch(token)
         }
 
         Log.d(TAG, "Queued NIP-50 search for \"$query\" to ${searchRelayUrls.size} relay(s) [token=$token]")
