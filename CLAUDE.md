@@ -158,6 +158,8 @@ Rate-limit exhaustion counts per relay (`grep "token exhausted" | grep -oE "wss:
 
 Subscription leak detection: grep for `Search EVENT received` and compare the last event timestamp against the last closeSearch timestamp. Any events arriving after the last close indicate a leaking subscription that neither EOSE nor timeout caught.
 
+Validation discipline: When validation criteria fail, revert first, investigate second, re-ship third. Do not attempt to reframe failed criteria as acceptable during the analysis of the same failed run. "Pre-existing" is a claim that requires evidence from a comparable baseline — if the baseline log doesn't exist or was captured under different conditions (different feed size, scroll intensity, video density), the comparison is invalid. A user-reported new symptom during validation is a hard stop regardless of root-cause analysis.
+
 ---
 
 ## Key Patterns
