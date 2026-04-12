@@ -148,6 +148,23 @@ class SearchViewModel @Inject constructor(
         }
     }
 
+    /** Called by DisposableEffect when SearchScreen exits composition (nav back). */
+    fun onScreenLeft() {
+        currentSearchToken?.let { relayPool.closeSearch(it) }
+        currentSearchToken = null
+        _queryFlow.value = ""
+        _searchResultEventIds.value = emptySet()
+        _uiState.update {
+            it.copy(
+                query         = "",
+                peopleResults = emptyList(),
+                noteResults   = emptyList(),
+                loading       = false,
+                hasSearched   = false,
+            )
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         currentSearchToken?.let { relayPool.closeSearch(it) }

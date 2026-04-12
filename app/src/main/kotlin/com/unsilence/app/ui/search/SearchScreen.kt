@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -102,6 +103,7 @@ fun SearchScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     var pendingSearch by remember { mutableStateOf(false) }
 
+    DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     LaunchedEffect(state.loading) { if (state.loading) pendingSearch = false }
 
