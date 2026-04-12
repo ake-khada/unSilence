@@ -19,18 +19,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SearchOff
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +42,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -88,6 +98,13 @@ fun SearchScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var pendingSearch by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    LaunchedEffect(state.loading) { if (state.loading) pendingSearch = false }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -111,11 +128,14 @@ fun SearchScreen(
             Spacer(Modifier.width(Spacing.small))
             BasicTextField(
                 value         = state.query,
-                onValueChange = { viewModel.search(it) },
+                onValueChange = {
+                    viewModel.search(it)
+                    pendingSearch = it.length >= 3
+                },
                 textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
                 cursorBrush   = SolidColor(Cyan),
                 singleLine    = true,
-                modifier      = Modifier.weight(1f),
+                modifier      = Modifier.weight(1f).focusRequester(focusRequester),
                 decorationBox = { inner ->
                     if (state.query.isEmpty()) {
                         Text(
@@ -127,6 +147,32 @@ fun SearchScreen(
                     inner()
                 },
             )
+            if (state.query.isNotEmpty()) {
+                Spacer(Modifier.width(Spacing.small))
+                Icon(
+                    imageVector        = Icons.Filled.Close,
+                    contentDescription = "Clear search",
+                    tint               = TextSecondary,
+                    modifier           = Modifier
+                        .size(18.dp)
+                        .clickable {
+                            viewModel.search("")
+                            pendingSearch = false
+                            focusRequester.requestFocus()
+                        },
+                )
+            }
+        }
+
+        // Typing / loading feedback
+        if (pendingSearch || state.loading) {
+            LinearProgressIndicator(
+                modifier   = Modifier.fillMaxWidth().height(2.dp),
+                color      = Cyan,
+                trackColor = Color.Transparent,
+            )
+        } else {
+            Spacer(Modifier.height(2.dp))
         }
 
         // ── Tab row ───────────────────────────────────────────────────────────
@@ -150,7 +196,17 @@ fun SearchScreen(
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
 
         // ── Results ───────────────────────────────────────────────────────────
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(remember {
+                object : NestedScrollConnection {
+                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                        keyboardController?.hide()
+                        return Offset.Zero
+                    }
+                }
+            })
+        ) {
             when {
                 !state.hasSearched -> {
                     EmptyState(
