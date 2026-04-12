@@ -32,15 +32,20 @@ class UserRepository @Inject constructor(
 
     /**
      * Requests profiles for pubkeys not yet cached OR stale (>6 hours).
-     * Delegates to [ProfileResolver] for in-flight dedup, batching, and staleness checks.
+     * Pre-filters via [ProfileResolver.filterUnresolved] so that already-fresh pubkeys
+     * never reach the batching/relay pipeline — eliminates "all fresh, skipping" waste.
      * Default scroll mode: 1 indexer relay.
      */
-    fun fetchMissingProfiles(pubkeys: List<String>) {
-        profileResolver.request(pubkeys)
+    suspend fun fetchMissingProfiles(pubkeys: List<String>) {
+        val stale = profileResolver.filterUnresolved(pubkeys.toSet())
+        if (stale.isEmpty()) return
+        profileResolver.request(stale.toList())
     }
 
     /** Profile screen variant: hits up to [maxRelays] indexer relays for better coverage. */
-    fun fetchProfilesWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
-        profileResolver.requestWithFanout(pubkeys, maxRelays)
+    suspend fun fetchProfilesWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
+        val stale = profileResolver.filterUnresolved(pubkeys.toSet())
+        if (stale.isEmpty()) return
+        profileResolver.requestWithFanout(stale.toList(), maxRelays)
     }
 }
