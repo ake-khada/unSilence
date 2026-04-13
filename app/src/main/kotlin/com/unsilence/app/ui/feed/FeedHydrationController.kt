@@ -505,18 +505,59 @@ class FeedHydrationController(
             return
         }
 
+        // Build targetId → createdAt map for tier computation.
+        // For kind-6 reposts, engagementTargetId returns rootId but we use the
+        // repost's createdAt (conservative: repost is newer → shorter threshold).
+        val candidateSet = candidateTargetIds.toSet()
+        val targetCreatedAt = mutableMapOf<String, Long>()
+        for (row in unflagged) {
+            val targetId = engagementTargetId(row)
+            if (targetId in candidateSet) {
+                targetCreatedAt.putIfAbsent(targetId, row.createdAt)
+            }
+        }
+
         // Pre-mark candidates to prevent re-submission from concurrent frames.
         unflagged.forEach { markHydrated(it.id, PHASE_ENGAGEMENT) }
         engagementFetchedIds.addAll(candidateTargetIds)
         warmEngagementJob = scope.launch(Dispatchers.IO) {
-            val threshold = System.currentTimeMillis() - ENGAGEMENT_STALE_MS
-            val freshIds = eventStatsDao.getFreshEngagementIds(candidateTargetIds, threshold).toSet()
+            val now = System.currentTimeMillis()
+
+            // Group candidates by tier threshold based on post age.
+            // Older posts have settled engagement — no need for 5-minute refresh.
+            val tierGroups = candidateTargetIds.groupBy { targetId ->
+                freshnessThreshold(targetCreatedAt[targetId] ?: 0L, now)
+            }
+
+            // Query each tier separately, union the fresh sets
+            val freshIds = mutableSetOf<String>()
+            for ((threshold, idsInTier) in tierGroups) {
+                freshIds.addAll(eventStatsDao.getFreshEngagementIds(idsInTier, threshold))
+            }
+
             val staleIds = candidateTargetIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)
             if (staleIds.isNotEmpty()) {
                 queueEngagementFetch(staleIds)
-                Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateTargetIds.size - freshIds.size - staleIds.size} deferred)")
+                Log.d(TAG, "Engagement freshness: ${staleIds.size} stale (${freshIds.size} fresh, ${candidateTargetIds.size - freshIds.size - staleIds.size} deferred, tiers: ${tierGroups.size})")
             }
         }
+    }
+
+    /**
+     * Returns the epoch-ms cutoff for engagement freshness based on post age.
+     * Older posts have settled engagement counts and don't need 5-minute refresh cycles.
+     * P_ENGAGEMENT_TIERED_FRESHNESS: predicted 71% reduction in engagement batches.
+     */
+    private fun freshnessThreshold(createdAtSec: Long, nowMs: Long): Long {
+        val ageMin = (nowMs / 1000 - createdAtSec) / 60
+        val thresholdMs = when {
+            ageMin < 10   -> ENGAGEMENT_STALE_MS  // Tier 1: <10 min old → 5 min (current behavior)
+            ageMin < 60   -> 15 * 60_000L         // Tier 2: 10-60 min  → 15 min
+            ageMin < 360  -> 60 * 60_000L         // Tier 3: 1-6 hours  → 1 hour
+            ageMin < 1440 -> 4 * 60 * 60_000L     // Tier 4: 6-24 hours → 4 hours
+            else          -> 24 * 60 * 60_000L    // Tier 5: >24 hours  → 24 hours
+        }
+        return nowMs - thresholdMs
     }
 
     private fun startIdleEngagement() {
