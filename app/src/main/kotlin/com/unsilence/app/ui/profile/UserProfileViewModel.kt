@@ -25,6 +25,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -118,6 +119,7 @@ class UserProfileViewModel @Inject constructor(
     val followingCount = MutableStateFlow<Long?>(null)
 
     private val engagementFetchedIds = mutableSetOf<String>()
+    private var lastHydratedBatchIds = emptySet<String>()
 
     init {
         // Unified card hydration + engagement fetch as posts arrive
@@ -125,10 +127,17 @@ class UserProfileViewModel @Inject constructor(
             postsFlow.collectLatest { rows ->
                 isLoadingPosts.value = false
 
-                // Hydrate independently so collectLatest re-emissions don't cancel it
+                // Only re-hydrate when the top-20 event IDs actually change (new events
+                // entering the result set). Room re-emits on ANY write to the joined tables
+                // (users, event_stats, events) even for data-only changes — without this
+                // guard, every hydration write triggers a re-emission that re-runs hydration.
                 val batch = rows.take(20)
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    cardHydrator.hydrateVisibleCards(batch)
+                val batchIds = batch.map { it.id }.toSet()
+                if (batchIds != lastHydratedBatchIds) {
+                    lastHydratedBatchIds = batchIds
+                    withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        cardHydrator.hydrateVisibleCards(batch)
+                    }
                 }
 
                 // Capped engagement fetch — one batch of 20 max, debounced
