@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -116,6 +117,7 @@ class ProfileViewModel @Inject constructor(
     val isLoadingPosts = MutableStateFlow(true)
 
     private val engagementFetchedIds = mutableSetOf<String>()
+    private var lastHydratedBatchIds = emptySet<String>()
 
     init {
         if (pubkeyHex != null) {
@@ -176,10 +178,17 @@ class ProfileViewModel @Inject constructor(
             tabPostsFlow.collectLatest { rows ->
                 isLoadingPosts.value = false
 
-                // Hydrate independently so collectLatest re-emissions don't cancel it
+                // Only re-hydrate when the top-20 event IDs actually change (new events
+                // entering the result set). Room re-emits on ANY write to the joined tables
+                // (users, event_stats, events) even for data-only changes — without this
+                // guard, every hydration write triggers a re-emission that re-runs hydration.
                 val batch = rows.take(20)
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    cardHydrator.hydrateVisibleCards(batch)
+                val batchIds = batch.map { it.id }.toSet()
+                if (batchIds != lastHydratedBatchIds) {
+                    lastHydratedBatchIds = batchIds
+                    withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        cardHydrator.hydrateVisibleCards(batch)
+                    }
                 }
 
                 // Capped engagement fetch — one batch of 20 max, debounced
