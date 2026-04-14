@@ -117,6 +117,7 @@ fun UserProfileScreen(
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val zapLoadingIds   by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
     val optimisticSats  by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
+    val zapFlash        by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
     val showSnackbar     = LocalShowSnackbar.current
@@ -128,6 +129,12 @@ fun UserProfileScreen(
     val listState = rememberLazyListState()
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
     val scope = rememberCoroutineScope()
+
+    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
+    LaunchedEffect(zapFlash) {
+        val flash = zapFlash ?: return@LaunchedEffect
+        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
+    }
 
     // Intercept avatar tap: same pubkey → scroll to top, different → navigate
     val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
@@ -154,7 +161,7 @@ fun UserProfileScreen(
         isNwcConfigured = isNwcConfigured,
         zapLoadingIds = zapLoadingIds,
         optimisticZapSats = optimisticSats,
-        zapResultFlow = actionsViewModel.zapResult,
+        zapFlash = zapFlash,
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
@@ -513,7 +520,7 @@ fun UserProfileScreen(
             isNwcConfigured = isNwcConfigured,
             isZapLoading    = row.id in zapLoadingIds,
             extraZapSats    = optimisticSats[row.id] ?: 0L,
-            zapResultFlow   = actionsViewModel.zapResult,
+            zapFlash        = zapFlash,
         )
     }
 

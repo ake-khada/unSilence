@@ -63,7 +63,6 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -88,7 +87,7 @@ fun ArticleReaderScreen(
     isNwcConfigured: Boolean = false,
     isZapLoading: Boolean = false,
     extraZapSats: Long = 0L,
-    zapResultFlow: SharedFlow<Pair<String, Result<Long>>>? = null,
+    zapFlash: NoteActionsViewModel.ZapFlashState? = null,
 ) {
     val title = articleTagValue(row.tags, "title")
     val image = articleTagValue(row.tags, "image")
@@ -99,15 +98,9 @@ fun ArticleReaderScreen(
 
     var showRepostMenu    by remember { mutableStateOf(false) }
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        zapResultFlow?.collect { (id, result) ->
-            if (id == row.id) {
-                if (result.isSuccess) {
-                    zapFlashTrigger++
-                } else {
-                    showSnackbar("Zap failed: ${result.exceptionOrNull()?.message ?: "unknown error"}")
-                }
-            }
+    LaunchedEffect(zapFlash) {
+        if (zapFlash != null && zapFlash.noteId == row.id && zapFlash.success) {
+            zapFlashTrigger++
         }
     }
     var showConnectWallet by remember { mutableStateOf(false) }

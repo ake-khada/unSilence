@@ -50,6 +50,7 @@ import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
@@ -90,12 +91,20 @@ fun FeedScreen(
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val zapLoadingIds by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
     val optimisticSats by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
+    val zapFlash      by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
+    val showSnackbar    = LocalShowSnackbar.current
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+
+    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
+    LaunchedEffect(zapFlash) {
+        val flash = zapFlash ?: return@LaunchedEffect
+        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
+    }
 
     // ── New-post flash animation tracking ──────────────────────────────────────
     val events = reducerState.visibleEvents
@@ -136,7 +145,7 @@ fun FeedScreen(
         isNwcConfigured = isNwcConfigured,
         zapLoadingIds = zapLoadingIds,
         optimisticZapSats = optimisticSats,
-        zapResultFlow = actionsViewModel.zapResult,
+        zapFlash = zapFlash,
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
@@ -381,7 +390,7 @@ fun FeedScreen(
             isNwcConfigured = isNwcConfigured,
             isZapLoading    = row.id in zapLoadingIds,
             extraZapSats    = optimisticSats[row.id] ?: 0L,
-            zapResultFlow   = actionsViewModel.zapResult,
+            zapFlash        = zapFlash,
         )
     }
 

@@ -41,7 +41,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlinx.coroutines.flow.SharedFlow
+import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -72,7 +72,7 @@ data class EngagementSnapshot(
     val isNwcConfigured: Boolean = false,
     val zapLoadingIds: Set<String> = emptySet(),
     val optimisticZapSats: Map<String, Long> = emptyMap(),
-    val zapResultFlow: SharedFlow<Pair<String, Result<Long>>>? = null,
+    val zapFlash: NoteActionsViewModel.ZapFlashState? = null,
 )
 
 /**
@@ -267,7 +267,7 @@ private fun EventFeedItem(
             isNwcConfigured = engagement.isNwcConfigured,
             isZapLoading = row.id in engagement.zapLoadingIds,
             extraZapSats = engagement.optimisticZapSats[row.id] ?: 0L,
-            zapResultFlow = engagement.zapResultFlow,
+            zapFlash = engagement.zapFlash,
         )
     } else {
         // Resolve original author profile for kind-6 reposts
@@ -318,7 +318,7 @@ private fun EventFeedItem(
             parentAuthor = parentAuthor,
             isZapLoading = row.id in engagement.zapLoadingIds,
             extraZapSats = engagement.optimisticZapSats[row.id] ?: 0L,
-            zapResultFlow = engagement.zapResultFlow,
+            zapFlash = engagement.zapFlash,
         )
     }
 }

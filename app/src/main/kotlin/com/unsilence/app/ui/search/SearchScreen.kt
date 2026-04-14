@@ -63,6 +63,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.ui.feed.ArticleReaderScreen
@@ -94,10 +95,18 @@ fun SearchScreen(
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
     val zapLoadingIds   by actionsViewModel.zapLoading.collectAsStateWithLifecycle()
     val optimisticSats  by actionsViewModel.optimisticZapSats.collectAsStateWithLifecycle()
+    val zapFlash        by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
 
+    val showSnackbar = LocalShowSnackbar.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+
+    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
+    LaunchedEffect(zapFlash) {
+        val flash = zapFlash ?: return@LaunchedEffect
+        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
+    }
 
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -273,7 +282,7 @@ fun SearchScreen(
                             isNwcConfigured = isNwcConfigured,
                             zapLoadingIds = zapLoadingIds,
                             optimisticZapSats = optimisticSats,
-                            zapResultFlow = actionsViewModel.zapResult,
+                            zapFlash = zapFlash,
                         )
                         val callbacks = EventActionCallbacks(
                             onNoteClick = onNoteClick,
@@ -320,7 +329,7 @@ fun SearchScreen(
             isNwcConfigured = isNwcConfigured,
             isZapLoading    = row.id in zapLoadingIds,
             extraZapSats    = optimisticSats[row.id] ?: 0L,
-            zapResultFlow   = actionsViewModel.zapResult,
+            zapFlash        = zapFlash,
         )
     }
 }

@@ -110,7 +110,28 @@ class NoteActionsViewModel @Inject constructor(
 
     /** Zap results: eventId → success(amountSats) or failure. */
     private val _zapResult = MutableSharedFlow<Pair<String, Result<Long>>>(extraBufferCapacity = 10)
-    val zapResult: SharedFlow<Pair<String, Result<Long>>> = _zapResult.asSharedFlow()
+
+    /**
+     * Most recent zap result, lifted to screen-level observation.
+     * Cards key their flash effect on this value instead of each collecting the SharedFlow.
+     * The [tick] field ensures distinct emissions even if the same note is zapped twice.
+     */
+    data class ZapFlashState(val noteId: String, val success: Boolean, val message: String? = null, val tick: Long = System.nanoTime())
+
+    private val _zapFlashState = MutableStateFlow<ZapFlashState?>(null)
+    val zapFlashState: StateFlow<ZapFlashState?> = _zapFlashState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            _zapResult.collect { (id, result) ->
+                _zapFlashState.value = ZapFlashState(
+                    noteId = id,
+                    success = result.isSuccess,
+                    message = result.exceptionOrNull()?.message,
+                )
+            }
+        }
+    }
 
     /**
      * Set of event IDs the current user has zapped.
