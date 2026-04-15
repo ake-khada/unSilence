@@ -10,6 +10,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val SNAPSHOT_VERSION = "SNAPSHOT_V1"
+private const val PENDING_RELAYS_CAP = 1_000
+private const val PENDING_RELAYS_TRIM = 200
 
 @Singleton
 class MemoryEventStore @Inject constructor() {
@@ -55,6 +57,8 @@ class MemoryEventStore @Inject constructor() {
     // during insert() when the event finally arrives.
     private val pendingRelays = ConcurrentHashMap<String, MutableSet<String>>()
 
+    internal val pendingRelayCount: Int get() = pendingRelays.size
+
     fun addRelaySeen(eventId: String, relayUrl: String) {
         val event = eventsById[eventId]
         if (event != null) {
@@ -62,6 +66,15 @@ class MemoryEventStore @Inject constructor() {
         } else {
             // Event not yet flushed from channel — buffer for insert()
             pendingRelays.getOrPut(eventId) { ConcurrentHashMap.newKeySet() }.add(relayUrl)
+            trimPendingRelaysIfNeeded()
+        }
+    }
+
+    internal fun trimPendingRelaysIfNeeded() {
+        if (pendingRelays.size <= PENDING_RELAYS_CAP) return
+        repeat(PENDING_RELAYS_TRIM) {
+            val key = pendingRelays.keys.firstOrNull() ?: return
+            pendingRelays.remove(key)
         }
     }
 
