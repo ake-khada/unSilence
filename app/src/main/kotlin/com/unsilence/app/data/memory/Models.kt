@@ -1,8 +1,14 @@
 package com.unsilence.app.data.memory
 
+import androidx.compose.runtime.Immutable
+
 /**
  * In-memory Nostr event representation. Pre-parsed NIP-10 threading
  * and NIP-36 content warnings. Tags stored as parsed lists, not JSON.
+ *
+ * NOT a UI-facing type — never passed to @Composable functions.
+ * The MutableSet<String> on relaysSeen is intentional: relay provenance
+ * accumulates across duplicate arrivals via insert()'s dedup path.
  */
 data class NostrEvent(
     val id: String,
@@ -49,7 +55,12 @@ data class FeedFilter(
 /**
  * UI row contract. Replaces the Room-based FeedRow from EventDao.
  * Contains event data + denormalized author info + engagement counts.
+ *
+ * @Immutable: all fields are val, all collection types are immutable
+ * interfaces (List, not MutableList). Compose compiler treats stdlib
+ * List/Set as potentially unstable without this annotation.
  */
+@Immutable
 data class FeedRow(
     val id: String,
     val pubkey: String,

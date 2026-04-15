@@ -154,40 +154,58 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt[targetId] = System.currentTimeMillis()
     }
 
+    /**
+     * Extract sats from a kind-9735 zap receipt.
+     *
+     * Priority: bolt11 tag (parsed via BOLT11 amount spec), then "amount"
+     * tag (millisatoshis, NIP-57).
+     *
+     * Note: Quartz's LnInvoiceUtil.getAmountInSats() is the canonical
+     * parser used by EventProcessor, but it's compiled for Java 21 and
+     * can't run in JVM 17 unit tests (UnsupportedClassVersionError).
+     * This parser implements the same BOLT11 amount extraction:
+     * lnbc<digits><multiplier>1<data> where m=milli, u=micro, n=nano, p=pico.
+     */
     private fun extractSatsFromZap(event: NostrEvent): Long {
-        // Primary: "amount" tag in millisatoshis (NIP-57 standard)
+        // Primary: parse bolt11 tag
+        val bolt11 = event.tags
+            .firstOrNull { it.size >= 2 && it[0] == "bolt11" }
+            ?.get(1)
+        if (bolt11 != null) {
+            val sats = parseBolt11Amount(bolt11)
+            if (sats > 0) return sats
+        }
+
+        // Fallback: "amount" tag in millisatoshis (NIP-57)
         val amountMsats = event.tags
             .firstOrNull { it.size >= 2 && it[0] == "amount" }
             ?.get(1)?.toLongOrNull()
         if (amountMsats != null) return amountMsats / 1000
 
-        // Fallback: parse bolt11 invoice amount
-        val bolt11 = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "bolt11" }
-            ?.get(1)
-        if (bolt11 != null) return parseBolt11Amount(bolt11)
-
         return 0L
     }
 
     private fun parseBolt11Amount(bolt11: String): Long {
+        // BOLT11 HRP: lnbc<amount><multiplier>  Separator: 1  Data: bech32
         val prefix = "lnbc"
-        val idx = bolt11.lowercase().indexOf(prefix)
+        val lower = bolt11.lowercase()
+        val idx = lower.indexOf(prefix)
         if (idx < 0) return 0L
 
-        val afterPrefix = bolt11.substring(idx + prefix.length)
+        val afterPrefix = lower.substring(idx + prefix.length)
         val numStr = afterPrefix.takeWhile { it.isDigit() }
         if (numStr.isEmpty()) return 0L
 
         val amount = numStr.toLongOrNull() ?: return 0L
         val multiplier = afterPrefix.getOrNull(numStr.length)
 
+        // BTC multipliers → sats (1 BTC = 100_000_000 sats)
         return when (multiplier) {
-            'm' -> amount * 100_000
-            'u' -> amount * 100
-            'n' -> amount / 10
-            'p' -> amount / 10_000
-            else -> amount
+            'm' -> amount * 100_000       // milli-BTC
+            'u' -> amount * 100           // micro-BTC
+            'n' -> amount / 10            // nano-BTC (1 nBTC = 0.1 sat)
+            'p' -> amount / 10_000        // pico-BTC
+            else -> amount                // no multiplier = BTC (rare for zaps)
         }
     }
 
