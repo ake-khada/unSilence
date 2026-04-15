@@ -6,6 +6,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -22,6 +23,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "EventProcessor"
+
+/** Fire-and-forget dispatch of event ID fetches to a specific relay. */
+fun interface PrefetchDispatcher {
+    fun dispatch(relayUrl: String, eventIds: List<String>)
+}
 
 // Dedup cache limits
 private const val DEDUP_MAX  = 10_000
@@ -86,6 +92,96 @@ class EventProcessor @Inject constructor(
         }
     }
 
+    // ── Prefetch infrastructure ─────────────────────────────────────────────
+
+    /** Set by RelayPool after construction to avoid circular dependency. */
+    internal var prefetchDispatcher: PrefetchDispatcher? = null
+
+    /** Event IDs already requested via prefetch (prevents duplicate fetches). */
+    internal val prefetchedRefs: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    // Observability counters
+    internal val prefetchEnqueuedCount = java.util.concurrent.atomic.AtomicLong(0)
+    internal val prefetchDedupedCount = java.util.concurrent.atomic.AtomicLong(0)
+    internal val prefetchSkippedAlreadyCachedCount = java.util.concurrent.atomic.AtomicLong(0)
+    internal val prefetchFetchedBySourceRelayCount = java.util.concurrent.atomic.AtomicLong(0)
+
+    private companion object {
+        const val PREFETCH_RATE_CAP = 50
+        const val PREFETCH_CHANNEL_CAP = 500
+        val EVENT_ID_HEX_REGEX = Regex("^[0-9a-f]{64}$")
+    }
+
+    private val prefetchChannel = Channel<Pair<String, String>>(
+        capacity = PREFETCH_CHANNEL_CAP,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * Enqueue a referenced event ID for prefetch from the source relay.
+     * Skip rules: malformed ID, blank/non-wss URL, already cached, already prefetched.
+     */
+    private fun requestPrefetch(eventId: String, sourceRelayUrl: String) {
+        if (!EVENT_ID_HEX_REGEX.matches(eventId)) return
+        if (sourceRelayUrl.isBlank() || !sourceRelayUrl.startsWith("wss://")) return
+        if (memoryEventStore.getEventEntity(eventId) != null) {
+            prefetchSkippedAlreadyCachedCount.incrementAndGet()
+            return
+        }
+        if (!prefetchedRefs.add(eventId)) {
+            prefetchDedupedCount.incrementAndGet()
+            return
+        }
+        prefetchEnqueuedCount.incrementAndGet()
+        prefetchChannel.trySend(eventId to sourceRelayUrl)
+    }
+
+    /**
+     * Drain the prefetch channel and dispatch batched fetches.
+     * Production: runs as an infinite loop via drainPrefetch().
+     * Tests: call drainPrefetchForTest() after process() + drainForTest().
+     */
+    internal fun drainPrefetchForTest() {
+        val batch = mutableListOf<Pair<String, String>>()
+        while (true) {
+            val item = prefetchChannel.tryReceive().getOrNull() ?: break
+            batch.add(item)
+        }
+        if (batch.isEmpty()) return
+        dispatchPrefetchBatch(batch)
+    }
+
+    private fun dispatchPrefetchBatch(batch: List<Pair<String, String>>) {
+        val dispatcher = prefetchDispatcher ?: return
+        val byRelay = batch.groupBy({ it.second }, { it.first })
+        for ((relayUrl, ids) in byRelay) {
+            dispatcher.dispatch(relayUrl, ids)
+            prefetchFetchedBySourceRelayCount.addAndGet(ids.size.toLong())
+        }
+        if (prefetchEnqueuedCount.get() % 100 == 0L) {
+            Log.d(TAG, "prefetch counters: enqueued=${prefetchEnqueuedCount.get()} " +
+                "deduped=${prefetchDedupedCount.get()} " +
+                "skipped_cached=${prefetchSkippedAlreadyCachedCount.get()} " +
+                "fetched=${prefetchFetchedBySourceRelayCount.get()}")
+        }
+    }
+
+    /**
+     * PREFETCH drainer: collects up to [PREFETCH_RATE_CAP] requests per 1-second
+     * window. Groups by source relay for efficient batched REQs.
+     */
+    private suspend fun drainPrefetch() {
+        while (true) {
+            val first = withTimeoutOrNull(1_000L) { prefetchChannel.receive() } ?: continue
+            val batch = mutableListOf(first)
+            while (batch.size < PREFETCH_RATE_CAP) {
+                val next = prefetchChannel.tryReceive().getOrNull() ?: break
+                batch.add(next)
+            }
+            dispatchPrefetchBatch(batch)
+        }
+    }
+
     // ── 1. Dedup cache ────────────────────────────────────────────────────────
 
     /**
@@ -134,6 +230,7 @@ class EventProcessor @Inject constructor(
         val drainerScope = CoroutineScope(scope.coroutineContext + drainerJob!!)
         drainerScope.launch { drainHot() }
         drainerScope.launch { drainCold() }
+        drainerScope.launch { drainPrefetch() }
         Log.d(TAG, "Drainers started")
     }
 
@@ -142,9 +239,11 @@ class EventProcessor @Inject constructor(
         drainerJob?.cancel()
         drainerJob = null
         seenIds.clear()
+        prefetchedRefs.clear()
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
+        while (prefetchChannel.tryReceive().isSuccess) { /* discard */ }
         Log.d(TAG, "Stopped and cleared state")
     }
 
@@ -267,6 +366,27 @@ class EventProcessor @Inject constructor(
             firstSeenAt = System.currentTimeMillis(),
             relaysSeen = mutableSetOf(relayUrl),
         )
+
+        // ── Pre-fetch all semantically-referenced events from the source relay ─
+        // Forward fix for A.4.3 deferred bug: prevents parent notes, repost
+        // targets, and notification refs from being missing when the UI looks
+        // them up. Generalized: prefetches all event refs the event exposes.
+        nostrEvent.replyToId?.let { requestPrefetch(it, relayUrl) }
+        nostrEvent.rootId?.let { requestPrefetch(it, relayUrl) }
+        tagsList
+            .filter { it.size >= 2 && it[0] == "e" }
+            .forEach { requestPrefetch(it[1], relayUrl) }
+
+        // ── Direct-path control-plane updates (not channeled) ────────────────
+        // Kind 3 (contact list) updates the follows index in MemoryEventStore
+        // without entering the feed-content channel or main event store.
+        if (kind == 3) {
+            val follows = nostrEvent.tags
+                .filter { it.size >= 2 && it[0] == "p" }
+                .map { it[1] }
+                .toSet()
+            memoryEventStore.updateFollows(pubkey, follows, createdAt)
+        }
 
         // ── Priority lanes ───────────────────────────────────────────────────
         val shouldChannel = kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023, 30385)

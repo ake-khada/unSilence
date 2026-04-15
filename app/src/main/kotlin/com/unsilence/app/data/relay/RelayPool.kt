@@ -316,6 +316,13 @@ class RelayPool @Inject constructor(
         return false
     }
 
+    // Wire EventProcessor prefetch → RelayPool.fetchEventsByIdsFromRelay
+    init {
+        processor.prefetchDispatcher = PrefetchDispatcher { relayUrl, eventIds ->
+            fetchEventsByIdsFromRelay(relayUrl, eventIds)
+        }
+    }
+
     // Evict stale entries every 5 minutes to prevent unbounded growth.
     init {
         scope.launch {
@@ -1347,16 +1354,54 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
-        // Skip indexer relays — they only store profile metadata (kind 0, 10002)
+        // Broadened relay targeting: non-indexer relays first, then indexer relays
+        // for coverage. Previously limited to 3 non-indexer relays which missed
+        // events on less-replicated relays.
         val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
-        val targets = connections.values.filter { it.url !in indexerUrls }.take(3)
+        val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
+        val indexer = connections.values.filter { it.url in indexerUrls }
+        val targets = (nonIndexer + indexer).take(6)
         targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${targets.size} relay(s)")
     }
 
     /** Single-ID overload — delegates to batch. */
     fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
+
+    /**
+     * Fetch events by ID from a SPECIFIC relay (source-relay targeting).
+     * Used by EventProcessor's prefetch: when a reply arrives from relay X,
+     * the parent event is almost certainly on relay X too.
+     * Deduped against the same in-flight tracker (30s TTL).
+     */
+    fun fetchEventsByIdsFromRelay(relayUrl: String, eventIds: List<String>) {
+        if (eventIds.isEmpty()) return
+        val normalized = normalizeRelayUrl(relayUrl) ?: return
+        if (normalized in blockedUrls) return
+        val now = System.currentTimeMillis()
+        val novel = eventIds.filter { id ->
+            val last = eventFetchInFlight[id]
+            last == null || (now - last) > 30_000
+        }
+        if (novel.isEmpty()) return
+        novel.forEach { eventFetchInFlight[it] = now }
+        val subId = "prefetch-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(novel.size))
+            })
+        }.toString()
+        val conn = connections[normalized]
+        if (conn != null) {
+            sendOneShotToRelay(conn, req)
+            Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
+        }
+    }
 
     /**
      * Fetch a single event by ID using relay hints. Hints-first strategy:
@@ -1404,12 +1449,12 @@ class RelayPool @Inject constructor(
             }
         }
 
-        // No hints (or all hints were indexer/blocked) — capped fallback.
-        // 3 random non-indexer relays. eventFetchInFlight prevents retry within 30s.
-        val fallbackTargets = connections.values
-            .filter { it.url !in indexerUrls }
-            .shuffled()
-            .take(3)
+        // No hints (or all hints were indexer/blocked) — broadened fallback.
+        // Non-indexer relays first (shuffled), then indexer relays for coverage.
+        // eventFetchInFlight prevents retry within 30s.
+        val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
+        val indexer = connections.values.filter { it.url in indexerUrls }
+        val fallbackTargets = (nonIndexer + indexer).take(6)
         fallbackTargets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchEventById: $eventId → ${fallbackTargets.size} fallback relay(s) (no hints)")
     }
