@@ -22,6 +22,7 @@ import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
+import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.OutboxRouter
@@ -86,6 +87,7 @@ class AppBootstrapper @Inject constructor(
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
     private val relayTrustScoreDao: RelayTrustScoreDao,
+    private val snapshotScheduler: SnapshotScheduler,
 ) {
     private val bootstrapMutex = Mutex()
 
@@ -119,6 +121,10 @@ class AppBootstrapper @Inject constructor(
                 }
             )
         }
+
+        // Phase 1.5: Restore MemoryEventStore snapshot BEFORE relay connections
+        snapshotScheduler.restoreIfPresent()
+        Log.d(TAG, "Phase1.5: snapshot restore complete")
 
         // Step 1: Connect to indexer relays
         val indexerUrls = relayConfigDao.getIndexerRelayUrls()
@@ -242,6 +248,9 @@ class AppBootstrapper @Inject constructor(
      * 6. Reset in-memory state (seenIds, connection map)
      */
     suspend fun teardown() {
+        // 0. Save snapshot before clearing state
+        snapshotScheduler.saveNow()
+
         // 1. Cancel persistent subscriptions
         relayPool.clearPersistentSubs()
 

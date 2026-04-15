@@ -8,6 +8,7 @@ import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
+import com.unsilence.app.data.memory.SnapshotScheduler
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
 import javax.inject.Inject
@@ -16,6 +17,12 @@ import javax.inject.Inject
 class UnsilenceApp : Application(), SingletonImageLoader.Factory, Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
+    @Inject lateinit var snapshotScheduler: SnapshotScheduler
+
+    override fun onCreate() {
+        super.onCreate()
+        snapshotScheduler.attach()
+    }
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()

@@ -3,7 +3,8 @@ package com.unsilence.app.data.memory
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
-import java.io.File
+import java.io.BufferedReader
+import java.io.BufferedWriter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
 import javax.inject.Inject
@@ -453,44 +454,39 @@ class MemoryEventStore @Inject constructor() {
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
-    suspend fun saveSnapshot(file: File) {
-        val tmpFile = File(file.parentFile, "${file.name}.tmp")
-        tmpFile.bufferedWriter().use { writer ->
-            writer.write(SNAPSHOT_VERSION)
+    suspend fun saveSnapshotTo(writer: BufferedWriter) {
+        writer.write(SNAPSHOT_VERSION)
+        writer.newLine()
+        for (event in eventsById.values) {
+            writer.write(serializeEvent(event))
             writer.newLine()
-            for (event in eventsById.values) {
-                writer.write(serializeEvent(event))
-                writer.newLine()
-            }
-            // Write aggregates section
-            writer.write("---AGGREGATES---")
-            writer.newLine()
-            for ((id, count) in replyCounts) {
-                writer.write("reply|$id|$count")
-                writer.newLine()
-            }
-            for ((id, count) in repostCounts) {
-                writer.write("repost|$id|$count")
-                writer.newLine()
-            }
-            for ((id, count) in reactionCounts) {
-                writer.write("reaction|$id|$count")
-                writer.newLine()
-            }
-            for ((id, zap) in zapStatsByEventId) {
-                writer.write("zap|$id|${zap.count}|${zap.totalSats}")
-                writer.newLine()
-            }
         }
-        tmpFile.renameTo(file)
+        // Write aggregates section
+        writer.write("---AGGREGATES---")
+        writer.newLine()
+        for ((id, count) in replyCounts) {
+            writer.write("reply|$id|$count")
+            writer.newLine()
+        }
+        for ((id, count) in repostCounts) {
+            writer.write("repost|$id|$count")
+            writer.newLine()
+        }
+        for ((id, count) in reactionCounts) {
+            writer.write("reaction|$id|$count")
+            writer.newLine()
+        }
+        for ((id, zap) in zapStatsByEventId) {
+            writer.write("zap|$id|${zap.count}|${zap.totalSats}")
+            writer.newLine()
+        }
     }
 
-    suspend fun restoreFromSnapshot(file: File) {
-        if (!file.exists()) return
+    suspend fun restoreSnapshotFrom(reader: BufferedReader) {
         var inAggregates = false
         var versionChecked = false
 
-        file.bufferedReader().useLines { lines ->
+        reader.useLines { lines ->
             for (line in lines) {
                 // First line must be the version header
                 if (!versionChecked) {

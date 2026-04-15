@@ -380,6 +380,45 @@ These are the standard gesture scripts for common validation scenarios. Sprint p
 
 **Expected duration:** ~45 seconds
 
+### SNAPSHOT_PERSISTENCE — Test save-on-background and restore-on-launch
+
+```
+1. Open the app and browse the feed for at least 2 minutes
+   (events accumulate in MemoryEventStore)
+2. Background the app via home button or app switcher
+   (this fires ProcessLifecycleOwner.ON_STOP → save)
+3. Wait 2 seconds for the save coroutine to complete
+4. Verify logcat shows "Snapshot saved" — this is the critical save event
+5. Verify file exists on disk:
+   adb shell ls -la /data/data/com.unsilence.app/files/snapshots/memory_events.snapshot
+6. NOW force-stop the process:
+   adb shell am force-stop com.unsilence.app
+7. Reopen the app by tapping the launcher icon
+8. Wait for the feed to appear
+9. Type "done"
+```
+
+**Purpose:** Verify snapshot save-on-background and restore-on-launch work end-to-end.
+
+**Expected duration:** ~180 seconds (includes 2 minutes browsing + background + restart)
+
+**Pass criteria:**
+```bash
+# Save log line present
+adb logcat -d -s SnapshotScheduler | grep "Snapshot saved"
+
+# Restore log line present on relaunch
+adb logcat -d -s SnapshotScheduler | grep "Snapshot restored"
+
+# File exists and is non-trivial size (>1KB for any real session)
+adb shell ls -la /data/data/com.unsilence.app/files/snapshots/memory_events.snapshot
+```
+
+**CRITICAL:** Do NOT skip step 2 (backgrounding). A force-stop sends SIGKILL with
+no lifecycle callbacks. If you force-stop a foreground app, you're testing "does a
+stale snapshot from a previous session restore" — not "does our save-on-background
+actually work." The background step is what triggers the ON_STOP save.
+
 ### COLD_START — Test app startup behavior
 
 ```
