@@ -2,6 +2,7 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.db.dao.UserDao
+import com.unsilence.app.data.memory.MemoryEventStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +32,7 @@ private const val TAG = "ProfileResolver"
 @Singleton
 class ProfileResolver @Inject constructor(
     private val userDao: UserDao,
+    private val memoryEventStore: MemoryEventStore,
     private val relayPool: dagger.Lazy<RelayPool>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -89,20 +91,17 @@ class ProfileResolver @Inject constructor(
     }
 
     /**
-     * Returns the subset of [pubkeys] that do NOT have a fresh profile in Room.
-     * "Fresh" = exists AND updated_at within STALE_THRESHOLD_SECONDS (6h).
-     * Batch-queries Room with a single SELECT — safe to call on every hydration launch.
+     * Returns the subset of [pubkeys] that do NOT have a fresh profile in MemoryEventStore.
+     * "Fresh" = profile exists AND was cached locally within STALE_THRESHOLD_SECONDS (6h).
+     * Uses profileUpdatedAt (local cache time), NOT event createdAt.
      * Used by CardHydrator to skip orchestration for already-resolved pubkeys.
      */
-    suspend fun filterUnresolved(pubkeys: Set<String>): Set<String> {
+    fun filterUnresolved(pubkeys: Set<String>): Set<String> {
         if (pubkeys.isEmpty()) return emptySet()
-        // Threshold in epoch seconds — matches users.updated_at column convention
-        val freshnessThreshold = System.currentTimeMillis() / 1000 - STALE_THRESHOLD_SECONDS
-        val fresh = mutableSetOf<String>()
-        for (chunk in pubkeys.chunked(999)) {
-            fresh.addAll(userDao.getFreshPubkeys(chunk, freshnessThreshold))
+        val freshnessThreshold = System.currentTimeMillis() - STALE_THRESHOLD_SECONDS * 1000
+        return pubkeys.filterTo(mutableSetOf()) { pk ->
+            memoryEventStore.getProfileLastUpdated(pk) < freshnessThreshold
         }
-        return pubkeys - fresh
     }
 
     /** Cancel work, drain queued requests, clear caches. Called on logout. */
@@ -149,18 +148,18 @@ class ProfileResolver @Inject constructor(
         }
         if (notInFlight.isEmpty()) return
 
-        // 2. Room staleness check — skip profiles updated within 6 hours
-        //    Profiles with no avatar get a shorter 1-hour retry window
-        val staleThreshold = now / 1000 - STALE_THRESHOLD_SECONDS
-        val noPictureThreshold = now / 1000 - 3600L
-        // Batch lookup in chunks of 999 (SQLite IN clause limit)
+        // 2. MemoryEventStore staleness check — skip profiles cached locally within 6 hours
+        //    Profiles with no picture get a shorter 1-hour retry window
+        val staleThreshold = now - STALE_THRESHOLD_SECONDS * 1000
+        val noPictureThreshold = now - 3600_000L
         val toFetch = mutableListOf<String>()
-        for (chunk in notInFlight.chunked(999)) {
-            val existing = userDao.getUsersByPubkeys(chunk).associateBy { it.pubkey }
-            for (pk in chunk) {
-                val user = existing[pk]
-                if (user == null || user.updatedAt < staleThreshold ||
-                    (user.picture.isNullOrBlank() && user.updatedAt < noPictureThreshold)) {
+        for (pk in notInFlight) {
+            val lastUpdated = memoryEventStore.getProfileLastUpdated(pk)
+            if (lastUpdated < staleThreshold) {
+                toFetch.add(pk)
+            } else {
+                val user = memoryEventStore.getUserEntity(pk)
+                if (user != null && user.picture.isNullOrBlank() && lastUpdated < noPictureThreshold) {
                     toFetch.add(pk)
                 }
             }

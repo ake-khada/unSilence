@@ -12,6 +12,7 @@ import app.cash.turbine.test
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -964,6 +965,61 @@ class MemoryEventStoreInvariantsTest {
         assertTrue("Both-relay event should appear", "both" in ids)
     }
 
+    // ── updateFollows: dedicated follows path ──────────────────────────────
+
+    @Test
+    fun `updateFollows populates followsByPubkey without inserting event`() {
+        val pubkey = "pk-alice"
+        val follows = setOf("pk-bob", "pk-carol")
+        store.updateFollows(pubkey, follows, createdAt = 1000L)
+
+        assertEquals("getFollows should return the set", follows, store.getFollows(pubkey))
+        // No event should be in the main store
+        val userEvents = store.userEvents(pubkey, setOf(3))
+        assertTrue("Kind-3 should NOT be in the main event store", userEvents.isEmpty())
+    }
+
+    @Test
+    fun `updateFollows ignores stale contact list`() {
+        val pubkey = "pk-alice"
+        val newer = setOf("pk-bob", "pk-carol")
+        val older = setOf("pk-dave")
+
+        store.updateFollows(pubkey, newer, createdAt = 2000L)
+        store.updateFollows(pubkey, older, createdAt = 1000L) // stale — should be ignored
+
+        assertEquals("Newer follows should remain", newer, store.getFollows(pubkey))
+    }
+
+    @Test
+    fun `updateFollows overwrites with newer contact list`() {
+        val pubkey = "pk-alice"
+        val first = setOf("pk-bob")
+        val second = setOf("pk-carol", "pk-dave")
+
+        store.updateFollows(pubkey, first, createdAt = 1000L)
+        store.updateFollows(pubkey, second, createdAt = 2000L)
+
+        assertEquals("Newer follows should overwrite", second, store.getFollows(pubkey))
+    }
+
+    @Test
+    fun `updateFollows bumps followsSignal so followsFlow emits`() = runTest {
+        val pubkey = "pk-alice"
+
+        store.followsFlow(pubkey).test {
+            // Initial emission: empty
+            assertEquals(emptySet<String>(), awaitItem())
+
+            val follows = setOf("pk-bob")
+            store.updateFollows(pubkey, follows, createdAt = 1000L)
+
+            assertEquals("followsFlow should emit after updateFollows", follows, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
     // ── MemoryFeedFilter must not contain media fields ─────────────────────
 
     @Test
@@ -981,6 +1037,226 @@ class MemoryEventStoreInvariantsTest {
                     "is presentation-layer, applied AFTER memory query.",
                 field in fields,
             )
+        }
+    }
+
+    // ── A.4.3: profileUpdatedAt local freshness ────────────────────────────
+
+    @Test
+    fun `getProfileLastUpdated reflects local cache time not event createdAt`() {
+        val ancientCreatedAt = 1500000000L  // ~mid-2017
+        val beforeInsert = System.currentTimeMillis()
+
+        store.insert(event(
+            id = "p1", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""",
+            createdAt = ancientCreatedAt,
+        ))
+
+        val lastUpdated = store.getProfileLastUpdated("alice")
+        assertTrue(
+            "getProfileLastUpdated must be a recent local timestamp " +
+            "(>=$beforeInsert), not the event createdAt ($ancientCreatedAt). " +
+            "Got: $lastUpdated",
+            lastUpdated >= beforeInsert,
+        )
+        assertNotEquals(
+            "getProfileLastUpdated must NOT equal event createdAt — " +
+            "that would cause ProfileResolver to refetch ancient profiles forever",
+            ancientCreatedAt, lastUpdated,
+        )
+    }
+
+    @Test
+    fun `getProfileLastUpdated returns 0 for unknown pubkey`() {
+        assertEquals(0L, store.getProfileLastUpdated("unknown"))
+    }
+
+    @Test
+    fun `getProfileLastUpdated updates when newer profile replaces older`() {
+        store.insert(event(
+            id = "p-old", kind = 0, pubkey = "alice",
+            content = """{"name":"Old"}""", createdAt = 100,
+        ))
+        val first = store.getProfileLastUpdated("alice")
+        assertTrue(first > 0)
+
+        // Small delay to ensure different local timestamp
+        Thread.sleep(5)
+
+        store.insert(event(
+            id = "p-new", kind = 0, pubkey = "alice",
+            content = """{"name":"New"}""", createdAt = 200,
+        ))
+        val second = store.getProfileLastUpdated("alice")
+        assertTrue("Newer profile should update local timestamp", second >= first)
+    }
+
+    @Test
+    fun `getProfileLastUpdated does not update when stale profile arrives`() {
+        store.insert(event(
+            id = "p-new", kind = 0, pubkey = "alice",
+            content = """{"name":"New"}""", createdAt = 200,
+        ))
+        val afterNew = store.getProfileLastUpdated("alice")
+
+        store.insert(event(
+            id = "p-old", kind = 0, pubkey = "alice",
+            content = """{"name":"Old"}""", createdAt = 100,
+        ))
+        val afterOld = store.getProfileLastUpdated("alice")
+
+        assertEquals(
+            "Stale profile must NOT update local timestamp",
+            afterNew, afterOld,
+        )
+    }
+
+    @Test
+    fun `clear resets profileUpdatedAt`() {
+        store.insert(event(
+            id = "p-clear", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""",
+        ))
+        assertTrue(store.getProfileLastUpdated("alice") > 0)
+
+        store.clear()
+
+        assertEquals(0L, store.getProfileLastUpdated("alice"))
+    }
+
+    // ── A.4.3: threadFlow fixpoint ─────────────────────────────────────────
+
+    @Test
+    fun `threadFlow collects descendants to fixpoint not just two passes`() = runTest {
+        store.insert(event(id = "root", kind = 1, createdAt = 1))
+        store.insert(event(id = "r1", kind = 1, replyToId = "root", rootId = "root", createdAt = 2))
+        store.insert(event(id = "r2", kind = 1, replyToId = "r1", createdAt = 3))     // depth 2
+        store.insert(event(id = "r3", kind = 1, replyToId = "r2", createdAt = 4))     // depth 3
+        store.insert(event(id = "r4", kind = 1, replyToId = "r3", createdAt = 5))     // depth 4
+        store.insert(event(id = "unrelated", kind = 1, createdAt = 6))
+
+        store.threadFlow("root").test {
+            val events = awaitItem()
+            val ids = events.map { it.id }.toSet()
+            assertTrue("root included", "root" in ids)
+            assertTrue("r1 (depth 1) included", "r1" in ids)
+            assertTrue("r2 (depth 2) included", "r2" in ids)
+            assertTrue("r3 (depth 3) included", "r3" in ids)
+            assertTrue("r4 (depth 4) included — fixpoint required", "r4" in ids)
+            assertFalse("unrelated event excluded", "unrelated" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `threadFlow re-emits when new reply arrives`() = runTest {
+        store.insert(event(id = "root", kind = 1, createdAt = 1))
+
+        store.threadFlow("root").test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+
+            store.insert(event(id = "r1", kind = 1, replyToId = "root", rootId = "root", createdAt = 2))
+
+            val updated = awaitItem()
+            assertEquals(2, updated.size)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── A.4.3: toEventEntity adapter ───────────────────────────────────────
+
+    @Test
+    fun `toEventEntity maps all NostrEvent fields correctly`() {
+        val evt = event(
+            id = "adapter-test",
+            pubkey = "pk-adapt",
+            kind = 1,
+            content = "test content",
+            createdAt = 1700000000L,
+            sig = "test-sig",
+            relayUrl = "wss://relay.test",
+            replyToId = "parent-id",
+            rootId = "root-id",
+            hasContentWarning = true,
+            contentWarningReason = "nsfw",
+            firstSeenAt = 9999L,
+            tags = listOf(listOf("e", "some-ref"), listOf("p", "some-pk")),
+        )
+        store.insert(evt)
+
+        val entity = store.getEventEntity("adapter-test")
+        assertNotNull(entity)
+        assertEquals("adapter-test", entity!!.id)
+        assertEquals("pk-adapt", entity.pubkey)
+        assertEquals(1, entity.kind)
+        assertEquals("test content", entity.content)
+        assertEquals(1700000000L, entity.createdAt)
+        assertEquals("test-sig", entity.sig)
+        assertEquals("wss://relay.test", entity.relayUrl)
+        assertEquals("parent-id", entity.replyToId)
+        assertEquals("root-id", entity.rootId)
+        assertTrue(entity.hasContentWarning)
+        assertEquals("nsfw", entity.contentWarningReason)
+    }
+
+    @Test
+    fun `getEventEntity returns null for unknown id`() {
+        assertNull(store.getEventEntity("nonexistent"))
+    }
+
+    // ── A.4.3: toUserEntity adapter ────────────────────────────────────────
+
+    @Test
+    fun `getUserEntity maps profile fields correctly`() {
+        store.insert(event(
+            id = "profile-adapt",
+            pubkey = "pk-profile",
+            kind = 0,
+            content = """{"name":"Alice","display_name":"Alice W","about":"Bio here","picture":"https://example.com/a.jpg","nip05":"alice@example.com","lud16":"alice@ln.tips","banner":"https://example.com/banner.jpg"}""",
+            createdAt = 1700000000L,
+        ))
+
+        val user = store.getUserEntity("pk-profile")
+        assertNotNull(user)
+        assertEquals("pk-profile", user!!.pubkey)
+        assertEquals("Alice", user.name)
+        assertEquals("Alice W", user.displayName)
+        assertEquals("Bio here", user.about)
+        assertEquals("https://example.com/a.jpg", user.picture)
+        assertEquals("alice@example.com", user.nip05)
+        assertEquals("alice@ln.tips", user.lud16)
+        assertEquals("https://example.com/banner.jpg", user.banner)
+        assertEquals(1700000000L, user.createdAt)
+        assertTrue("updatedAt should be recent local time", user.updatedAt > 0)
+    }
+
+    @Test
+    fun `getUserEntity returns null for unknown pubkey`() {
+        assertNull(store.getUserEntity("nonexistent"))
+    }
+
+    // ── userEntityFlow (A.4.3 embedded quote fix) ────────────────────────────
+
+    @Test
+    fun `userEntityFlow emits null then UserEntity when profile arrives`() = runTest {
+        store.userEntityFlow("alice").test {
+            // Initial: no profile
+            val initial = awaitItem()
+            assertNull("Should be null before profile insert", initial)
+
+            // Insert profile
+            store.insert(event(
+                id = "p-alice", kind = 0, pubkey = "alice",
+                content = """{"name":"Alice","picture":"https://a.jpg"}""",
+            ))
+
+            val resolved = awaitItem()
+            assertNotNull("Should resolve after profile insert", resolved)
+            assertEquals("Alice", resolved!!.name)
+            assertEquals("https://a.jpg", resolved.picture)
+            cancelAndIgnoreRemainingEvents()
         }
     }
 }

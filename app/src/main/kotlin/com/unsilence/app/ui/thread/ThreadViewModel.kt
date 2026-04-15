@@ -8,8 +8,9 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
@@ -47,6 +48,7 @@ data class ThreadUiState(
 @HiltViewModel
 class ThreadViewModel @Inject constructor(
     private val eventRepository: EventRepository,
+    private val memoryEventStore: MemoryEventStore,
     private val relayConfigDao: RelayConfigDao,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
@@ -74,7 +76,7 @@ class ThreadViewModel @Inject constructor(
         viewModelScope.launch {
             eventIdFlow
                 .filterNotNull()
-                .flatMapLatest { id -> eventRepository.threadFlow(id) }
+                .flatMapLatest { id -> memoryEventStore.threadFeedRowFlow(id) }
                 .collect { rows ->
                     val focusedId = eventIdFlow.value ?: return@collect
                     val focused = rows.firstOrNull { it.id == focusedId }
@@ -115,7 +117,7 @@ class ThreadViewModel @Inject constructor(
         _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
             // Resolve thread root: if the tapped event is a reply, load from its root
-            val event = eventRepository.getEventById(eventId)
+            val event = memoryEventStore.getEventEntity(eventId)
             val rootId = event?.rootId ?: event?.replyToId ?: eventId
 
             if (eventIdFlow.value == rootId) return@launch  // Already showing this thread

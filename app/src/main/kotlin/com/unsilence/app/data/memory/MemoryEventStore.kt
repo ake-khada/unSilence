@@ -1,12 +1,17 @@
 package com.unsilence.app.data.memory
 
 import android.os.Trace
-import android.util.Log
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.util.concurrent.ConcurrentHashMap
@@ -41,7 +46,11 @@ class MemoryEventStore @Inject constructor() {
 
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
+    /** Local cache freshness — when each profile was last updated in MemoryEventStore (epoch ms).
+     *  NOT the kind-0 event's original createdAt. Used by ProfileResolver. */
+    private val profileUpdatedAt = ConcurrentHashMap<String, Long>()
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
+    private val followsCreatedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
 
@@ -139,7 +148,12 @@ class MemoryEventStore @Inject constructor() {
 
     private fun handleProfile(event: NostrEvent) {
         profilesByPubkey.compute(event.pubkey) { _, existing ->
-            if (existing == null || event.createdAt >= existing.createdAt) event else existing
+            if (existing == null || event.createdAt >= existing.createdAt) {
+                profileUpdatedAt[event.pubkey] = System.currentTimeMillis()
+                event
+            } else {
+                existing
+            }
         }
     }
 
@@ -161,11 +175,7 @@ class MemoryEventStore @Inject constructor() {
             .filter { it.size >= 2 && it[0] == "p" }
             .map { it[1] }
             .toSet()
-        followsByPubkey.compute(event.pubkey) { _, existing ->
-            val existingEvent = eventsById.values.firstOrNull { it.pubkey == event.pubkey && it.kind == 3 && it.id != event.id }
-            if (existingEvent == null || event.createdAt >= existingEvent.createdAt) pubkeys
-            else followsByPubkey[event.pubkey] ?: pubkeys
-        }
+        updateFollows(event.pubkey, pubkeys, event.createdAt)
     }
 
     private fun handleRepost(event: NostrEvent) {
@@ -358,11 +368,6 @@ class MemoryEventStore @Inject constructor() {
                 if (filter.relayUrls != null && event.relaysSeen.none { it in filter.relayUrls }) continue
                 result.add(event)
             }
-            if (scanned > limit * 10) {
-                Log.d("MemoryEventStore",
-                    "feedEvents: scanned=$scanned accepted=${result.size} " +
-                        "limit=$limit ratio=${scanned.toFloat() / result.size.coerceAtLeast(1)}")
-            }
             return result
         } finally {
             Trace.endSection()
@@ -411,6 +416,27 @@ class MemoryEventStore @Inject constructor() {
     fun getProfile(pubkey: String): NostrEvent? = profilesByPubkey[pubkey]
     fun hasProfile(pubkey: String): Boolean = profilesByPubkey.containsKey(pubkey)
     fun getFollows(pubkey: String): Set<String>? = followsByPubkey[pubkey]
+
+    /** Local cache freshness — when this profile was last updated in MemoryEventStore (epoch ms).
+     *  NOT the kind-0 event's original createdAt. Used by ProfileResolver to decide re-fetch. */
+    fun getProfileLastUpdated(pubkey: String): Long = profileUpdatedAt[pubkey] ?: 0L
+
+    /**
+     * Direct-path update for kind-3 contact lists. Called by EventProcessor
+     * instead of channeling kind 3 through the feed-content batching system.
+     * Does NOT insert the kind-3 event into the main store — only updates
+     * the follows index. Stale updates (lower createdAt) are ignored.
+     */
+    fun updateFollows(pubkey: String, followedPubkeys: Set<String>, createdAt: Long) {
+        followsCreatedAt.compute(pubkey) { _, existingTs ->
+            if (existingTs != null && existingTs > createdAt) {
+                return@compute existingTs // stale — ignore
+            }
+            followsByPubkey[pubkey] = followedPubkeys
+            _followsSignal.value = System.nanoTime()
+            createdAt
+        }
+    }
     fun getRelayList(pubkey: String): RelayList? = relayListsByPubkey[pubkey]
     fun getMuteList(pubkey: String): MuteList? = muteListsByPubkey[pubkey]
 
@@ -434,6 +460,85 @@ class MemoryEventStore @Inject constructor() {
     fun profileFlow(pubkey: String): Flow<NostrEvent?> =
         _profileSignal.map { getProfile(pubkey) }
 
+    /** Thread flow with fixpoint collection — re-emits when feed signal bumps. */
+    fun threadFlow(rootId: String): Flow<List<NostrEvent>> =
+        _feedSignal.map { collectThread(rootId) }
+
+    /** Thread flow producing FeedRow for UI consumption (ThreadViewModel). */
+    fun threadFeedRowFlow(rootId: String): Flow<List<FeedRow>> =
+        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+            .map { collectThread(rootId).map { toFeedRow(it) } }
+
+    private fun collectThread(rootId: String): List<NostrEvent> {
+        val results = mutableListOf<NostrEvent>()
+        val included = mutableSetOf<String>()
+
+        eventsById[rootId]?.let {
+            results.add(it)
+            included.add(rootId)
+        }
+
+        // Add events that explicitly mark rootId as their thread root
+        for (event in eventsById.values) {
+            if (event.id in included) continue
+            if (event.rootId == rootId) {
+                results.add(event)
+                included.add(event.id)
+            }
+        }
+
+        // Fixpoint loop: add events whose replyToId points to anything
+        // already in the thread, until no new additions
+        var changed = true
+        while (changed) {
+            changed = false
+            for (event in eventsById.values) {
+                if (event.id in included) continue
+                if (event.replyToId != null && event.replyToId in included) {
+                    results.add(event)
+                    included.add(event.id)
+                    changed = true
+                }
+            }
+        }
+
+        return results.sortedBy { it.createdAt }
+    }
+
+    // ─── Entity adapters (bridge for consumers still expecting Room types) ──
+
+    /** Convert NostrEvent to EventEntity. Returns null if event not found. */
+    fun getEventEntity(eventId: String): EventEntity? {
+        val event = eventsById[eventId] ?: return null
+        return event.toEventEntity()
+    }
+
+    /** Convert profile NostrEvent to UserEntity. Returns null if no profile stored. */
+    fun getUserEntity(pubkey: String): UserEntity? {
+        val profile = profilesByPubkey[pubkey] ?: return null
+        val fields = parseProfileJson(profile.content)
+        return UserEntity(
+            pubkey = pubkey,
+            name = fields["name"],
+            displayName = fields["display_name"],
+            about = fields["about"],
+            picture = fields["picture"],
+            nip05 = fields["nip05"],
+            lud16 = fields["lud16"],
+            banner = fields["banner"],
+            createdAt = profile.createdAt,
+            updatedAt = profileUpdatedAt[pubkey] ?: 0L,
+        )
+    }
+
+    /** Observe a single event by ID. Emits null until the event arrives. */
+    fun eventEntityFlow(eventId: String): Flow<EventEntity?> =
+        _feedSignal.map { getEventEntity(eventId) }
+
+    /** Observe a single user profile by pubkey. Emits null until the profile arrives. */
+    fun userEntityFlow(pubkey: String): Flow<UserEntity?> =
+        _profileSignal.map { getUserEntity(pubkey) }
+
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
     fun writeRelaysFor(pubkey: String): List<String> =
@@ -446,12 +551,11 @@ class MemoryEventStore @Inject constructor() {
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
         val profile = profilesByPubkey[event.pubkey]
-        val profileContent = profile?.content
-        // Parse basic profile fields from JSON content
-        val authorName = profileContent?.extractJsonString("name")
-        val authorDisplayName = profileContent?.extractJsonString("display_name")
-        val authorPicture = profileContent?.extractJsonString("picture")
-        val authorNip05 = profileContent?.extractJsonString("nip05")
+        val fields = profile?.content?.let { parseProfileJson(it) } ?: emptyMap()
+        val authorName = fields["name"]
+        val authorDisplayName = fields["display_name"]
+        val authorPicture = fields["picture"]
+        val authorNip05 = fields["nip05"]
 
         val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
         val zap = zapStats(statsId)
@@ -692,7 +796,9 @@ class MemoryEventStore @Inject constructor() {
         zapStatsByEventId.clear()
         statsUpdatedAt.clear()
         profilesByPubkey.clear()
+        profileUpdatedAt.clear()
         followsByPubkey.clear()
+        followsCreatedAt.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
         replaceableByCoordinate.clear()
@@ -705,15 +811,38 @@ class MemoryEventStore @Inject constructor() {
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
-private fun String.extractJsonString(key: String): String? {
-    val searchKey = "\"$key\""
-    val idx = indexOf(searchKey)
-    if (idx < 0) return null
-    val afterColon = indexOf(':', idx + searchKey.length)
-    if (afterColon < 0) return null
-    val quoteStart = indexOf('"', afterColon + 1)
-    if (quoteStart < 0) return null
-    val quoteEnd = indexOf('"', quoteStart + 1)
-    if (quoteEnd < 0) return null
-    return substring(quoteStart + 1, quoteEnd)
+internal fun NostrEvent.toEventEntity(): EventEntity = EventEntity(
+    id = id,
+    pubkey = pubkey,
+    kind = kind,
+    content = content,
+    createdAt = createdAt,
+    tags = tags.joinToString(",", "[", "]") { tag ->
+        tag.joinToString(",", "[", "]") { value ->
+            "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        }
+    },
+    sig = sig,
+    relayUrl = relayUrl,
+    replyToId = replyToId,
+    rootId = rootId,
+    hasContentWarning = hasContentWarning,
+    contentWarningReason = contentWarningReason,
+    cachedAt = firstSeenAt,
+    firstSeenAt = firstSeenAt,
+)
+
+/** Parse profile JSON once and return all string fields. Handles escaped chars, nulls, etc. */
+private fun parseProfileJson(content: String): Map<String, String?> {
+    return try {
+        val obj = NostrJson.parseToJsonElement(content).jsonObject
+        buildMap {
+            for (key in PROFILE_JSON_KEYS) {
+                val element = obj[key]
+                put(key, if (element != null && element !is JsonNull && element is JsonPrimitive) element.content else null)
+            }
+        }
+    } catch (_: Exception) { emptyMap() }
 }
+
+private val PROFILE_JSON_KEYS = listOf("name", "display_name", "about", "picture", "nip05", "lud16", "banner")

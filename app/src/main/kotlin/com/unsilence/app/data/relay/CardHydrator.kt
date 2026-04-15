@@ -3,6 +3,7 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.VideoThumbnailCache
@@ -52,6 +53,7 @@ object Nip19FailureCache {
 @Singleton
 class CardHydrator @Inject constructor(
     private val eventDao: EventDao,
+    private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
@@ -174,6 +176,17 @@ class CardHydrator @Inject constructor(
                 }
             }
             extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
+            // Thread parents: replies reference their parent (replyToId) and root (rootId).
+            // Fetching these ensures Conversations tab parent notes resolve via hydrateRefs
+            // even if the initial lookupEvent times out.
+            event.replyToId?.let { id ->
+                referencedIds.add(id)
+                relayHints.putIfAbsent(id, event.relayUrl)
+            }
+            event.rootId?.let { id ->
+                referencedIds.add(id)
+                relayHints.putIfAbsent(id, event.relayUrl)
+            }
         }
 
         // Short-circuit: if no refs to resolve, skip the entire pipeline
@@ -184,8 +197,8 @@ class CardHydrator @Inject constructor(
         referencedIds.removeAll(missingRefCache.keys)
         if (referencedIds.isEmpty()) return
 
-        // Fetch missing referenced events
-        val missingRefs = referencedIds.filter { eventDao.getEventById(it) == null }
+        // Fetch missing referenced events (check MemoryEventStore, not Room)
+        val missingRefs = referencedIds.filter { memoryEventStore.getEventEntity(it) == null }
         if (missingRefs.isNotEmpty()) {
             // Broadcast fetch for all missing refs
             relayPool.fetchEventsByIds(missingRefs.toList())
@@ -196,17 +209,21 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        // After ref events arrive, resolve their authors
+        // Wait for missing refs to arrive from relays, then negative-cache stragglers
         if (missingRefs.isNotEmpty()) {
             delay(1500)
-            val stillMissing = missingRefs.filter { eventDao.getEventById(it) == null }
-            // Negative-cache refs that didn't arrive after relay round-trip
+            val stillMissing = missingRefs.filter { memoryEventStore.getEventEntity(it) == null }
             for (id in stillMissing) { missingRefCache[id] = true }
-            val refAuthors = missingRefs.filter { it !in stillMissing }
-                .mapNotNull { eventDao.getEventById(it)?.pubkey }
-            if (refAuthors.isNotEmpty()) {
-                userRepository.fetchMissingProfiles(refAuthors)
-            }
+        }
+
+        // Resolve authors for ALL referenced events (existing + newly fetched).
+        // Previously only missing refs got author resolution — refs already in
+        // MemoryEventStore were skipped, leaving embedded quote author profiles
+        // unresolved (no name, avatar, or NIP-05).
+        val allRefAuthors = referencedIds
+            .mapNotNull { memoryEventStore.getEventEntity(it)?.pubkey }
+        if (allRefAuthors.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(allRefAuthors)
         }
 
         // Prefetch video thumbnails (capped at 3 per batch)
