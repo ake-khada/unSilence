@@ -1,9 +1,9 @@
 package com.unsilence.app.ui.feed
 
+import android.os.Trace
 import android.util.Log
-import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.UserDao
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.RelayPool
 import kotlinx.coroutines.CoroutineScope
@@ -28,8 +28,7 @@ class FeedHydrationController(
     private val scope: CoroutineScope,
     private val cardHydrator: CardHydrator,
     private val relayPool: RelayPool,
-    private val userDao: UserDao,
-    private val eventStatsDao: EventStatsDao,
+    private val memoryEventStore: MemoryEventStore,
 ) {
     /** When non-null, source-relay fan-out skips this URL (single-relay feed optimization). */
     var feedRelayUrl: String? = null
@@ -137,6 +136,17 @@ class FeedHydrationController(
      * This is the single entry point — the controller decides what to do.
      */
     fun onScrollFrame(
+        visibleItems: List<FeedRow>,
+        allEvents: List<FeedRow>,
+        scrollPixelOffset: Int,
+        isScrollInProgress: Boolean,
+    ) {
+        Trace.beginSection("FeedHydrationController.enrich")
+        try { onScrollFrameInner(visibleItems, allEvents, scrollPixelOffset, isScrollInProgress) }
+        finally { Trace.endSection() }
+    }
+
+    private fun onScrollFrameInner(
         visibleItems: List<FeedRow>,
         allEvents: List<FeedRow>,
         scrollPixelOffset: Int,
@@ -529,10 +539,10 @@ class FeedHydrationController(
                 freshnessThreshold(targetCreatedAt[targetId] ?: 0L, now)
             }
 
-            // Query each tier separately, union the fresh sets
+            // Check each tier: IDs whose stats were updated after the threshold are fresh
             val freshIds = mutableSetOf<String>()
             for ((threshold, idsInTier) in tierGroups) {
-                freshIds.addAll(eventStatsDao.getFreshEngagementIds(idsInTier, threshold))
+                freshIds.addAll(idsInTier.filter { memoryEventStore.statsLastUpdated(it) > threshold })
             }
 
             val staleIds = candidateTargetIds.filter { it !in freshIds }.take(WARM_ZONE_ENGAGEMENT_CAP)

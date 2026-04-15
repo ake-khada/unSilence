@@ -1,7 +1,11 @@
 package com.unsilence.app.data.memory
 
+import android.os.Trace
+import android.util.Log
+import com.unsilence.app.data.db.dao.FeedRow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -333,15 +337,36 @@ class MemoryEventStore @Inject constructor() {
     // ─── Query API ──────────────────────────────────────────────────────────
 
     fun feedEvents(filter: FeedFilter, limit: Int = 300): List<NostrEvent> {
-        val result = mutableListOf<NostrEvent>()
-        for (entry in recentByCreatedAt) {
-            if (result.size >= limit) break
-            val event = eventsById[entry.id] ?: continue
-            if (event.kind !in filter.kinds) continue
-            if (filter.followedPubkeys != null && event.pubkey !in filter.followedPubkeys) continue
-            result.add(event)
+        Trace.beginSection("MemoryEventStore.feedEvents")
+        var scanned = 0
+        try {
+            val result = mutableListOf<NostrEvent>()
+            for (entry in recentByCreatedAt) {
+                scanned++
+                if (result.size >= limit) break
+                val event = eventsById[entry.id] ?: continue
+                if (event.kind !in filter.kinds) continue
+                if (filter.followedPubkeys != null && event.pubkey !in filter.followedPubkeys) continue
+                // Content filter: 1 = notes only, 2 = replies only
+                if (filter.contentFilter == 1 && event.kind != 6) {
+                    if (event.replyToId != null || event.rootId != null) continue
+                }
+                if (filter.contentFilter == 2) {
+                    if ((event.replyToId == null && event.rootId == null) || event.kind == 6) continue
+                }
+                // Relay URL scoping
+                if (filter.relayUrls != null && event.relaysSeen.none { it in filter.relayUrls }) continue
+                result.add(event)
+            }
+            if (scanned > limit * 10) {
+                Log.d("MemoryEventStore",
+                    "feedEvents: scanned=$scanned accepted=${result.size} " +
+                        "limit=$limit ratio=${scanned.toFloat() / result.size.coerceAtLeast(1)}")
+            }
+            return result
+        } finally {
+            Trace.endSection()
         }
-        return result
     }
 
     fun userEvents(pubkey: String, kinds: Set<Int>, limit: Int = 200): List<NostrEvent> {
@@ -400,7 +425,11 @@ class MemoryEventStore @Inject constructor() {
     // ─── Reactive flows ─────────────────────────────────────────────────────
 
     fun feedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> =
-        _feedSignal.map { feedEvents(filter, limit).map { toFeedRow(it) } }
+        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+            .map { feedEvents(filter, limit).map { toFeedRow(it) } }
+
+    fun followsFlow(pubkey: String): Flow<Set<String>> =
+        _followsSignal.map { getFollows(pubkey) ?: emptySet() }
 
     fun profileFlow(pubkey: String): Flow<NostrEvent?> =
         _profileSignal.map { getProfile(pubkey) }
@@ -433,13 +462,13 @@ class MemoryEventStore @Inject constructor() {
             kind = event.kind,
             content = event.content,
             createdAt = event.createdAt,
-            tags = event.tags,
+            tags = tagsToJson(event.tags),
             relayUrl = event.relayUrl,
             replyToId = event.replyToId,
             rootId = event.rootId,
             hasContentWarning = event.hasContentWarning,
             contentWarningReason = event.contentWarningReason,
-            firstSeenAt = event.firstSeenAt,
+            cachedAt = event.firstSeenAt,
             zapTotalSats = zap.totalSats,
             authorName = authorName,
             authorDisplayName = authorDisplayName,
@@ -450,6 +479,15 @@ class MemoryEventStore @Inject constructor() {
             repostCount = repostCount(statsId),
             zapCount = zap.count,
         )
+    }
+
+    /** Serialize tags to JSON format matching Room's storage: [["tag","val"],["tag","val"]] */
+    private fun tagsToJson(tags: List<List<String>>): String {
+        return tags.joinToString(",", "[", "]") { tag ->
+            tag.joinToString(",", "[", "]") { value ->
+                "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+            }
+        }
     }
 
     // ─── Snapshot persistence ───────────────────────────────────────────────

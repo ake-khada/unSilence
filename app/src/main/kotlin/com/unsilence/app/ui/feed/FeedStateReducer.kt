@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import android.os.Handler
 import android.os.Looper
+import android.os.Trace
 import android.util.Log
 import com.unsilence.app.data.db.dao.FeedRow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -161,6 +162,11 @@ class FeedStateReducer(private val feedKey: String) {
      * appends are never miscounted as new posts.
      */
     fun onNewEvents(allEvents: List<FeedRow>) {
+        Trace.beginSection("FeedStateReducer.reduce")
+        try { onNewEventsInner(allEvents) } finally { Trace.endSection() }
+    }
+
+    private fun onNewEventsInner(allEvents: List<FeedRow>) {
         latestRows = allEvents
 
         val current = _state.value

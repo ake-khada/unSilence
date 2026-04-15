@@ -1,7 +1,5 @@
 package com.unsilence.app.data.memory
 
-import androidx.compose.runtime.Immutable
-
 /**
  * In-memory Nostr event representation. Pre-parsed NIP-10 threading
  * and NIP-36 content warnings. Tags stored as parsed lists, not JSON.
@@ -46,41 +44,17 @@ data class EventEntry(val id: String, val createdAt: Long)
 
 /**
  * Feed query filter. Determines which events appear in a feed flow.
+ *
+ * Structural filters only — these are applied inside the walk so that
+ * [limit] counts accepted rows, not scanned rows. Presentation filters
+ * (media type, sinceHours, engagement minimums) stay in FeedViewModel.
+ *
+ * @param contentFilter 0 = all, 1 = notes only (no replies), 2 = replies only
+ * @param relayUrls When non-null, only events seen on at least one of these relays pass.
  */
 data class FeedFilter(
     val kinds: Set<Int> = setOf(1, 6, 30023),
     val followedPubkeys: Set<String>? = null,
-)
-
-/**
- * UI row contract. Replaces the Room-based FeedRow from EventDao.
- * Contains event data + denormalized author info + engagement counts.
- *
- * @Immutable: all fields are val, all collection types are immutable
- * interfaces (List, not MutableList). Compose compiler treats stdlib
- * List/Set as potentially unstable without this annotation.
- */
-@Immutable
-data class FeedRow(
-    val id: String,
-    val pubkey: String,
-    val kind: Int,
-    val content: String,
-    val createdAt: Long,
-    val tags: List<List<String>>,
-    val relayUrl: String,
-    val replyToId: String?,
-    val rootId: String?,
-    val hasContentWarning: Boolean,
-    val contentWarningReason: String?,
-    val firstSeenAt: Long,
-    val zapTotalSats: Long,
-    val authorName: String?,
-    val authorDisplayName: String?,
-    val authorPicture: String?,
-    val authorNip05: String?,
-    val reactionCount: Int,
-    val replyCount: Int,
-    val repostCount: Int,
-    val zapCount: Int,
+    val contentFilter: Int = 0,
+    val relayUrls: Set<String>? = null,
 )
