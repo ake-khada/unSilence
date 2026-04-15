@@ -211,10 +211,10 @@ class SnapshotSchedulerInvariantsTest {
         assertEquals(1, restoredStore.eventsByIds(setOf("safe-1")).size)
     }
 
-    // ── Test 7: attach does not start periodic save ────────────────────────
+    // ── Test 7: scheduler is idle before ON_START ────────────────────────
 
     @Test
-    fun `attach does not start periodic save before ON_START`() {
+    fun `scheduler is idle before ON_START fires`() {
         // After construction, periodicJob should be null — no eager scheduling.
         // attach() registers the lifecycle observer but does NOT start periodic saves.
         // Only ON_START (which we don't fire in this test) should start it.
