@@ -914,27 +914,7 @@ class RelayPool @Inject constructor(
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
     private fun isOneShotSubscription(subId: String): Boolean =
-        subId.startsWith("kind3-")                  ||
-        subId.startsWith("kind10002-")              ||
-        subId.startsWith("profiles-")               ||
-        subId.startsWith("hint-profiles-")          ||
-        subId.startsWith("src-profiles-")           ||
-        subId.startsWith("hint-event-")             ||
-        subId.startsWith("search-")                 ||
-        subId.startsWith("older-")                  ||
-        subId.startsWith("relay-ecosystem-")        ||
-        subId.startsWith("thread-event-")           ||
-        subId.startsWith("thread-replies-")         ||
-        subId.startsWith("thread-reactions-")       ||
-        subId.startsWith("thread-zaps-")            ||
-        subId.startsWith("user-posts-")             ||
-        subId.startsWith("user-longform-")          ||
-        subId.startsWith("user-engagement-")        ||
-        subId.startsWith("engagement-replies-")     ||
-        subId.startsWith("engagement-reactions-")   ||
-        subId.startsWith("engagement-zaps-")        ||
-        subId.startsWith("batch-events-")           ||
-        subId.startsWith("trust-scores-")
+        SubscriptionRules.isOneShotSubscription(subId)
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
