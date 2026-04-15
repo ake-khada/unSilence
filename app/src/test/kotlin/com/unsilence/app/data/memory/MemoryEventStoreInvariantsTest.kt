@@ -886,4 +886,101 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(firstReactionCount, target.reactionCount("e1"))
         assertEquals(firstStoreSize, target.eventsByIds(setOf("e1", "e2", "r1")).size)
     }
+
+    // ── feedEvents limit applies to accepted rows ──────────────────────────
+
+    @Test
+    fun `feedEvents limit applies to accepted rows not scanned rows`() {
+        // Seed 500 events: first 300 (newest) are replies, next 200 are notes.
+        // contentFilter=1 means "notes only" — should reject all 300 replies
+        // and accept the 200 notes from deeper in the store.
+        for (i in 1..200) {
+            store.insert(event(
+                id = "note-$i",
+                kind = 1,
+                createdAt = 1000L + i,
+                replyToId = null, rootId = null,
+            ))
+        }
+        for (i in 1..300) {
+            store.insert(event(
+                id = "reply-$i",
+                kind = 1,
+                createdAt = 2000L + i,
+                replyToId = "some-target",
+            ))
+        }
+
+        val filter = FeedFilter(
+            kinds = setOf(1),
+            contentFilter = 1,
+        )
+        val result = store.feedEvents(filter, limit = 200)
+
+        assertEquals("Expected 200 notes, got ${result.size}", 200, result.size)
+        assertTrue(
+            "All results should be notes, not replies",
+            result.all { it.replyToId == null && it.rootId == null },
+        )
+        assertTrue(
+            "Should include older notes that required scanning past replies",
+            result.any { it.id == "note-1" },
+        )
+    }
+
+    // ── feedEvents relay URL scoping ───────────────────────────────────────
+
+    @Test
+    fun `feedEvents with relayUrls filter respects relaysSeen`() {
+        val globalUrls = setOf("wss://global1.example.com", "wss://global2.example.com")
+
+        store.insert(event(
+            id = "non-global",
+            kind = 1,
+            relayUrl = "wss://private.example.com",
+        ))
+        store.insert(event(
+            id = "global",
+            kind = 1,
+            relayUrl = "wss://global1.example.com",
+        ))
+        val both = event(
+            id = "both",
+            kind = 1,
+            relayUrl = "wss://other.example.com",
+        )
+        store.insert(both)
+        store.addRelaySeen("both", "wss://global2.example.com")
+
+        val filter = FeedFilter(
+            kinds = setOf(1),
+            relayUrls = globalUrls,
+        )
+        val result = store.feedEvents(filter)
+        val ids = result.map { it.id }.toSet()
+
+        assertFalse("Non-global event should not appear", "non-global" in ids)
+        assertTrue("Global event should appear", "global" in ids)
+        assertTrue("Both-relay event should appear", "both" in ids)
+    }
+
+    // ── MemoryFeedFilter must not contain media fields ─────────────────────
+
+    @Test
+    fun `MemoryFeedFilter has no media-related fields`() {
+        val filter = FeedFilter()
+        val fields = filter::class.members.map { it.name }.toSet()
+
+        val mediaRelatedFields = listOf(
+            "media", "mediaType", "showImages",
+            "showVideos", "imageOnly", "videoOnly",
+        )
+        for (field in mediaRelatedFields) {
+            assertFalse(
+                "MemoryFeedFilter must not contain '$field' — media filtering " +
+                    "is presentation-layer, applied AFTER memory query.",
+                field in fields,
+            )
+        }
+    }
 }

@@ -4,12 +4,11 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
-import com.unsilence.app.data.db.dao.UserDao
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.auth.KeyManager
@@ -25,6 +24,7 @@ import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.memory.FeedFilter as MemoryFeedFilter
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -90,8 +90,7 @@ class FeedViewModel @Inject constructor(
     private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val pinnedRelayDao: PinnedRelayDao,
-    private val userDao: UserDao,
-    private val eventStatsDao: EventStatsDao,
+    private val memoryEventStore: MemoryEventStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -227,8 +226,7 @@ class FeedViewModel @Inject constructor(
         scope = viewModelScope,
         cardHydrator = cardHydrator,
         relayPool = relayPool,
-        userDao = userDao,
-        eventStatsDao = eventStatsDao,
+        memoryEventStore = memoryEventStore,
     )
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
@@ -442,7 +440,9 @@ class FeedViewModel @Inject constructor(
                     }
 
                     val cfValue = cf.value
-                    val roomFlow = when (type) {
+                    val pubkey = keyManager.getPublicKeyHex() ?: ""
+
+                    val feedFlow = when (type) {
                         is FeedType.Global    -> {
                             browseSession.stop()
                             val globalUrls = resolveGlobalUrls()
@@ -451,16 +451,30 @@ class FeedViewModel @Inject constructor(
                                 normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
                             }
                             relayPool.connect(globalUrls, isHomeFeed = true)
+                            Log.d("FeedVM", "A4_VERIFY: Global feed → MemoryEventStore")
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(globalUrls, filter, limit, contentFilter = cfValue)
+                                val memFilter = MemoryFeedFilter(
+                                    kinds = filter.enabledKinds.toSet(),
+                                    contentFilter = cfValue,
+                                    relayUrls = globalUrls.toSet(),
+                                )
+                                memoryEventStore.feedFlow(memFilter, limit)
                             }
                         }
                         is FeedType.Following -> {
                             browseSession.stop()
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
-                            _displayLimit.flatMapLatest { limit ->
-                                eventRepository.followingFeedFlow(filter, limit, contentFilter = cfValue)
+                            Log.d("FeedVM", "A4_VERIFY: Following feed → MemoryEventStore")
+                            combine(_displayLimit, memoryEventStore.followsFlow(pubkey)) { limit, follows ->
+                                limit to follows
+                            }.flatMapLatest { (limit, follows) ->
+                                val memFilter = MemoryFeedFilter(
+                                    kinds = filter.enabledKinds.toSet(),
+                                    followedPubkeys = follows,
+                                    contentFilter = cfValue,
+                                )
+                                memoryEventStore.feedFlow(memFilter, limit)
                             }
                         }
                         is FeedType.RelaySet  -> {
@@ -483,9 +497,31 @@ class FeedViewModel @Inject constructor(
                             }
                         }
                     }
+
+                    // Post-query filters for MemoryEventStore feeds (Global/Following).
+                    // Structural filters (kind, pubkey, contentFilter, relayUrls) are
+                    // applied inside the walk so limit counts accepted rows.
+                    // Presentation filters (sinceHours, engagement minimums) stay here.
+                    val isMemoryFeed = type is FeedType.Global || type is FeedType.Following
+                    val filtered = if (isMemoryFeed) {
+                        val sinceTs = filter.sinceHours?.let {
+                            System.currentTimeMillis() / 1000L - it * 3600L
+                        } ?: 0L
+                        feedFlow.map { rows ->
+                            rows.filter { row ->
+                                val passTime = row.createdAt >= sinceTs
+                                val passEngagement = row.replyCount >= filter.minReplies &&
+                                    row.repostCount >= filter.minReposts &&
+                                    row.reactionCount >= filter.minReactions &&
+                                    row.zapTotalSats >= filter.minZapSats
+                                passTime && passEngagement
+                            }
+                        }
+                    } else feedFlow
+
                     // Post-query media type filter: Text/Images/Video within kind 1
-                    if (filter.needsMediaFilter) roomFlow.map { rows -> applyMediaFilter(rows, filter.showTypes) }
-                    else roomFlow
+                    if (filter.needsMediaFilter) filtered.map { rows -> applyMediaFilter(rows, filter.showTypes) }
+                    else filtered
                 }
                 // Drop intermediate emissions when the collector is busy (scroll scenarios).
                 // Without conflate(), rapid Room re-queries queue up and force Compose
