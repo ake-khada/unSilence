@@ -1,0 +1,55 @@
+package com.unsilence.app.data.relay
+
+/**
+ * Pure subscription routing rules extracted from RelayPool.
+ * This is the canonical source of truth for EOSE close behavior
+ * and home-sub routing eligibility.
+ *
+ * RelayPool delegates to these functions. Tests verify the rules
+ * without needing WebSocket infrastructure.
+ */
+object SubscriptionRules {
+
+    /**
+     * One-shot subscription prefixes: relay sends CLOSE after EOSE.
+     *
+     * 21 prefixes verified against RelayPool.isOneShotSubscription()
+     * at commit 201d067. Sprint 0 inventory documented "17 one-shot
+     * prefix types" — that count was wrong; the actual implementation
+     * has 21.
+     */
+    private val oneShotPrefixes = listOf(
+        "kind3-",
+        "kind10002-",
+        "profiles-",
+        "hint-profiles-",
+        "src-profiles-",
+        "hint-event-",
+        "search-",
+        "older-",
+        "relay-ecosystem-",
+        "thread-event-",
+        "thread-replies-",
+        "thread-reactions-",
+        "thread-zaps-",
+        "user-posts-",
+        "user-longform-",
+        "user-engagement-",
+        "engagement-replies-",
+        "engagement-reactions-",
+        "engagement-zaps-",
+        "batch-events-",
+        "trust-scores-",
+    )
+
+    fun isOneShotSubscription(subId: String): Boolean =
+        oneShotPrefixes.any { subId.startsWith(it) }
+
+    /**
+     * Only PERSISTENT-purpose relays receive home feed subscriptions
+     * (feed-posts, feed-media, feed-longform, follows-, notifs-).
+     * BROWSE and OUTBOX relays must not receive these.
+     */
+    fun shouldReceiveHomeSubs(purpose: ConnectionPurpose): Boolean =
+        purpose == ConnectionPurpose.PERSISTENT
+}
