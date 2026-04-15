@@ -9,6 +9,8 @@ import java.util.concurrent.ConcurrentSkipListSet
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val SNAPSHOT_VERSION = "SNAPSHOT_V1"
+
 @Singleton
 class MemoryEventStore @Inject constructor() {
 
@@ -419,6 +421,8 @@ class MemoryEventStore @Inject constructor() {
     suspend fun saveSnapshot(file: File) {
         val tmpFile = File(file.parentFile, "${file.name}.tmp")
         tmpFile.bufferedWriter().use { writer ->
+            writer.write(SNAPSHOT_VERSION)
+            writer.newLine()
             for (event in eventsById.values) {
                 writer.write(serializeEvent(event))
                 writer.newLine()
@@ -449,9 +453,19 @@ class MemoryEventStore @Inject constructor() {
     suspend fun restoreFromSnapshot(file: File) {
         if (!file.exists()) return
         var inAggregates = false
+        var versionChecked = false
 
         file.bufferedReader().useLines { lines ->
             for (line in lines) {
+                // First line must be the version header
+                if (!versionChecked) {
+                    versionChecked = true
+                    if (line != SNAPSHOT_VERSION) {
+                        // Unknown format — treat as missing snapshot
+                        return
+                    }
+                    continue
+                }
                 if (line == "---AGGREGATES---") {
                     inAggregates = true
                     continue
@@ -460,7 +474,6 @@ class MemoryEventStore @Inject constructor() {
                     restoreAggregate(line)
                 } else {
                     val event = deserializeEvent(line) ?: continue
-                    // Direct insert into store — rebuilds indexes
                     insertFromSnapshot(event)
                 }
             }
