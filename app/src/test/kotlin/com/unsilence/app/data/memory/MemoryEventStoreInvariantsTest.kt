@@ -840,4 +840,18 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.delete()
         }
     }
+
+    // ── pendingRelays cap ───────────────────────────────────────────────────
+
+    @Test
+    fun `pendingRelays does not grow unbounded when insert never fires`() {
+        // Simulate seenIds dedups for events that never get inserted
+        for (i in 1..1500) {
+            store.addRelaySeen("event-$i", "wss://relay$i.example.com")
+        }
+        assertTrue(
+            "Expected pendingRelayCount <= 1000, got ${store.pendingRelayCount}",
+            store.pendingRelayCount <= 1000,
+        )
+    }
 }
