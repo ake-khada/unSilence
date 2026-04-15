@@ -11,6 +11,7 @@ import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.OgMetadata
@@ -57,6 +58,7 @@ class NoteActionsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val eventRepository: EventRepository,
     private val userRepository: UserRepository,
+    private val memoryEventStore: MemoryEventStore,
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
@@ -184,7 +186,7 @@ class NoteActionsViewModel @Inject constructor(
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val nowSeconds  = System.currentTimeMillis() / 1000L
-            val original   = eventRepository.getEventById(eventId) ?: return@launch
+            val original   = memoryEventStore.getEventEntity(eventId) ?: return@launch
             val originalJson = entityToJson(original)
 
             val template = EventTemplate<RepostEvent>(
@@ -270,8 +272,22 @@ class NoteActionsViewModel @Inject constructor(
     /** Event IDs we already attempted to fetch from relays (prevents redundant requests). */
     private val fetchedQuoteIds = mutableSetOf<String>()
 
-    suspend fun lookupProfile(pubkey: String): UserEntity? =
-        userRepository.getUser(pubkey)
+    /**
+     * Look up a profile by pubkey. Returns immediately if cached; otherwise
+     * triggers a relay fetch and waits up to 5 seconds for the profile to
+     * arrive via EventProcessor → MemoryEventStore.
+     * Mirrors lookupEvent's fetch-then-wait pattern so embedded quote author
+     * profiles resolve even when not pre-fetched by hydrateProfiles.
+     */
+    suspend fun lookupProfile(pubkey: String): UserEntity? {
+        memoryEventStore.getUserEntity(pubkey)?.let { return it }
+        // Trigger profile fetch — fetchMissingProfiles pre-filters via
+        // profileResolver.filterUnresolved() and has in-flight guards.
+        userRepository.fetchMissingProfiles(listOf(pubkey))
+        return withTimeoutOrNull(5_000L) {
+            memoryEventStore.userEntityFlow(pubkey).filterNotNull().first()
+        }
+    }
 
     /**
      * Look up an event by ID. Checks Room first; if missing, triggers a one-shot relay
@@ -282,8 +298,8 @@ class NoteActionsViewModel @Inject constructor(
      * happens every call — so recomposition after a late relay arrival can still resolve.
      */
     suspend fun lookupEvent(eventId: String, relayHints: List<String> = emptyList()): EventEntity? {
-        // Fast path: already cached in Room
-        eventRepository.getEventById(eventId)?.let { return it }
+        // Fast path: already in MemoryEventStore
+        memoryEventStore.getEventEntity(eventId)?.let { return it }
 
         // Trigger relay fetch only once per event ID
         val shouldFetch = synchronized(fetchedQuoteIds) { fetchedQuoteIds.add(eventId) }
@@ -295,9 +311,9 @@ class NoteActionsViewModel @Inject constructor(
             }
         }
 
-        // Wait for the event to appear in Room (from any source)
+        // Wait for the event to appear in MemoryEventStore (via EventProcessor)
         return withTimeoutOrNull(5_000L) {
-            eventRepository.flowById(eventId).filterNotNull().first()
+            memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
         }
     }
 

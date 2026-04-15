@@ -145,10 +145,13 @@ private fun ThreadedReplyItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Two-phase parent lookup: Room first, then relay fetch (lookupEvent does both + 5s wait)
+    // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
+    // Pass the reply's source relay as a hint — the parent event is most likely
+    // on the same relay. Without this hint, fetchEventById tries 3 random relays
+    // which may not have the parent (especially for non-indexed content).
     val parentEvent by produceState<EventEntity?>(null, parentId) {
         if (callbacks.lookupEvent != null) {
-            value = callbacks.lookupEvent.invoke(parentId, emptyList())
+            value = callbacks.lookupEvent.invoke(parentId, listOf(replyRow.relayUrl))
         }
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
