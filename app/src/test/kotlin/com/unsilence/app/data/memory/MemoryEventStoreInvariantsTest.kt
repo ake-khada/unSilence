@@ -17,6 +17,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.StringReader
+import java.io.StringWriter
 
 class MemoryEventStoreInvariantsTest {
 
@@ -565,11 +567,11 @@ class MemoryEventStoreInvariantsTest {
         // Save snapshot
         val tmpFile = java.io.File.createTempFile("snapshot-test", ".bin")
         try {
-            store.saveSnapshot(tmpFile)
+            tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Restore into fresh store
             val restored = MemoryEventStore()
-            restored.restoreFromSnapshot(tmpFile)
+            tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Verify events
             assertEquals(6, restored.eventsByIds(
@@ -612,7 +614,7 @@ class MemoryEventStoreInvariantsTest {
 
         val tmpFile = java.io.File.createTempFile("signal-test", ".bin")
         try {
-            store.saveSnapshot(tmpFile)
+            tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Fresh store — subscribe to flows BEFORE restore
             val restored = MemoryEventStore()
@@ -622,7 +624,7 @@ class MemoryEventStoreInvariantsTest {
                 assertTrue(initial.isEmpty())
 
                 // Restore should bump _feedSignal → trigger re-emission
-                restored.restoreFromSnapshot(tmpFile)
+                tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
                 val afterRestore = awaitItem()
                 assertTrue(afterRestore.isNotEmpty())
@@ -793,7 +795,7 @@ class MemoryEventStoreInvariantsTest {
         try {
             // Measure save
             val saveStart = System.nanoTime()
-            store.saveSnapshot(tmpFile)
+            tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
             val saveMs = (System.nanoTime() - saveStart) / 1_000_000.0
 
             val fileSizeKB = tmpFile.length() / 1024.0
@@ -801,7 +803,7 @@ class MemoryEventStoreInvariantsTest {
             // Measure restore
             val restored = MemoryEventStore()
             val restoreStart = System.nanoTime()
-            restored.restoreFromSnapshot(tmpFile)
+            tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
             val restoreMs = (System.nanoTime() - restoreStart) / 1_000_000.0
 
             // Print metrics (visible in test output)
@@ -830,7 +832,7 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.writeText("SNAPSHOT_V99\nsome garbage data\n")
 
             val restored = MemoryEventStore()
-            restored.restoreFromSnapshot(tmpFile)
+            tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Store should remain completely empty — no crash, no partial load
             assertTrue(restored.eventsByIds(setOf("anything")).isEmpty())
@@ -853,5 +855,35 @@ class MemoryEventStoreInvariantsTest {
             "Expected pendingRelayCount <= 1000, got ${store.pendingRelayCount}",
             store.pendingRelayCount <= 1000,
         )
+    }
+
+    // ── restoreSnapshotFrom idempotency ────────────────────────────────────
+
+    @Test
+    fun `restoreSnapshotFrom is idempotent across multiple calls`() = runTest {
+        // Populate a source store with events + engagement that produces aggregates
+        val source = MemoryEventStore()
+        source.insert(event(id = "e1", kind = 1))
+        source.insert(event(id = "e2", kind = 1, replyToId = "e1", tags = listOf(listOf("e", "e1"))))
+        source.insert(event(id = "r1", kind = 7, tags = listOf(listOf("e", "e1"))))
+
+        val snapshot = StringWriter()
+        source.saveSnapshotTo(snapshot.buffered())
+        val snapshotData = snapshot.toString()
+
+        // Restore once
+        val target = MemoryEventStore()
+        target.restoreSnapshotFrom(StringReader(snapshotData).buffered())
+        val firstReplyCount = target.replyCount("e1")
+        val firstReactionCount = target.reactionCount("e1")
+        val firstStoreSize = target.eventsByIds(setOf("e1", "e2", "r1")).size
+
+        // Restore again with same data
+        target.restoreSnapshotFrom(StringReader(snapshotData).buffered())
+
+        // Counts and store size must be identical
+        assertEquals(firstReplyCount, target.replyCount("e1"))
+        assertEquals(firstReactionCount, target.reactionCount("e1"))
+        assertEquals(firstStoreSize, target.eventsByIds(setOf("e1", "e2", "r1")).size)
     }
 }
