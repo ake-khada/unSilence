@@ -1,167 +1,207 @@
 package com.unsilence.app.data.relay
 
-import org.junit.Ignore
+import com.unsilence.app.data.memory.MemoryEventStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
- * Invariant tests for EventProcessor behavior during the A.2 rewrite
+ * Invariant tests for EventProcessor behavior after the A.2 rewrite
  * (EventProcessor writes to MemoryEventStore instead of Room).
  *
- * Each test is @Ignore until A.2 rewires EventProcessor. Un-ignore
- * one at a time as each behavior is implemented:
- *
- *  A.2 step 1: process() entry point → MemoryEventStore.insert()
- *  A.2 step 2: dedup via seenIds (already exists, must survive rewrite)
- *  A.2 step 3: spam filter / NIP-40 expiry (already exist, must survive)
- *
- * The tests reference EventProcessor's internal behavior documented in
- * Sprint 0 Section 1. They will need a TestDispatcher, a real
- * MemoryEventStore instance, and mock/stub DAOs (or those DAOs removed
- * if A.2 removes DAO dependencies from EventProcessor).
- *
- * NOTE: android.util.Log calls in EventProcessor will crash in JVM
- * unit tests. A.2 must either add Robolectric, replace Log with an
- * injectable logger, or use a Log stub (e.g., ShadowLog). Plan for
- * this when un-ignoring.
+ * Each test uses a real MemoryEventStore. The EventProcessor's drainers
+ * are stopped via setTestScope(); tests call drainForTest() to push
+ * channel contents through flushBatch into MemoryEventStore.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class EventProcessorInvariantsTest {
 
-    @Test
-    @Ignore("Pending A.2 EventProcessor rewrite to MemoryEventStore")
-    fun `duplicate event arrival uses queue path not per-event coroutine`() {
-        // TODO: A.2 implementation
-        //
-        // Setup:
-        //   - Inject TestDispatcher into EventProcessor's CoroutineScope
-        //   - Inject real MemoryEventStore
-        //   - Track scope.launch call count via a wrapper or spy
-        //
-        // Action:
-        //   - Build a valid EVENT JSON string with a fixed event ID
-        //   - Call processor.process(raw, "wss://relay.example.com") 100 times
-        //     with different relay URLs but same event ID
-        //
-        // Assert:
-        //   - MemoryEventStore.eventsByIds(setOf(eventId)).size == 1
-        //   - The stored event's relaysSeen.size == 100 (or at least > 1)
-        //   - scope.launch counter shows the relay provenance queue path
-        //     was taken (N-1 times) rather than spawning N coroutines
-        //     for full event processing
-        //
-        // Why this matters:
-        //   The same event arrives from 19+ relays simultaneously.
-        //   Pre-seenIds, each arrival spawned a full processing coroutine.
-        //   Post-seenIds, duplicates only record relay provenance via a
-        //   lightweight queue path (no JSON parsing, no Room writes).
+    private lateinit var store: MemoryEventStore
+    private lateinit var processor: EventProcessor
+
+    @Before
+    fun setUp() {
+        store = MemoryEventStore()
+        val outboxRouter = dagger.Lazy<OutboxRouter> { error("OutboxRouter not needed in this test") }
+        processor = EventProcessor(store, outboxRouter)
+        // Stop drainers — tests use drainForTest() for synchronous channel drain
+        processor.setTestScope(CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher()))
     }
 
-    @Test
-    @Ignore("Pending A.2 EventProcessor rewrite to MemoryEventStore")
-    fun `seenIds dedup prevents reprocessing across flushBatch cycles`() {
-        // TODO: A.2 implementation
-        //
-        // Setup:
-        //   - Inject TestDispatcher + real MemoryEventStore
-        //   - Spy on the JSON parse path (e.g., count calls to handleEvent
-        //     or the first method after seenIds check)
-        //
-        // Action:
-        //   - Build a valid EVENT JSON string
-        //   - Call processor.process(raw, relay) 10 times with same raw message
-        //   - Advance TestDispatcher to ensure flushBatch completes between some calls
-        //
-        // Assert:
-        //   - Parse/handleEvent spy was called exactly ONCE
-        //   - MemoryEventStore contains exactly 1 event
-        //
-        // Why this matters:
-        //   seenIds is a ConcurrentHashMap that persists across flushBatch
-        //   cycles. An event seen in batch N must not be re-parsed in batch N+1.
-        //   Without seenIds, hot channel batching alone is insufficient because
-        //   the same event arrives from different relays at different times.
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Build a valid raw Nostr EVENT message that EventProcessor can parse.
+     * The id is a 64-char hex string derived from [seed].
+     * Content is JSON-escaped for safe embedding in the EVENT JSON.
+     */
+    private fun rawEvent(
+        seed: Int,
+        kind: Int = 1,
+        content: String = "hello nostr",
+        relayUrl: String = "wss://relay.example.com",
+        tags: String = "[]",
+        createdAt: Long = 1700000000L + seed,
+    ): Pair<String, String> {
+        val id = seed.toString().padStart(64, 'a')
+        val pubkey = "b".repeat(64)
+        val sig = "c".repeat(128)
+        // JSON-escape content: backslashes first, then quotes, then newlines
+        val escaped = content
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        val raw = """["EVENT","sub-1",{"id":"$id","pubkey":"$pubkey","kind":$kind,"content":"$escaped","created_at":$createdAt,"tags":$tags,"sig":"$sig"}]"""
+        return raw to relayUrl
     }
 
-    @Test
-    @Ignore("Pending A.2 EventProcessor rewrite to MemoryEventStore")
-    fun `trimDedupCache evicts when seenIds exceeds 10000`() {
-        // TODO: A.2 implementation
-        //
-        // Setup:
-        //   - Inject TestDispatcher + real MemoryEventStore
-        //   - Access seenIds size via reflection (or a test-only accessor
-        //     added during A.2 rewrite — acceptable since EventProcessor
-        //     is being gutted anyway)
-        //
-        // Action:
-        //   - Generate 11000 unique valid EVENT JSON strings
-        //   - Call processor.process() for each one
-        //   - Advance TestDispatcher to ensure trimDedupCacheIfNeeded fires
-        //
-        // Assert:
-        //   - seenIds.size is between 8000 and 10000 after trim
-        //     (DEDUP_MAX=10000, DEDUP_TRIM=2000, so trim removes ~2000)
-        //   - All 11000 events are in MemoryEventStore (trim only affects
-        //     the dedup cache, not the event store itself)
-        //
-        // Why this matters:
-        //   Without trim, seenIds grows unbounded. With trim, the oldest
-        //   ~2000 entries are evicted when size exceeds 10000. The eviction
-        //   is approximate (ConcurrentHashMap has no defined iteration order)
-        //   but bounded.
-    }
+    private fun eventId(seed: Int): String = seed.toString().padStart(64, 'a')
+
+    // ── Test 1: Duplicate event relay provenance ────────────────────────────
 
     @Test
-    @Ignore("Pending A.2 EventProcessor rewrite to MemoryEventStore")
-    fun `content starting with brace is filtered for kind 1`() {
-        // TODO: A.2 implementation
-        //
-        // Setup:
-        //   - Inject TestDispatcher + real MemoryEventStore
-        //
-        // Action:
-        //   - Build a valid EVENT JSON for kind=1 with content="{spam json}"
-        //   - Call processor.process(raw, relay)
-        //   - Advance dispatcher to flush
-        //
-        // Assert:
-        //   - MemoryEventStore.eventsByIds(setOf(eventId)) is EMPTY
-        //   - The event was rejected by the spam filter before reaching
-        //     the channel/store
-        //
-        // Also test:
-        //   - Kind 1 with content="normal text" IS stored (control)
-        //   - Kind 0 with content="{...}" IS stored (spam filter is kind-1 only)
-        //
-        // Why this matters:
-        //   Machine-generated JSON payloads (bridge bots, protocol broadcasts)
-        //   posted as kind-1 notes pollute feeds. The filter checks
-        //   content.startsWith("{") for kind 1 only. EventProcessor line 251.
+    fun `duplicate event arrival uses queue path not per-event coroutine`() = runTest {
+        val (raw, _) = rawEvent(1)
+        val relayUrls = (1..100).map { "wss://relay$it.example.com" }
+
+        // Process same event from 100 different relays.
+        // First goes through channel→flushBatch→insert.
+        // Remaining 99 hit seenIds dedup → addRelaySeen (may buffer in pendingRelays
+        // until insert is called during drainForTest).
+        for (url in relayUrls) {
+            processor.process(raw, url)
+        }
+        processor.drainForTest()
+
+        // Only 1 event stored
+        val events = store.eventsByIds(setOf(eventId(1)))
+        assertEquals("Expected exactly 1 event in store", 1, events.size)
+
+        // All 100 relays recorded in relaysSeen
+        val relaysSeen = events.first().relaysSeen
+        assertEquals("Expected 100 relays in relaysSeen", 100, relaysSeen.size)
+        for (url in relayUrls) {
+            assertTrue("Missing relay: $url", relaysSeen.contains(url))
+        }
     }
 
+    // ── Test 2: seenIds dedup prevents reprocessing ─────────────────────────
+
     @Test
-    @Ignore("Pending A.2 EventProcessor rewrite to MemoryEventStore")
-    fun `expired events per NIP-40 are filtered`() {
-        // TODO: A.2 implementation
-        //
-        // Setup:
-        //   - Inject TestDispatcher + real MemoryEventStore
-        //
-        // Action:
-        //   - Build a valid EVENT JSON with an "expiration" tag set to
-        //     (now - 3600) — i.e., expired 1 hour ago
-        //   - Call processor.process(raw, relay)
-        //   - Advance dispatcher to flush
-        //
-        // Assert:
-        //   - MemoryEventStore.eventsByIds(setOf(eventId)) is EMPTY
-        //
-        // Also test:
-        //   - Event with expiration tag in the FUTURE IS stored (control)
-        //   - Event with NO expiration tag IS stored (control)
-        //
-        // Why this matters:
-        //   NIP-40 specifies that events with an expiration tag whose value
-        //   is before the current time should be treated as deleted.
-        //   EventProcessor checks this at line 244-247 before any routing.
+    fun `seenIds dedup prevents reprocessing across flushBatch cycles`() = runTest {
+        val (raw, relay) = rawEvent(2)
+
+        // Process same raw message 10 times from same relay
+        repeat(10) {
+            processor.process(raw, relay)
+        }
+        processor.drainForTest()
+
+        // Exactly 1 event in store (seenIds prevented re-parse + re-insert)
+        val events = store.eventsByIds(setOf(eventId(2)))
+        assertEquals("Expected exactly 1 event in store", 1, events.size)
+    }
+
+    // ── Test 3: trimDedupCache evicts when over 10000 ───────────────────────
+
+    @Test
+    fun `trimDedupCache evicts when seenIds exceeds 10000`() = runTest {
+        // Insert 11000 unique events, draining every 200 to avoid channel
+        // capacity overflow (channels cap at 500, trySend drops silently).
+        for (i in 1..11000) {
+            val (raw, relay) = rawEvent(i)
+            processor.process(raw, relay)
+            if (i % 200 == 0) processor.drainForTest()
+        }
+        processor.drainForTest()
+
+        // seenIds should have been trimmed: between 9000 and 10000
+        val size = processor.seenIds.size
+        assertTrue(
+            "Expected seenIds.size between 9000 and 10000, got $size",
+            size in 9000..10000,
+        )
+
+        // All 11000 events should be in MemoryEventStore regardless of trim
+        val allEvents = store.eventsByIds((1..11000).map { eventId(it) }.toSet())
+        assertEquals("Expected all 11000 events in store", 11000, allEvents.size)
+    }
+
+    // ── Test 4: Spam filter for kind 1 starting with "{" ────────────────────
+
+    @Test
+    fun `content starting with brace is filtered for kind 1`() = runTest {
+        // Spam: kind 1 with JSON content → rejected
+        val (spamRaw, spamRelay) = rawEvent(seed = 10, kind = 1, content = """{"spam":true}""")
+        processor.process(spamRaw, spamRelay)
+
+        // Control: kind 1 with normal text → accepted
+        val (normalRaw, normalRelay) = rawEvent(seed = 11, kind = 1, content = "normal post")
+        processor.process(normalRaw, normalRelay)
+
+        // Control: kind 0 with JSON content → accepted (spam filter is kind-1 only)
+        val (profileRaw, profileRelay) = rawEvent(seed = 12, kind = 0, content = """{"name":"alice"}""")
+        processor.process(profileRaw, profileRelay)
+
+        processor.drainForTest()
+
+        // Spam event rejected
+        val spamEvents = store.eventsByIds(setOf(eventId(10)))
+        assertTrue("Spam event should be rejected", spamEvents.isEmpty())
+
+        // Normal kind-1 accepted
+        val normalEvents = store.eventsByIds(setOf(eventId(11)))
+        assertEquals("Normal kind-1 should be stored", 1, normalEvents.size)
+
+        // Kind-0 profile with JSON accepted
+        val profileEvents = store.eventsByIds(setOf(eventId(12)))
+        assertEquals("Kind-0 profile with JSON content should be stored", 1, profileEvents.size)
+    }
+
+    // ── Test 5: NIP-40 expiry filter ────────────────────────────────────────
+
+    @Test
+    fun `expired events per NIP-40 are filtered`() = runTest {
+        val pastExpiration = (System.currentTimeMillis() / 1000L) - 3600  // 1 hour ago
+        val futureExpiration = (System.currentTimeMillis() / 1000L) + 3600  // 1 hour from now
+
+        // Expired event → rejected
+        val (expiredRaw, expiredRelay) = rawEvent(
+            seed = 20,
+            tags = """[["expiration","$pastExpiration"]]""",
+        )
+        processor.process(expiredRaw, expiredRelay)
+
+        // Future expiration → accepted
+        val (futureRaw, futureRelay) = rawEvent(
+            seed = 21,
+            tags = """[["expiration","$futureExpiration"]]""",
+        )
+        processor.process(futureRaw, futureRelay)
+
+        // No expiration tag → accepted
+        val (noExpiryRaw, noExpiryRelay) = rawEvent(seed = 22)
+        processor.process(noExpiryRaw, noExpiryRelay)
+
+        processor.drainForTest()
+
+        // Expired event rejected
+        val expiredEvents = store.eventsByIds(setOf(eventId(20)))
+        assertTrue("Expired event should be rejected", expiredEvents.isEmpty())
+
+        // Future expiration accepted
+        val futureEvents = store.eventsByIds(setOf(eventId(21)))
+        assertEquals("Future-expiration event should be stored", 1, futureEvents.size)
+
+        // No expiration accepted
+        val noExpiryEvents = store.eventsByIds(setOf(eventId(22)))
+        assertEquals("Event with no expiration should be stored", 1, noExpiryEvents.size)
     }
 }

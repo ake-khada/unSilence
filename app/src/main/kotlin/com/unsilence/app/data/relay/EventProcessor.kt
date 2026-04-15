@@ -1,18 +1,8 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
-import com.unsilence.app.data.db.dao.EventDao
-import com.unsilence.app.data.db.dao.EventRelayDao
-import com.unsilence.app.data.db.dao.EventStatsDao
-import com.unsilence.app.data.db.dao.ReactionDao
-import com.unsilence.app.data.db.dao.TagDao
-import com.unsilence.app.data.db.dao.UserDao
-import com.unsilence.app.data.db.entity.EventEntity
-import com.unsilence.app.data.db.entity.EventRelayEntity
-import com.unsilence.app.data.db.entity.EventStatsEntity
-import com.unsilence.app.data.db.entity.ReactionEntity
-import com.unsilence.app.data.db.entity.TagEntity
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,8 +10,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import androidx.room.withTransaction
-import com.unsilence.app.data.db.AppDatabase
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.intOrNull
@@ -29,8 +17,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
-import com.vitorpamplona.quartz.lightning.LnInvoiceUtil
-import java.math.BigDecimal
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -42,17 +28,7 @@ private const val DEDUP_MAX  = 10_000
 private const val DEDUP_TRIM = 2_000
 
 /**
- * Parsed, ready-to-persist entity. The sealed type encodes which table it targets so
- * [flushBatch] can route without another when-expression.
- */
-sealed class ProcessedEvent {
-    data class Event(val entity: EventEntity)       : ProcessedEvent()
-    data class User(val entity: UserEntity)         : ProcessedEvent()
-    data class Reaction(val entity: ReactionEntity) : ProcessedEvent()
-}
-
-/**
- * Parses raw relay wire messages and writes valid events to Room.
+ * Parses raw relay wire messages and writes valid events to [MemoryEventStore].
  *
  * Performance architecture (fixes phone overheating from 19-relay fan-out):
  *
@@ -64,29 +40,51 @@ sealed class ProcessedEvent {
  *     startsWith() call. EOSE, OK, NOTICE, CLOSED never reach the JSON parser.
  *
  *  3. PRIORITY LANES — two channels:
- *       HOT  (cap 50 ): kinds 1, 6, 20, 21, 30023 — feed content, flushed every 100 ms.
+ *       HOT  (cap 500): kinds 1, 6, 20, 21, 30023 — feed content, flushed every 100 ms.
  *       COLD (cap 500): kinds 0, 7, 9735           — background data, flushed every 2 s.
  *
- *  4. BATCHED ROOM WRITES — drainer coroutines collect from their channel, then call
- *     a single batch-insert DAO method instead of one INSERT per event.
+ *  4. BATCHED WRITES — drainer coroutines collect from their channel, then call
+ *     MemoryEventStore.insert() for deduplicated batches.
  *
  *  5. WRITE COALESCING — before each flush, duplicates are removed by primary key so
- *     that one event arriving from 5 relays produces exactly one INSERT.
+ *     that one event arriving from 5 relays produces exactly one insert.
  */
 @Singleton
 class EventProcessor @Inject constructor(
-    private val database: AppDatabase,
-    private val eventDao: EventDao,
-    private val userDao: UserDao,
-    private val reactionDao: ReactionDao,
-    private val eventStatsDao: EventStatsDao,
-    private val tagDao: TagDao,
-    private val eventRelayDao: EventRelayDao,
+    private val memoryEventStore: MemoryEventStore,
     private val outboxRouter: dagger.Lazy<OutboxRouter>,
-    private val relayTrustScoreDao: com.unsilence.app.data.db.dao.RelayTrustScoreDao,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
+
+    // ── Testing support ──────────────────────────────────────────────────────
+
+    // Stops drainers and switches scope. Tests call drainForTest() instead of
+    // relying on the infinite drainer loops (which don't terminate in test dispatchers).
+    internal fun setTestScope(testScope: CoroutineScope) {
+        stop()
+        scope = testScope
+    }
+
+    /**
+     * Drain both channels and flush once. Tests call this after process()
+     * to push events through the channel→flushBatch→MemoryEventStore path
+     * without needing the infinite drainer loops.
+     */
+    internal fun drainForTest() {
+        val buffer = mutableListOf<NostrEvent>()
+        while (true) {
+            val event = hotChannel.tryReceive().getOrNull() ?: break
+            buffer.add(event)
+        }
+        while (true) {
+            val event = coldChannel.tryReceive().getOrNull() ?: break
+            buffer.add(event)
+        }
+        if (buffer.isNotEmpty()) {
+            flushBatch(buffer)
+        }
+    }
 
     // ── 1. Dedup cache ────────────────────────────────────────────────────────
 
@@ -94,17 +92,17 @@ class EventProcessor @Inject constructor(
      * Set of recently-seen event IDs. ConcurrentHashMap<K,Unit> is the idiomatic
      * Kotlin/Java concurrent set. Trimmed when it exceeds [DEDUP_MAX].
      */
-    private val seenIds = ConcurrentHashMap<String, Unit>(DEDUP_MAX + DEDUP_TRIM)
+    internal val seenIds = ConcurrentHashMap<String, Unit>(DEDUP_MAX + DEDUP_TRIM)
 
     // ── 3. Priority channels ──────────────────────────────────────────────────
 
     /** HOT lane: feed content (kind 1, 6, 20, 21, 30023). Flushed every 100 ms.
      *  Capacity 500: initial load from 19 relays × 500 limit = up to 9 500 kind 1 events
      *  can burst in before the first drain. trySend drops silently, so we size generously. */
-    private val hotChannel  = Channel<ProcessedEvent>(capacity = 500)
+    private val hotChannel  = Channel<NostrEvent>(capacity = 500)
 
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
-    private val coldChannel = Channel<ProcessedEvent>(capacity = 500)
+    private val coldChannel = Channel<NostrEvent>(capacity = 500)
 
     // ── Kind handlers (immutable — populated at construction, no race) ─────────
 
@@ -121,7 +119,6 @@ class EventProcessor @Inject constructor(
         10007 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10007) },
         10012 to { obj -> outboxRouter.get().handleFavoriteRelays(obj) },
         30002 to { obj -> outboxRouter.get().handleRelaySet(obj) },
-        30385 to { obj -> handleTrustScore(obj) },
     )
 
     private var drainerJob: Job? = null
@@ -170,17 +167,9 @@ class EventProcessor @Inject constructor(
         // ── Fix 1: dedup by event ID, extracted without JSON parsing ──────────
         val eventId = extractEventId(raw) ?: return
         if (seenIds.putIfAbsent(eventId, Unit) != null) {
-            // Already processed — still record this relay as a source so
+            // Already processed — just record this relay as a source so
             // relay-specific feeds (browse mode) include the event.
-            scope.launch {
-                eventRelayDao.insertOrIgnore(
-                    EventRelayEntity(
-                        eventId  = eventId,
-                        relayUrl = relayUrl,
-                        seenAt   = System.currentTimeMillis() / 1000L,
-                    )
-                )
-            }
+            memoryEventStore.addRelaySeen(eventId, relayUrl)
             return
         }
         trimDedupCacheIfNeeded()
@@ -216,7 +205,7 @@ class EventProcessor @Inject constructor(
         return id
     }
 
-    private fun trimDedupCacheIfNeeded() {
+    internal fun trimDedupCacheIfNeeded() {
         if (seenIds.size <= DEDUP_MAX) return
         // ConcurrentHashMap has no defined iteration order, but removing any 2 k
         // entries is sufficient — we just need an approximate LRU effect.
@@ -237,7 +226,6 @@ class EventProcessor @Inject constructor(
         val content   = obj["content"]?.jsonPrimitive?.content       ?: return
         val createdAt = obj["created_at"]?.jsonPrimitive?.longOrNull ?: return
         val sig       = obj["sig"]?.jsonPrimitive?.content           ?: return
-        val tagsJson  = obj["tags"]?.toString()                      ?: "[]"
         val tags      = obj["tags"]?.jsonArray ?: JsonArray(emptyList())
 
         // NIP-40: skip events that have already expired
@@ -250,22 +238,43 @@ class EventProcessor @Inject constructor(
         // posted as kind-1 notes. Normal notes are always plain text/markdown.
         if (kind == 1 && (content.startsWith("{") || content.startsWith("xitchat-broadcast-v1-"))) return
 
-        // Build the entity and route to the appropriate priority lane
-        val processed: ProcessedEvent? = when (kind) {
-            0 -> buildUserEvent(pubkey, content, createdAt)
-            7 -> buildReactionEvent(id, pubkey, createdAt, content, tags)
-            1, 6, 9734, 9735, 20, 21, 30023 -> buildContentEvent(
-                id, pubkey, kind, content, createdAt, tagsJson, sig, tags, relayUrl
-            )
-            else -> null
+        // Parse NIP-10 threading for content event kinds
+        val (replyToId, rootId) = when (kind) {
+            1, 6, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
+            else -> Pair(null, null)
         }
 
-        // ── Fix 4: priority lanes ─────────────────────────────────────────────
-        if (processed != null) {
+        val (hasCw, cwReason) = parseContentWarning(tags)
+
+        // Convert JsonArray tags to List<List<String>>
+        val tagsList = tags.map { tag ->
+            tag.jsonArray.map { it.jsonPrimitive.content }
+        }
+
+        val nostrEvent = NostrEvent(
+            id = id,
+            pubkey = pubkey,
+            kind = kind,
+            content = content,
+            createdAt = createdAt,
+            tags = tagsList,
+            sig = sig,
+            relayUrl = relayUrl,
+            replyToId = replyToId,
+            rootId = rootId,
+            hasContentWarning = hasCw,
+            contentWarningReason = cwReason,
+            firstSeenAt = System.currentTimeMillis(),
+            relaysSeen = mutableSetOf(relayUrl),
+        )
+
+        // ── Priority lanes ───────────────────────────────────────────────────
+        val shouldChannel = kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023, 30385)
+        if (shouldChannel) {
             val isHot = kind == 1 || kind == 6 || kind == 20 || kind == 21 || kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
-            if (isHot) hotChannel.trySend(processed) else coldChannel.trySend(processed)
+            if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)
         }
 
         // Dispatch to kind handlers (OutboxRouter for kind 3 / 10002).
@@ -274,114 +283,14 @@ class EventProcessor @Inject constructor(
         kindHandlers[kind]?.let { handler -> scope.launch { handler(obj) } }
     }
 
-    // ── Kind 30385: Trusted Relay Assertions ───────────────────────────────────
-
-    private suspend fun handleTrustScore(obj: JsonObject) {
-        val tags = obj["tags"]?.jsonArray ?: return
-        fun tag(name: String): String? = tags.firstOrNull {
-            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == name
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-
-        val relayUrl = tag("d") ?: return
-        val score = tag("score")?.toIntOrNull() ?: return
-        val reliability = tag("reliability")?.toIntOrNull() ?: return
-        val quality = tag("quality")?.toIntOrNull() ?: return
-        val accessibility = tag("accessibility")?.toIntOrNull() ?: return
-        val confidence = tag("confidence") ?: return
-        val observations = tag("observations")?.toIntOrNull() ?: 0
-
-        val entity = com.unsilence.app.data.db.entity.RelayTrustScoreEntity(
-            relayUrl = relayUrl,
-            score = score,
-            reliability = reliability,
-            quality = quality,
-            accessibility = accessibility,
-            confidence = confidence,
-            observations = observations,
-            policy = tag("policy"),
-            countryCode = tag("country_code"),
-            operatorVerified = tag("operator_verified"),
-        )
-        relayTrustScoreDao.upsertAll(listOf(entity))
-    }
-
-    // ── Entity builders (no DB access — just data class construction) ─────────
-
-    private fun buildUserEvent(pubkey: String, content: String, createdAt: Long): ProcessedEvent.User? {
-        return try {
-            val meta = NostrJson.parseToJsonElement(content).jsonObject
-            fun str(key: String) = meta[key]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-            ProcessedEvent.User(
-                UserEntity(
-                    pubkey      = pubkey,
-                    name        = str("name"),
-                    displayName = str("display_name"),
-                    about       = str("about"),
-                    picture     = str("picture"),
-                    nip05       = str("nip05"),
-                    lud16       = str("lud16"),
-                    banner      = str("banner"),
-                    createdAt   = createdAt,
-                    updatedAt   = nowSeconds,
-                )
-            )
-        } catch (_: Exception) {
-            Log.w(TAG, "Bad metadata for $pubkey")
-            null
-        }
-    }
-
-    private fun buildReactionEvent(
-        id: String, pubkey: String, createdAt: Long, content: String, tags: JsonArray,
-    ): ProcessedEvent.Reaction? {
-        val targetId = tags.lastOrNull { tag ->
-            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e"
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content ?: return null
-        return ProcessedEvent.Reaction(
-            ReactionEntity(
-                eventId       = id,
-                targetEventId = targetId,
-                pubkey        = pubkey,
-                content       = content.ifBlank { "+" },
-                createdAt     = createdAt,
-            )
-        )
-    }
-
-    private fun buildContentEvent(
-        id: String, pubkey: String, kind: Int, content: String, createdAt: Long,
-        tagsJson: String, sig: String, tags: JsonArray, relayUrl: String,
-    ): ProcessedEvent.Event {
-        val (replyToId, rootId) = parseNip10Threading(tags)
-        val (hasCw, cwReason)   = parseContentWarning(tags)
-        return ProcessedEvent.Event(
-            EventEntity(
-                id                   = id,
-                pubkey               = pubkey,
-                kind                 = kind,
-                content              = content,
-                createdAt            = createdAt,
-                tags                 = tagsJson,
-                sig                  = sig,
-                relayUrl             = relayUrl,
-                replyToId            = replyToId,
-                rootId               = rootId,
-                hasContentWarning    = hasCw,
-                contentWarningReason = cwReason,
-                cachedAt             = nowSeconds,
-                firstSeenAt          = System.currentTimeMillis(),
-            )
-        )
-    }
-
-    // ── Fix 2 + 4: Channel drainers ───────────────────────────────────────────
+    // ── Channel drainers ──────────────────────────────────────────────────────
 
     /**
      * HOT drainer: collects up to 100 feed events within a 100 ms window, then
      * flushes. The withTimeoutOrNull provides natural pacing without busy-waiting.
      */
     private suspend fun drainHot() {
-        val buffer = ArrayDeque<ProcessedEvent>(100)
+        val buffer = ArrayDeque<NostrEvent>(100)
         while (true) {
             // Block up to 100 ms waiting for the first item
             val first = withTimeoutOrNull(100L) { hotChannel.receive() }
@@ -406,7 +315,7 @@ class EventProcessor @Inject constructor(
      * Profiles, reactions, and zaps don't need sub-second latency.
      */
     private suspend fun drainCold() {
-        val buffer = ArrayDeque<ProcessedEvent>(200)
+        val buffer = ArrayDeque<NostrEvent>(200)
         while (true) {
             val first = withTimeoutOrNull(2_000L) { coldChannel.receive() }
             if (first != null) {
@@ -424,151 +333,24 @@ class EventProcessor @Inject constructor(
         }
     }
 
-    // ── Zap sats extraction ─────────────────────────────────────────────
+    // ── Batch insert ──────────────────────────────────────────────────────────
 
-    /** Extract a tag value from a JSON-serialized tags array: [["key","value"],...] */
-    private fun tagValue(tagsJson: String, key: String): String? = runCatching {
-        NostrJson.parseToJsonElement(tagsJson).jsonArray
-            .firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == key }
-            ?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-    }.getOrNull()
-
-    /**
-     * Extract sats from a kind-9735 zap receipt's tags.
-     * Primary: parse bolt11 invoice via Quartz's LnInvoiceUtil.
-     * Fallback: read "amount" tag from embedded zap request (millisats).
-     */
-    private fun extractZapSats(tagsJson: String): Long {
-        // Primary: parse bolt11 tag via Quartz's LnInvoiceUtil
-        val bolt11 = tagValue(tagsJson, "bolt11")
-        if (bolt11 != null) {
-            try {
-                val sats = LnInvoiceUtil.getAmountInSats(bolt11)
-                if (sats > BigDecimal.ZERO) return sats.toLong()
-            } catch (_: Exception) { }
-        }
-
-        // Fallback: read "amount" tag from embedded zap request (millisats)
-        val descriptionJson = tagValue(tagsJson, "description") ?: return 0L
-        return try {
-            val zapRequest = NostrJson.parseToJsonElement(descriptionJson).jsonObject
-            val tags = zapRequest["tags"]?.jsonArray
-            val amountTag = tags?.firstOrNull { tag ->
-                tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "amount"
-            }
-            val msats = amountTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()
-            (msats ?: 0L) / 1_000L
-        } catch (_: Exception) { 0L }
-    }
-
-    private suspend fun flushBatch(batch: List<ProcessedEvent>) {
-        // LinkedHashMap preserves insertion order while deduplicating by key
-        val events    = LinkedHashMap<String, EventEntity>()
-        val users     = LinkedHashMap<String, UserEntity>()
-        val reactions = LinkedHashMap<String, ReactionEntity>()
-
-        for (item in batch) {
-            when (item) {
-                is ProcessedEvent.Event    -> events[item.entity.id]          = item.entity
-                is ProcessedEvent.User     -> users[item.entity.pubkey]       = item.entity
-                is ProcessedEvent.Reaction -> reactions[item.entity.eventId]  = item.entity
+    private fun flushBatch(batch: List<NostrEvent>) {
+        // Dedup by event ID within this batch (same event from N relays)
+        val events = LinkedHashMap<String, NostrEvent>(batch.size)
+        for (event in batch) {
+            val existing = events[event.id]
+            if (existing != null) {
+                // Merge relay provenance
+                existing.relaysSeen.addAll(event.relaysSeen)
+            } else {
+                events[event.id] = event
             }
         }
 
-        // Wrap ALL Room writes in a single transaction — triggers ONE Room Flow
-        // re-emission instead of 6+ separate ones (events, users, reactions, tags,
-        // relays, stats). This is the single biggest Room performance improvement.
-        database.withTransaction {
-        // Single batch insert per table — one SQLite write-lock acquisition instead of N.
-        // insertOrIgnoreBatch returns row IDs: -1 = already existed (duplicate).
-        val eventList = events.values.toList()
-        val eventRowIds = if (eventList.isNotEmpty()) eventDao.insertOrIgnoreBatch(eventList) else emptyList()
-        if (users.isNotEmpty())     userDao.upsertBatch(users.values.toList())
-        val reactionList = reactions.values.toList()
-        val reactionRowIds = if (reactionList.isNotEmpty()) reactionDao.insertOrIgnoreBatch(reactionList) else emptyList()
-
-        // Build set of newly inserted event IDs (row ID != -1)
-        val newEventIds = HashSet<String>(eventList.size)
-        for (i in eventRowIds.indices) {
-            if (eventRowIds[i] != -1L) newEventIds.add(eventList[i].id)
+        for (event in events.values) {
+            memoryEventStore.insert(event)
         }
-
-        // Collect all tags and relay entries across ALL events (provenance even for dupes),
-        // then batch-insert once
-        val allRelayEntities = ArrayList<EventRelayEntity>(eventList.size)
-        val allTagEntities   = ArrayList<TagEntity>(eventList.size * 4) // ~4 tags per event avg
-
-        for (entity in eventList) {
-            // Relay provenance — always record, even for duplicates
-            allRelayEntities.add(
-                EventRelayEntity(
-                    eventId = entity.id,
-                    relayUrl = entity.relayUrl,
-                    seenAt = entity.createdAt,
-                )
-            )
-
-            // Parse tags — only for newly inserted events
-            if (entity.id !in newEventIds) continue
-            try {
-                val tagsArray = NostrJson.parseToJsonElement(entity.tags).jsonArray
-                for (index in 0 until tagsArray.size) {
-                    val tag = tagsArray[index].jsonArray
-                    if (tag.size < 2) continue
-                    allTagEntities.add(
-                        TagEntity(
-                            eventId = entity.id,
-                            tagName = tag[0].jsonPrimitive.content,
-                            tagPos = index,
-                            tagValue = tag[1].jsonPrimitive.content,
-                            extra = tag.getOrNull(2)?.jsonPrimitive?.content,
-                        )
-                    )
-                }
-            } catch (_: Exception) { }
-        }
-
-        // Batch insert relay entries and tags — two transactions instead of 2*N
-        if (allRelayEntities.isNotEmpty()) eventRelayDao.insertAll(allRelayEntities)
-        if (allTagEntities.isNotEmpty())   tagDao.insertAll(allTagEntities)
-
-        // Only increment stats for NEWLY INSERTED events — prevents double-counting
-        // when the same event arrives from multiple relays or across app restarts.
-        val replyTargets = mutableListOf<String>()
-        val repostTargets = mutableListOf<String>()
-        val zapTargets = mutableListOf<Pair<String, Long>>()
-
-        for (entity in eventList) {
-            if (entity.id !in newEventIds) continue
-            when (entity.kind) {
-                1 -> {
-                    entity.replyToId?.let { replyTargets.add(it) }
-                    if (entity.rootId != null && entity.rootId != entity.replyToId) {
-                        replyTargets.add(entity.rootId)
-                    }
-                }
-                6 -> {
-                    entity.rootId?.let { repostTargets.add(it) }
-                }
-                9735 -> {
-                    if (entity.rootId != null) {
-                        val sats = extractZapSats(entity.tags)
-                        zapTargets.add(entity.rootId to sats)
-                    }
-                }
-            }
-        }
-
-        // Only count reactions that were newly inserted
-        val reactionTargets = reactionRowIds.indices
-            .filter { reactionRowIds[it] != -1L }
-            .map { reactionList[it].targetEventId }
-
-        if (replyTargets.isNotEmpty() || repostTargets.isNotEmpty() ||
-            reactionTargets.isNotEmpty() || zapTargets.isNotEmpty()) {
-            eventStatsDao.batchIncrementStats(replyTargets, repostTargets, reactionTargets, zapTargets)
-        }
-        } // database.withTransaction
     }
 
     // ── NIP-10: threading ─────────────────────────────────────────────────────
@@ -579,7 +361,7 @@ class EventProcessor @Inject constructor(
      * Priority: explicit "root"/"reply" markers. Fallback: positional
      * (first e = root, last e = reply-to). If only one e tag, it is the root.
      */
-    private fun parseNip10Threading(tags: JsonArray): Pair<String?, String?> {
+    internal fun parseNip10Threading(tags: JsonArray): Pair<String?, String?> {
         val eTags = tags.filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
             .map { it.jsonArray }
 

@@ -48,6 +48,23 @@ class MemoryEventStore @Inject constructor() {
     private val _statsSignal = MutableStateFlow(0L)
     private val _followsSignal = MutableStateFlow(0L)
 
+    // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
+
+    // Buffer for relay URLs that arrive via addRelaySeen before the event
+    // is flushed from EventProcessor's channel into eventsById. Applied
+    // during insert() when the event finally arrives.
+    private val pendingRelays = ConcurrentHashMap<String, MutableSet<String>>()
+
+    fun addRelaySeen(eventId: String, relayUrl: String) {
+        val event = eventsById[eventId]
+        if (event != null) {
+            event.relaysSeen.add(relayUrl)
+        } else {
+            // Event not yet flushed from channel — buffer for insert()
+            pendingRelays.getOrPut(eventId) { ConcurrentHashMap.newKeySet() }.add(relayUrl)
+        }
+    }
+
     // ─── Insert (called by EventProcessor.flushBatch) ───────────────────────
 
     fun insert(event: NostrEvent): Boolean {
@@ -57,6 +74,11 @@ class MemoryEventStore @Inject constructor() {
             // Duplicate — just record the relay
             existing.relaysSeen.addAll(event.relaysSeen)
             return false
+        }
+
+        // Apply any relay URLs that arrived via addRelaySeen before this insert
+        pendingRelays.remove(event.id)?.let { pending ->
+            event.relaysSeen.addAll(pending)
         }
 
         // 2. Update indexes
@@ -612,6 +634,7 @@ class MemoryEventStore @Inject constructor() {
 
     fun clear() {
         eventsById.clear()
+        pendingRelays.clear()
         idsByKind.clear()
         idsByPubkey.clear()
         idsByReplyTarget.clear()
