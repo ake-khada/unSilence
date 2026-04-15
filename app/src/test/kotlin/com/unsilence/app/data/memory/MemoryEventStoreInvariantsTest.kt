@@ -1,5 +1,13 @@
 package com.unsilence.app.data.memory
 
+// ── Deferred test suites (do NOT forget) ────────────────────────────────────
+// EventProcessorInvariantsTest — due in A.2 (EventProcessor rewired to MemoryEventStore)
+//   Tests: duplicate queue path, seenIds dedup, trimDedupCache, brace-content filter, NIP-40 expiry
+// RelayPoolInvariantsTest — due in A.6 (OutboxRouter rewired) / A.7 (Room deleted)
+//   Tests: PERSISTENT-only home subs, persistent prefix survives EOSE, one-shot CLOSE after EOSE,
+//          concurrent reconnect dedup
+// ─────────────────────────────────────────────────────────────────────────────
+
 import app.cash.turbine.test
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -201,6 +209,29 @@ class MemoryEventStoreInvariantsTest {
         val stats = store.zapStats(targetId)
         assertEquals(3, stats.count)
         assertEquals(1121L, stats.totalSats)
+    }
+
+    @Test
+    fun `zapStats parses real bolt11 invoice for 21 sats`() {
+        val targetId = "bolt11-target"
+        store.insert(event(id = targetId, kind = 1))
+
+        // Real-format bolt11: lnbc210n = 210 nano-BTC = 21 sats
+        store.insert(
+            event(
+                id = "zap-bolt11",
+                kind = 9735,
+                tags = listOf(
+                    listOf("e", targetId),
+                    listOf("bolt11", "lnbc210n1pj9npyypp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypq"),
+                ),
+                content = "",
+            ),
+        )
+
+        val stats = store.zapStats(targetId)
+        assertEquals(1, stats.count)
+        assertEquals(21L, stats.totalSats)
     }
 
     // ── Kind 0 profile (replaceable) ────────────────────────────────────────
@@ -646,5 +677,73 @@ class MemoryEventStoreInvariantsTest {
         assertTrue(read.contains("wss://read-only"))
         assertTrue(read.contains("wss://both"))
         assertFalse(read.contains("wss://write-only"))
+    }
+
+    // ── Snapshot benchmark (informational — prints metrics) ──────────────────
+
+    @Test
+    fun `snapshot 1000 events - measure size and time`() = runTest {
+        // Insert 1000 events with realistic-sized content and tags
+        for (i in 1..1000) {
+            val tags = mutableListOf<List<String>>()
+            if (i % 3 == 0) tags.add(listOf("e", "ref-${i % 50}", "", "reply"))
+            if (i % 5 == 0) tags.add(listOf("p", "pk-${i % 20}"))
+            tags.add(listOf("t", "nostr"))
+
+            store.insert(
+                event(
+                    id = "bench-$i",
+                    pubkey = "pk-${i % 20}",
+                    kind = if (i % 10 == 0) 6 else 1,
+                    content = "This is test note #$i with some realistic content length that a typical Nostr note might have, including mentions of @npub1abc and links to https://example.com/page/$i",
+                    createdAt = 1700000000L + i,
+                    tags = tags,
+                    relayUrl = "wss://relay${i % 5}.example.com",
+                    replyToId = if (i % 3 == 0) "ref-${i % 50}" else null,
+                    rootId = if (i % 3 == 0) "ref-${i % 50}" else null,
+                ),
+            )
+        }
+        // Add some profiles and follows
+        for (i in 0 until 20) {
+            store.insert(
+                event(
+                    id = "bench-profile-$i", pubkey = "pk-$i", kind = 0,
+                    content = """{"name":"user$i","display_name":"User $i","about":"Bio for user $i","picture":"https://example.com/avatar/$i.jpg","nip05":"user$i@example.com"}""",
+                    createdAt = 1700000000L + i,
+                ),
+            )
+        }
+
+        val tmpFile = java.io.File.createTempFile("bench-snapshot", ".bin")
+        try {
+            // Measure save
+            val saveStart = System.nanoTime()
+            store.saveSnapshot(tmpFile)
+            val saveMs = (System.nanoTime() - saveStart) / 1_000_000.0
+
+            val fileSizeKB = tmpFile.length() / 1024.0
+
+            // Measure restore
+            val restored = MemoryEventStore()
+            val restoreStart = System.nanoTime()
+            restored.restoreFromSnapshot(tmpFile)
+            val restoreMs = (System.nanoTime() - restoreStart) / 1_000_000.0
+
+            // Print metrics (visible in test output)
+            println("=== Snapshot benchmark (1000 events + 20 profiles) ===")
+            println("  File size:    %.1f KB".format(fileSizeKB))
+            println("  Save time:    %.1f ms".format(saveMs))
+            println("  Restore time: %.1f ms".format(restoreMs))
+            println("  Projected 5k: %.1f KB".format(fileSizeKB * 5))
+            println("======================================================")
+
+            // Verify round-trip correctness
+            assertEquals(1020, restored.eventsByIds(
+                (1..1000).map { "bench-$it" }.toSet() + (0 until 20).map { "bench-profile-$it" }.toSet(),
+            ).size)
+        } finally {
+            tmpFile.delete()
+        }
     }
 }
