@@ -411,6 +411,34 @@ class MemoryEventStoreInvariantsTest {
         assertTrue(set2!!.tags.any { it.size >= 2 && it[0] == "r" && it[1] == "wss://set2relay" })
     }
 
+    @Test
+    fun `kind 30002 distinguishes by pubkey and d-tag compound key`() {
+        // Two different pubkeys, same d-tag "favorites"
+        store.insert(
+            event(
+                id = "pkA-fav", pubkey = "pubkeyA", kind = 30002, createdAt = 100,
+                tags = listOf(listOf("d", "favorites"), listOf("r", "wss://relayA")),
+            ),
+        )
+        store.insert(
+            event(
+                id = "pkB-fav", pubkey = "pubkeyB", kind = 30002, createdAt = 200,
+                tags = listOf(listOf("d", "favorites"), listOf("r", "wss://relayB")),
+            ),
+        )
+
+        // Both must exist independently — pubkeyB's insert must NOT overwrite pubkeyA
+        val evtA = store.eventsByIds(setOf("pkA-fav")).firstOrNull()
+        val evtB = store.eventsByIds(setOf("pkB-fav")).firstOrNull()
+
+        assertNotNull(evtA)
+        assertNotNull(evtB)
+        assertTrue(evtA!!.tags.any { it.size >= 2 && it[0] == "r" && it[1] == "wss://relayA" })
+        assertTrue(evtB!!.tags.any { it.size >= 2 && it[0] == "r" && it[1] == "wss://relayB" })
+        assertEquals("pubkeyA", evtA.pubkey)
+        assertEquals("pubkeyB", evtB.pubkey)
+    }
+
     // ── Feed query: sorting ─────────────────────────────────────────────────
 
     @Test
@@ -560,6 +588,52 @@ class MemoryEventStoreInvariantsTest {
 
             // Verify follows
             assertEquals(setOf("f1", "f2"), restored.getFollows("snap-pk"))
+        } finally {
+            tmpFile.delete()
+        }
+    }
+
+    @Test
+    fun `snapshot restore bumps signals to trigger UI re-render`() = runTest {
+        // Populate store with mixed kinds that touch different signals
+        store.insert(event(id = "sig-note", kind = 1, createdAt = 100))
+        store.insert(
+            event(id = "sig-profile", pubkey = "sig-pk", kind = 0,
+                content = """{"name":"signaltest"}""", createdAt = 101),
+        )
+        store.insert(
+            event(id = "sig-follows", pubkey = "sig-pk", kind = 3,
+                tags = listOf(listOf("p", "f1")), createdAt = 102),
+        )
+        store.insert(
+            event(id = "sig-reaction", kind = 7,
+                tags = listOf(listOf("e", "sig-note")), createdAt = 103),
+        )
+
+        val tmpFile = java.io.File.createTempFile("signal-test", ".bin")
+        try {
+            store.saveSnapshot(tmpFile)
+
+            // Fresh store — subscribe to flows BEFORE restore
+            val restored = MemoryEventStore()
+
+            restored.feedFlow(defaultFilter).test {
+                val initial = awaitItem()
+                assertTrue(initial.isEmpty())
+
+                // Restore should bump _feedSignal → trigger re-emission
+                restored.restoreFromSnapshot(tmpFile)
+
+                val afterRestore = awaitItem()
+                assertTrue(afterRestore.isNotEmpty())
+                assertTrue(afterRestore.any { it.id == "sig-note" })
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            // Verify profile signal was bumped too (profile is populated)
+            assertNotNull(restored.getProfile("sig-pk"))
+            // Verify follows signal was bumped (follows are populated)
+            assertEquals(setOf("f1"), restored.getFollows("sig-pk"))
         } finally {
             tmpFile.delete()
         }
@@ -742,6 +816,26 @@ class MemoryEventStoreInvariantsTest {
             assertEquals(1020, restored.eventsByIds(
                 (1..1000).map { "bench-$it" }.toSet() + (0 until 20).map { "bench-profile-$it" }.toSet(),
             ).size)
+        } finally {
+            tmpFile.delete()
+        }
+    }
+
+    // ── Snapshot version mismatch ───────────────────────────────────────────
+
+    @Test
+    fun `snapshot with unknown version is treated as missing`() = runTest {
+        val tmpFile = java.io.File.createTempFile("bad-version", ".bin")
+        try {
+            tmpFile.writeText("SNAPSHOT_V99\nsome garbage data\n")
+
+            val restored = MemoryEventStore()
+            restored.restoreFromSnapshot(tmpFile)
+
+            // Store should remain completely empty — no crash, no partial load
+            assertTrue(restored.eventsByIds(setOf("anything")).isEmpty())
+            assertNull(restored.getProfile("anything"))
+            assertEquals(0, restored.replyCount("anything"))
         } finally {
             tmpFile.delete()
         }
