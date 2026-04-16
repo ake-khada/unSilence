@@ -1795,4 +1795,310 @@ class MemoryEventStoreInvariantsTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // ── Tier 4: Actor-keyed action indexes ──────────────────────────────────
+
+    // ── reactedEventIdsFlow ─────────────────────────────────────────────────
+
+    @Test
+    fun `reactedEventIdsFlow returns target IDs of kind-7 events authored by pubkey`() = runTest {
+        store.reactedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            // Kind-7 reaction by alice targeting note1
+            store.insert(event(
+                id = "reaction1", pubkey = "alice", kind = 7,
+                tags = listOf(listOf("e", "note1"), listOf("p", "bob")),
+                content = "+",
+            ))
+            val ids = awaitItem()
+            assertEquals(setOf("note1"), ids)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `reactedEventIdsFlow extracts target from last e tag (not first)`() = runTest {
+        // Kind-7 with two e tags: first is root, last is the actual target
+        store.insert(event(
+            id = "reaction-multi-e", pubkey = "alice", kind = 7,
+            tags = listOf(listOf("e", "root-note"), listOf("e", "target-note"), listOf("p", "bob")),
+            content = "+",
+        ))
+        store.reactedEventIdsFlow("alice").test {
+            val ids = awaitItem()
+            assertTrue("target-note from last e-tag", "target-note" in ids)
+            assertFalse("root-note from first e-tag excluded", "root-note" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `reactedEventIdsFlow skips kind-7 with no e tags`() = runTest {
+        store.insert(event(
+            id = "reaction-no-e", pubkey = "alice", kind = 7,
+            tags = listOf(listOf("p", "bob")),
+            content = "+",
+        ))
+        store.reactedEventIdsFlow("alice").test {
+            assertEquals("No e-tag → empty set", emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `reactedEventIdsFlow updates reactively on new kind-7 insert`() = runTest {
+        store.reactedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            store.insert(event(
+                id = "r1", pubkey = "alice", kind = 7,
+                tags = listOf(listOf("e", "note-a")), content = "+",
+            ))
+            assertEquals(setOf("note-a"), awaitItem())
+
+            store.insert(event(
+                id = "r2", pubkey = "alice", kind = 7,
+                tags = listOf(listOf("e", "note-b")), content = "+",
+            ))
+            assertEquals(setOf("note-a", "note-b"), awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `reactedEventIdsFlow returns empty set for unknown pubkey`() = runTest {
+        store.insert(event(
+            id = "r-other", pubkey = "bob", kind = 7,
+            tags = listOf(listOf("e", "note-x")), content = "+",
+        ))
+        store.reactedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── repostedEventIdsFlow ────────────────────────────────────────────────
+
+    @Test
+    fun `repostedEventIdsFlow returns rootId of kind-6 events authored by pubkey`() = runTest {
+        store.insert(event(
+            id = "repost1", pubkey = "alice", kind = 6,
+            rootId = "original-note",
+            tags = listOf(listOf("e", "original-note"), listOf("p", "bob")),
+        ))
+        store.repostedEventIdsFlow("alice").test {
+            assertEquals(setOf("original-note"), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `repostedEventIdsFlow skips kind-6 with null rootId`() = runTest {
+        store.insert(event(
+            id = "repost-no-root", pubkey = "alice", kind = 6,
+            rootId = null,
+            tags = listOf(listOf("p", "bob")),
+        ))
+        store.repostedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `repostedEventIdsFlow updates reactively on new kind-6 insert`() = runTest {
+        store.repostedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            store.insert(event(
+                id = "rp1", pubkey = "alice", kind = 6, rootId = "note-a",
+                tags = listOf(listOf("e", "note-a")),
+            ))
+            assertEquals(setOf("note-a"), awaitItem())
+
+            store.insert(event(
+                id = "rp2", pubkey = "alice", kind = 6, rootId = "note-b",
+                tags = listOf(listOf("e", "note-b")),
+            ))
+            assertEquals(setOf("note-a", "note-b"), awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── zappedEventIdsFlow ──────────────────────────────────────────────────
+
+    @Test
+    fun `zappedEventIdsFlow returns rootId of kind-9734 events authored by pubkey`() = runTest {
+        store.insert(event(
+            id = "zap1", pubkey = "alice", kind = 9734, rootId = "zapped-note",
+            tags = listOf(listOf("e", "zapped-note"), listOf("p", "bob"), listOf("amount", "1000000")),
+        ))
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals(setOf("zapped-note"), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `zappedEventIdsFlow uses kind-9734 not kind-9735`() = runTest {
+        // Kind-9735 zap receipt (authored by LNURL provider, not the user)
+        store.insert(event(
+            id = "receipt1", pubkey = "lnurl-provider", kind = 9735, rootId = "some-note",
+            tags = listOf(listOf("e", "some-note"), listOf("p", "alice")),
+        ))
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals("kind-9735 by different author → empty", emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+        // Even if pubkey matches (shouldn't happen in practice), 9735 is not tracked
+        store.zappedEventIdsFlow("lnurl-provider").test {
+            assertEquals("kind-9735 not in zapped index", emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `zappedEventIdsFlow skips kind-9734 with null rootId`() = runTest {
+        store.insert(event(
+            id = "zap-no-root", pubkey = "alice", kind = 9734, rootId = null,
+            tags = listOf(listOf("p", "bob")),
+        ))
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `zappedEventIdsFlow updates reactively on new kind-9734 insert`() = runTest {
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            store.insert(event(
+                id = "z1", pubkey = "alice", kind = 9734, rootId = "note-a",
+                tags = listOf(listOf("e", "note-a"), listOf("amount", "1000")),
+            ))
+            assertEquals(setOf("note-a"), awaitItem())
+
+            store.insert(event(
+                id = "z2", pubkey = "alice", kind = 9734, rootId = "note-b",
+                tags = listOf(listOf("e", "note-b"), listOf("amount", "2000")),
+            ))
+            assertEquals(setOf("note-a", "note-b"), awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Cross-kind isolation ────────────────────────────────────────────────
+
+    @Test
+    fun `kind-7 insert does not affect repostedEventIds or zappedEventIds`() = runTest {
+        store.insert(event(
+            id = "r-cross", pubkey = "alice", kind = 7,
+            tags = listOf(listOf("e", "note-x")), content = "+",
+        ))
+        store.repostedEventIdsFlow("alice").test {
+            assertEquals("kind-7 not in repost set", emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals("kind-7 not in zap set", emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `kind-9735 (zap receipt) does not appear in zappedEventIds (wrong author)`() = runTest {
+        // Simulate a zap receipt authored by LNURL provider targeting alice's note
+        store.insert(event(
+            id = "receipt-cross", pubkey = "lnurl-srv", kind = 9735, rootId = "alice-note",
+            tags = listOf(listOf("e", "alice-note"), listOf("p", "alice")),
+        ))
+        // alice's zapped set should be empty — she authored a note, not a zap request
+        store.zappedEventIdsFlow("alice").test {
+            assertEquals(emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+        // lnurl-srv's zapped set should also be empty — 9735 is not tracked in zapped index
+        store.zappedEventIdsFlow("lnurl-srv").test {
+            assertEquals(emptySet<String>(), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Phase 2: Optimistic write parity ────────────────────────────────────
+
+    @Test
+    fun `optimistic reaction insert via MES makes target appear in reactedEventIdsFlow`() = runTest {
+        store.reactedEventIdsFlow("me").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            // Simulate optimistic insert: build NostrEvent as NoteActionsVM would
+            store.insert(event(
+                id = "opt-reaction-1", pubkey = "me", kind = 7,
+                tags = listOf(listOf("e", "target-event"), listOf("p", "author")),
+                content = "+", createdAt = System.currentTimeMillis() / 1000,
+            ))
+            assertTrue("target-event in reacted set", "target-event" in awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `optimistic repost insert via MES makes rootId appear in repostedEventIdsFlow`() = runTest {
+        store.repostedEventIdsFlow("me").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            store.insert(event(
+                id = "opt-repost-1", pubkey = "me", kind = 6, rootId = "original",
+                tags = listOf(listOf("e", "original"), listOf("p", "author")),
+                createdAt = System.currentTimeMillis() / 1000,
+            ))
+            assertTrue("original in reposted set", "original" in awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `optimistic zap insert via MES makes rootId appear in zappedEventIdsFlow`() = runTest {
+        store.zappedEventIdsFlow("me").test {
+            assertEquals(emptySet<String>(), awaitItem())
+
+            store.insert(event(
+                id = "opt-zap-1", pubkey = "me", kind = 9734, rootId = "zapped-note",
+                tags = listOf(listOf("e", "zapped-note"), listOf("p", "recipient"), listOf("amount", "21000")),
+                createdAt = System.currentTimeMillis() / 1000,
+            ))
+            assertTrue("zapped-note in zapped set", "zapped-note" in awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `incrementZapStats updates zapStatsByEventId atomically`() {
+        // No existing stats
+        val before = store.zapStats("note-z")
+        assertEquals(0, before.count)
+        assertEquals(0L, before.totalSats)
+
+        // Increment
+        store.incrementZapStats("note-z", 1000L)
+        val after = store.zapStats("note-z")
+        assertEquals(1, after.count)
+        assertEquals(1000L, after.totalSats)
+
+        // Second increment accumulates
+        store.incrementZapStats("note-z", 500L)
+        val after2 = store.zapStats("note-z")
+        assertEquals(2, after2.count)
+        assertEquals(1500L, after2.totalSats)
+    }
 }
