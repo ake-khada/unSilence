@@ -5,10 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.relay.SearchResult
-import com.unsilence.app.data.repository.EventRepository
-import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -22,7 +20,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -40,8 +37,7 @@ data class SearchUiState(
 class SearchViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val relayConfigDao: RelayConfigDao,
-    private val eventRepository: EventRepository,
-    private val userRepository: UserRepository,
+    private val memoryEventStore: MemoryEventStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
@@ -97,7 +93,7 @@ class SearchViewModel @Inject constructor(
 
                     _uiState.update { it.copy(loading = true, hasSearched = true) }
 
-                    // Use user-configured search relays (kind 10007), fall back to defaults.
+                    // TODO(A.5.1 T5): migrate to MES when kind-10007 handling is added
                     val userSearchRelays = relayConfigDao.searchRelayUrls()
                     val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAYS }
 
@@ -107,26 +103,25 @@ class SearchViewModel @Inject constructor(
                     currentSearchToken = token
                     _searchResultEventIds.value = emptySet()
 
-                    // Send NIP-50 REQ to search relays — results flow into Room via EventProcessor.
+                    // Send NIP-50 REQ to search relays — results flow into MES via EventProcessor.
                     relayPool.searchNotes(searchRelays, query, token)
 
                     // Give relays time to respond before declaring "no results"
                     val searchStart = System.currentTimeMillis()
 
                     // Relay results: events whose IDs were emitted by RelayPool's search-notes subs.
-                    // flatMapLatest re-queries Room each time new IDs arrive.
+                    // flatMapLatest re-queries MES each time new IDs arrive.
                     val relayResults = _searchResultEventIds
-                        .map { ids -> ids.toList() }
                         .flatMapLatest { ids ->
                             if (ids.isEmpty()) flowOf(emptyList())
-                            else eventRepository.eventsByIds(ids)
+                            else memoryEventStore.feedRowsByIdsFlow(ids)
                         }
 
-                    // Combine local LIKE results with relay-returned results + people search.
+                    // Combine local MES results with relay-returned results + people search.
                     combine(
-                        eventRepository.searchNotes(query),
+                        memoryEventStore.searchNotesFlow(query),
                         relayResults,
-                        userRepository.searchUsers(query),
+                        memoryEventStore.searchUsersFlow(query),
                     ) { localNotes, relayNotes, people ->
                         Triple(localNotes, relayNotes, people)
                     }.collect { (localNotes, relayNotes, people) ->
