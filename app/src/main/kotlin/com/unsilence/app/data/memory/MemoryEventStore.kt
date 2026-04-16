@@ -5,10 +5,12 @@ import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.relay.NostrJson
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -440,9 +442,9 @@ class MemoryEventStore @Inject constructor() {
     fun searchEvents(query: String): List<NostrEvent> {
         val lowerQuery = query.lowercase()
         return eventsById.values
-            .filter { it.kind == 1 && it.content.lowercase().contains(lowerQuery) }
+            .filter { (it.kind == 1 || it.kind == 30023) && it.content.lowercase().contains(lowerQuery) }
             .sortedByDescending { it.createdAt }
-            .take(100)
+            .take(50)
     }
 
     fun eventsByIds(ids: Set<String>): List<NostrEvent> {
@@ -629,6 +631,57 @@ class MemoryEventStore @Inject constructor() {
         }
         statsUpdatedAt[eventId] = System.currentTimeMillis()
     }
+
+    // ─── A.5.1 T3: Search flows ────────────────────────────────────────────
+
+    /** Reactive note search: kind 1 + 30023, case-insensitive substring, createdAt DESC, limit 50. */
+    fun searchNotesFlow(query: String): Flow<List<FeedRow>> =
+        _feedSignal
+            .map { searchNotes(query) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    private fun searchNotes(query: String): List<FeedRow> {
+        val lq = query.lowercase()
+        return eventsById.values
+            .filter { (it.kind == 1 || it.kind == 30023) && it.content.lowercase().contains(lq) }
+            .sortedByDescending { it.createdAt }
+            .take(50)
+            .map { toFeedRow(it) }
+    }
+
+    /** Reactive profile search: matches name, display_name, about; case-insensitive; display_name ASC; limit 50. */
+    fun searchUsersFlow(query: String): Flow<List<UserEntity>> =
+        _profileSignal
+            .map { searchUsers(query) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    private fun searchUsers(query: String): List<UserEntity> {
+        val lq = query.lowercase()
+        return profilesByPubkey.values
+            .mapNotNull { event ->
+                val entity = getUserEntity(event.pubkey) ?: return@mapNotNull null
+                val matches = listOfNotNull(entity.name, entity.displayName, entity.about)
+                    .any { it.lowercase().contains(lq) }
+                if (matches) entity else null
+            }
+            .sortedBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: "" }
+            .take(50)
+    }
+
+    /** Exact ID lookup returning FeedRows, sorted by createdAt DESC. */
+    fun feedRowsByIds(ids: Set<String>): List<FeedRow> =
+        ids.mapNotNull { eventsById[it] }
+            .sortedByDescending { it.createdAt }
+            .map { toFeedRow(it) }
+
+    /** Reactive variant — re-emits when events arrive (relay echo may populate missing IDs). */
+    fun feedRowsByIdsFlow(ids: Set<String>): Flow<List<FeedRow>> =
+        _feedSignal
+            .map { feedRowsByIds(ids) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
 
     // ─── Reactive flows ─────────────────────────────────────────────────────
 
