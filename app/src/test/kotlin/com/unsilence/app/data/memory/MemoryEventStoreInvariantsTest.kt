@@ -2101,4 +2101,274 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(2, after2.count)
         assertEquals(1500L, after2.totalSats)
     }
+
+    // ── Tier 3: Search APIs ─────────────────────────────────────────────────
+
+    // ── searchNotesFlow ─────────────────────────────────────────────────────
+
+    @Test
+    fun `searchNotesFlow matches kind-1 notes by content substring`() = runTest {
+        store.insert(event(id = "note1", kind = 1, content = "Hello world from Nostr"))
+        store.insert(event(id = "note2", kind = 1, content = "Goodbye moon"))
+
+        store.searchNotesFlow("world").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("note1", results[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchNotesFlow matches kind-30023 articles by content substring`() = runTest {
+        store.insert(event(id = "article1", kind = 30023, content = "A longform article about Bitcoin"))
+        store.insert(event(id = "note1", kind = 1, content = "Short note about Bitcoin"))
+
+        store.searchNotesFlow("Bitcoin").test {
+            val results = awaitItem()
+            assertEquals(2, results.size)
+            val ids = results.map { it.id }.toSet()
+            assertTrue("article1 in results", "article1" in ids)
+            assertTrue("note1 in results", "note1" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchNotesFlow is case-insensitive`() = runTest {
+        store.insert(event(id = "mixed", kind = 1, content = "Lightning Network is FAST"))
+
+        store.searchNotesFlow("lightning").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("mixed", results[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchNotesFlow excludes kind-6 reposts and kind-7 reactions`() = runTest {
+        store.insert(event(id = "note", kind = 1, content = "searchable content here"))
+        store.insert(event(id = "repost", kind = 6, content = "searchable content here", rootId = "note"))
+        store.insert(event(
+            id = "reaction", kind = 7, content = "+",
+            tags = listOf(listOf("e", "note")),
+        ))
+
+        store.searchNotesFlow("searchable").test {
+            val results = awaitItem()
+            assertEquals("Only kind-1 matches", 1, results.size)
+            assertEquals("note", results[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchNotesFlow respects limit of 50 and createdAt DESC sort`() = runTest {
+        // Insert 55 matching events with ascending createdAt
+        for (i in 1..55) {
+            store.insert(event(
+                id = "bulk-$i", kind = 1, content = "searchterm in content",
+                createdAt = 1000L + i,
+            ))
+        }
+
+        store.searchNotesFlow("searchterm").test {
+            val results = awaitItem()
+            assertEquals("Capped at 50", 50, results.size)
+            // First result should be the newest (createdAt = 1055)
+            assertEquals("bulk-55", results[0].id)
+            // Last result should be the 6th oldest (createdAt = 1006), since 1-5 are cut
+            assertEquals("bulk-6", results[49].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchNotesFlow re-emits when new matching event arrives`() = runTest {
+        store.searchNotesFlow("nostr").test {
+            assertEquals("Initially empty", emptyList<Any>(), awaitItem())
+
+            store.insert(event(id = "late-arrival", kind = 1, content = "Hello Nostr!"))
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("late-arrival", results[0].id)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── searchUsersFlow ─────────────────────────────────────────────────────
+
+    @Test
+    fun `searchUsersFlow matches by name substring`() = runTest {
+        store.insert(event(
+            id = "profile-alice", pubkey = "alice", kind = 0,
+            content = """{"name":"alice_nostr","display_name":"Alice","about":"Just a user"}""",
+        ))
+
+        store.searchUsersFlow("alice_n").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("alice", results[0].pubkey)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow matches by display_name substring`() = runTest {
+        store.insert(event(
+            id = "profile-bob", pubkey = "bob", kind = 0,
+            content = """{"name":"b0b","display_name":"Bobby Tables","about":"SQL enthusiast"}""",
+        ))
+
+        store.searchUsersFlow("Bobby").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("bob", results[0].pubkey)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow matches by about substring`() = runTest {
+        store.insert(event(
+            id = "profile-carol", pubkey = "carol", kind = 0,
+            content = """{"name":"carol","display_name":"Carol","about":"Bitcoin maximalist forever"}""",
+        ))
+
+        store.searchUsersFlow("maximalist").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("carol", results[0].pubkey)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow is case-insensitive`() = runTest {
+        store.insert(event(
+            id = "profile-dave", pubkey = "dave", kind = 0,
+            content = """{"name":"DAVE","display_name":"Dave The Dev","about":"coding"}""",
+        ))
+
+        store.searchUsersFlow("dave").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("dave", results[0].pubkey)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow sorts by display_name ASC`() = runTest {
+        store.insert(event(
+            id = "p-zara", pubkey = "zara", kind = 0,
+            content = """{"name":"z","display_name":"Zara","about":"last"}""",
+        ))
+        store.insert(event(
+            id = "p-alice", pubkey = "alice", kind = 0,
+            content = """{"name":"a","display_name":"Alice","about":"first"}""",
+        ))
+        store.insert(event(
+            id = "p-mike", pubkey = "mike", kind = 0,
+            content = """{"name":"m","display_name":"Markaa","about":"a person"}""",
+        ))
+
+        // All match "a": Zara (display_name), Alice (name), Markaa (display_name+about)
+        store.searchUsersFlow("a").test {
+            val results = awaitItem()
+            assertEquals(3, results.size)
+            assertEquals("Alice", results[0].displayName)
+            assertEquals("Markaa", results[1].displayName)
+            assertEquals("Zara", results[2].displayName)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow respects limit of 50`() = runTest {
+        for (i in 1..55) {
+            store.insert(event(
+                id = "profile-$i", pubkey = "pk-$i", kind = 0,
+                content = """{"name":"user$i","display_name":"User $i","about":"searchable bio"}""",
+            ))
+        }
+
+        store.searchUsersFlow("searchable").test {
+            val results = awaitItem()
+            assertEquals("Capped at 50", 50, results.size)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow re-emits when new matching profile arrives`() = runTest {
+        store.searchUsersFlow("newuser").test {
+            assertEquals("Initially empty", emptyList<Any>(), awaitItem())
+
+            store.insert(event(
+                id = "profile-new", pubkey = "newpk", kind = 0,
+                content = """{"name":"newuser","display_name":"New User","about":"just arrived"}""",
+            ))
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("newpk", results[0].pubkey)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── feedRowsByIdsFlow ───────────────────────────────────────────────────
+
+    @Test
+    fun `feedRowsByIdsFlow returns FeedRows for known IDs only`() = runTest {
+        store.insert(event(id = "exists-1", kind = 1, content = "one"))
+        store.insert(event(id = "exists-2", kind = 1, content = "two"))
+
+        store.feedRowsByIdsFlow(setOf("exists-1", "exists-2", "missing-3")).test {
+            val results = awaitItem()
+            assertEquals("Only 2 known IDs", 2, results.size)
+            val ids = results.map { it.id }.toSet()
+            assertTrue("exists-1" in ids)
+            assertTrue("exists-2" in ids)
+            assertFalse("missing-3" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedRowsByIdsFlow sorts by createdAt DESC`() = runTest {
+        store.insert(event(id = "old", kind = 1, content = "old", createdAt = 100))
+        store.insert(event(id = "new", kind = 1, content = "new", createdAt = 200))
+        store.insert(event(id = "mid", kind = 1, content = "mid", createdAt = 150))
+
+        store.feedRowsByIdsFlow(setOf("old", "new", "mid")).test {
+            val results = awaitItem()
+            assertEquals(3, results.size)
+            assertEquals("new", results[0].id)
+            assertEquals("mid", results[1].id)
+            assertEquals("old", results[2].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedRowsByIdsFlow re-emits when a previously-missing ID arrives`() = runTest {
+        store.insert(event(id = "present", kind = 1, content = "here", createdAt = 100))
+
+        store.feedRowsByIdsFlow(setOf("present", "late")).test {
+            val first = awaitItem()
+            assertEquals("Initially only 1", 1, first.size)
+            assertEquals("present", first[0].id)
+
+            // Late arrival
+            store.insert(event(id = "late", kind = 1, content = "arrived", createdAt = 200))
+            val second = awaitItem()
+            assertEquals("Now 2", 2, second.size)
+            assertEquals("late", second[0].id) // newest first
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }
