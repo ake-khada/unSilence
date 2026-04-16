@@ -1,7 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
-import com.unsilence.app.data.db.dao.EventDao
+import com.unsilence.app.data.memory.MemoryEventStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,7 +26,7 @@ private const val TAG = "BrowseSession"
 @Singleton
 class RelayBrowseSession @Inject constructor(
     private val relayPool: RelayPool,
-    private val eventDao: EventDao,
+    private val memoryEventStore: MemoryEventStore,
 ) {
     private val _isActive = MutableStateFlow(false)
     val isActive: StateFlow<Boolean> = _isActive
@@ -73,7 +73,7 @@ class RelayBrowseSession @Inject constructor(
         relayPool.browseEngagementTargets = normalized
 
         // Query latest event timestamp so we only ask for newer events on revisit
-        val since = eventDao.maxCreatedAtForRelays(normalized)
+        val since = memoryEventStore.maxCreatedAtForRelays(normalized.toSet())
 
         for (url in normalized) {
             val hash = url.hashCode()

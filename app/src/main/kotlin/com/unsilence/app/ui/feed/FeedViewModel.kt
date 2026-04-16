@@ -484,25 +484,38 @@ class FeedViewModel @Inject constructor(
                                 .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
                             browseSession.start(setUrls)
+                            Log.d("FeedVM", "A5_T1: RelaySet feed → MemoryEventStore (${setUrls.size} relays)")
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(setUrls, filter, limit, contentFilter = cfValue)
+                                val memFilter = MemoryFeedFilter(
+                                    kinds = filter.enabledKinds.toSet(),
+                                    contentFilter = cfValue,
+                                    relayUrls = setUrls.toSet(),
+                                )
+                                memoryEventStore.feedFlow(memFilter, limit)
                             }
                         }
                         is FeedType.SingleRelay -> {
                             val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
                             currentRelayUrls = singleUrl
                             browseSession.start(singleUrl)
+                            Log.d("FeedVM", "A5_T1: SingleRelay feed → MemoryEventStore (${type.url})")
                             _displayLimit.flatMapLatest { limit ->
-                                eventRepository.feedFlow(singleUrl, filter, limit, contentFilter = cfValue)
+                                val memFilter = MemoryFeedFilter(
+                                    kinds = filter.enabledKinds.toSet(),
+                                    contentFilter = cfValue,
+                                    relayUrls = singleUrl.toSet(),
+                                )
+                                memoryEventStore.feedFlow(memFilter, limit)
                             }
                         }
                     }
 
-                    // Post-query filters for MemoryEventStore feeds (Global/Following).
+                    // Post-query presentation filters for MemoryEventStore feeds.
                     // Structural filters (kind, pubkey, contentFilter, relayUrls) are
                     // applied inside the walk so limit counts accepted rows.
                     // Presentation filters (sinceHours, engagement minimums) stay here.
-                    val isMemoryFeed = type is FeedType.Global || type is FeedType.Following
+                    // All feed types now use MES (A.5.1 T1: SingleRelay + RelaySet migrated).
+                    val isMemoryFeed = true
                     val filtered = if (isMemoryFeed) {
                         val sinceTs = filter.sinceHours?.let {
                             System.currentTimeMillis() / 1000L - it * 3600L
