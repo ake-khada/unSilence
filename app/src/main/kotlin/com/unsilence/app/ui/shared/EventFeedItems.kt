@@ -161,6 +161,17 @@ private fun ThreadedReplyItem(
         }
     }
 
+    // ── DIAGNOSTIC: log when thread parent doesn't resolve ───────────────
+    LaunchedEffect(parentId, parentEvent) {
+        if (parentEvent == null) {
+            kotlinx.coroutines.delay(6000) // Wait past lookupEvent's 5s timeout
+            android.util.Log.w("CardHydrator", "Outbox final: refId=${parentId.take(12)} exists=false " +
+                "kind=null author=null relayUrl=null contentLen=0 " +
+                "referencedBy=${replyRow.id.take(12)} referencedByKind=${replyRow.kind} " +
+                "phase=unresolved")
+        }
+    }
+
     // Single card — parent is embedded inside the reply NoteCard
     EventFeedItem(
         row = replyRow,
