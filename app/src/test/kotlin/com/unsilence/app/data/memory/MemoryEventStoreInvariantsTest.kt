@@ -9,6 +9,7 @@ package com.unsilence.app.data.memory
 // ─────────────────────────────────────────────────────────────────────────────
 
 import app.cash.turbine.test
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1434,6 +1435,363 @@ class MemoryEventStoreInvariantsTest {
             assertNotNull("Should resolve after profile insert", resolved)
             assertEquals("Alice", resolved!!.name)
             assertEquals("https://a.jpg", resolved.picture)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── A.5.1 T2: userFeedFlow ─────────────────────────────────────────────
+
+    @Test
+    fun `userFeedFlow contentFilter=0 returns all kinds for pubkey`() = runTest {
+        store.insert(event(id = "note1", pubkey = "alice", kind = 1, createdAt = 100))
+        store.insert(event(id = "repost1", pubkey = "alice", kind = 6, rootId = "note1", createdAt = 101))
+        store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 102,
+            tags = listOf(listOf("d", "slug"))))
+        store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "note1", rootId = "note1", createdAt = 103))
+        // Other user's event — should be excluded
+        store.insert(event(id = "bob-note", pubkey = "bob", kind = 1, createdAt = 104))
+
+        store.userFeedFlow("alice", contentFilter = 0).test {
+            val rows = awaitItem()
+            val ids = rows.map { it.id }
+            assertEquals(4, rows.size)
+            assertTrue("note1 included", "note1" in ids)
+            assertTrue("repost1 included", "repost1" in ids)
+            assertTrue("article1 included", "article1" in ids)
+            assertTrue("reply1 included", "reply1" in ids)
+            assertFalse("bob-note excluded", "bob-note" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userFeedFlow contentFilter=1 returns kind-1 roots + kind-6 reposts (no replies, no longform)`() = runTest {
+        store.insert(event(id = "root1", pubkey = "alice", kind = 1, createdAt = 100))
+        store.insert(event(id = "root2", pubkey = "alice", kind = 1, createdAt = 101))
+        store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "root1", rootId = "root1", createdAt = 102))
+        store.insert(event(id = "repost1", pubkey = "alice", kind = 6, rootId = "root1", createdAt = 103))
+        store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
+            tags = listOf(listOf("d", "slug"))))
+
+        store.userFeedFlow("alice", contentFilter = 1).test {
+            val rows = awaitItem()
+            val ids = rows.map { it.id }
+            assertEquals("kind-1 roots + kind-6 reposts", 3, rows.size)
+            assertTrue("root1 included", "root1" in ids)
+            assertTrue("root2 included", "root2" in ids)
+            assertTrue("repost1 included (kind-6 in Notes tab)", "repost1" in ids)
+            assertFalse("reply1 excluded", "reply1" in ids)
+            assertFalse("article1 excluded", "article1" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userFeedFlow contentFilter=2 returns kind-1 replies only (not kind-6, not kind-30023)`() = runTest {
+        store.insert(event(id = "root1", pubkey = "alice", kind = 1, createdAt = 100))
+        store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "root1", rootId = "root1", createdAt = 101))
+        store.insert(event(id = "reply2", pubkey = "alice", kind = 1, replyToId = "root1", createdAt = 102))
+        store.insert(event(id = "repost1", pubkey = "alice", kind = 6, rootId = "root1", createdAt = 103))
+        store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
+            tags = listOf(listOf("d", "slug"))))
+
+        store.userFeedFlow("alice", contentFilter = 2).test {
+            val rows = awaitItem()
+            val ids = rows.map { it.id }
+            assertEquals(2, rows.size)
+            assertTrue("reply1 included", "reply1" in ids)
+            assertTrue("reply2 included", "reply2" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userFeedFlow with kinds=setOf(30023) returns only longform`() = runTest {
+        store.insert(event(id = "note1", pubkey = "alice", kind = 1, createdAt = 100))
+        store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 101,
+            tags = listOf(listOf("d", "slug1"))))
+        store.insert(event(id = "article2", pubkey = "alice", kind = 30023, createdAt = 102,
+            tags = listOf(listOf("d", "slug2"))))
+
+        store.userFeedFlow("alice", kinds = setOf(30023)).test {
+            val rows = awaitItem()
+            val ids = rows.map { it.id }
+            assertEquals(2, rows.size)
+            assertTrue("article1 included", "article1" in ids)
+            assertTrue("article2 included", "article2" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userFeedFlow respects limit and createdAt DESC sort`() = runTest {
+        for (i in 1..10) {
+            store.insert(event(id = "evt-$i", pubkey = "alice", kind = 1, createdAt = i.toLong()))
+        }
+
+        store.userFeedFlow("alice", limit = 3).test {
+            val rows = awaitItem()
+            assertEquals(3, rows.size)
+            // DESC sort — newest first
+            assertEquals("evt-10", rows[0].id)
+            assertEquals("evt-9", rows[1].id)
+            assertEquals("evt-8", rows[2].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userFeedFlow emits when new event for pubkey arrives`() = runTest {
+        store.insert(event(id = "evt-1", pubkey = "alice", kind = 1, createdAt = 100))
+
+        store.userFeedFlow("alice").test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+
+            store.insert(event(id = "evt-2", pubkey = "alice", kind = 1, createdAt = 200))
+
+            val updated = awaitItem()
+            assertEquals(2, updated.size)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── A.5.1 T2: getUserEntities ──────────────────────────────────────────
+
+    @Test
+    fun `getUserEntities returns entities in order of input pubkeys`() {
+        store.insert(event(id = "p-charlie", kind = 0, pubkey = "charlie",
+            content = """{"name":"Charlie"}""", createdAt = 100))
+        store.insert(event(id = "p-alice", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""", createdAt = 101))
+        store.insert(event(id = "p-bob", kind = 0, pubkey = "bob",
+            content = """{"name":"Bob"}""", createdAt = 102))
+
+        val result = store.getUserEntities(listOf("alice", "bob", "charlie"))
+        assertEquals(3, result.size)
+        assertEquals("alice", result[0].pubkey)
+        assertEquals("bob", result[1].pubkey)
+        assertEquals("charlie", result[2].pubkey)
+    }
+
+    @Test
+    fun `getUserEntities returns empty list for unknown pubkeys`() {
+        val result = store.getUserEntities(listOf("unknown1", "unknown2"))
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `getUserEntities handles mixed known and unknown pubkeys`() {
+        store.insert(event(id = "p-alice", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""", createdAt = 100))
+
+        val result = store.getUserEntities(listOf("unknown", "alice", "missing"))
+        assertEquals(1, result.size)
+        assertEquals("alice", result[0].pubkey)
+    }
+
+    // ── A.5.1 T2: followerCountCache ──────────────────────────────────────
+
+    @Test
+    fun `getFollowerCount returns null pair when never cached`() {
+        val (count, updatedAt) = store.getFollowerCount("unknown")
+        assertNull(count)
+        assertNull(updatedAt)
+    }
+
+    @Test
+    fun `cacheFollowerCount stores count and updatedAt in seconds`() {
+        val beforeSeconds = System.currentTimeMillis() / 1000
+        store.cacheFollowerCount("alice", 42L)
+        val afterSeconds = System.currentTimeMillis() / 1000
+
+        val (count, updatedAt) = store.getFollowerCount("alice")
+        assertEquals(42L, count)
+        assertNotNull(updatedAt)
+        // updatedAt should be in seconds, not milliseconds
+        assertTrue("updatedAt in seconds range", updatedAt!! in beforeSeconds..afterSeconds)
+    }
+
+    @Test
+    fun `cacheFollowerCount overwrites prior value for same pubkey`() {
+        store.cacheFollowerCount("alice", 10L)
+        store.cacheFollowerCount("alice", 99L)
+
+        val (count, _) = store.getFollowerCount("alice")
+        assertEquals(99L, count)
+    }
+
+    @Test
+    fun `getFollowerCount returns stored count and seconds timestamp`() {
+        store.cacheFollowerCount("alice", 500L)
+        store.cacheFollowerCount("bob", 1000L)
+
+        val (aliceCount, aliceTs) = store.getFollowerCount("alice")
+        val (bobCount, bobTs) = store.getFollowerCount("bob")
+
+        assertEquals(500L, aliceCount)
+        assertEquals(1000L, bobCount)
+        assertNotNull(aliceTs)
+        assertNotNull(bobTs)
+    }
+
+    // ── A.5.1 T2: addFollow / removeFollow ────────────────────────────────
+
+    @Test
+    fun `addFollow adds pubkey to ownPubkey follows set`() {
+        store.addFollow("me", "alice")
+
+        val follows = store.getFollows("me")
+        assertNotNull(follows)
+        assertTrue("alice" in follows!!)
+    }
+
+    @Test
+    fun `addFollow is idempotent (adding same pubkey twice is noop)`() {
+        store.addFollow("me", "alice")
+        store.addFollow("me", "alice")
+
+        val follows = store.getFollows("me")
+        assertNotNull(follows)
+        assertEquals(1, follows!!.size)
+        assertTrue("alice" in follows)
+    }
+
+    @Test
+    fun `removeFollow removes pubkey from ownPubkey follows set`() {
+        store.addFollow("me", "alice")
+        store.addFollow("me", "bob")
+        store.removeFollow("me", "alice")
+
+        val follows = store.getFollows("me")
+        assertNotNull(follows)
+        assertFalse("alice" in follows!!)
+        assertTrue("bob" in follows)
+    }
+
+    @Test
+    fun `removeFollow is noop when pubkey not present`() {
+        store.addFollow("me", "alice")
+        store.removeFollow("me", "nonexistent")
+
+        val follows = store.getFollows("me")
+        assertNotNull(follows)
+        assertEquals(1, follows!!.size)
+        assertTrue("alice" in follows)
+    }
+
+    @Test
+    fun `addFollow updates followsFlow emission`() = runTest {
+        store.followsFlow("me").test {
+            val initial = awaitItem()
+            assertTrue(initial.isEmpty())
+
+            store.addFollow("me", "alice")
+
+            val updated = awaitItem()
+            assertTrue("alice" in updated)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── A.5.1 T2: filterFreshPubkeys / stalePubkeys ──────────────────────
+
+    @Test
+    fun `filterFreshPubkeys returns only pubkeys with profileUpdatedAt newer than threshold`() {
+        store.insert(event(id = "p-alice", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""", createdAt = 100))
+        // bob has no profile
+
+        val threshold = System.currentTimeMillis() - 1000 // 1 second ago
+        val fresh = store.filterFreshPubkeys(listOf("alice", "bob"), threshold)
+
+        assertTrue("alice should be fresh", "alice" in fresh)
+        assertFalse("bob should not be fresh (no profile)", "bob" in fresh)
+    }
+
+    @Test
+    fun `filterFreshPubkeys preserves input order`() {
+        store.insert(event(id = "p-charlie", kind = 0, pubkey = "charlie",
+            content = """{"name":"Charlie"}""", createdAt = 100))
+        store.insert(event(id = "p-alice", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""", createdAt = 101))
+        store.insert(event(id = "p-bob", kind = 0, pubkey = "bob",
+            content = """{"name":"Bob"}""", createdAt = 102))
+
+        val threshold = 1L // everything is fresh relative to epoch
+        val fresh = store.filterFreshPubkeys(listOf("bob", "charlie", "alice"), threshold)
+
+        assertEquals(listOf("bob", "charlie", "alice"), fresh)
+    }
+
+    @Test
+    fun `stalePubkeys returns pubkeys with profileUpdatedAt older than threshold`() {
+        store.insert(event(id = "p-alice", kind = 0, pubkey = "alice",
+            content = """{"name":"Alice"}""", createdAt = 100))
+
+        // Use a threshold far in the future so alice is stale
+        val futureThreshold = System.currentTimeMillis() + 100_000
+        val stale = store.stalePubkeys(futureThreshold)
+
+        assertTrue("alice should be stale", "alice" in stale)
+    }
+
+    @Test
+    fun `stalePubkeys includes pubkeys with no profile`() {
+        // Insert a kind-1 event from bob — no kind-0 profile
+        store.insert(event(id = "bob-note", pubkey = "bob", kind = 1, createdAt = 100))
+
+        val stale = store.stalePubkeys(System.currentTimeMillis() + 1000)
+        assertTrue("bob (no profile) should be stale", "bob" in stale)
+    }
+
+    // ── A.5.1 T2 Phase 2: Existing behavior contracts ─────────────────────
+
+    @Test
+    fun `userEntityFlow emits initial cached profile`() = runTest {
+        // Pre-insert profile before subscribing
+        store.insert(event(
+            id = "p-pre", kind = 0, pubkey = "pre-cached",
+            content = """{"name":"PreCached"}""",
+        ))
+
+        store.userEntityFlow("pre-cached").test {
+            val first = awaitItem()
+            assertNotNull("First emission should be cached profile", first)
+            assertEquals("PreCached", first!!.name)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `userEntityFlow emits when profile event arrives`() = runTest {
+        store.userEntityFlow("late").test {
+            val initial = awaitItem()
+            assertNull("Initially null", initial)
+
+            store.insert(event(
+                id = "p-late", kind = 0, pubkey = "late",
+                content = """{"name":"LateArrival"}""",
+            ))
+
+            val updated = awaitItem()
+            assertNotNull(updated)
+            assertEquals("LateArrival", updated!!.name)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `followsFlow with target pubkey check reflects add and remove`() = runTest {
+        store.followsFlow("me").map { "target" in it }.test {
+            assertFalse("Initially not following", awaitItem())
+
+            store.addFollow("me", "target")
+            assertTrue("Following after add", awaitItem())
+
+            store.removeFollow("me", "target")
+            assertFalse("Not following after remove", awaitItem())
+
             cancelAndIgnoreRemainingEvents()
         }
     }
