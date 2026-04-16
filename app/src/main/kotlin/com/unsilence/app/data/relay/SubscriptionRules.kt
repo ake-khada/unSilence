@@ -40,6 +40,7 @@ object SubscriptionRules {
         "engagement-zaps-",
         "batch-events-",
         "trust-scores-",
+        "prefetch-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =
