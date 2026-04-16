@@ -1183,7 +1183,7 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val conns = relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
+        val conns = relayUrls.mapNotNull { normalizeRelayUrl(it)?.let { url -> connections[url] } }
         conns.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${conns.size} source relay(s)")
     }
