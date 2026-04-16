@@ -105,10 +105,13 @@ class EventProcessor @Inject constructor(
     internal val prefetchDedupedCount = java.util.concurrent.atomic.AtomicLong(0)
     internal val prefetchSkippedAlreadyCachedCount = java.util.concurrent.atomic.AtomicLong(0)
     internal val prefetchFetchedBySourceRelayCount = java.util.concurrent.atomic.AtomicLong(0)
+    internal val outboxPrefetchDispatchedCount = java.util.concurrent.atomic.AtomicLong(0)
 
     private companion object {
         const val PREFETCH_RATE_CAP = 50
         const val PREFETCH_CHANNEL_CAP = 500
+        const val OUTBOX_RELAY_BUDGET = 5
+        const val OUTBOX_AUTHOR_BUDGET = 3
         val EVENT_ID_HEX_REGEX = Regex("^[0-9a-f]{64}$")
     }
 
@@ -163,6 +166,28 @@ class EventProcessor @Inject constructor(
                 "deduped=${prefetchDedupedCount.get()} " +
                 "skipped_cached=${prefetchSkippedAlreadyCachedCount.get()} " +
                 "fetched=${prefetchFetchedBySourceRelayCount.get()}")
+        }
+    }
+
+    /**
+     * A.6 outbox-aware prefetch: dispatch referenced event IDs to the author's
+     * NIP-65 write relays. Bypasses prefetchedRefs dedup (source relay already
+     * claimed that slot) and dispatches directly (no channel — budget-capped
+     * volume doesn't need rate limiting).
+     *
+     * @param refIds referenced event IDs (already validated by requestPrefetch)
+     * @param outboxRelays write relay URLs to try (budget-capped by caller)
+     */
+    private fun dispatchOutboxPrefetch(refIds: List<String>, outboxRelays: List<String>) {
+        val dispatcher = prefetchDispatcher ?: return
+        val missing = refIds.filter {
+            EVENT_ID_HEX_REGEX.matches(it) && memoryEventStore.getEventEntity(it) == null
+        }
+        if (missing.isEmpty()) return
+        for (relay in outboxRelays) {
+            if (relay.isBlank() || !relay.startsWith("wss://")) continue
+            dispatcher.dispatch(relay, missing)
+            outboxPrefetchDispatchedCount.addAndGet(missing.size.toLong())
         }
     }
 
@@ -377,15 +402,58 @@ class EventProcessor @Inject constructor(
             .filter { it.size >= 2 && it[0] == "e" }
             .forEach { requestPrefetch(it[1], relayUrl) }
 
+        // ── A.6 outbox-aware prefetch: also try author's NIP-65 write relays ─
+        // When the event references other events (via e-tags) and mentions
+        // authors (via p-tags), resolve those authors' write relays from cached
+        // kind-10002 data and dispatch prefetch there too. This catches events
+        // that only exist on the author's outbox relays.
+        val pTagPubkeys = tagsList
+            .filter { it.size >= 2 && it[0] == "p" }
+            .map { it[1] }
+            .distinct()
+            .take(OUTBOX_AUTHOR_BUDGET)
+        // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
+        // etc.), use the wrapper's own pubkey as fallback author. Self-reposts
+        // (wrapper author == target author) are the common case for bridged content.
+        val outboxAuthors = if (pTagPubkeys.isNotEmpty()) {
+            pTagPubkeys
+        } else if (kind == 6) {
+            listOf(pubkey)
+        } else {
+            emptyList()
+        }
+        if (outboxAuthors.isNotEmpty()) {
+            val outboxRelays = outboxAuthors
+                .flatMap { memoryEventStore.writeRelaysFor(it) }
+                .mapNotNull { normalizeRelayUrl(it) }
+                .filter { it != relayUrl } // skip source relay (already tried)
+                .distinct()
+                .take(OUTBOX_RELAY_BUDGET)
+            if (outboxRelays.isNotEmpty()) {
+                val refIds = buildList {
+                    nostrEvent.replyToId?.let { add(it) }
+                    nostrEvent.rootId?.let { add(it) }
+                    tagsList.filter { it.size >= 2 && it[0] == "e" }.forEach { add(it[1]) }
+                }.distinct()
+                dispatchOutboxPrefetch(refIds, outboxRelays)
+                Log.d(TAG, "outbox prefetch: ${refIds.size} refs → ${outboxRelays.size} write relays for ${outboxAuthors.size} authors")
+            }
+        }
+
         // ── Direct-path control-plane updates (not channeled) ────────────────
-        // Kind 3 (contact list) updates the follows index in MemoryEventStore
-        // without entering the feed-content channel or main event store.
+        // Control-plane kinds (3, 10002) update MemoryEventStore state directly
+        // without entering the feed-content channels. They are NOT feed items.
         if (kind == 3) {
             val follows = nostrEvent.tags
                 .filter { it.size >= 2 && it[0] == "p" }
                 .map { it[1] }
                 .toSet()
             memoryEventStore.updateFollows(pubkey, follows, createdAt)
+        }
+        // Kind 10002 (NIP-65 relay list) → direct insert so writeRelaysFor()
+        // resolves for outbox-aware prefetch and CardHydrator outbox fallback.
+        if (kind == 10002) {
+            memoryEventStore.insert(nostrEvent)
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
