@@ -6,7 +6,6 @@ import com.unsilence.app.data.db.dao.CoverageDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
-import com.unsilence.app.data.db.dao.EventRelayDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.NotificationsDao
@@ -65,7 +64,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun notificationsDao(): NotificationsDao
     abstract fun eventStatsDao(): EventStatsDao
     abstract fun tagDao(): TagDao
-    abstract fun eventRelayDao(): EventRelayDao
     abstract fun relayConfigDao(): RelayConfigDao
     abstract fun nostrRelaySetDao(): NostrRelaySetDao
     abstract fun coverageDao(): CoverageDao

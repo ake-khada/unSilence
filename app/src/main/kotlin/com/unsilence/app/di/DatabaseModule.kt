@@ -24,7 +24,6 @@ import com.unsilence.app.data.db.dao.CoverageDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
-import com.unsilence.app.data.db.dao.EventRelayDao
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.NotificationsDao
@@ -70,7 +69,6 @@ object DatabaseModule {
     @Provides fun provideNotificationsDao(db: AppDatabase): NotificationsDao = db.notificationsDao()
     @Provides fun provideEventStatsDao(db: AppDatabase): EventStatsDao = db.eventStatsDao()
     @Provides fun provideTagDao(db: AppDatabase): TagDao = db.tagDao()
-    @Provides fun provideEventRelayDao(db: AppDatabase): EventRelayDao = db.eventRelayDao()
     @Provides fun provideRelayConfigDao(db: AppDatabase): RelayConfigDao = db.relayConfigDao()
     @Provides fun provideNostrRelaySetDao(db: AppDatabase): NostrRelaySetDao = db.nostrRelaySetDao()
     @Provides fun provideCoverageDao(db: AppDatabase): CoverageDao = db.coverageDao()
