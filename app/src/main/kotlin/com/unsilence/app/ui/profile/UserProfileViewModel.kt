@@ -5,17 +5,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.dao.UserDao
-import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -35,6 +32,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -51,15 +49,13 @@ private const val TAG = "UserProfileVM"
 @HiltViewModel
 class UserProfileViewModel @Inject constructor(
     private val userRepository: UserRepository,
-    private val eventRepository: EventRepository,
+    private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
-    private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
     private val relayConfigDao: RelayConfigDao,
     private val cardHydrator: CardHydrator,
-    private val userDao: UserDao,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -73,7 +69,7 @@ class UserProfileViewModel @Inject constructor(
     @OptIn(ExperimentalCoroutinesApi::class)
     val userFlow: Flow<UserEntity?> = _pubkeyHex
         .filterNotNull()
-        .flatMapLatest { userRepository.userFlow(it) }
+        .flatMapLatest { memoryEventStore.userEntityFlow(it) }
 
     // ── Growing query window for pagination ────────────────────────────
     private val _displayLimit = MutableStateFlow(200)
@@ -81,7 +77,7 @@ class UserProfileViewModel @Inject constructor(
     @OptIn(ExperimentalCoroutinesApi::class)
     val postsFlow: Flow<List<FeedRow>> =
         combine(_pubkeyHex.filterNotNull(), _displayLimit) { pk, limit -> pk to limit }
-            .flatMapLatest { (pk, limit) -> eventRepository.userPostsFlow(pk, limit) }
+            .flatMapLatest { (pk, limit) -> memoryEventStore.userFeedFlow(pk, limit = limit) }
 
     // ── Profile tabs ──────────────────────────────────────────────────
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
@@ -91,9 +87,9 @@ class UserProfileViewModel @Inject constructor(
         combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab -> pk to tab }
             .flatMapLatest { (pk, tab) ->
                 when (tab) {
-                    ProfileTab.NOTES    -> eventRepository.userNotesFlow(pk)
-                    ProfileTab.REPLIES  -> eventRepository.userRepliesFlow(pk)
-                    ProfileTab.LONGFORM -> eventRepository.userLongformFlow(pk)
+                    ProfileTab.NOTES    -> memoryEventStore.userFeedFlow(pk, contentFilter = 1)
+                    ProfileTab.REPLIES  -> memoryEventStore.userFeedFlow(pk, contentFilter = 2)
+                    ProfileTab.LONGFORM -> memoryEventStore.userFeedFlow(pk, kinds = setOf(30023))
                 }
             }
 
@@ -107,7 +103,7 @@ class UserProfileViewModel @Inject constructor(
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
         profileCache.getOrPut(pubkey) {
-            userRepository.userFlow(pubkey)
+            memoryEventStore.userEntityFlow(pubkey)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
@@ -155,15 +151,21 @@ class UserProfileViewModel @Inject constructor(
         }
     }
 
+    private val myPubkey: String? = keyManager.getPublicKeyHex()
+
     /** Whether the logged-in user follows the viewed pubkey. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val isFollowing: Flow<Boolean> = _pubkeyHex
-        .filterNotNull()
-        .flatMapLatest { followDao.isFollowingFlow(it) }
+    val isFollowing: Flow<Boolean> = if (myPubkey != null) {
+        _pubkeyHex
+            .filterNotNull()
+            .flatMapLatest { target ->
+                memoryEventStore.followsFlow(myPubkey).map { target in it }
+            }
+    } else {
+        MutableStateFlow(false)
+    }
 
     val followLoading = MutableStateFlow(false)
-
-    private val myPubkey: String? = keyManager.getPublicKeyHex()
 
     fun toggleFollow() {
         val targetPubkey = _pubkeyHex.value ?: return
@@ -173,7 +175,7 @@ class UserProfileViewModel @Inject constructor(
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val currentFollows = followDao.allPubkeys()
+                val currentFollows = memoryEventStore.getFollows(myPubkey)?.toList() ?: emptyList()
                 val nowFollowing = targetPubkey in currentFollows
                 val newFollowList = if (nowFollowing) {
                     currentFollows.filter { it != targetPubkey }
@@ -198,11 +200,11 @@ class UserProfileViewModel @Inject constructor(
                 val targetUrls = (writeUrls + indexerUrls).distinct()
                 relayPool.publishToRelays(toEventJson(signed), targetUrls)
 
-                // Update local follows table
+                // Optimistic local mutation via MES
                 if (nowFollowing) {
-                    followDao.delete(targetPubkey)
+                    memoryEventStore.removeFollow(myPubkey, targetPubkey)
                 } else {
-                    followDao.insert(FollowEntity(pubkey = targetPubkey, followedAt = nowSeconds))
+                    memoryEventStore.addFollow(myPubkey, targetPubkey)
                 }
             } finally {
                 followLoading.value = false
@@ -251,11 +253,10 @@ class UserProfileViewModel @Inject constructor(
             relayPool.fetchUserPosts(pubkey, outboxRelayUrls)
         }
 
-        // Fetch follower count via NIP-45 COUNT
+        // Fetch follower count via NIP-45 COUNT (cache in MES, not Room)
         viewModelScope.launch(Dispatchers.IO) {
-            val cached = userDao.getFollowerCount(pubkey)
-            val cachedAt = userDao.getFollowerCountUpdatedAt(pubkey)
-            val oneDayAgo = System.currentTimeMillis() / 1000 - 86_400
+            val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkey)
+            val oneDayAgo = System.currentTimeMillis() / 1000 - MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS
 
             if (cached != null && cachedAt != null && cachedAt > oneDayAgo) {
                 followerCount.value = cached
@@ -274,7 +275,7 @@ class UserProfileViewModel @Inject constructor(
             )
             if (count != null) {
                 followerCount.value = count
-                userDao.updateFollowerCount(pubkey, count, System.currentTimeMillis() / 1000)
+                memoryEventStore.cacheFollowerCount(pubkey, count)
             }
         }
 
