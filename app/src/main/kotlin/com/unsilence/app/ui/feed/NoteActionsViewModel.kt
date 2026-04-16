@@ -7,16 +7,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.entity.EventEntity
-import com.unsilence.app.data.db.entity.ReactionEntity
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapRepository
@@ -30,13 +28,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,13 +50,11 @@ class NoteActionsViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
-    private val eventRepository: EventRepository,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
-    private val eventStatsDao: EventStatsDao,
     val sharedPlayerHolder: SharedPlayerHolder,
     val videoThumbnailCache: VideoThumbnailCache,
 ) : ViewModel() {
@@ -79,28 +71,23 @@ class NoteActionsViewModel @Inject constructor(
 
     /**
      * Set of event IDs the current user has reacted to.
-     * Room re-emits on every reactions table write, keeping this live.
+     * MES re-emits via _actionSignal on every kind-7 insert.
      */
     val reactedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
-            eventRepository.reactedEventIds(pk)
-                .map { it.toHashSet() }
+            memoryEventStore.reactedEventIdsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
         } ?: MutableStateFlow(emptySet())
 
     /**
      * Set of event IDs the current user has reposted.
-     * Room re-emits on every events table write.
+     * MES re-emits via _actionSignal on every kind-6 insert.
      */
     val repostedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
-            eventRepository.repostedEventIds(pk)
-                .map { it.toHashSet() }
+            memoryEventStore.repostedEventIdsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
         } ?: MutableStateFlow(emptySet())
-
-    /** Optimistic zap state: event IDs zapped in this session after NWC confirms. */
-    private val _optimisticZaps = MutableStateFlow(emptySet<String>())
 
     /** Optimistic sats: per-event amount to add on top of Room's zapTotalSats. */
     private val _optimisticZapSats = MutableStateFlow<Map<String, Long>>(emptyMap())
@@ -137,19 +124,13 @@ class NoteActionsViewModel @Inject constructor(
 
     /**
      * Set of event IDs the current user has zapped.
-     * Combines Room-backed storage with in-session optimistic updates so the
-     * zap icon turns amber after NWC confirms payment.
+     * MES re-emits via _actionSignal on every kind-9734 insert.
      */
     val zappedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
-            combine(
-                eventRepository.zappedEventIds(pk).map { it.toHashSet() },
-                _optimisticZaps,
-            ) { fromRoom, optimistic -> fromRoom + optimistic }
+            memoryEventStore.zappedEventIdsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
-        } ?: _optimisticZaps
-            .map { it.toSet() }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+        } ?: MutableStateFlow(emptySet())
 
     // ── Public actions ────────────────────────────────────────────────────────
 
@@ -170,16 +151,8 @@ class NoteActionsViewModel @Inject constructor(
 
             relayPool.publish(toEventJson(signed))
 
-            // Optimistic insert → reactions table updates → reactedEventIds re-emits
-            eventRepository.insertReaction(
-                ReactionEntity(
-                    eventId       = signed.id,
-                    targetEventId = eventId,
-                    pubkey        = signed.pubKey,
-                    content       = "+",
-                    createdAt     = signed.createdAt,
-                )
-            )
+            // Optimistic insert → MES actor-index updates → reactedEventIdsFlow re-emits
+            memoryEventStore.insert(signedEventToNostrEvent(signed))
         }
     }
 
@@ -203,21 +176,8 @@ class NoteActionsViewModel @Inject constructor(
 
             relayPool.publish(toEventJson(signed))
 
-            // Optimistic insert as kind 6 with rootId = eventId (drives repost_count JOIN)
-            eventRepository.insertEvent(
-                EventEntity(
-                    id        = signed.id,
-                    pubkey    = signed.pubKey,
-                    kind      = signed.kind,
-                    content   = signed.content,
-                    createdAt = signed.createdAt,
-                    tags      = tagsToJson(signed.tags),
-                    sig       = signed.sig,
-                    relayUrl  = "wss://relay.damus.io",
-                    rootId    = eventId,
-                    cachedAt  = nowSeconds,
-                )
-            )
+            // Optimistic insert → MES actor-index updates → repostedEventIdsFlow re-emits
+            memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
         }
     }
 
@@ -226,24 +186,16 @@ class NoteActionsViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val result = zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
             if (result.isSuccess) {
-                // Persist the kind-9734 zap request so Room's zappedEventIds survives restarts
                 val signed = result.getOrThrow()
-                eventRepository.insertEvent(
-                    EventEntity(
-                        id        = signed.id,
-                        pubkey    = signed.pubKey,
-                        kind      = signed.kind,
-                        content   = signed.content,
-                        createdAt = signed.createdAt,
-                        tags      = tagsToJson(signed.tags),
-                        sig       = signed.sig,
-                        relayUrl  = relayUrl,
-                        rootId    = eventId,
-                        cachedAt  = System.currentTimeMillis() / 1000L,
-                    )
-                )
-                // Increment zap sats in event_stats so the count survives restarts
-                eventStatsDao.incrementZapStats(eventId, amountSats)
+                // Optimistic insert → MES actor-index updates → zappedEventIdsFlow re-emits
+                memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
+                // Compatibility shim: optimistic zap sats bump.
+                // This mutates recipient-side aggregate state (zapStatsByEventId)
+                // for immediate UX feedback. The canonical recipient-side path is
+                // kind-9735 via handleZapReceipt. This shim preserves the pre-Tier-4
+                // behavior where eventStatsDao.incrementZapStats was called on
+                // successful payment. Remove if/when A.5.2 reworks zap aggregation.
+                memoryEventStore.incrementZapStats(eventId, amountSats)
             }
             withContext(Dispatchers.Main) {
                 _zapLoading.value = _zapLoading.value - eventId
@@ -358,9 +310,45 @@ class NoteActionsViewModel @Inject constructor(
         put("sig",        entity.sig)
     }.toString()
 
-    private fun tagsToJson(tags: Array<Array<String>>): String = buildJsonArray {
-        tags.forEach { row ->
-            add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
+    /**
+     * Convert a signed Quartz Event to a NostrEvent for MES optimistic insert.
+     * Parses NIP-10 e-tag threading to set rootId (used by repost + zap actor indexes).
+     */
+    private fun signedEventToNostrEvent(
+        signed: Event,
+        rootId: String? = null,
+    ): NostrEvent {
+        val tagsList = signed.tags.map { it.toList() }
+        // If rootId not explicitly provided, try NIP-10 positional parse from e-tags
+        val resolvedRootId = rootId ?: run {
+            val eTags = tagsList.filter { it.size >= 2 && it[0] == "e" }
+            when {
+                eTags.isEmpty() -> null
+                eTags.size == 1 -> eTags[0][1]
+                else -> {
+                    // Marker-based
+                    eTags.firstOrNull { it.getOrNull(3) == "root" }?.get(1)
+                    // Fallback: positional (first e-tag = root)
+                        ?: eTags[0][1]
+                }
+            }
         }
-    }.toString()
+        val now = System.currentTimeMillis()
+        return NostrEvent(
+            id = signed.id,
+            pubkey = signed.pubKey,
+            kind = signed.kind,
+            content = signed.content,
+            createdAt = signed.createdAt,
+            tags = tagsList,
+            sig = signed.sig,
+            relayUrl = "",
+            replyToId = null,
+            rootId = resolvedRootId,
+            hasContentWarning = false,
+            contentWarningReason = null,
+            firstSeenAt = now,
+            relaysSeen = mutableSetOf(),
+        )
+    }
 }
