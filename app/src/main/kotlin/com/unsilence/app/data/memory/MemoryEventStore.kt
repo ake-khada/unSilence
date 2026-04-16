@@ -364,8 +364,8 @@ class MemoryEventStore @Inject constructor() {
                 if (filter.contentFilter == 2) {
                     if ((event.replyToId == null && event.rootId == null) || event.kind == 6) continue
                 }
-                // Relay URL scoping
-                if (filter.relayUrls != null && event.relaysSeen.none { it in filter.relayUrls }) continue
+                // Relay URL scoping — null or empty means no relay filter (all relays pass)
+                if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
                 result.add(event)
             }
             return result
@@ -447,6 +447,34 @@ class MemoryEventStore @Inject constructor() {
     fun reactionCount(eventId: String): Int = reactionCounts[eventId] ?: 0
     fun zapStats(eventId: String): ZapAggregate = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
     fun statsLastUpdated(eventId: String): Long = statsUpdatedAt[eventId] ?: 0L
+
+    // ─── A.5.1 T1: Relay browse queries ───────────────────────────────────
+
+    /**
+     * Returns the max `createdAt` across all events where `event.relaysSeen`
+     * overlaps with [relayUrls]. Used by RelayBrowseSession for REQ `since` cursors.
+     *
+     * Scan-based implementation — called infrequently (once per browse session start).
+     * // TODO(A.5.1 perf): per-relay index if profiling shows hot
+     */
+    fun maxCreatedAtForRelays(relayUrls: Set<String>): Long? {
+        if (relayUrls.isEmpty()) return null
+        var max: Long? = null
+        for (event in eventsById.values) {
+            if (event.relaysSeen.any { it in relayUrls }) {
+                val ts = event.createdAt
+                if (max == null || ts > max) max = ts
+            }
+        }
+        return max
+    }
+
+    /**
+     * Returns the subset of [eventIds] whose `statsUpdatedAt` is newer than [threshold].
+     * Preserves input order. Replaces `EventStatsDao.getFreshEngagementIds`.
+     */
+    fun filterFreshEngagement(eventIds: List<String>, threshold: Long): List<String> =
+        eventIds.filter { (statsUpdatedAt[it] ?: 0L) > threshold }
 
     // ─── Reactive flows ─────────────────────────────────────────────────────
 

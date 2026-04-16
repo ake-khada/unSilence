@@ -965,6 +965,104 @@ class MemoryEventStoreInvariantsTest {
         assertTrue("Both-relay event should appear", "both" in ids)
     }
 
+    // ── A.5.1 T1: FeedFilter.relayUrls contract ────────────────────────────
+
+    @Test
+    fun `feedFlow with relayUrls filter returns only events seen on those relays`() = runTest {
+        val targetRelay = "wss://target.example.com"
+        store.insert(event(id = "on-target", kind = 1, relayUrl = targetRelay, createdAt = 2))
+        store.insert(event(id = "off-target", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
+
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(targetRelay))
+        store.feedFlow(filter).test {
+            val rows = awaitItem()
+            assertEquals(1, rows.size)
+            assertEquals("on-target", rows[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedFlow with null relayUrls filter returns events from all relays`() = runTest {
+        store.insert(event(id = "a", kind = 1, relayUrl = "wss://r1.example.com", createdAt = 2))
+        store.insert(event(id = "b", kind = 1, relayUrl = "wss://r2.example.com", createdAt = 1))
+
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = null)
+        store.feedFlow(filter).test {
+            val rows = awaitItem()
+            assertEquals(2, rows.size)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedFlow with relayUrls returns events seen on ANY of the listed relays (OR semantics)`() = runTest {
+        val relay1 = "wss://r1.example.com"
+        val relay2 = "wss://r2.example.com"
+        store.insert(event(id = "on-r1", kind = 1, relayUrl = relay1, createdAt = 3))
+        store.insert(event(id = "on-r2", kind = 1, relayUrl = relay2, createdAt = 2))
+        store.insert(event(id = "on-other", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
+
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay1, relay2))
+        store.feedFlow(filter).test {
+            val rows = awaitItem()
+            val ids = rows.map { it.id }.toSet()
+            assertEquals(2, ids.size)
+            assertTrue("on-r1" in ids)
+            assertTrue("on-r2" in ids)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedFlow with relayUrls excludes events seen only on other relays`() = runTest {
+        store.insert(event(id = "match", kind = 1, relayUrl = "wss://target.example.com", createdAt = 2))
+        store.insert(event(id = "nomatch", kind = 1, relayUrl = "wss://wrong.example.com", createdAt = 1))
+
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf("wss://target.example.com"))
+        store.feedFlow(filter).test {
+            val rows = awaitItem()
+            assertEquals(1, rows.size)
+            assertEquals("match", rows[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedFlow with relayUrls respects limit and sort order (createdAt DESC)`() = runTest {
+        val relay = "wss://relay.example.com"
+        for (i in 1..10) {
+            store.insert(event(id = "lim-$i", kind = 1, relayUrl = relay, createdAt = i.toLong()))
+        }
+
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
+        store.feedFlow(filter, limit = 5).test {
+            val rows = awaitItem()
+            assertEquals(5, rows.size)
+            // Should be the 5 most recent (10, 9, 8, 7, 6) in descending order
+            assertEquals(listOf(10L, 9L, 8L, 7L, 6L), rows.map { it.createdAt })
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `feedFlow with relayUrls updates when new event arrives with matching relaysSeen`() = runTest {
+        val relay = "wss://live.example.com"
+        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
+
+        store.feedFlow(filter).test {
+            val initial = awaitItem()
+            assertTrue(initial.isEmpty())
+
+            store.insert(event(id = "live-1", kind = 1, relayUrl = relay, createdAt = 100))
+
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+            assertEquals("live-1", updated[0].id)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
     // ── updateFollows: dedicated follows path ──────────────────────────────
 
     @Test
@@ -1163,6 +1261,86 @@ class MemoryEventStoreInvariantsTest {
             assertEquals(2, updated.size)
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    // ── A.5.1 T1: maxCreatedAtForRelays ────────────────────────────────────
+
+    @Test
+    fun `maxCreatedAtForRelays returns max createdAt across matching events`() {
+        val relay1 = "wss://relay1.example.com"
+        val relay2 = "wss://relay2.example.com"
+        store.insert(event(id = "r1-old", kind = 1, createdAt = 100, relayUrl = relay1))
+        store.insert(event(id = "r1-new", kind = 1, createdAt = 300, relayUrl = relay1))
+        store.insert(event(id = "r2-mid", kind = 1, createdAt = 200, relayUrl = relay2))
+
+        val max = store.maxCreatedAtForRelays(setOf(relay1))
+        assertEquals(300L, max)
+    }
+
+    @Test
+    fun `maxCreatedAtForRelays returns null when no events match`() {
+        store.insert(event(id = "other", kind = 1, createdAt = 100, relayUrl = "wss://other.example.com"))
+
+        val max = store.maxCreatedAtForRelays(setOf("wss://nomatch.example.com"))
+        assertNull(max)
+    }
+
+    @Test
+    fun `maxCreatedAtForRelays with empty relayUrls set returns null`() {
+        store.insert(event(id = "any", kind = 1, createdAt = 100))
+
+        val max = store.maxCreatedAtForRelays(emptySet())
+        assertNull(max)
+    }
+
+    // ── A.5.1 T1: filterFreshEngagement ─────────────────────────────────────
+
+    @Test
+    fun `filterFreshEngagement returns only ids with statsUpdatedAt newer than threshold`() {
+        val target1 = "fresh-target-1"
+        val target2 = "fresh-target-2"
+        val staleTarget = "stale-target"
+
+        store.insert(event(id = target1, kind = 1))
+        store.insert(event(id = target2, kind = 1))
+        store.insert(event(id = staleTarget, kind = 1))
+
+        // React to target1 and target2 — this updates their statsUpdatedAt
+        store.insert(event(id = "r1", kind = 7, tags = listOf(listOf("e", target1))))
+        store.insert(event(id = "r2", kind = 7, tags = listOf(listOf("e", target2))))
+        // staleTarget gets no engagement — statsUpdatedAt stays at 0
+
+        val threshold = 1L // anything > 0 means staleTarget is excluded
+        val fresh = store.filterFreshEngagement(listOf(target1, target2, staleTarget), threshold)
+
+        assertTrue(target1 in fresh)
+        assertTrue(target2 in fresh)
+        assertFalse(staleTarget in fresh)
+    }
+
+    @Test
+    fun `filterFreshEngagement returns empty when all ids are stale`() {
+        store.insert(event(id = "s1", kind = 1))
+        store.insert(event(id = "s2", kind = 1))
+
+        // No engagement — statsUpdatedAt is 0 for both
+        val threshold = System.currentTimeMillis()
+        val fresh = store.filterFreshEngagement(listOf("s1", "s2"), threshold)
+
+        assertTrue(fresh.isEmpty())
+    }
+
+    @Test
+    fun `filterFreshEngagement preserves input order for fresh ids`() {
+        val ids = (1..5).map { "order-$it" }
+        for (id in ids) {
+            store.insert(event(id = id, kind = 1))
+            // React to each so they all have statsUpdatedAt > 0
+            store.insert(event(id = "react-$id", kind = 7, tags = listOf(listOf("e", id))))
+        }
+
+        val fresh = store.filterFreshEngagement(ids, 1L)
+        assertEquals(ids, fresh)
     }
 
     // ── A.4.3: toEventEntity adapter ───────────────────────────────────────
