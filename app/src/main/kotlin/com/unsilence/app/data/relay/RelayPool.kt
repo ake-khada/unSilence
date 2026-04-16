@@ -208,20 +208,9 @@ class RelayPool @Inject constructor(
      * Call this instead of conn.send(req) for all one-shot subscription REQs.
      */
     private fun sendOneShotToRelay(conn: RelayConnection, req: String) {
-        if (!canSendToRelay(conn.url)) {
-            val rlState = rateLimiters[conn.url]
-            val cooldownUntil = rlState?.cooldownUntil?.get() ?: 0
-            if (cooldownUntil > 0) {
-                val lastLogged = cooldownLogged[conn.url] ?: 0
-                if (cooldownUntil > lastLogged) {
-                    Log.w(TAG, "Dropping REQ to ${conn.url}: cooldown until ${java.util.Date(cooldownUntil)}")
-                    cooldownLogged[conn.url] = cooldownUntil
-                }
-            }
-            return
-        }
         val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
-        if (count.get() >= MAX_CONCURRENT_REQS_PER_RELAY) {
+        // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
+        if (count.get() >= MAX_CONCURRENT_REQS_PER_RELAY || !canSendToRelay(conn.url)) {
             val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
             queue.add(req)
             Log.d(TAG, "Queued REQ for ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
@@ -1385,6 +1374,8 @@ class RelayPool @Inject constructor(
             last == null || (now - last) > 30_000
         }
         if (novel.isEmpty()) return
+        val conn = connections[normalized]
+        if (conn == null) return          // no connection — don't pollute eventFetchInFlight
         novel.forEach { eventFetchInFlight[it] = now }
         val subId = "prefetch-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
@@ -1396,11 +1387,8 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
-        val conn = connections[normalized]
-        if (conn != null) {
-            sendOneShotToRelay(conn, req)
-            Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
-        }
+        sendOneShotToRelay(conn, req)
+        Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
     }
 
     /**
