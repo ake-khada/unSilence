@@ -69,9 +69,9 @@ class RelayPool @Inject constructor(
     private val processor: EventProcessor,
     private val relayConfigDao: dagger.Lazy<com.unsilence.app.data.db.dao.RelayConfigDao>,
     private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
-    private val coverageRepository: dagger.Lazy<com.unsilence.app.data.repository.CoverageRepository>,
+    private val coverageTracker: dagger.Lazy<com.unsilence.app.data.cache.CoverageTracker>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
-    private val syncStateDao: dagger.Lazy<com.unsilence.app.data.db.dao.SyncStateDao>,
+    private val syncTracker: dagger.Lazy<com.unsilence.app.data.cache.SyncTracker>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -734,7 +734,7 @@ class RelayPool @Inject constructor(
             val terminalHandle = registry.onLaneFailure(lane.subId, lane.relayUrl)
             if (terminalHandle != null) {
                 scope.launch {
-                    coverageRepository.get().markFromHandle(terminalHandle)
+                    coverageTracker.get().markFromHandle(terminalHandle)
                     registry.cleanup(terminalHandle.handleId)
                 }
             }
@@ -767,7 +767,7 @@ class RelayPool @Inject constructor(
         mapSubIdToSyncKey(subId)?.let { syncKey ->
             scope.launch {
                 try {
-                    syncStateDao.get().upsert(
+                    syncTracker.get().upsert(
                         com.unsilence.app.data.db.entity.SyncStateEntity(
                             subscriptionKey = syncKey,
                             lastSyncAt = System.currentTimeMillis(),
@@ -782,7 +782,7 @@ class RelayPool @Inject constructor(
         val terminalHandle = subscriptionRegistry.get().onEose(subId, conn.url)
         if (terminalHandle != null) {
             scope.launch {
-                coverageRepository.get().markFromHandle(terminalHandle)
+                coverageTracker.get().markFromHandle(terminalHandle)
                 subscriptionRegistry.get().cleanup(terminalHandle.handleId)
             }
         }
