@@ -17,7 +17,7 @@ import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.CoverageRepository
+import com.unsilence.app.data.cache.CoverageTracker
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
@@ -82,7 +82,7 @@ class FeedViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,
     private val browseSession: RelayBrowseSession,
-    private val coverageRepository: CoverageRepository,
+    private val coverageTracker: CoverageTracker,
     private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
     private val relayConfigDao: RelayConfigDao,
@@ -422,7 +422,7 @@ class FeedViewModel @Inject constructor(
                     // events arrive from the browse relay or the timeout fires.
                     if (!isBrowse) {
                         val intent = CoverageIntent.HomeFeed()
-                        val status = coverageRepository.ensureCoverage(intent)
+                        val status = coverageTracker.ensureCoverage(intent)
                         _uiState.value = FeedUiState(loading = status != CoverageStatus.COMPLETE, coverageStatus = status)
                     }
 
@@ -432,7 +432,7 @@ class FeedViewModel @Inject constructor(
                         if (_uiState.value.coverageStatus == CoverageStatus.LOADING) {
                             if (!isBrowse) {
                                 val intent = CoverageIntent.HomeFeed()
-                                coverageRepository.markFailed(
+                                coverageTracker.markFailed(
                                     intent.scopeType, intent.scopeKey, intent.relaySetId
                                 )
                             }
@@ -564,7 +564,7 @@ class FeedViewModel @Inject constructor(
                         // If empty, keep LOADING — 10s timeout will mark FAILED
                     } else {
                         val intent = CoverageIntent.HomeFeed()
-                        val status = coverageRepository.getStatus(
+                        val status = coverageTracker.getStatus(
                             intent.scopeType, intent.scopeKey, intent.relaySetId
                         )
                         _uiState.value = FeedUiState(loading = false, coverageStatus = status)

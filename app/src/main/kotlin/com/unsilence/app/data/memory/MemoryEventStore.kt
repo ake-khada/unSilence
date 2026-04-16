@@ -688,6 +688,7 @@ class MemoryEventStore @Inject constructor() {
     fun feedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
             .map { feedEvents(filter, limit).map { toFeedRow(it) } }
+            .flowOn(Dispatchers.Default)
 
     fun userFeedFlow(
         pubkey: String,
@@ -697,6 +698,7 @@ class MemoryEventStore @Inject constructor() {
     ): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
             .map { userFeedEvents(pubkey, contentFilter, kinds, limit).map { toFeedRow(it) } }
+            .flowOn(Dispatchers.Default)
 
     fun followsFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { getFollows(pubkey) ?: emptySet() }
@@ -707,11 +709,13 @@ class MemoryEventStore @Inject constructor() {
     /** Thread flow with fixpoint collection — re-emits when feed signal bumps. */
     fun threadFlow(rootId: String): Flow<List<NostrEvent>> =
         _feedSignal.map { collectThread(rootId) }
+            .flowOn(Dispatchers.Default)
 
     /** Thread flow producing FeedRow for UI consumption (ThreadViewModel). */
     fun threadFeedRowFlow(rootId: String): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
             .map { collectThread(rootId).map { toFeedRow(it) } }
+            .flowOn(Dispatchers.Default)
 
     private fun collectThread(rootId: String): List<NostrEvent> {
         val results = mutableListOf<NostrEvent>()
