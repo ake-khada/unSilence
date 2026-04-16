@@ -449,6 +449,335 @@ class EventProcessorInvariantsTest {
         assertTrue("Zap target should be prefetched", zapTarget in fetched)
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // A.6 Outbox-aware prefetch — referenced events fetched from author's
+    // NIP-65 write relays when the author's kind-10002 is cached
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Seed a kind-10002 relay list into MemoryEventStore for [pubkey]. */
+    private fun seedRelayList(pubkey: String, writeRelays: List<String>) {
+        val rTags = writeRelays.map { listOf("r", it, "write") }
+        store.insert(NostrEvent(
+            id = "rl-$pubkey".padEnd(64, '0'),
+            pubkey = pubkey,
+            kind = 10002,
+            content = "",
+            createdAt = 1700000000L,
+            tags = rTags,
+            sig = "c".repeat(128),
+            relayUrl = "wss://indexer.example.com",
+            replyToId = null,
+            rootId = null,
+            hasContentWarning = false,
+            contentWarningReason = null,
+            firstSeenAt = System.currentTimeMillis(),
+            relaysSeen = mutableSetOf("wss://indexer.example.com"),
+        ))
+    }
+
+    /** Build a reply event with both e-tag and p-tag (referencing parent author). */
+    private fun replyEventWithPTag(
+        seed: Int,
+        parentId: String,
+        parentAuthorPubkey: String,
+        relayUrl: String = "wss://relay.example.com",
+    ): Pair<String, String> = rawEvent(
+        seed = seed,
+        kind = 1,
+        tags = """[["e","$parentId","","reply"],["p","$parentAuthorPubkey"]]""",
+        relayUrl = relayUrl,
+    )
+
+    // ── Test 14: reply with p-tag triggers outbox prefetch ───────────────
+
+    @Test
+    fun `reply with p-tag and cached write relays triggers outbox prefetch`() = runTest {
+        val parentAuthor = "d".repeat(64)
+        val parentId = refId(9071)
+        seedRelayList(parentAuthor, listOf("wss://author-outbox.example.com"))
+
+        val (raw, relay) = replyEventWithPTag(
+            seed = 700, parentId = parentId, parentAuthorPubkey = parentAuthor,
+        )
+        processor.process(raw, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Source relay prefetch should still fire
+        assertTrue(
+            "Source relay prefetch should fire",
+            recorder.dispatches.any { it.relayUrl == relay && parentId in it.eventIds },
+        )
+        // Outbox relay prefetch should ALSO fire
+        assertTrue(
+            "Outbox relay prefetch should fire for author's write relay",
+            recorder.dispatches.any {
+                it.relayUrl == "wss://author-outbox.example.com" && parentId in it.eventIds
+            },
+        )
+        assertTrue(
+            "Outbox dispatched counter should be incremented",
+            processor.outboxPrefetchDispatchedCount.get() >= 1,
+        )
+    }
+
+    // ── Test 15: no outbox dispatch when write relays not cached ─────────
+
+    @Test
+    fun `no outbox dispatch when author write relays are not cached`() = runTest {
+        val unknownAuthor = "f".repeat(64) // No kind-10002 seeded
+        val parentId = refId(9081)
+
+        val (raw, relay) = replyEventWithPTag(
+            seed = 710, parentId = parentId, parentAuthorPubkey = unknownAuthor,
+        )
+        processor.process(raw, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Source relay prefetch fires
+        assertTrue(
+            "Source relay prefetch should fire",
+            recorder.dispatches.any { it.relayUrl == relay && parentId in it.eventIds },
+        )
+        // No outbox dispatch (no cached relay list)
+        val outboxDispatches = recorder.dispatches.filter { it.relayUrl != relay }
+        assertTrue(
+            "No outbox dispatch without cached write relays",
+            outboxDispatches.none { parentId in it.eventIds },
+        )
+        assertEquals(
+            "Outbox dispatched counter should be 0",
+            0, processor.outboxPrefetchDispatchedCount.get(),
+        )
+    }
+
+    // ── Test 16: outbox skips source relay (no duplicate) ────────────────
+
+    @Test
+    fun `outbox prefetch skips source relay to avoid duplicate dispatch`() = runTest {
+        val parentAuthor = "d".repeat(64)
+        val parentId = refId(9091)
+        val sourceRelay = "wss://relay.example.com"
+        // Author's write relay IS the same as source relay
+        seedRelayList(parentAuthor, listOf(sourceRelay, "wss://other-outbox.example.com"))
+
+        val (raw, _) = replyEventWithPTag(
+            seed = 720, parentId = parentId, parentAuthorPubkey = parentAuthor,
+            relayUrl = sourceRelay,
+        )
+        processor.process(raw, sourceRelay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Source relay dispatch exists
+        val sourceDispatches = recorder.dispatches.filter {
+            it.relayUrl == sourceRelay && parentId in it.eventIds
+        }
+        // Outbox dispatches should NOT include the source relay
+        val outboxDispatches = recorder.dispatches.filter {
+            it.relayUrl == "wss://other-outbox.example.com" && parentId in it.eventIds
+        }
+        assertTrue("Outbox should dispatch to other-outbox", outboxDispatches.isNotEmpty())
+
+        // Total dispatches for parentId from source relay should be exactly 1
+        // (from source-relay prefetch, not duplicated by outbox)
+        assertEquals(
+            "Source relay should appear exactly once for parentId",
+            1, sourceDispatches.size,
+        )
+    }
+
+    // ── Test 18: kind 10002 populates writeRelaysFor via direct insert ──
+
+    @Test
+    fun `kind 10002 populates MemoryEventStore writeRelaysFor via direct insert`() = runTest {
+        val author = "d".repeat(64)
+        val (raw, relay) = rawEvent(
+            seed = 740,
+            kind = 10002,
+            content = "",
+            tags = """[["r","wss://author-write.example.com","write"],["r","wss://author-read.example.com","read"]]""",
+        )
+        // Override pubkey to match author
+        val rawFixed = raw.replace("b".repeat(64), author)
+        processor.process(rawFixed, relay)
+        processor.drainForTest()
+
+        val writeRelays = store.writeRelaysFor(author)
+        assertTrue(
+            "writeRelaysFor should contain the write relay",
+            "wss://author-write.example.com" in writeRelays,
+        )
+        assertTrue(
+            "writeRelaysFor should NOT contain the read relay",
+            "wss://author-read.example.com" !in writeRelays,
+        )
+    }
+
+    // ── Test 17: outbox budget caps at 5 relays ─────────────────────────
+
+    @Test
+    fun `outbox prefetch is capped at 5 unique relay URLs`() = runTest {
+        val parentAuthor = "d".repeat(64)
+        val parentId = refId(9101)
+        // Author has 10 write relays — only 5 should be dispatched
+        val writeRelays = (1..10).map { "wss://outbox$it.example.com" }
+        seedRelayList(parentAuthor, writeRelays)
+
+        val (raw, relay) = replyEventWithPTag(
+            seed = 730, parentId = parentId, parentAuthorPubkey = parentAuthor,
+        )
+        processor.process(raw, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        val outboxRelays = recorder.dispatches
+            .filter { it.relayUrl != relay && parentId in it.eventIds }
+            .map { it.relayUrl }
+            .distinct()
+        assertTrue(
+            "Outbox relays should be capped at 5, got ${outboxRelays.size}",
+            outboxRelays.size <= 5,
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // A.6.2 — Bridged repost author fallback: kind-6 wrappers without
+    // p-tags use the wrapper's own pubkey as outbox author fallback
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── Test 19: kind-6 without p-tags uses wrapper pubkey for outbox ───
+
+    @Test
+    fun `kind 6 repost without p-tags uses wrapper pubkey for outbox`() = runTest {
+        val wrapperAuthor = "e".repeat(64)
+        val repostTarget = refId(9111)
+        seedRelayList(wrapperAuthor, listOf("wss://wrapper-outbox.example.com"))
+
+        // Repost event with e-tag but NO p-tag
+        val (raw, relay) = rawEvent(
+            seed = 800, kind = 6,
+            content = "",
+            tags = """[["e","$repostTarget"]]""",
+        )
+        val rawFixed = raw.replace("b".repeat(64), wrapperAuthor)
+        processor.process(rawFixed, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Outbox should use wrapper author as fallback
+        assertTrue(
+            "Outbox should dispatch to wrapper author's write relay",
+            recorder.dispatches.any {
+                it.relayUrl == "wss://wrapper-outbox.example.com" &&
+                repostTarget in it.eventIds
+            },
+        )
+    }
+
+    // ── Test 20: kind-6 WITH p-tags uses p-tag author, not wrapper ──────
+
+    @Test
+    fun `kind 6 repost WITH p-tags uses p-tag author not wrapper`() = runTest {
+        val wrapperAuthor = "e".repeat(64)
+        val targetAuthor = "f".repeat(64)
+        val repostTarget = refId(9121)
+        seedRelayList(wrapperAuthor, listOf("wss://wrapper-outbox.example.com"))
+        seedRelayList(targetAuthor, listOf("wss://target-outbox.example.com"))
+
+        val (raw, relay) = rawEvent(
+            seed = 810, kind = 6,
+            content = "",
+            tags = """[["e","$repostTarget"],["p","$targetAuthor"]]""",
+        )
+        val rawFixed = raw.replace("b".repeat(64), wrapperAuthor)
+        processor.process(rawFixed, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Should use target-outbox (p-tag author), NOT wrapper-outbox
+        assertTrue(
+            "Outbox should dispatch to target author's write relay",
+            recorder.dispatches.any {
+                it.relayUrl == "wss://target-outbox.example.com" &&
+                repostTarget in it.eventIds
+            },
+        )
+        assertTrue(
+            "Outbox should NOT dispatch to wrapper author's write relay " +
+            "when p-tag author exists",
+            recorder.dispatches.none {
+                it.relayUrl == "wss://wrapper-outbox.example.com" &&
+                repostTarget in it.eventIds
+            },
+        )
+    }
+
+    // ── Test 21: kind-1 without p-tags does NOT fall back to wrapper ────
+
+    @Test
+    fun `kind 1 reply without p-tags does NOT fall back to wrapper pubkey`() = runTest {
+        val author = "e".repeat(64)
+        val parentId = refId(9131)
+        seedRelayList(author, listOf("wss://author-outbox.example.com"))
+
+        val (raw, relay) = rawEvent(
+            seed = 820, kind = 1,
+            tags = """[["e","$parentId","","reply"]]""",  // no p-tag
+        )
+        val rawFixed = raw.replace("b".repeat(64), author)
+        processor.process(rawFixed, relay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // No outbox dispatch for kind 1 without p-tags
+        assertEquals(
+            "Kind 1 without p-tags should not trigger outbox",
+            0, processor.outboxPrefetchDispatchedCount.get(),
+        )
+    }
+
+    // ── Test 22: kind-6 wrapper fallback doesn't double-dispatch ────────
+
+    @Test
+    fun `kind 6 wrapper fallback does not double-dispatch to source relay`() = runTest {
+        val wrapperAuthor = "e".repeat(64)
+        val repostTarget = refId(9141)
+        val sharedRelay = "wss://shared.example.com"
+        seedRelayList(wrapperAuthor, listOf(sharedRelay, "wss://other-outbox.example.com"))
+
+        val (raw, _) = rawEvent(
+            seed = 830, kind = 6,
+            content = "",
+            tags = """[["e","$repostTarget"]]""",
+            relayUrl = sharedRelay,
+        )
+        val rawFixed = raw.replace("b".repeat(64), wrapperAuthor)
+        processor.process(rawFixed, sharedRelay)
+        processor.drainForTest()
+        processor.drainPrefetchForTest()
+
+        // Source relay dispatch exists (from source-relay prefetch)
+        val sharedDispatches = recorder.dispatches.filter {
+            it.relayUrl == sharedRelay && repostTarget in it.eventIds
+        }
+        assertEquals(
+            "Shared relay should appear exactly once (source-relay prefetch, " +
+            "not duplicated by outbox wrapper-author fallback)",
+            1, sharedDispatches.size,
+        )
+
+        // Outbox should still dispatch to the other write relay
+        assertTrue(
+            "Outbox should dispatch to non-source write relay",
+            recorder.dispatches.any {
+                it.relayUrl == "wss://other-outbox.example.com" &&
+                repostTarget in it.eventIds
+            },
+        )
+    }
+
     // ── Test 13: end-to-end — prefetched event resolves via getEventEntity ─
 
     @Test
