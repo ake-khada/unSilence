@@ -26,6 +26,10 @@ private const val PENDING_RELAYS_TRIM = 200
 @Singleton
 class MemoryEventStore @Inject constructor() {
 
+    companion object {
+        const val FOLLOWER_COUNT_TTL_SECONDS = 86_400L
+    }
+
     // ─── Primary store ──────────────────────────────────────────────────────
     private val eventsById = ConcurrentHashMap<String, NostrEvent>()
 
@@ -53,6 +57,10 @@ class MemoryEventStore @Inject constructor() {
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
+
+    // ─── Follower count cache (NIP-45 COUNT results) ─────────────────────────
+    // Key: pubkey → (count, updatedAtSeconds)
+    private val followerCountCache = ConcurrentHashMap<String, Pair<Long, Long>>()
 
     // ─── Parameterized replaceable events (kind 30002 etc.) ─────────────────
     // Key: "$pubkey:$kind:$dTag" → event ID of the latest version
@@ -476,11 +484,100 @@ class MemoryEventStore @Inject constructor() {
     fun filterFreshEngagement(eventIds: List<String>, threshold: Long): List<String> =
         eventIds.filter { (statsUpdatedAt[it] ?: 0L) > threshold }
 
+    // ─── A.5.1 T2: User feed queries ───────────────────────────────────────
+
+    /**
+     * User-scoped feed query: returns events authored by [pubkey], filtered by
+     * [contentFilter] and [kinds], sorted by createdAt DESC, capped at [limit].
+     *
+     * contentFilter semantics (match FeedFilter contract):
+     *   0 = all: all kinds in the set, no filter
+     *   1 = notes only: kind-1 roots (no replies, no kind-6, no kind-30023)
+     *   2 = replies only: kind-1 with replyToId or rootId (no kind-6, no kind-30023)
+     */
+    private fun userFeedEvents(
+        pubkey: String,
+        contentFilter: Int,
+        kinds: Set<Int>,
+        limit: Int,
+    ): List<NostrEvent> {
+        val ids = idsByPubkey[pubkey] ?: return emptyList()
+        val events = ids.mapNotNull { eventsById[it] }.filter { it.kind in kinds }
+
+        val filtered = when (contentFilter) {
+            // Notes tab: kind-1 roots (no replies) + kind-6 reposts — matches Room userNotesFlow
+            1 -> events.filter {
+                (it.kind == 1 && it.replyToId == null && it.rootId == null) || it.kind == 6
+            }
+            // Replies tab: kind-1 replies only (has replyToId or rootId)
+            2 -> events.filter { it.kind == 1 && (it.replyToId != null || it.rootId != null) }
+            else -> events
+        }
+
+        return filtered.sortedByDescending { it.createdAt }.take(limit)
+    }
+
+    // ─── A.5.1 T2: Batch user entity lookup ───────────────────────────────
+
+    /** Batch variant of [getUserEntity]. Returns entities in input order, skipping unknown pubkeys. */
+    fun getUserEntities(pubkeys: List<String>): List<UserEntity> =
+        pubkeys.mapNotNull { getUserEntity(it) }
+
+    // ─── A.5.1 T2: Follower count cache ───────────────────────────────────
+
+    /** Cache a NIP-45 COUNT result. Timestamp stored in seconds (parity with Room path). */
+    fun cacheFollowerCount(pubkey: String, count: Long) {
+        followerCountCache[pubkey] = Pair(count, System.currentTimeMillis() / 1000)
+    }
+
+    /** Returns (count, updatedAtSeconds) or (null, null) if not cached. */
+    fun getFollowerCount(pubkey: String): Pair<Long?, Long?> {
+        val cached = followerCountCache[pubkey] ?: return Pair(null, null)
+        return Pair(cached.first, cached.second)
+    }
+
+    // ─── A.5.1 T2: Optimistic follow mutations ───────────────────────────
+
+    /** Optimistic add: appends [targetPubkey] to [ownPubkey]'s follows set. */
+    fun addFollow(ownPubkey: String, targetPubkey: String) {
+        val current = followsByPubkey[ownPubkey] ?: emptySet()
+        updateFollows(ownPubkey, current + targetPubkey, System.currentTimeMillis() / 1000)
+    }
+
+    /** Optimistic remove: drops [targetPubkey] from [ownPubkey]'s follows set. */
+    fun removeFollow(ownPubkey: String, targetPubkey: String) {
+        val current = followsByPubkey[ownPubkey] ?: return
+        updateFollows(ownPubkey, current - targetPubkey, System.currentTimeMillis() / 1000)
+    }
+
+    // ─── A.5.1 T2: Profile freshness queries ─────────────────────────────
+
+    /** Returns subset of [pubkeys] whose profileUpdatedAt is newer than [threshold] (millis). Preserves input order. */
+    fun filterFreshPubkeys(pubkeys: List<String>, threshold: Long): List<String> =
+        pubkeys.filter { (profileUpdatedAt[it] ?: 0L) > threshold }
+
+    /** Returns pubkeys whose profileUpdatedAt is older than [olderThan] (millis) or never set. */
+    fun stalePubkeys(olderThan: Long): List<String> {
+        val allKnown = HashSet<String>()
+        allKnown.addAll(profilesByPubkey.keys)
+        allKnown.addAll(idsByPubkey.keys)
+        return allKnown.filter { (profileUpdatedAt[it] ?: 0L) < olderThan }
+    }
+
     // ─── Reactive flows ─────────────────────────────────────────────────────
 
     fun feedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
             .map { feedEvents(filter, limit).map { toFeedRow(it) } }
+
+    fun userFeedFlow(
+        pubkey: String,
+        contentFilter: Int = 0,
+        kinds: Set<Int> = setOf(1, 6, 30023),
+        limit: Int = 200,
+    ): Flow<List<FeedRow>> =
+        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+            .map { userFeedEvents(pubkey, contentFilter, kinds, limit).map { toFeedRow(it) } }
 
     fun followsFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { getFollows(pubkey) ?: emptySet() }
@@ -827,6 +924,7 @@ class MemoryEventStore @Inject constructor() {
         profileUpdatedAt.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
+        followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
         replaceableByCoordinate.clear()
