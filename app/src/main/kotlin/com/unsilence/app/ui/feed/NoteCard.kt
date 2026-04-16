@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -114,6 +115,7 @@ import com.unsilence.app.data.relay.extractRepostTargetRelay
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
@@ -337,6 +339,23 @@ fun NoteCard(
         }
     }
     val repostProfile = originalAuthorProfile ?: resolvedRepostAuthor
+
+    // ── DIAGNOSTIC: log when kind-6 repost target doesn't resolve ──────────
+    LaunchedEffect(row.id, boostedJson, fetchedRepostEvent) {
+        if (row.kind == 6 && boostedJson == null && fetchedRepostEvent == null && repostTargetId != null) {
+            delay(6000) // Wait past lookupEvent's 5s timeout
+            Log.w("CardHydrator", "Outbox final: refId=${repostTargetId.take(12)} exists=false " +
+                "kind=null author=null relayUrl=null contentLen=0 " +
+                "referencedBy=${row.id.take(12)} referencedByKind=6 phase=unresolved")
+        } else if (row.kind == 6 && boostedJson == null && fetchedRepostEvent != null) {
+            if (fetchedRepostEvent!!.content.isBlank()) {
+                Log.w("CardHydrator", "Outbox final: refId=${repostTargetId?.take(12)} exists=true " +
+                    "kind=${fetchedRepostEvent!!.kind} author=${fetchedRepostEvent!!.pubkey.take(12)} " +
+                    "relayUrl=${fetchedRepostEvent!!.relayUrl} contentLen=0 " +
+                    "referencedBy=${row.id.take(12)} referencedByKind=6 phase=fetched-empty")
+            }
+        }
+    }
 
     // For kind-6 reposts, navigate to the referenced event, not the wrapper
     val navigateId = if (row.kind == 6) repostTargetId ?: row.id else row.id

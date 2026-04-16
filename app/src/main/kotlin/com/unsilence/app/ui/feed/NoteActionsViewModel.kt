@@ -297,15 +297,26 @@ class NoteActionsViewModel @Inject constructor(
      * Fetch is triggered once per event ID (fetchedQuoteIds guard), but Room observation
      * happens every call — so recomposition after a late relay arrival can still resolve.
      */
-    suspend fun lookupEvent(eventId: String, relayHints: List<String> = emptyList()): EventEntity? {
+    suspend fun lookupEvent(
+        eventId: String,
+        relayHints: List<String> = emptyList(),
+        authorPubkey: String? = null,
+    ): EventEntity? {
         // Fast path: already in MemoryEventStore
         memoryEventStore.getEventEntity(eventId)?.let { return it }
+
+        // Build relay hints: caller hints + outbox write relays for the author
+        val outboxHints = authorPubkey?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList()
+        val allHints = (relayHints + outboxHints).distinct()
 
         // Trigger relay fetch only once per event ID
         val shouldFetch = synchronized(fetchedQuoteIds) { fetchedQuoteIds.add(eventId) }
         if (shouldFetch) {
-            if (relayHints.isNotEmpty()) {
-                relayPool.fetchEventById(eventId, relayHints)
+            if (allHints.isNotEmpty()) {
+                // bypassDedup: if we reach here, the event wasn't found by prior
+                // prefetch — outbox hints deserve a fresh attempt regardless of
+                // eventFetchInFlight state from the source-relay prefetch.
+                relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
             } else {
                 relayPool.fetchEventById(eventId)
             }

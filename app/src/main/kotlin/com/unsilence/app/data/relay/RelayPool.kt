@@ -1396,11 +1396,17 @@ class RelayPool @Inject constructor(
      * when hints exist, connectAndAwait to ensure the WebSocket is open,
      * then send REQ only to hint relays — no broadcast fallback.
      * When no hints exist, sends to at most 3 random non-indexer relays.
+     *
+     * @param bypassDedup when true, skip the eventFetchInFlight 30s guard.
+     *   Used by outbox fallback: the same event ID was already tried on the
+     *   source relay, but we need to retry on the author's write relays.
      */
-    suspend fun fetchEventById(eventId: String, relayHints: List<String>) {
+    suspend fun fetchEventById(eventId: String, relayHints: List<String>, bypassDedup: Boolean = false) {
         val now = System.currentTimeMillis()
-        val last = eventFetchInFlight[eventId]
-        if (last != null && (now - last) <= 30_000) return
+        if (!bypassDedup) {
+            val last = eventFetchInFlight[eventId]
+            if (last != null && (now - last) <= 30_000) return
+        }
         eventFetchInFlight[eventId] = now
 
         val subId = "hint-event-${System.nanoTime()}"
