@@ -8,6 +8,7 @@ import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -48,6 +49,12 @@ class MemoryEventStore @Inject constructor() {
     private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
 
+    // ─── Actor-side action indexes (Tier 4: "what have I done?") ───────────
+    // Key: actor pubkey → Set<target event ID>
+    private val reactedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
+    private val repostedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
+    private val zappedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
+
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
     /** Local cache freshness — when each profile was last updated in MemoryEventStore (epoch ms).
@@ -71,6 +78,7 @@ class MemoryEventStore @Inject constructor() {
     private val _profileSignal = MutableStateFlow(0L)
     private val _statsSignal = MutableStateFlow(0L)
     private val _followsSignal = MutableStateFlow(0L)
+    private val _actionSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -135,6 +143,7 @@ class MemoryEventStore @Inject constructor() {
             3 -> handleFollows(event)
             6 -> handleRepost(event)
             7 -> handleReaction(event)
+            9734 -> handleZapRequest(event)
             9735 -> handleZapReceipt(event)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event)
@@ -146,7 +155,12 @@ class MemoryEventStore @Inject constructor() {
             0 -> _profileSignal.value = System.nanoTime()
             3 -> _followsSignal.value = System.nanoTime()
             1, 6, 30023 -> _feedSignal.value = System.nanoTime()
-            7, 9735 -> _statsSignal.value = System.nanoTime()
+            7, 9734, 9735 -> _statsSignal.value = System.nanoTime()
+            // _actionSignal bumped below for actor-side indexes
+        }
+        // Actor-side signal: bumped for kinds that populate the action indexes
+        if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
+            _actionSignal.value = System.nanoTime()
         }
 
         return true
@@ -190,6 +204,10 @@ class MemoryEventStore @Inject constructor() {
         val targetId = event.rootId ?: return
         repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        // Actor-side index: track what this pubkey has reposted
+        repostedTargetsByActor
+            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
+            .add(targetId)
     }
 
     private fun handleReaction(event: NostrEvent) {
@@ -199,6 +217,18 @@ class MemoryEventStore @Inject constructor() {
             ?.get(1) ?: return
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        // Actor-side index: track what this pubkey has reacted to
+        reactedTargetsByActor
+            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
+            .add(targetId)
+    }
+
+    private fun handleZapRequest(event: NostrEvent) {
+        val targetId = event.rootId ?: return
+        // Actor-side index: track what this pubkey has zapped (kind 9734, NOT 9735)
+        zappedTargetsByActor
+            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
+            .add(targetId)
     }
 
     private fun handleZapReceipt(event: NostrEvent) {
@@ -562,6 +592,42 @@ class MemoryEventStore @Inject constructor() {
         allKnown.addAll(profilesByPubkey.keys)
         allKnown.addAll(idsByPubkey.keys)
         return allKnown.filter { (profileUpdatedAt[it] ?: 0L) < olderThan }
+    }
+
+    // ─── A.5.1 T4: Actor-side action state flows ─────────────────────────
+
+    /** Set of target event IDs the given [pubkey] has reacted to (kind 7). */
+    fun reactedEventIdsFlow(pubkey: String): Flow<Set<String>> =
+        _actionSignal
+            .map { reactedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .distinctUntilChanged()
+
+    /** Set of target event IDs the given [pubkey] has reposted (kind 6). */
+    fun repostedEventIdsFlow(pubkey: String): Flow<Set<String>> =
+        _actionSignal
+            .map { repostedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .distinctUntilChanged()
+
+    /** Set of target event IDs the given [pubkey] has zapped (kind 9734, NOT 9735). */
+    fun zappedEventIdsFlow(pubkey: String): Flow<Set<String>> =
+        _actionSignal
+            .map { zappedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .distinctUntilChanged()
+
+    /**
+     * Compatibility shim: optimistic zap sats bump.
+     * This mutates recipient-side aggregate state (zapStatsByEventId)
+     * for immediate UX feedback. The canonical recipient-side path is
+     * kind-9735 via handleZapReceipt. This shim preserves the pre-Tier-4
+     * behavior where eventStatsDao.incrementZapStats was called on
+     * successful payment. Remove if/when A.5.2 reworks zap aggregation.
+     */
+    fun incrementZapStats(eventId: String, sats: Long) {
+        zapStatsByEventId.compute(eventId) { _, existing ->
+            val current = existing ?: ZapAggregate.EMPTY
+            ZapAggregate(current.count + 1, current.totalSats + sats)
+        }
+        statsUpdatedAt[eventId] = System.currentTimeMillis()
     }
 
     // ─── Reactive flows ─────────────────────────────────────────────────────
@@ -928,10 +994,14 @@ class MemoryEventStore @Inject constructor() {
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
         replaceableByCoordinate.clear()
+        reactedTargetsByActor.clear()
+        repostedTargetsByActor.clear()
+        zappedTargetsByActor.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L
         _followsSignal.value = 0L
+        _actionSignal.value = 0L
     }
 }
 
