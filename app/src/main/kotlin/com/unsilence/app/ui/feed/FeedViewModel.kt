@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.db.dao.RelayConfigDao
@@ -83,7 +82,6 @@ class FeedViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,
     private val browseSession: RelayBrowseSession,
-    private val followDao: FollowDao,
     private val coverageRepository: CoverageRepository,
     private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
@@ -340,12 +338,15 @@ class FeedViewModel @Inject constructor(
 
     init {
         // Reactively track follows — auto-switch to Following on first follow
-        viewModelScope.launch {
-            followDao.countFlow().collect { count ->
-                val had = _hasFollows.value
-                _hasFollows.value = count > 0
-                if (!had && count > 0 && _feedType.value is FeedType.Global) {
-                    _feedType.value = FeedType.Following
+        val ownPubkey = keyManager.getPublicKeyHex()
+        if (ownPubkey != null) {
+            viewModelScope.launch {
+                memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
+                    val had = _hasFollows.value
+                    _hasFollows.value = count > 0
+                    if (!had && count > 0 && _feedType.value is FeedType.Global) {
+                        _feedType.value = FeedType.Following
+                    }
                 }
             }
         }
