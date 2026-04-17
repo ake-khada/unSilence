@@ -51,6 +51,25 @@ data class RelaySet(
     val members: List<String> = emptyList(),
 )
 
+/**
+ * A single notification item — MES equivalent of Room's NotificationRow.
+ *
+ * Built at scan time from eventsById + profile lookups.
+ * Carries enough resolved data for the UI to render without additional lookups.
+ */
+data class NotificationItem(
+    val id: String,
+    val notifType: String,   // "reaction" | "reply" | "repost" | "zap" | "mention"
+    val actorPubkey: String,
+    val actorName: String?,
+    val actorDisplayName: String?,
+    val actorPicture: String?,
+    val targetNoteId: String?,
+    val targetNoteContent: String,
+    val parentNoteContent: String,
+    val createdAt: Long,
+)
+
 /** Pinned relay in the feed picker. Pure local config, not a Nostr event. */
 data class PinnedRelay(
     val pubkey: String,
