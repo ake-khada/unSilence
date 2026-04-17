@@ -4,7 +4,6 @@ import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.db.dao.FollowDao
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.FollowEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
@@ -50,7 +49,6 @@ class OutboxRouter @Inject constructor(
     private val keyManager: KeyManager,
     private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
-    private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val relayPool: RelayPool,
 ) {
@@ -167,8 +165,8 @@ class OutboxRouter @Inject constructor(
                 RelayConfigEntity(kind = kind, relayUrl = url)
             }
 
-        relayConfigDao.replaceForKind(kind, pubkey, createdAt, entities)
-        Log.d(TAG, "Stored ${entities.size} relay configs for kind $kind (created_at=$createdAt)")
+        // Room write removed (T5a): MES handles relay config state via insert() handlers.
+        Log.d(TAG, "Received ${entities.size} relay configs for kind $kind (created_at=$createdAt)")
     }
 
     /**
@@ -201,8 +199,8 @@ class OutboxRouter @Inject constructor(
             }
         }
 
-        relayConfigDao.replaceForKind(10012, pubkey, createdAt, entities)
-        Log.d(TAG, "Stored ${entities.size} favorite relay entries (created_at=$createdAt)")
+        // Room write removed (T5a): MES handles favorite relay state via insert() handlers.
+        Log.d(TAG, "Received ${entities.size} favorite relay entries (created_at=$createdAt)")
     }
 
     /**
@@ -300,37 +298,7 @@ class OutboxRouter @Inject constructor(
             )
         )
 
-        // If this is our own relay list, populate relay_configs table (kind 10002).
-        // Only accept if newer than what we already have (replaceable event semantics).
-        if (pubkey == keyManager.getPublicKeyHex()) {
-            val existing = relayConfigDao.maxCreatedAt(10002) ?: 0L
-            if (createdAt <= existing) {
-                Log.d(TAG, "Skipping older own kind-10002 (have=$existing, got=$createdAt)")
-                return
-            }
-
-            val ownRelays = tags
-                .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "r" }
-                .mapNotNull { tag ->
-                    val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
-                    val marker = tag.jsonArray.getOrNull(2)?.jsonPrimitive?.content
-                    RelayConfigEntity(
-                        kind   = 10002,
-                        relayUrl = url,
-                        marker = when {
-                            marker == null || marker.isBlank() -> null  // both read + write
-                            marker == "read"  -> "read"
-                            marker == "write" -> "write"
-                            else -> null
-                        },
-                    )
-                }
-            if (ownRelays.isNotEmpty()) {
-                relayConfigDao.replaceForKind(10002, pubkey, createdAt, ownRelays)
-                Log.d(TAG, "Seeded ${ownRelays.size} own relays from kind 10002 (created_at=$createdAt)")
-            }
-        }
+        // Room relay_configs write removed (T5a): MES handles kind-10002 state via handleRelayList().
     }
 
     // ── Outbox routing: connect to top write relays ───────────────────────────

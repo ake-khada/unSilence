@@ -8,7 +8,6 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -49,7 +48,6 @@ data class ThreadUiState(
 class ThreadViewModel @Inject constructor(
     private val eventRepository: EventRepository,
     private val memoryEventStore: MemoryEventStore,
-    private val relayConfigDao: RelayConfigDao,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
@@ -124,9 +122,10 @@ class ThreadViewModel @Inject constructor(
 
             eventIdFlow.value = rootId
 
-            val readRelays = relayConfigDao.getAllReadWriteRelays()
+            val ownPubkey = pubkeyHex ?: ""
+            val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
                 .filter { it.marker == null || it.marker == "read" }
-                .mapNotNull { normalizeRelayUrl(it.relayUrl) }
+                .mapNotNull { normalizeRelayUrl(it.url) }
             val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
             relayPool.fetchThread(urls, rootId)
         }

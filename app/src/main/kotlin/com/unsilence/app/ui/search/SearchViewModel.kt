@@ -3,7 +3,7 @@ package com.unsilence.app.ui.search
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.RelayConfigDao
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.RelayPool
@@ -36,7 +36,7 @@ data class SearchUiState(
 @HiltViewModel
 class SearchViewModel @Inject constructor(
     private val relayPool: RelayPool,
-    private val relayConfigDao: RelayConfigDao,
+    private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
 ) : ViewModel() {
 
@@ -93,8 +93,8 @@ class SearchViewModel @Inject constructor(
 
                     _uiState.update { it.copy(loading = true, hasSearched = true) }
 
-                    // TODO(A.5.1 T5): migrate to MES when kind-10007 handling is added
-                    val userSearchRelays = relayConfigDao.searchRelayUrls()
+                    val ownPubkey = keyManager.getPublicKeyHex() ?: ""
+                    val userSearchRelays = memoryEventStore.getSearchRelayUrls(ownPubkey)
                     val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAYS }
 
                     // Generate token and set it BEFORE sending any REQ so the collector
