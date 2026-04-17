@@ -1624,7 +1624,7 @@ class RelayPool @Inject constructor(
     /**
      * Request notification events for [userPubkey] from all currently connected relays.
      * Sends a #p-tagged filter for kinds 1 (replies/mentions), 6 (reposts), 7 (reactions),
-     * and 9735 (zap receipts). Results flow through EventProcessor → MES notification index.
+     * and 9735 (zap receipts). Results flow through EventProcessor → Room → NotificationsDao.
      */
     fun fetchNotifications(userPubkey: String) {
         // Remove any previous notifs persistent sub before registering a new one

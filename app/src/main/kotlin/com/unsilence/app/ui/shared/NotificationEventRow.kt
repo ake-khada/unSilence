@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
-import com.unsilence.app.data.memory.NotificationItem
+import com.unsilence.app.data.db.dao.NotificationRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Cyan
@@ -60,7 +60,7 @@ import java.util.concurrent.TimeUnit
  */
 @Composable
 fun NotificationEventRow(
-    row: NotificationItem,
+    row: NotificationRow,
     onNoteClick: (String) -> Unit,
 ) {
     val (icon, iconTint, actionText) = notifMeta(row.notifType)
