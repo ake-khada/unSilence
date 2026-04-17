@@ -201,5 +201,48 @@ data class RelayTrustScoreEntity(
     val policy: String? = null,
     val countryCode: String? = null,
     val operatorVerified: String? = null,
-    val updatedAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = 0L,
+)
+
+/**
+ * Relay liveness monitor (kind 30166 / NIP-66). Populated by MES
+ * handleRelayMonitor() from events fetched via RelayPool.fetchRelayMonitors().
+ * Source: wss://relay.nostr.watch — operational health, RTT, NIP support.
+ */
+data class RelayMonitorEntity(
+    val relayUrl: String,
+    val rttOpen: Int? = null,
+    val rttRead: Int? = null,
+    val rttWrite: Int? = null,
+    val supportedNips: List<Int> = emptyList(),
+    val network: String? = null,
+    val requirements: List<String> = emptyList(),
+    val geohash: String? = null,
+    val iconUrl: String? = null,
+    val monitorPubkey: String,
+    val createdAt: Long,
+)
+
+/**
+ * Combined relay health: trust quality (kind 30385) + operational liveness (kind 30166).
+ * Keyed by normalized relay URL. Either or both sources may be present.
+ */
+data class RelayHealthInfo(
+    val relayUrl: String,
+    val trustScore: RelayTrustScoreEntity? = null,
+    val monitor: RelayMonitorEntity? = null,
+) {
+    val score: Int? get() = trustScore?.score
+    val ping: Int? get() = monitor?.rttOpen ?: monitor?.rttRead
+    val iconUrl: String? get() = monitor?.iconUrl
+}
+
+/**
+ * Instrumentation result from a paginated fetch session.
+ */
+data class PaginatedFetchResult(
+    val totalEvents: Int,
+    val totalPages: Int,
+    val oldestCreatedAt: Long,
+    val relay: String,
 )

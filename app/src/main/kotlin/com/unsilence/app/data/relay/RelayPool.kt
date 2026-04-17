@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,6 +28,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
+import com.unsilence.app.data.memory.PaginatedFetchResult
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
 import okhttp3.OkHttpClient
@@ -140,6 +143,14 @@ class RelayPool @Inject constructor(
     private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
     private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
+    // ── Paginated fetch state ─────────────────────────────────────────
+    private data class PageState(
+        val eventCount: AtomicInteger = AtomicInteger(0),
+        val oldestCreatedAt: AtomicLong = AtomicLong(Long.MAX_VALUE),
+        val eoseReceived: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+    private val _activePages = ConcurrentHashMap<String, PageState>()
+
     /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
     fun activeOneShotCount(): Int = _activeOneShotSubs.size
 
@@ -156,6 +167,9 @@ class RelayPool @Inject constructor(
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
         const val SEARCH_TIMEOUT_MS = 10_000L
+        const val RELAY_MONITOR_URL = "wss://relay.nostr.watch"
+        const val RELAY_MONITOR_PUBKEY =
+            "9bbbb845e5b6c831c29789900769843ab43bb5047abe697870cb50b6fc9bf923"
     }
 
     /** After bootstrap settles (30s), tighten cap to [STEADY_STATE_CAP] for non-PERSISTENT. */
@@ -377,6 +391,20 @@ class RelayPool @Inject constructor(
         val quoteClose = raw.indexOf('"', subStart)
         if (quoteClose < 0) return null
         return raw.substring(subStart, quoteClose)
+    }
+
+    /**
+     * Extract created_at from a raw EVENT message without full JSON parsing.
+     * Scans for `"created_at":` and reads the numeric value.
+     */
+    private fun extractCreatedAt(raw: String): Long? {
+        val key = "\"created_at\":"
+        val idx = raw.indexOf(key)
+        if (idx < 0) return null
+        val start = idx + key.length
+        val end = raw.indexOfAny(charArrayOf(',', '}', ' '), start)
+        if (end < 0) return null
+        return raw.substring(start, end).trim().toLongOrNull()
     }
 
     /**
@@ -726,6 +754,14 @@ class RelayPool @Inject constructor(
                     if (subId.startsWith("search-profiles-")) {
                         Log.d(TAG, "Search EVENT received: subId=$subId relay=${conn.url}")
                     }
+                    // Paginated fetch tracking: count events and track oldest created_at
+                    _activePages[subId]?.let { page ->
+                        page.eventCount.incrementAndGet()
+                        val ts = extractCreatedAt(raw)
+                        if (ts != null) {
+                            page.oldestCreatedAt.updateAndGet { minOf(it, ts) }
+                        }
+                    }
                 }
                 processor.process(raw, conn.url)
             }
@@ -765,6 +801,11 @@ class RelayPool @Inject constructor(
      */
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
+        // Paginated fetch: signal EOSE without sending CLOSE (pagination loop decides)
+        _activePages[subId]?.let { page ->
+            page.eoseReceived.complete(Unit)
+            return
+        }
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
@@ -1047,45 +1088,250 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "fetchRelaySetsByCoordinate: ${dTags.size} sets from $sent hint relay(s) for ${authorPubkey.take(8)}…")
     }
 
+    // ── Paginated fetch primitive ────────────────────────────────────────
+    //
+    // Reusable building block for fetching large result sets (>500 events)
+    // from a single relay. Handles: 500-event ceiling (pagination via
+    // "until"), EOSE signaling, per-page cleanup, overall timeout.
+    //
+    // ISOLATION: uses conn.send() directly, bypasses sub cap and rate limiter.
+    // Events flow through EventProcessor's direct-path insert into MES.
+
     /**
-     * Fetch kind 30385 (Trusted Relay Assertions) from [providerPubkeyHex].
-     * Events are processed by [EventProcessor] which upserts them into Room.
-     * Sends REQ to all connected relays plus the provider's known publishing relays.
+     * Paginated fetch from a single relay. Sends REQ, waits for EOSE,
+     * paginates with "until" if the page is full, repeats until last page
+     * or overall timeout.
      */
-    fun fetchTrustScores(providerPubkeyHex: String) {
-        val subId = "trust-scores-${System.nanoTime()}"
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(30385)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(providerPubkeyHex)) })
-                put("limit", JsonPrimitive(500))
-            })
-        }.toString()
-        _activeOneShotSubs.add(subId)
-        // Send to all connected relays
-        for (conn in connections.values) {
-            sendOneShotToRelay(conn, req)
+    private suspend fun paginatedFetch(
+        conn: RelayConnection,
+        baseFilter: JsonObject,
+        subIdPrefix: String,
+        timeoutMs: Long = 15_000,
+        onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
+    ): PaginatedFetchResult {
+        var totalEvents = 0
+        var totalPages = 0
+        var globalOldest = Long.MAX_VALUE
+        val deadline = System.currentTimeMillis() + timeoutMs
+
+        while (System.currentTimeMillis() < deadline) {
+            val subId = "$subIdPrefix-${System.nanoTime()}"
+            val pageState = PageState()
+            _activePages[subId] = pageState
+
+            val filter = if (globalOldest < Long.MAX_VALUE) {
+                buildJsonObject {
+                    baseFilter.forEach { (key, value) -> put(key, value) }
+                    put("until", JsonPrimitive(globalOldest - 1))
+                }
+            } else {
+                baseFilter
+            }
+
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(filter)
+            }.toString()
+
+            val sent = conn.send(req)
+            if (!sent) {
+                _activePages.remove(subId)
+                Log.w(TAG, "paginatedFetch: send failed on ${conn.url}")
+                break
+            }
+
+            val remaining = deadline - System.currentTimeMillis()
+            val gotEose = withTimeoutOrNull(remaining) {
+                pageState.eoseReceived.await()
+            }
+
+            val pageCount = pageState.eventCount.get()
+            val pageOldest = pageState.oldestCreatedAt.get()
+
+            // Send CLOSE and clean up
+            conn.send(buildJsonArray {
+                add(JsonPrimitive("CLOSE"))
+                add(JsonPrimitive(subId))
+            }.toString())
+            _activePages.remove(subId)
+
+            totalEvents += pageCount
+            totalPages++
+            if (pageOldest < globalOldest) globalOldest = pageOldest
+            onPage(totalPages, pageCount)
+
+            if (gotEose == null) {
+                Log.w(TAG, "paginatedFetch: timeout on page $totalPages of ${conn.url}")
+                break
+            }
+            if (pageCount < 450) break
         }
-        // Also ensure the provider's known publishing relays get the REQ
-        val providerRelays = listOf(
-            "wss://relay.damus.io", "wss://nos.lol",
-            "wss://relay.primal.net", "wss://relay.ditto.pub",
+
+        return PaginatedFetchResult(
+            totalEvents = totalEvents,
+            totalPages = totalPages,
+            oldestCreatedAt = if (globalOldest < Long.MAX_VALUE) globalOldest else 0L,
+            relay = conn.url,
         )
-        for (rawUrl in providerRelays) {
-            val url = normalizeRelayUrl(rawUrl) ?: continue
-            if (connections.containsKey(url)) continue // already sent above
-            val conn = RelayConnection(url, okHttpClient)
-            connections[url] = conn
-            connectionLastActivity[url] = System.currentTimeMillis()
-            conn.connect()
-            scope.launch {
-                conn.send(req)
-                listenForEvents(conn)
+    }
+
+    // ── Relay health fetch orchestrators ──────────────────────────────────
+
+    /**
+     * Fetch kind 30385 (Trusted Relay Assertions) using paginated multi-relay fetch.
+     *
+     * 1. Resolve provider's write relays from kind-10002
+     * 2. Paginated fetch on each write relay (concurrent)
+     * 3. Log coverage metrics
+     */
+    /**
+     * Fetch kind 30385 (trust scores) for specific relay URLs only.
+     * Uses #d filter so the relay returns only the requested entries.
+     * Each relay URL is a d-tag in kind 30385 replaceable events.
+     */
+    suspend fun fetchTrustScores(providerPubkeyHex: String, relayUrls: List<String>) {
+        if (relayUrls.isEmpty()) return
+
+        // Normalize relay URLs for consistent #d matching with trust score d-tags
+        val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        if (normalizedUrls.isEmpty()) return
+
+        // Resolve provider's write relays to know where to fetch from
+        fetchRelayLists(listOf(providerPubkeyHex))
+        val mes = memoryEventStore.get()
+        val writeRelays = withTimeoutOrNull(5_000L) {
+            var relays = mes.writeRelaysFor(providerPubkeyHex)
+            while (relays.isEmpty()) {
+                delay(200)
+                relays = mes.writeRelaysFor(providerPubkeyHex)
+            }
+            relays
+        } ?: emptyList()
+
+        val sourceUrls = if (writeRelays.isNotEmpty()) {
+            writeRelays.mapNotNull { normalizeRelayUrl(it) }
+        } else {
+            Log.w(TAG, "Trust score provider 10002 not found — using fallback relays")
+            listOf("wss://nos.lol", "wss://relay.damus.io")
+        }
+
+        // #d filter: request only the relay URLs we care about (normalized)
+        val filter = buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(30385)) })
+            put("authors", buildJsonArray { add(JsonPrimitive(providerPubkeyHex)) })
+            put("#d", buildJsonArray { normalizedUrls.forEach { add(JsonPrimitive(it)) } })
+        }
+        Log.d(TAG, "Trust score REQ: ${normalizedUrls.size} relays from ${sourceUrls.size} sources")
+
+        // Try each source relay until we get results
+        var fetched = 0
+        for (url in sourceUrls) {
+            val conn = getOrCreateConnection(url) ?: continue
+            try {
+                val subId = "trust-${url.hashCode().toUInt()}-${System.nanoTime()}"
+                val pageState = PageState()
+                _activePages[subId] = pageState
+
+                val req = buildJsonArray {
+                    add(JsonPrimitive("REQ"))
+                    add(JsonPrimitive(subId))
+                    add(filter)
+                }.toString()
+
+                if (!conn.send(req)) {
+                    _activePages.remove(subId)
+                    continue
+                }
+
+                // With #d filter, result set is small — 15s is plenty
+                withTimeoutOrNull(15_000) { pageState.eoseReceived.await() }
+                val count = pageState.eventCount.get()
+
+                conn.send(buildJsonArray {
+                    add(JsonPrimitive("CLOSE"))
+                    add(JsonPrimitive(subId))
+                }.toString())
+                _activePages.remove(subId)
+
+                fetched += count
+                Log.d(TAG, "Trust scores from $url: $count events")
+
+                // If we got a good response, no need to try more sources
+                if (count > 0) break
+            } catch (e: Exception) {
+                Log.w(TAG, "Trust fetch failed on $url: ${e.message}")
             }
         }
-        Log.d(TAG, "Fetching kind 30385 trust scores from ${connections.size} relays")
+
+        val mesCount = mes.getTrustScores().size
+        Log.d(TAG, "Trust scores: $mesCount in MES ($fetched fetched for ${normalizedUrls.size} requested)")
+    }
+
+    /**
+     * Fetch kind 30166 (NIP-66 relay monitors) from relay.nostr.watch.
+     * Fetches ALL monitors (no #d filter) because relay.nostr.watch uses
+     * d-tag formats that may not match our normalized URLs (e.g. trailing slashes).
+     * With snapshot persistence this only downloads once; subsequent launches
+     * restore from disk and refresh in the background.
+     */
+    suspend fun fetchRelayMonitors() {
+        var conn = getOrCreateConnection(RELAY_MONITOR_URL)
+        if (conn == null) {
+            Log.w(TAG, "relay.nostr.watch unreachable — retrying in 3s")
+            delay(3_000)
+            conn = getOrCreateConnection(RELAY_MONITOR_URL)
+        }
+        if (conn == null) {
+            Log.w(TAG, "relay.nostr.watch unreachable after retry — skipping relay monitors")
+            return
+        }
+
+        val baseFilter = buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(30166)) })
+            put("authors", buildJsonArray { add(JsonPrimitive(RELAY_MONITOR_PUBKEY)) })
+        }
+
+        try {
+            val result = paginatedFetch(
+                conn = conn,
+                baseFilter = baseFilter,
+                subIdPrefix = "relay-monitor",
+                timeoutMs = 30_000,
+                onPage = { page, count ->
+                    Log.d(TAG, "Monitor page $page: $count events")
+                },
+            )
+            val monitorCount = memoryEventStore.get().getRelayMonitors().size
+            Log.d(TAG, "Relay monitors: $monitorCount in MES " +
+                "(${result.totalPages} pages, ${result.totalEvents} events)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Monitor fetch failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Get a live connection to [url], creating one if needed.
+     * Bypasses connection cap for control-plane fetches.
+     * Replaces stale/dead connections.
+     */
+    private suspend fun getOrCreateConnection(url: String): RelayConnection? {
+        val normalized = normalizeRelayUrl(url) ?: return null
+        val existing = connections[normalized]
+        if (existing != null && existing.isConnected) return existing
+        if (existing != null) connections.remove(normalized)
+        val conn = RelayConnection(normalized, okHttpClient)
+        connections[normalized] = conn
+        connectionLastActivity[normalized] = System.currentTimeMillis()
+        conn.connect()
+        scope.launch { listenForEvents(conn) }
+        return try {
+            conn.awaitConnected(timeoutMs = 5_000)
+            conn
+        } catch (_: Exception) {
+            Log.w(TAG, "getOrCreateConnection: $normalized failed to connect")
+            null
+        }
     }
 
     /**

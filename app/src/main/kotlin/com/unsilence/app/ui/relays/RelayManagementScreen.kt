@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.DropdownMenu
@@ -66,8 +67,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.unsilence.app.data.memory.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.memory.FavoriteEntry
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.ui.theme.Black
@@ -99,10 +101,10 @@ fun RelayManagementScreen(
     val blockedRelays   by viewModel.blockedRelays.collectAsStateWithLifecycle(initialValue = emptyList())
     val favoriteRelays  by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
     val relaySets       by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
-    val trustScores     by viewModel.trustScores.collectAsStateWithLifecycle(initialValue = emptyMap())
+    val relayHealth     by viewModel.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
 
     var showCreateRelaySet by remember { mutableStateOf(false) }
-    var trustDetailRelay by remember { mutableStateOf<RelayTrustScoreEntity?>(null) }
+    var healthDetailRelay by remember { mutableStateOf<RelayHealthInfo?>(null) }
 
     if (showCreateRelaySet) {
         CreateRelaySetScreen(
@@ -191,10 +193,10 @@ fun RelayManagementScreen(
                         items(readWriteRelays, key = { it.url }) { relay ->
                             ReadWriteRelayRow(
                                 relay          = relay,
-                                trustScore     = trustScores[relay.url],
+                                health         = relayHealth.lookup(relay.url),
                                 onToggleMarker = { viewModel.toggleMarker(relay) },
                                 onRemove       = { viewModel.removeReadWriteRelay(relay.url) },
-                                onTrustTap     = { trustScores[relay.url]?.let { trustDetailRelay = it } },
+                                onHealthTap    = { relayHealth.lookup(relay.url)?.let { healthDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -221,8 +223,8 @@ fun RelayManagementScreen(
                             SimpleRelayRow(
                                 url        = url,
                                 onRemove   = { viewModel.removeIndexerRelay(url) },
-                                trustScore = trustScores[url],
-                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
+                                health     = relayHealth.lookup(url),
+                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -239,8 +241,8 @@ fun RelayManagementScreen(
                             SimpleRelayRow(
                                 url        = url,
                                 onRemove   = { viewModel.removeSearchRelay(url) },
-                                trustScore = trustScores[url],
-                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
+                                health     = relayHealth.lookup(url),
+                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -280,10 +282,10 @@ fun RelayManagementScreen(
                             FavoriteRelayRow(
                                 url        = fav.url!!,
                                 relaySets  = relaySets,
-                                trustScore = trustScores[fav.url],
+                                health     = fav.url?.let { relayHealth.lookup(it) },
                                 onRemove   = { viewModel.removeFavoriteRelay(fav.url!!) },
                                 onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, fav.url!!) },
-                                onTrustTap = { trustScores[fav.url]?.let { trustDetailRelay = it } },
+                                onHealthTap = { fav.url?.let { relayHealth.lookup(it) }?.let { healthDetailRelay = it } },
                                 onStartFeed = onStartFeed?.let { cb ->
                                     { cb(fav.url!!, displayUrl(fav.url!!)) }
                                 },
@@ -303,8 +305,8 @@ fun RelayManagementScreen(
                             SimpleRelayRow(
                                 url        = url,
                                 onRemove   = { viewModel.removeBlockedRelay(url) },
-                                trustScore = trustScores[url],
-                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
+                                health     = relayHealth.lookup(url),
+                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -314,11 +316,11 @@ fun RelayManagementScreen(
         }
     }
 
-    // Trust score detail bottom sheet
-    trustDetailRelay?.let { score ->
-        TrustScoreDetailSheet(
-            score = score,
-            onDismiss = { trustDetailRelay = null },
+    // Relay health detail bottom sheet
+    healthDetailRelay?.let { health ->
+        RelayHealthDetailSheet(
+            health = health,
+            onDismiss = { healthDetailRelay = null },
         )
     }
 }
@@ -369,12 +371,16 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
 private fun displayUrl(url: String): String =
     url.removePrefix("wss://").removePrefix("ws://")
 
+/** Look up health info, trying both raw and normalized URL forms. */
+private fun Map<String, RelayHealthInfo>.lookup(url: String): RelayHealthInfo? =
+    this[url] ?: normalizeRelayUrl(url)?.let { this[it] }
+
 @Composable
 private fun SimpleRelayRow(
     url: String,
     onRemove: () -> Unit,
-    trustScore: RelayTrustScoreEntity? = null,
-    onTrustTap: () -> Unit = {},
+    health: RelayHealthInfo? = null,
+    onHealthTap: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -382,16 +388,20 @@ private fun SimpleRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TrustScoreDot(trustScore, onClick = onTrustTap)
+        HealthDot(health, onClick = onHealthTap)
         Spacer(Modifier.width(8.dp))
-        Text(
-            text     = displayUrl(url),
-            color    = Color.White,
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text     = displayUrl(url),
+                color    = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            HealthInfoButton(health, onClick = onHealthTap)
+        }
+        PingLabel(health)
         IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
         }
@@ -401,10 +411,10 @@ private fun SimpleRelayRow(
 @Composable
 private fun ReadWriteRelayRow(
     relay: RelayConfig,
-    trustScore: RelayTrustScoreEntity?,
+    health: RelayHealthInfo?,
     onToggleMarker: () -> Unit,
     onRemove: () -> Unit,
-    onTrustTap: () -> Unit,
+    onHealthTap: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -412,17 +422,20 @@ private fun ReadWriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Trust score dot
-        TrustScoreDot(trustScore, onClick = onTrustTap)
+        HealthDot(health, onClick = onHealthTap)
         Spacer(Modifier.width(8.dp))
-        Text(
-            text     = displayUrl(relay.url),
-            color    = Color.White,
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text     = displayUrl(relay.url),
+                color    = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            HealthInfoButton(health, onClick = onHealthTap)
+        }
+        PingLabel(health)
         // R/W marker chip
         val markerLabel = when (relay.marker) {
             "read"  -> "R"
@@ -452,10 +465,10 @@ private fun ReadWriteRelayRow(
 private fun FavoriteRelayRow(
     url: String,
     relaySets: List<RelaySet>,
-    trustScore: RelayTrustScoreEntity? = null,
+    health: RelayHealthInfo? = null,
     onRemove: () -> Unit,
     onAddToSet: (dTag: String) -> Unit,
-    onTrustTap: () -> Unit = {},
+    onHealthTap: () -> Unit = {},
     onStartFeed: (() -> Unit)?,
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -466,16 +479,20 @@ private fun FavoriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TrustScoreDot(trustScore, onClick = onTrustTap)
+        HealthDot(health, onClick = onHealthTap)
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = displayUrl(url),
-            color = Color.White,
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = displayUrl(url),
+                color = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            HealthInfoButton(health, onClick = onHealthTap)
+        }
+        PingLabel(health)
         if (onStartFeed != null) {
             var justAdded by remember { mutableStateOf(false) }
             LaunchedEffect(justAdded) {
@@ -576,36 +593,70 @@ private fun RelaySetRow(
     }
 }
 
-// ── Trust score components ──────────────────────────────────────────────────
+// ── Relay health components ─────────────────────────────────────────────────
 
-private val TrustGreen  = Color(0xFF4CAF50)
-private val TrustYellow = Color(0xFFFFC107)
-private val TrustRed    = Color(0xFFFF5252)
-private val TrustGray   = Color(0xFF666666)
+private val HealthGreen  = Color(0xFF4CAF50)
+private val HealthYellow = Color(0xFFFFC107)
+private val HealthRed    = Color(0xFFFF5252)
+private val HealthGray   = Color(0xFF666666)
 
 private fun trustColor(score: Int?): Color = when {
-    score == null -> TrustGray
-    score >= 70   -> TrustGreen
-    score >= 40   -> TrustYellow
-    else          -> TrustRed
+    score == null -> HealthGray
+    score >= 70   -> HealthGreen
+    score >= 40   -> HealthYellow
+    else          -> HealthRed
+}
+
+private fun pingColor(ms: Int): Color = when {
+    ms <= 200  -> HealthGreen
+    ms <= 500  -> HealthYellow
+    else       -> HealthRed
+}
+
+/** Dot color: trust score if available, otherwise ping-based, otherwise grey. */
+private fun healthDotColor(health: RelayHealthInfo?): Color {
+    if (health == null) return HealthGray
+    health.score?.let { return trustColor(it) }
+    health.ping?.let { return pingColor(it) }
+    return HealthGray
 }
 
 @Composable
-private fun TrustScoreDot(score: RelayTrustScoreEntity?, onClick: () -> Unit) {
-    val color = trustColor(score?.score)
-    Canvas(
-        modifier = Modifier
-            .size(10.dp)
-            .clickable(enabled = score != null, onClick = onClick),
-    ) {
+private fun HealthDot(health: RelayHealthInfo?, onClick: () -> Unit) {
+    val color = healthDotColor(health)
+    Canvas(modifier = Modifier.size(10.dp)) {
         drawCircle(color = color)
     }
 }
 
+@Composable
+private fun HealthInfoButton(health: RelayHealthInfo?, onClick: () -> Unit) {
+    if (health == null) return
+    IconButton(onClick = onClick, modifier = Modifier.size(24.dp)) {
+        Icon(
+            imageVector = Icons.Outlined.Info,
+            contentDescription = "Relay info",
+            tint = TextSecondary,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun PingLabel(health: RelayHealthInfo?) {
+    val ping = health?.ping ?: return
+    Text(
+        text = "${ping}ms",
+        color = pingColor(ping),
+        fontSize = 10.sp,
+        modifier = Modifier.padding(end = 4.dp),
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TrustScoreDetailSheet(
-    score: RelayTrustScoreEntity,
+private fun RelayHealthDetailSheet(
+    health: RelayHealthInfo,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(
@@ -622,60 +673,117 @@ private fun TrustScoreDetailSheet(
         ) {
             // Header
             Text(
-                text = displayUrl(score.relayUrl),
+                text = displayUrl(health.relayUrl),
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Canvas(modifier = Modifier.size(10.dp)) {
-                    drawCircle(color = trustColor(score.score))
+
+            // ── Trust score section ─────────────────────────────────────
+            val score = health.trustScore
+            if (score != null) {
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Canvas(modifier = Modifier.size(10.dp)) {
+                        drawCircle(color = trustColor(score.score))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Trust Score: ${score.score}/100",
+                        color = trustColor(score.score),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = score.confidence.replaceFirstChar { it.uppercase() } + " confidence",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                    )
                 }
-                Spacer(Modifier.width(8.dp))
+
+                Spacer(Modifier.height(16.dp))
+
+                TrustBar("Reliability", score.reliability, 0.40f)
+                TrustBar("Quality", score.quality, 0.35f)
+                TrustBar("Accessibility", score.accessibility, 0.25f)
+
+                Spacer(Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    score.policy?.let { policy ->
+                        MetadataChip(label = "Policy", value = policy)
+                    }
+                    score.countryCode?.let { cc ->
+                        MetadataChip(label = "Region", value = cc)
+                    }
+                    MetadataChip(label = "Observations", value = score.observations.toString())
+                }
+
+                score.operatorVerified?.let { method ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Operator verified: $method",
+                        color = HealthGreen,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+
+            // ── Monitor / liveness section ──────────────────────────────
+            val monitor = health.monitor
+            if (monitor != null) {
+                if (score != null) {
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider(color = Surface2)
+                }
+                Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "Trust Score: ${score.score}/100",
-                    color = trustColor(score.score),
+                    text = "Liveness Monitor",
+                    color = Color.White,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    text = score.confidence.replaceFirstChar { it.uppercase() } + " confidence",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                )
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    monitor.rttOpen?.let { MetadataChip(label = "Open", value = "${it}ms") }
+                    monitor.rttRead?.let { MetadataChip(label = "Read", value = "${it}ms") }
+                    monitor.rttWrite?.let { MetadataChip(label = "Write", value = "${it}ms") }
+                }
+
+                if (monitor.supportedNips.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "NIPs: ${monitor.supportedNips.sorted().joinToString(", ")}",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                    )
+                }
+
+                monitor.network?.let { net ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Network: $net",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                    )
+                }
             }
 
-            Spacer(Modifier.height(16.dp))
-
-            // Score breakdown bars
-            TrustBar("Reliability", score.reliability, 0.40f)
-            TrustBar("Quality", score.quality, 0.35f)
-            TrustBar("Accessibility", score.accessibility, 0.25f)
-
-            Spacer(Modifier.height(12.dp))
-
-            // Metadata row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                score.policy?.let { policy ->
-                    MetadataChip(label = "Policy", value = policy)
-                }
-                score.countryCode?.let { cc ->
-                    MetadataChip(label = "Region", value = cc)
-                }
-                MetadataChip(label = "Observations", value = score.observations.toString())
-            }
-
-            score.operatorVerified?.let { method ->
+            // No data at all
+            if (score == null && monitor == null) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Operator verified: $method",
-                    color = TrustGreen,
-                    fontSize = 12.sp,
+                    text = "No health data available for this relay.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
                 )
             }
         }

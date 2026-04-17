@@ -505,12 +505,13 @@ class EventProcessor @Inject constructor(
             memoryEventStore.updateFollows(pubkey, follows, createdAt)
             Log.d(TAG, "Kind-3 direct path: pubkey=${pubkey.take(8)}… ${follows.size} follows (createdAt=$createdAt)")
         }
-        // NIP-51/NIP-65 relay kinds → direct insert into MES.
-        // These are control-plane events (not feed content) that need immediate
-        // processing: 10002 for outbox prefetch, 10006/10007/10012/30002 for
-        // relay config UI. Without direct insert they never reach MES.insert()
-        // because they're not in shouldChannel.
-        if (kind in setOf(10002, 10006, 10007, 10012, 30002)) {
+        // Control-plane events → direct insert into MES (bypass cold channel).
+        // These are NOT feed content and need immediate processing:
+        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config UI,
+        // 30385 for trust scores, 30166 for relay monitors (hundreds arrive in
+        // burst — cold channel drops via trySend; direct insert ensures none are
+        // lost). Both are ephemeral (not snapshot-persisted, re-fetched every bootstrap).
+        if (kind in setOf(10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
             memoryEventStore.insert(nostrEvent)
         }
         // Kind-10012 (favorites) may contain ["a", "30002:pubkey:dtag", "hint-relay"]
@@ -525,7 +526,7 @@ class EventProcessor @Inject constructor(
         // which makes it available for snapshot persistence. The direct-path
         // updateFollows above provides immediate MES update; the cold channel
         // provides the eventsById entry for snapshot serialization.
-        val shouldChannel = kind in setOf(0, 1, 3, 6, 7, 9734, 9735, 20, 21, 30023, 30385)
+        val shouldChannel = kind in setOf(0, 1, 3, 6, 7, 9734, 9735, 20, 21, 30023)
         if (shouldChannel) {
             val isHot = kind == 1 || kind == 6 || kind == 20 || kind == 21 || kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.

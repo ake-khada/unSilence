@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.memory.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
@@ -62,9 +62,9 @@ class RelayManagementViewModel @Inject constructor(
     val relaySets: Flow<List<RelaySet>> =
         ownerPubkey?.let { memoryEventStore.getAllSetsFlow(it) } ?: emptyFlow()
 
-    /** Relay trust scores keyed by URL for quick lookup (kind 30385). */
-    val trustScores: Flow<Map<String, RelayTrustScoreEntity>> =
-        memoryEventStore.trustScoresFlow()
+    /** Combined relay health (trust score + monitor) keyed by URL. */
+    val relayHealth: Flow<Map<String, RelayHealthInfo>> =
+        memoryEventStore.relayHealthFlow()
 
     val publishing = MutableStateFlow(false)
     private val publishMutex = Mutex()
