@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 17, 2026 (A.5.2 shipped — notifications migrated from Room DAO to MES scan-based queries + DataStore lastSeen)
+**Last updated:** April 17, 2026 (A.7 shipped — deleted 8 dead DAOs, 6 dead entities, CoverageRepository; dropped 7 tables via migration v18→v19)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -66,7 +66,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
                                   └→ Room DB (persistence, snapshots)
 ```
 
-**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.5.2 complete — feed, search, actions, threads, profiles, ephemeral trackers, relay config, notifications all read from MES/DataStore. Remaining: outbox model (A.6), Room read-path deletion (A.7).
+**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.7 complete — all consumer read paths migrated to MES/DataStore, dead Room artifacts deleted, 7 tables dropped. Remaining: outbox model (A.6).
 
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
@@ -81,10 +81,10 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **RelayPreferencesStore** — DataStore-backed persistence for kind-99 indexer URLs, pinned relays, and notification lastSeen timestamps (per-user). StateFlow cache with suspending and snapshot reads. Replaces relayConfigDao for indexer URL reads across all VMs and RelayPool
 - **AppBootstrapper** — 3-phase staggered init, bootstrap job cancellation (new login cancels in-progress bootstrap), MES follows seeded from Room, MediaPreconnect fire-and-forget, BackgroundSyncWorker (skeleton)
 
-### Room v18 Tables
-events, users, follows, reactions, event_stats, tags, event_relays, relay_configs, nostr_relay_sets, nostr_relay_set_members, coverage, pinned_relays, relay_trust_scores, sync_state
+### Room v19 Tables (9 remaining)
+events, users, follows, reactions, event_stats, tags, event_relays, relay_trust_scores, relay_list_metadata
 
-**Note:** `coverage`, `sync_state`, `relay_configs`, `nostr_relay_sets`, `nostr_relay_set_members`, and `pinned_relays` tables are no longer read at runtime — replaced by MES + DataStore (A.5.1 T5/T6). NotificationsDao queries (5-branch UNION ALL over events/users/reactions/event_stats) are no longer used — replaced by MES scan-based `getNotifications()` (A.5.2). Tables remain in schema but are dead code pending A.7 cleanup. `relay_trust_scores` is still read from Room (not yet migrated).
+**A.7 cleanup:** Dropped 7 tables (coverage, relay_configs, nostr_relay_sets, nostr_relay_set_members, own_relays, pinned_relays, sync_state) via MIGRATION_18_19. Deleted 8 DAOs, 6 entity classes, CoverageRepository. Surviving DAOs: EventDao, UserDao, FollowDao, ReactionDao, RelayListDao, EventStatsDao, RelayTrustScoreDao. SyncStateEntity kept as data class (used by SyncTracker). TagEntity/EventRelayEntity kept in @Database (tables used by EventDao SQL).
 
 ### Room Migrations
 - Index names: `index_tablename_col1_col2` convention (backticks in SQL)
