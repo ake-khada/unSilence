@@ -27,7 +27,21 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * v11 → v12: Declare event_relays index in Room entity annotation (was only in
  *             v8→v9 SQL migration). No-op for migrated installs; ensures Room's
  *             compile-time schema hash matches the on-disk schema.
+ * v18 → v19: A.7 — Drop dead tables no longer read at runtime (replaced by
+ *             MES/DataStore/in-memory trackers across A.5.1 and A.5.2).
  */
+val MIGRATION_18_19 = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS `coverage`")
+        db.execSQL("DROP TABLE IF EXISTS `nostr_relay_sets`")
+        db.execSQL("DROP TABLE IF EXISTS `nostr_relay_set_members`")
+        db.execSQL("DROP TABLE IF EXISTS `own_relays`")
+        db.execSQL("DROP TABLE IF EXISTS `pinned_relays`")
+        db.execSQL("DROP TABLE IF EXISTS `relay_configs`")
+        db.execSQL("DROP TABLE IF EXISTS `sync_state`")
+    }
+}
+
 val MIGRATION_11_12 = object : Migration(11, 12) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("CREATE INDEX IF NOT EXISTS `idx_event_relays_by_relay` ON `event_relays` (`relay_url`, `seen_at`, `event_id`)")
