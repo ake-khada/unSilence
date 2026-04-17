@@ -4,11 +4,9 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.NostrRelaySetDao
-import com.unsilence.app.data.db.dao.PinnedRelayDao
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.db.entity.PinnedRelayEntity
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.data.memory.RelaySet
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CoverageIntent
@@ -84,8 +82,7 @@ class FeedViewModel @Inject constructor(
     private val coverageTracker: CoverageTracker,
     private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
-    private val nostrRelaySetDao: NostrRelaySetDao,
-    private val pinnedRelayDao: PinnedRelayDao,
+    private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
 ) : ViewModel() {
 
@@ -96,31 +93,31 @@ class FeedViewModel @Inject constructor(
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
     /** All relay sets (NIP-51 kind 30002) for the dropdown. */
-    val userSetsFlow: StateFlow<List<NostrRelaySetEntity>> =
+    val userSetsFlow: StateFlow<List<RelaySet>> =
         keyManager.getPublicKeyHex()?.let { pk ->
-            nostrRelaySetDao.getAllSets(pk)
+            memoryEventStore.getAllSetsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
-    /** Favorite relays pinned to the feed picker — backed by Room for persistence. */
+    /** Favorite relays pinned to the feed picker — backed by DataStore for persistence. */
     val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
         keyManager.getPublicKeyHex()?.let { pk ->
-            pinnedRelayDao.pinnedFor(pk)
-                .map { entities -> entities.map { FeedType.SingleRelay(it.url, it.displayLabel ?: it.url) } }
+            relayPreferencesStore.pinnedRelaysFlow(pk)
+                .map { list -> list.map { FeedType.SingleRelay(it.url, it.displayLabel ?: it.url) } }
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
     fun addPinnedRelay(url: String, label: String) {
         val pk = keyManager.getPublicKeyHex() ?: return
         viewModelScope.launch {
-            pinnedRelayDao.upsert(PinnedRelayEntity(pubkey = pk, url = url, displayLabel = label))
+            relayPreferencesStore.upsertPinnedRelay(pk, url, label)
         }
     }
 
     fun removePinnedRelay(url: String) {
         val pk = keyManager.getPublicKeyHex() ?: return
         viewModelScope.launch {
-            pinnedRelayDao.delete(pk, url)
+            relayPreferencesStore.deletePinnedRelay(pk, url)
         }
     }
 
@@ -338,12 +335,15 @@ class FeedViewModel @Inject constructor(
     init {
         // Reactively track follows — auto-switch to Following on first follow
         val ownPubkey = keyManager.getPublicKeyHex()
+        Log.d("FeedVM", "init: ownPubkey=${ownPubkey?.take(8)}…")
         if (ownPubkey != null) {
             viewModelScope.launch {
                 memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
                     val had = _hasFollows.value
                     _hasFollows.value = count > 0
+                    Log.d("FeedVM", "followsCollector: count=$count had=$had feedType=${_feedType.value}")
                     if (!had && count > 0 && _feedType.value is FeedType.Global) {
+                        Log.d("FeedVM", "Auto-switch → Following")
                         _feedType.value = FeedType.Following
                     }
                 }
@@ -451,7 +451,7 @@ class FeedViewModel @Inject constructor(
                                 normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
                             }
                             relayPool.connect(globalUrls, isHomeFeed = true)
-                            Log.d("FeedVM", "A4_VERIFY: Global feed → MemoryEventStore")
+                            Log.d("FeedVM", "A4_VERIFY: Global feed → MES (pk=${pubkey.take(8)})")
                             _displayLimit.flatMapLatest { limit ->
                                 val memFilter = MemoryFeedFilter(
                                     kinds = filter.enabledKinds.toSet(),
@@ -465,7 +465,7 @@ class FeedViewModel @Inject constructor(
                             browseSession.stop()
                             currentRelayUrls = emptyList()
                             outboxRouter.start()
-                            Log.d("FeedVM", "A4_VERIFY: Following feed → MemoryEventStore")
+                            Log.d("FeedVM", "A4_VERIFY: Following feed → MES (pk=${pubkey.take(8)})")
                             combine(_displayLimit, memoryEventStore.followsFlow(pubkey)) { limit, follows ->
                                 limit to follows
                             }.flatMapLatest { (limit, follows) ->
@@ -479,8 +479,8 @@ class FeedViewModel @Inject constructor(
                         }
                         is FeedType.RelaySet  -> {
                             val ownerPk = keyManager.getPublicKeyHex() ?: ""
-                            val members = nostrRelaySetDao.getSetMembersSnapshot(type.dTag, ownerPk)
-                            val setUrls = members.mapNotNull { normalizeRelayUrl(it.relayUrl) }
+                            val members = memoryEventStore.getSetMembers(ownerPk, type.dTag)
+                            val setUrls = members.mapNotNull { normalizeRelayUrl(it) }
                                 .ifEmpty { resolveGlobalUrls() }
                             currentRelayUrls = setUrls
                             browseSession.start(setUrls)

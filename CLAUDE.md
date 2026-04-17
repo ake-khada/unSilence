@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 10, 2026 (design polish sprint complete: 8 items shipped)
+**Last updated:** April 16, 2026 (A.5.1 Tiers 3/4/6 shipped — search, actions, ephemeral trackers migrated to MES)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -62,10 +62,11 @@ Any runtime behavior change MUST use human-in-the-loop validation. See `VALIDATI
 ## Architecture
 
 ```
-Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
+Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → Compose UI
+                                  └→ Room DB (persistence, snapshots)
 ```
 
-**Core principle:** Room-first, 0ms screen render, network fills gaps invisibly.
+**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.5.1 migration in progress — feed, search, actions, threads, profiles, ephemeral trackers all read from MES. Remaining: relay config (T5), outbox model (A.6), Room read-path deletion (A.7).
 
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
@@ -74,11 +75,15 @@ Relay WebSocket → EventProcessor → Room DB → Flow/StateFlow → Compose UI
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, structural dedup
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs. Sampled at 60ms (16 Hz) via Flow.sample in FeedScreen's snapshotFlow wiring — the state machine has natural transition rates of hundreds of milliseconds; per-frame evaluation at display refresh rate (120 Hz on Pixel 9 Pro XL) is wasteful and produces frame drops. Scroll edge detection (onScrollStarted/onScrollStopped) uses a separate snapshotFlow with distinctUntilChanged() to capture edges immediately without sampling delay
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection: layout shift cooldown (500ms, stationary only), 250ms confirmation window (flatMapLatest cancellation), oscillation detection (A→B→A block within 3s). Fullscreen handoff: inline player detaches surface via `isFullscreen` flag, dialog gets exclusive surface ownership
-- **SearchViewModel** — NIP-50 search with 1000ms debounce, min 3-char filter, distinctUntilChanged, collectLatest cancellation. Token-based session tracking: each new query generates a token, `relayPool.closeSearch(token)` sends CLOSE frames for prior search subs before issuing new REQs. Search sub-IDs (`search-profiles-$token`, `search-notes-$token`) registered in `_activeOneShotSubs` so EOSE auto-closes work. `onCleared()` sends final CLOSE. RelayPool.searchNotes also runs a 10-second safety-net timeout that force-closes any search subscription whose EOSE never arrives — this handles relays (e.g. ditto.pub for search-notes) that treat NIP-50 search as a streaming subscription rather than a bounded query
+- **MemoryEventStore** — in-memory ConcurrentHashMap store (eventsById, profilesByPubkey, statsByTarget, followsByPubkey, reactionsByActor, repostsByActor). Signal-driven reactive Flows: `_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal` drive `.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)` patterns. All scan Flows MUST use `flowOn(Dispatchers.Default)` — MES has no internal IO dispatching like Room; without flowOn, scans run on Main thread causing ANR
+- **CoverageTracker / SyncTracker** — in-memory replacements for CoverageDao+SyncStateDao (ephemeral session-scoped relay sync state). ConcurrentHashMap-backed, not suspend, no Room dependency
+- **SearchViewModel** — NIP-50 search with 1000ms debounce, min 3-char filter, distinctUntilChanged, collectLatest cancellation. Local results from MES (`searchNotesFlow`, `searchUsersFlow`), relay results via token-correlated SharedFlow + `feedRowsByIdsFlow`. Token-based session tracking: each new query generates a token, `relayPool.closeSearch(token)` sends CLOSE frames for prior search subs before issuing new REQs. Search sub-IDs (`search-profiles-$token`, `search-notes-$token`) registered in `_activeOneShotSubs` so EOSE auto-closes work. `onCleared()` sends final CLOSE. RelayPool.searchNotes also runs a 10-second safety-net timeout that force-closes any search subscription whose EOSE never arrives — this handles relays (e.g. ditto.pub for search-notes) that treat NIP-50 search as a streaming subscription rather than a bounded query
 - **AppBootstrapper** — 3-phase staggered init, BackgroundSyncWorker (skeleton)
 
 ### Room v18 Tables
 events, users, follows, reactions, event_stats, tags, event_relays, relay_configs, nostr_relay_sets, nostr_relay_set_members, coverage, pinned_relays, relay_trust_scores, sync_state
+
+**Note:** `coverage` and `sync_state` tables are no longer read at runtime — replaced by in-memory CoverageTracker/SyncTracker (A.5.1 T6). Tables remain in schema but are dead code pending A.7 cleanup.
 
 ### Room Migrations
 - Index names: `index_tablename_col1_col2` convention (backticks in SQL)
@@ -151,6 +156,7 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_config
 16. **The current architecture is render-then-hydrate, not hydrate-then-render.** Room emissions flow directly to the reducer, which updates visible state immediately. The WARM zone catches up with hydration AFTER cards are visible. Any design that requires cards to be fully hydrated BEFORE entering visible state must first restructure this flow — by buffering Room emissions until hydration completes, or by driving display from a hydration-completion signal instead of from Room. Patching the gate at the reducer level will always fail because the hydration work hasn't started yet when the reducer runs. P_WARM_READINESS_PAGINATION attempted this patch twice and failed both times; the sprint was reverted and deferred
 17. **In Kotlin coroutines, `viewModelScope.launch { }` inside a `collectLatest` block does NOT participate in collectLatest's cancellation semantics** — the inner launch is scoped to `viewModelScope`, so each re-emission spawns a new coroutine while old ones continue running. On Room Flows with multi-table JOINs this creates a feedback loop: hydration writes → Room re-emission → new coroutine → more writes. Use `withContext(Dispatchers.IO)` instead (participates in cancellation), and add an ID-set guard to skip data-only re-emissions. P_PROFILE_VM_LEAK measured 452 leaked coroutines from this pattern in a 7.5-minute session
 18. **Engagement freshness checks use tiered thresholds based on post age** (`freshnessThreshold` in FeedHydrationController). The flat 5-minute threshold previously used was appropriate for fresh posts but produced ~71% wasted fetches on the dominant case (posts >1 hour old). If adding a new engagement dispatch path, route it through this function or replicate the tiering logic. Do NOT use the raw `ENGAGEMENT_STALE_MS` constant as the sole threshold — it's the Tier 1 value only. P_ENGAGEMENT_TIERED_FRESHNESS measured 43% batch reduction on return visits and 57% thermal rate reduction
+19. **Every MES signal-driven scan Flow MUST use `flowOn(Dispatchers.Default)`** — unlike Room (which dispatches to its own IO pool), MES scans run inline on the calling coroutine's thread. Without `flowOn`, all ConcurrentHashMap iteration + filtering + sorting runs on Main, causing ANR ("close app" dialog). A.5.1 T3 discovered this when search scans stalled the UI; T6 hardened all existing Flows. Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`
 
 ---
 
@@ -184,7 +190,9 @@ Validation discipline: When validation criteria fail, revert first, investigate 
 app/src/main/kotlin/com/unsilence/app/
 ├── data/
 │   ├── auth/        KeyManager, SigningManager
+│   ├── cache/       CoverageTracker, SyncTracker (in-memory ephemeral state)
 │   ├── db/          dao/, entity/, AppDatabase, migrations
+│   ├── memory/      MemoryEventStore, Models, SnapshotScheduler
 │   ├��─ relay/       RelayPool, EventProcessor, ProfileResolver, CardHydrator, OgFetcher
 │   ├── repository/  EventRepository, UserRepository, ZapRepository
 │   ├── wallet/      ZapRepository, NwcManager, LnurlResolver

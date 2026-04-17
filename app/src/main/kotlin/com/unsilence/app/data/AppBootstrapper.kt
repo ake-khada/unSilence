@@ -15,11 +15,9 @@ import com.unsilence.app.data.db.DatabaseMaintenanceJob
 import com.unsilence.app.data.db.dao.EventDao
 import com.unsilence.app.data.db.dao.EventStatsDao
 import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.dao.NostrRelaySetDao
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayTrustScoreDao
 import com.unsilence.app.data.db.dao.UserDao
-import com.unsilence.app.data.db.entity.RelayConfigEntity
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -32,13 +30,18 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import javax.inject.Inject
@@ -79,11 +82,10 @@ class AppBootstrapper @Inject constructor(
     private val eventDao: EventDao,
     private val signingManager: SigningManager,
     private val followDao: FollowDao,
-    private val relayConfigDao: RelayConfigDao,
     private val userDao: UserDao,
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
-    private val nostrRelaySetDao: NostrRelaySetDao,
+    private val relayPreferencesStore: RelayPreferencesStore,
     private val eventStatsDao: EventStatsDao,
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
@@ -91,7 +93,9 @@ class AppBootstrapper @Inject constructor(
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
 ) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
+    private var bootstrapJob: Job? = null
 
     /**
      * Sequential bootstrap for the logged-in user.
@@ -107,21 +111,27 @@ class AppBootstrapper @Inject constructor(
      * Guarded by a Mutex so concurrent calls (e.g. config change + init)
      * don't interleave steps.
      */
-    suspend fun bootstrap(pubkeyHex: String) = bootstrapMutex.withLock {
+    suspend fun bootstrap(pubkeyHex: String) {
+        // Cancel any in-progress bootstrap (e.g. from previous login session).
+        // Without this, the old bootstrap holds the mutex for minutes
+        // (MediaPreconnect.warmUp can hang) and the new bootstrap starves.
+        bootstrapJob?.cancel()
+        bootstrapJob = scope.launch { doBootstrap(pubkeyHex) }
+        bootstrapJob?.join()
+    }
+
+    private suspend fun doBootstrap(pubkeyHex: String) = bootstrapMutex.withLock {
         // ═══════════════════════════════════════════════════════════════════
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
+        eventProcessor.start()
         outboxRouter.start()
-        nostrRelaySetDao.claimOrphaned(pubkeyHex)
 
-        // Seed kind 99 indexer relays if none exist
-        val existingIndexers = relayConfigDao.getIndexerRelayUrls()
+        // Seed kind 99 indexer relays if none exist (DataStore).
+        // Suspending read waits for DataStore disk load — snapshot() would race.
+        val existingIndexers = relayPreferencesStore.indexerRelayUrlsSuspending()
         if (existingIndexers.isEmpty()) {
-            relayConfigDao.insertAll(
-                DEFAULT_INDEXER_URLS.map { url ->
-                    RelayConfigEntity(kind = 99, relayUrl = url)
-                }
-            )
+            relayPreferencesStore.setIndexerUrls(DEFAULT_INDEXER_URLS)
         }
 
         // Phase 1.5: Restore MemoryEventStore snapshot BEFORE relay connections
@@ -129,7 +139,7 @@ class AppBootstrapper @Inject constructor(
         Log.d(TAG, "Phase1.5: snapshot restore complete")
 
         // Step 1: Connect to indexer relays
-        val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+        val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
@@ -139,6 +149,17 @@ class AppBootstrapper @Inject constructor(
             followDao.followsFlow().filter { it.isNotEmpty() }.first()
         }
         Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded")
+
+        // Seed MES with Room follows so FeedVM auto-switches to Following.
+        // Without this, MES follows stay empty until a kind-3 arrives from the
+        // network (which may never happen if indexer relays fail to connect).
+        // createdAt=0 ensures any network-fetched kind-3 takes precedence.
+        if (!follows.isNullOrEmpty()) {
+            memoryEventStore.updateFollows(
+                pubkeyHex, follows.map { it.pubkey }.toSet(), 0L
+            )
+            Log.d(TAG, "Phase1 Step2: seeded MES with ${follows.size} follows from Room")
+        }
 
         // Step 3: Fetch kind-10002 (relay list) — wait for response via MES
         val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
@@ -186,14 +207,12 @@ class AppBootstrapper @Inject constructor(
         relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
 
-        // Seed kind 10007 search relays if none exist after fetch
-        val existingSearch = relayConfigDao.searchRelayUrls()
+        // Seed kind 10007 search relays in MES if none exist after fetch
+        val existingSearch = memoryEventStore.getSearchRelayUrls(pubkeyHex)
         if (existingSearch.isEmpty()) {
-            relayConfigDao.insertAll(
-                DEFAULT_SEARCH_URLS.map { url ->
-                    RelayConfigEntity(kind = 10007, relayUrl = url)
-                }
-            )
+            for (url in DEFAULT_SEARCH_URLS) {
+                memoryEventStore.addSearchRelay(pubkeyHex, url)
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -216,7 +235,10 @@ class AppBootstrapper @Inject constructor(
             Log.d(TAG, "Phase3: fetching relay trust scores (kind 30385)")
         }
 
-        MediaPreconnect.warmUp(okHttpClient)
+        // Media preconnect is fire-and-forget — never block the bootstrap mutex.
+        // supervisorScope inside warmUp waits for all HEAD requests; if one hangs
+        // the entire bootstrap stalls (measured: 2m27s in production).
+        scope.launch { MediaPreconnect.warmUp(okHttpClient) }
 
         scheduleBackgroundSync()
 
@@ -244,14 +266,17 @@ class AppBootstrapper @Inject constructor(
      * Full teardown on logout. Order matters:
      * 1. Cancel persistent subs (send CLOSE messages while connections are still alive)
      * 2. Disconnect all WebSockets
-     * 3. Clear user-specific Room tables (follows, relay_configs) — keep events/users as cache
+     * 3. Clear user-specific state — events/profiles/stats are reusable cache
      * 4. Clear KeyManager, SigningManager, NwcManager credentials
      * 5. Cancel child scopes (OutboxRouter, EventProcessor)
      * 6. Reset in-memory state (seenIds, connection map)
+     *
+     * No exitProcess — singletons survive. bootstrap() restarts subsystems.
      */
     suspend fun teardown() {
-        // 0. Save snapshot before clearing state
-        snapshotScheduler.saveNow()
+        // 0. Cancel in-progress bootstrap — releases the mutex immediately
+        bootstrapJob?.cancel()
+        bootstrapJob = null
 
         // 1. Cancel persistent subscriptions
         relayPool.clearPersistentSubs()
@@ -259,11 +284,15 @@ class AppBootstrapper @Inject constructor(
         // 2. Disconnect all WebSockets
         relayPool.disconnectAll()
 
-        // 3. Clear only user-specific tables — events/users/reactions are reusable cache
+        // 3. Clear ALL in-memory state — eventsById, profiles, stats, follows, relays.
+        //    clearUserState() preserved eventsById which leaked old user's cached events
+        //    into the new user's Global feed after re-login.
         followDao.clearAll()
-        relayConfigDao.clearAll()
-        nostrRelaySetDao.clearAllSets()
-        nostrRelaySetDao.clearAllMembers()
+        memoryEventStore.clear()
+
+        // 3b. Delete snapshot file — prevents restoreIfPresent() from reloading
+        //     old user's events into MES on next bootstrap.
+        snapshotScheduler.deleteSnapshot()
 
         // 4. Clear credentials and cached signer
         keyManager.clear()
@@ -275,13 +304,13 @@ class AppBootstrapper @Inject constructor(
         eventProcessor.stop()
         maintenanceJob.stop()
 
-        // 6. Release shared ExoPlayer
-        sharedPlayerHolder.release()
+        // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
+        withContext(Dispatchers.Main) { sharedPlayerHolder.release() }
 
         // 7. Clear profile resolver in-flight state
         profileResolver.clear()
 
-        // 9. In-memory state already cleared by eventProcessor.stop() (seenIds)
+        // In-memory state already cleared by eventProcessor.stop() (seenIds)
         // and relayPool.disconnectAll() (connections map)
 
         Log.d(TAG, "Teardown complete")

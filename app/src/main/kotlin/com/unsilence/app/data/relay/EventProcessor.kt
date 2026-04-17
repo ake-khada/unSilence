@@ -5,6 +5,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -27,6 +28,12 @@ private const val TAG = "EventProcessor"
 /** Fire-and-forget dispatch of event ID fetches to a specific relay. */
 fun interface PrefetchDispatcher {
     fun dispatch(relayUrl: String, eventIds: List<String>)
+}
+
+/** Fetches kind-30002 relay sets by coordinate from hint relays.
+ *  Called when kind-10012 arrives with ["a", "30002:pubkey:dtag", "hint-relay"] tags. */
+fun interface RelaySetRefFetcher {
+    fun fetch(author: String, dTags: List<String>, hintRelayUrls: List<String>)
 }
 
 // Dedup cache limits
@@ -96,6 +103,9 @@ class EventProcessor @Inject constructor(
 
     /** Set by RelayPool after construction to avoid circular dependency. */
     internal var prefetchDispatcher: PrefetchDispatcher? = null
+
+    /** Set by RelayPool — resolves kind-30002 relay set references from kind-10012 hint tags. */
+    internal var relaySetRefFetcher: RelaySetRefFetcher? = null
 
     /** Event IDs already requested via prefetch (prevents duplicate fetches). */
     internal val prefetchedRefs: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -179,26 +189,70 @@ class EventProcessor @Inject constructor(
      * @param outboxRelays write relay URLs to try (budget-capped by caller)
      */
     private fun dispatchOutboxPrefetch(refIds: List<String>, outboxRelays: List<String>) {
-        val dispatcher = prefetchDispatcher ?: return
         val missing = refIds.filter {
             EVENT_ID_HEX_REGEX.matches(it) && memoryEventStore.getEventEntity(it) == null
         }
         if (missing.isEmpty()) return
+        // Route through the prefetch channel for batching instead of dispatching
+        // individual REQs directly. The drainer's 250ms coalescing window groups
+        // IDs by relay, producing fewer multi-ID REQs instead of many 1-ID REQs.
         for (relay in outboxRelays) {
             if (relay.isBlank() || !relay.startsWith("wss://")) continue
-            dispatcher.dispatch(relay, missing)
+            for (id in missing) {
+                prefetchChannel.trySend(id to relay)
+            }
             outboxPrefetchDispatchedCount.addAndGet(missing.size.toLong())
         }
     }
 
     /**
-     * PREFETCH drainer: collects up to [PREFETCH_RATE_CAP] requests per 1-second
-     * window. Groups by source relay for efficient batched REQs.
+     * Resolve kind-30002 relay set references from a kind-10012 (favorites) event.
+     * Parses ["a", "30002:pubkey:dtag", "hint-relay"] tags, groups by hint relay,
+     * and dispatches fetches. The fetched kind-30002 events flow back through
+     * onRelayMessage → direct-path insert → handleRelaySetMaterialized().
+     */
+    private fun resolveRelaySetRefs(event: NostrEvent) {
+        val fetcher = relaySetRefFetcher ?: return
+        // Group d-tags by hint relay URL. A tag without a hint relay is skipped —
+        // the indexer fetch in fetchRelayEcosystem already covers those.
+        val byHintRelay = mutableMapOf<String, MutableList<String>>()
+        for (tag in event.tags) {
+            if (tag.size < 3 || tag[0] != "a") continue
+            val parts = tag[1].split(":")
+            // Expected format: "30002:pubkey:dtag"
+            if (parts.size < 3 || parts[0] != "30002") continue
+            val author = parts[1]
+            val dTag = parts.subList(2, parts.size).joinToString(":")
+            val hintRelay = tag[2]
+            if (hintRelay.isBlank() || !hintRelay.startsWith("wss://")) continue
+            // Skip if we already have this relay set with members
+            val existing = memoryEventStore.getSetMembers(event.pubkey, dTag)
+            if (existing.isNotEmpty()) continue
+            byHintRelay.getOrPut(hintRelay) { mutableListOf() }.add(dTag)
+        }
+        if (byHintRelay.isEmpty()) return
+        // All refs in a kind-10012 share the same author (the event pubkey)
+        val author = event.pubkey
+        for ((hintRelay, dTags) in byHintRelay) {
+            fetcher.fetch(author, dTags, listOf(hintRelay))
+            Log.d(TAG, "Relay set ref resolve: ${dTags.size} sets → $hintRelay for ${author.take(8)}…")
+        }
+    }
+
+    /**
+     * PREFETCH drainer: collects items from the channel, coalesces for 250ms,
+     * then dispatches as batched REQs grouped by relay.
+     *
+     * The 250ms coalescing window is critical: without it, tryReceive returns
+     * empty between rapid dispatches, producing 1-event-per-REQ subscriptions
+     * that saturate the 10-slot cap and starve profile/user fetches.
      */
     private suspend fun drainPrefetch() {
         while (true) {
             val first = withTimeoutOrNull(1_000L) { prefetchChannel.receive() } ?: continue
             val batch = mutableListOf(first)
+            // Coalescing window: wait 250ms for more items to accumulate
+            delay(250L)
             while (batch.size < PREFETCH_RATE_CAP) {
                 val next = prefetchChannel.tryReceive().getOrNull() ?: break
                 batch.add(next)
@@ -449,15 +503,29 @@ class EventProcessor @Inject constructor(
                 .map { it[1] }
                 .toSet()
             memoryEventStore.updateFollows(pubkey, follows, createdAt)
+            Log.d(TAG, "Kind-3 direct path: pubkey=${pubkey.take(8)}… ${follows.size} follows (createdAt=$createdAt)")
         }
-        // Kind 10002 (NIP-65 relay list) → direct insert so writeRelaysFor()
-        // resolves for outbox-aware prefetch and CardHydrator outbox fallback.
-        if (kind == 10002) {
+        // NIP-51/NIP-65 relay kinds → direct insert into MES.
+        // These are control-plane events (not feed content) that need immediate
+        // processing: 10002 for outbox prefetch, 10006/10007/10012/30002 for
+        // relay config UI. Without direct insert they never reach MES.insert()
+        // because they're not in shouldChannel.
+        if (kind in setOf(10002, 10006, 10007, 10012, 30002)) {
             memoryEventStore.insert(nostrEvent)
+        }
+        // Kind-10012 (favorites) may contain ["a", "30002:pubkey:dtag", "hint-relay"]
+        // tags referencing relay sets that exist on specific hint relays (not indexers).
+        // Resolve these references so the actual relay sets appear in the UI.
+        if (kind == 10012) {
+            resolveRelaySetRefs(nostrEvent)
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
-        val shouldChannel = kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023, 30385)
+        // Kind 3 is included so it reaches flushBatch → insert → eventsById,
+        // which makes it available for snapshot persistence. The direct-path
+        // updateFollows above provides immediate MES update; the cold channel
+        // provides the eventsById entry for snapshot serialization.
+        val shouldChannel = kind in setOf(0, 1, 3, 6, 7, 9734, 9735, 20, 21, 30023, 30385)
         if (shouldChannel) {
             val isHot = kind == 1 || kind == 6 || kind == 20 || kind == 21 || kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.

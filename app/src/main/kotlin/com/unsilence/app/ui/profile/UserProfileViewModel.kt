@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -54,7 +53,7 @@ class UserProfileViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayListDao: RelayListDao,
-    private val relayConfigDao: RelayConfigDao,
+    private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
@@ -196,7 +195,7 @@ class UserProfileViewModel @Inject constructor(
 
                 // Publish to write relays + indexer relays
                 val writeUrls = getWriteRelayUrls(myPubkey)
-                val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+                val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
                 val targetUrls = (writeUrls + indexerUrls).distinct()
                 relayPool.publishToRelays(toEventJson(signed), targetUrls)
 
