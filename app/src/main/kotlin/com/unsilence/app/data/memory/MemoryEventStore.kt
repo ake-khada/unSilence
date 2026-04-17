@@ -27,7 +27,6 @@ import javax.inject.Singleton
 private const val SNAPSHOT_VERSION = "SNAPSHOT_V1"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
-private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
 class MemoryEventStore @Inject constructor() {
@@ -94,12 +93,6 @@ class MemoryEventStore @Inject constructor() {
     // Key: "$pubkey:$kind:$dTag" → event ID of the latest version
     private val replaceableByCoordinate = ConcurrentHashMap<String, String>()
 
-    // ─── Notification recipient-side index ────────────────────────────────────
-    // Key: recipient pubkey → sorted set of EventEntry (descending by createdAt).
-    // Populated at insert time by scanning #p tags on kinds 1/6/7/9735.
-    // Self-notifications (event.pubkey == p-tag) are excluded.
-    private val notificationsByRecipient = ConcurrentHashMap<String, ConcurrentSkipListSet<EventEntry>>()
-
     // ─── Reactive signals ───────────────────────────────────────────────────
     private val _feedSignal = MutableStateFlow(0L)
     private val _profileSignal = MutableStateFlow(0L)
@@ -108,7 +101,6 @@ class MemoryEventStore @Inject constructor() {
     private val _actionSignal = MutableStateFlow(0L)
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
-    private val _notificationSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -197,11 +189,6 @@ class MemoryEventStore @Inject constructor() {
         // Actor-side signal: bumped for kinds that populate the action indexes
         if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
             _actionSignal.value = System.nanoTime()
-        }
-
-        // 6. Notification recipient-side index: populate from #p tags
-        if (event.kind in NOTIFICATION_KINDS) {
-            handleNotificationIndex(event)
         }
 
         return true
@@ -525,30 +512,6 @@ class MemoryEventStore @Inject constructor() {
                 }
             }
             event.id
-        }
-    }
-
-    /**
-     * Populate notification recipient-side index from #p tags.
-     * Called at insert time for kinds 1/6/7/9735.
-     */
-    private fun handleNotificationIndex(event: NostrEvent) {
-        val entry = EventEntry(event.id, event.createdAt)
-        var bumped = false
-        for (tag in event.tags) {
-            if (tag.size < 2 || tag[0] != "p") continue
-            val recipientPubkey = tag[1]
-            // Exclude self-notifications
-            if (recipientPubkey == event.pubkey) continue
-            notificationsByRecipient
-                .getOrPut(recipientPubkey) {
-                    ConcurrentSkipListSet(compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id })
-                }
-                .add(entry)
-            bumped = true
-        }
-        if (bumped) {
-            _notificationSignal.value = System.nanoTime()
         }
     }
 
@@ -1150,137 +1113,6 @@ class MemoryEventStore @Inject constructor() {
         _relayConfigSignal.value = System.nanoTime()
     }
 
-    // ─── A.5.2: Notification query APIs ─────────────────────────────────────
-
-    /**
-     * Snapshot query: returns up to [limit] notifications for [recipientPubkey],
-     * newest first. Resolves notifType, actor profile, and target event content
-     * at scan time from existing MES data.
-     *
-     * @param followedOnly If true, only show notifications from users the
-     *   recipient follows (kind-3 contact list).
-     */
-    fun getNotifications(
-        recipientPubkey: String,
-        limit: Int = 100,
-        followedOnly: Boolean = false,
-    ): List<NotificationItem> {
-        val entries = notificationsByRecipient[recipientPubkey] ?: return emptyList()
-        val follows = if (followedOnly) followsByPubkey[recipientPubkey] else null
-        val result = mutableListOf<NotificationItem>()
-        for (entry in entries) {
-            if (result.size >= limit) break
-            val event = eventsById[entry.id] ?: continue
-            if (follows != null && event.pubkey !in follows) continue
-            val item = buildNotificationItem(event, recipientPubkey) ?: continue
-            result.add(item)
-        }
-        return result
-    }
-
-    /**
-     * Count notifications for [recipientPubkey] with createdAt > [since].
-     */
-    fun notificationCountSince(recipientPubkey: String, since: Long): Int {
-        val entries = notificationsByRecipient[recipientPubkey] ?: return 0
-        return entries.count { entry ->
-            entry.createdAt > since && eventsById.containsKey(entry.id)
-        }
-    }
-
-    /**
-     * Reactive flow: emits notification list on each signal bump.
-     */
-    fun notificationsFlow(
-        recipientPubkey: String,
-        limit: Int = 100,
-        followedOnly: Boolean = false,
-    ): Flow<List<NotificationItem>> =
-        _notificationSignal
-            .map { getNotifications(recipientPubkey, limit, followedOnly) }
-            .distinctUntilChanged()
-            .flowOn(Dispatchers.Default)
-
-    /**
-     * Build a NotificationItem from an event in the notification index.
-     * Resolves notifType, actor profile, and target note content.
-     */
-    private fun buildNotificationItem(event: NostrEvent, recipientPubkey: String): NotificationItem? {
-        val notifType = deriveNotifType(event, recipientPubkey)
-        val profile = profilesByPubkey[event.pubkey]
-        val fields = profile?.content?.let { parseProfileJson(it) } ?: emptyMap()
-
-        val targetNoteId: String?
-        val targetNoteContent: String
-        val parentNoteContent: String
-
-        when (notifType) {
-            "reaction" -> {
-                // Last e-tag is the target event
-                val targetId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
-                targetNoteId = targetId
-                targetNoteContent = targetId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "reply" -> {
-                // For replies, targetNoteId = the reply itself (opens thread)
-                targetNoteId = event.id
-                targetNoteContent = event.content
-                parentNoteContent = event.replyToId?.let { eventsById[it]?.content } ?: ""
-            }
-            "repost" -> {
-                targetNoteId = event.rootId
-                targetNoteContent = event.rootId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "zap" -> {
-                val targetId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: event.rootId
-                targetNoteId = targetId
-                targetNoteContent = targetId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "mention" -> {
-                targetNoteId = event.id
-                targetNoteContent = event.content
-                parentNoteContent = ""
-            }
-            else -> return null
-        }
-
-        return NotificationItem(
-            id = event.id,
-            notifType = notifType,
-            actorPubkey = event.pubkey,
-            actorName = fields["name"],
-            actorDisplayName = fields["display_name"],
-            actorPicture = fields["picture"],
-            targetNoteId = targetNoteId,
-            targetNoteContent = targetNoteContent,
-            parentNoteContent = parentNoteContent,
-            createdAt = event.createdAt,
-        )
-    }
-
-    /**
-     * Derive notification type from event kind and threading info.
-     *
-     * Kind 1 disambiguates between "reply" and "mention":
-     * - If replyToId or rootId points to an event authored by the recipient → "reply"
-     * - Otherwise → "mention"
-     */
-    private fun deriveNotifType(event: NostrEvent, recipientPubkey: String): String = when (event.kind) {
-        7 -> "reaction"
-        6 -> "repost"
-        9735 -> "zap"
-        1 -> {
-            // Check if this is a reply to the recipient's event
-            val isReply = event.replyToId?.let { eventsById[it]?.pubkey == recipientPubkey } == true
-                || event.rootId?.let { eventsById[it]?.pubkey == recipientPubkey } == true
-            if (isReply) "reply" else "mention"
-        }
-        else -> "mention"
-    }
-
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
@@ -1544,12 +1376,10 @@ class MemoryEventStore @Inject constructor() {
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
-        notificationsByRecipient.clear()
         _followsSignal.value++
         _actionSignal.value++
         _relayConfigSignal.value++
         _relaySetSignal.value++
-        _notificationSignal.value++
     }
 
     fun clear() {
@@ -1589,8 +1419,6 @@ class MemoryEventStore @Inject constructor() {
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
         _relaySetSignal.value = 0L
-        notificationsByRecipient.clear()
-        _notificationSignal.value = 0L
     }
 }
 
