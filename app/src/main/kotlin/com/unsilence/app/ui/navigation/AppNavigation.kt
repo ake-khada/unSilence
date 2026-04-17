@@ -93,7 +93,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.RelaySet
-import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.RelayTrustScoreEntity
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType

@@ -2,9 +2,7 @@ package com.unsilence.app.data.memory
 
 import android.os.Trace
 import android.util.Log
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.entity.EventEntity
-import com.unsilence.app.data.db.entity.UserEntity
+// FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -70,6 +68,9 @@ class MemoryEventStore @Inject constructor() {
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
 
+    // ─── Trust scores (kind 30385) ────────────────────────────────────────────
+    private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
+
     // ─── A.5.1 T5a: Relay config state (kinds 10002/10006/10007/10012) ──────
     private val blockedRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
     private val searchRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
@@ -102,6 +103,7 @@ class MemoryEventStore @Inject constructor() {
     private val _actionSignal = MutableStateFlow(0L)
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
+    private val _trustScoreSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -177,6 +179,7 @@ class MemoryEventStore @Inject constructor() {
                 handleParameterizedReplaceable(event)
                 handleRelaySetMaterialized(event)
             }
+            30385 -> handleTrustScore(event)
         }
 
         // 5. Bump signals
@@ -454,6 +457,36 @@ class MemoryEventStore @Inject constructor() {
             favoritesByPubkey[event.pubkey] = entries
             _relayConfigSignal.value = System.nanoTime()
         }
+    }
+
+    // ─── Kind 30385: Trusted Relay Assertions ─────────────────────────────
+
+    private fun handleTrustScore(event: NostrEvent) {
+        fun tag(name: String): String? = event.tags.firstOrNull {
+            it.size >= 2 && it[0] == name
+        }?.get(1)
+
+        val relayUrl = tag("d") ?: return
+        val score = tag("score")?.toIntOrNull() ?: return
+        val reliability = tag("reliability")?.toIntOrNull() ?: return
+        val quality = tag("quality")?.toIntOrNull() ?: return
+        val accessibility = tag("accessibility")?.toIntOrNull() ?: return
+        val confidence = tag("confidence") ?: return
+        val observations = tag("observations")?.toIntOrNull() ?: 0
+
+        trustScoresByUrl[relayUrl] = RelayTrustScoreEntity(
+            relayUrl = relayUrl,
+            score = score,
+            reliability = reliability,
+            quality = quality,
+            accessibility = accessibility,
+            confidence = confidence,
+            observations = observations,
+            policy = tag("policy"),
+            countryCode = tag("country_code"),
+            operatorVerified = tag("operator_verified"),
+        )
+        _trustScoreSignal.value = System.nanoTime()
     }
 
     private fun handleRelaySetMaterialized(event: NostrEvent) {
@@ -938,6 +971,17 @@ class MemoryEventStore @Inject constructor() {
     fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
+    /** Snapshot of all relay lists (pubkey → RelayList). Used by OutboxRouter. */
+    fun allRelayListsSnapshot(): Map<String, RelayList> =
+        HashMap(relayListsByPubkey)
+
+    /** Reactive flow of all relay lists. Emits on every kind-10002 update. */
+    fun allRelayListsFlow(): Flow<Map<String, RelayList>> =
+        _relayConfigSignal
+            .map { allRelayListsSnapshot() }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── A.5.1 T5a: Relay config query APIs ────────────────────────────────
 
     fun getBlockedRelayUrls(pubkey: String): List<String> =
@@ -975,6 +1019,17 @@ class MemoryEventStore @Inject constructor() {
     fun favoriteRelayConfigsFlow(pubkey: String): Flow<List<FavoriteEntry>> =
         _relayConfigSignal
             .map { getFavoriteRelayConfigs(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    // ─── Trust score query APIs ───────────────────────────────────────────
+
+    fun getTrustScores(): Map<String, RelayTrustScoreEntity> =
+        HashMap(trustScoresByUrl)
+
+    fun trustScoresFlow(): Flow<Map<String, RelayTrustScoreEntity>> =
+        _trustScoreSignal
+            .map { getTrustScores() }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -1527,6 +1582,7 @@ class MemoryEventStore @Inject constructor() {
         relayKindCreatedAt.clear()
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
+        trustScoresByUrl.clear()
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
@@ -1534,6 +1590,7 @@ class MemoryEventStore @Inject constructor() {
         _actionSignal.value++
         _relayConfigSignal.value++
         _relaySetSignal.value++
+        _trustScoreSignal.value++
     }
 
     fun clear() {
@@ -1572,7 +1629,9 @@ class MemoryEventStore @Inject constructor() {
         _relayConfigSignal.value = 0L
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
+        trustScoresByUrl.clear()
         _relaySetSignal.value = 0L
+        _trustScoreSignal.value = 0L
     }
 }
 

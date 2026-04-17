@@ -1,8 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
-import com.unsilence.app.data.db.dao.EventDao
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.data.repository.UserRepository
@@ -52,7 +51,6 @@ object Nip19FailureCache {
  */
 @Singleton
 class CardHydrator @Inject constructor(
-    private val eventDao: EventDao,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,

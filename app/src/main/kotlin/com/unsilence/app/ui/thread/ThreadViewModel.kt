@@ -7,13 +7,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
@@ -46,7 +45,6 @@ data class ThreadUiState(
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class ThreadViewModel @Inject constructor(
-    private val eventRepository: EventRepository,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
@@ -144,19 +142,24 @@ class ThreadViewModel @Inject constructor(
 
             relayPool.publish(toEventJson(signed))
 
-            eventRepository.insertEvent(
-                EventEntity(
-                    id        = signed.id,
-                    pubkey    = signed.pubKey,
-                    kind      = signed.kind,
-                    content   = signed.content,
+            // Optimistic insert into MES → appears in thread immediately
+            val parsedTags = signed.tags.map { it.toList() }
+            memoryEventStore.insert(
+                NostrEvent(
+                    id = signed.id,
+                    pubkey = signed.pubKey,
+                    kind = signed.kind,
+                    content = signed.content,
                     createdAt = signed.createdAt,
-                    tags      = tagsToJson(signed.tags),
-                    sig       = signed.sig,
-                    relayUrl  = "wss://relay.damus.io",
+                    tags = parsedTags,
+                    sig = signed.sig,
+                    relayUrl = "local",
                     replyToId = replyToId,
-                    rootId    = rootId,
-                    cachedAt  = nowSeconds,
+                    rootId = rootId,
+                    hasContentWarning = false,
+                    contentWarningReason = null,
+                    firstSeenAt = nowSeconds,
+                    relaysSeen = mutableSetOf("local"),
                 )
             )
 
@@ -176,11 +179,5 @@ class ThreadViewModel @Inject constructor(
         })
         put("content",    event.content)
         put("sig",        event.sig)
-    }.toString()
-
-    private fun tagsToJson(tags: Array<Array<String>>): String = buildJsonArray {
-        tags.forEach { row ->
-            add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-        }
     }.toString()
 }

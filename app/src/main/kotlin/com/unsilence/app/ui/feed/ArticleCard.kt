@@ -49,7 +49,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black

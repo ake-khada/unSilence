@@ -81,10 +81,6 @@ dependencies {
     ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
     implementation(libs.hilt.navigation.compose)
 
-    // Room (local cache — UI reads only from Room)
-    implementation(libs.room.runtime)
-    ksp(libs.room.compiler)
-
     // Coil (image loading, GIF, blurhash)
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)

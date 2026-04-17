@@ -780,7 +780,7 @@ class RelayPool @Inject constructor(
             scope.launch {
                 try {
                     syncTracker.get().upsert(
-                        com.unsilence.app.data.db.entity.SyncStateEntity(
+                        com.unsilence.app.data.memory.SyncStateEntity(
                             subscriptionKey = syncKey,
                             lastSyncAt = System.currentTimeMillis(),
                             lastEventCount = 0,

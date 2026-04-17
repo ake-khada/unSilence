@@ -2,10 +2,8 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.entity.FollowEntity
-import com.unsilence.app.data.db.entity.RelayListEntity
+import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.RelayList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,8 +14,6 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -32,19 +28,18 @@ private const val TAG = "OutboxRouter"
  *
  * Flow:
  * 1. EventProcessor dispatches kind-3 and kind-10002 events to handler methods.
- * 2. When kind 3 arrives → saves followed pubkeys to Room (follows table).
+ * 2. When kind 3 arrives → MES updates follows via updateFollows().
  * 3. Requests kind 10002 (relay list metadata) for all followed pubkeys.
- * 4. When kind 10002 events arrive → saves write relay URLs to Room.
- * 5. Observes relay_list_metadata in Room → calls RelayPool.connectForAuthors()
+ * 4. When kind 10002 events arrive → MES updates relay lists via handleReadWriteRelayList().
+ * 5. Observes relay lists in MES → calls RelayPool.connectForAuthors()
  *    for the top 15 relays ranked by coverage (# of follows they serve).
  *
- * Architecture rule: all data flows Relay → Room. UI reads from Room via Flow.
+ * Architecture: all data flows Relay → MES. UI reads from MES via Flow.
  */
 @Singleton
 class OutboxRouter @Inject constructor(
     private val keyManager: KeyManager,
-    private val followDao: FollowDao,
-    private val relayListDao: RelayListDao,
+    private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
 ) {
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -77,22 +72,21 @@ class OutboxRouter @Inject constructor(
         // ── Step 1: request the user's kind 3 from connected relays ──────────
         relayPool.fetchFollowList(userPubkeyHex)
 
-        // ── Step 2: when follows appear in Room, request their kind 10002 ────
+        // ── Step 2: when follows appear in MES, request their kind 10002 ─────
         routingScope.launch {
-            followDao.followsFlow()
+            memoryEventStore.followsFlow(userPubkeyHex)
                 .filter { it.isNotEmpty() }
                 .first()          // one-shot: take the first non-empty emission
                 .let { follows ->
-                    val pubkeys = follows.map { it.pubkey }
-                    Log.d(TAG, "Follow list loaded: ${pubkeys.size} follows — fetching relay lists")
-                    relayPool.fetchRelayLists(pubkeys)
+                    Log.d(TAG, "Follow list loaded: ${follows.size} follows — fetching relay lists")
+                    relayPool.fetchRelayLists(follows.toList())
                 }
         }
 
         // ── Step 3: when relay lists arrive, route to write relays ───────────
         routingScope.launch {
             @OptIn(FlowPreview::class)
-            relayListDao.allFlow()
+            memoryEventStore.allRelayListsFlow()
                 .filter { it.isNotEmpty() }
                 .debounce(2000)
                 .collectLatest { relayLists ->
@@ -119,21 +113,34 @@ class OutboxRouter @Inject constructor(
 
     /**
      * Called by EventProcessor for every kind-3 event.
-     * Filters to the logged-in user's own contact list only.
+     * MES handles follow state via updateFollows(); this just logs.
      */
     suspend fun handleContactList(obj: kotlinx.serialization.json.JsonObject) {
         val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return
         val userPubkeyHex = keyManager.getPublicKeyHex() ?: return
         if (pubkey != userPubkeyHex) return
-        handleKind3(obj, userPubkeyHex)
+
+        val tags = obj["tags"]?.jsonArray ?: return
+        val count = tags.count { tag ->
+            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "p"
+        }
+        Log.d(TAG, "Kind-3 contact list: $count follows for $userPubkeyHex")
     }
 
     /**
      * Called by EventProcessor for every kind-10002 event.
-     * Processes relay lists for any pubkey (used for outbox routing).
+     * MES handles relay list state via handleReadWriteRelayList(); this just logs.
      */
     suspend fun handleRelayList(obj: kotlinx.serialization.json.JsonObject) {
-        handleKind10002(obj)
+        val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return
+        val tags = obj["tags"]?.jsonArray ?: return
+        val writeCount = tags.count { tag ->
+            val arr = tag.jsonArray
+            val type = arr.getOrNull(0)?.jsonPrimitive?.content
+            val marker = arr.getOrNull(2)?.jsonPrimitive?.content
+            type == "r" && (marker == null || marker.isBlank() || marker == "write")
+        }
+        Log.d(TAG, "Kind-10002 relay list for $pubkey: $writeCount write relays")
     }
 
     /**
@@ -173,7 +180,7 @@ class OutboxRouter @Inject constructor(
 
     /**
      * Called by EventProcessor for kind 30002 (NIP-51 relay set).
-     * Parses d-tag, title/description/image, and ["relay", url] members.
+     * MES handles relay set state via insert() → handleRelaySetMaterialized().
      */
     suspend fun handleRelaySet(obj: kotlinx.serialization.json.JsonObject) {
         val pubkey    = obj["pubkey"]?.jsonPrimitive?.content ?: return
@@ -186,86 +193,20 @@ class OutboxRouter @Inject constructor(
             tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "d"
         }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content ?: return
 
-        val title = tags.firstOrNull { tag ->
-            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "title"
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-
-        val description = tags.firstOrNull { tag ->
-            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "description"
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-
-        val image = tags.firstOrNull { tag ->
-            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "image"
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-
         val memberCount = tags
             .count { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "relay" }
 
-        // Room write removed (T5b): MES handles relay set state via insert() → handleRelaySetMaterialized().
         Log.d(TAG, "Received relay set '$dTag' with $memberCount members (created_at=$createdAt)")
-    }
-
-    // ── Kind 3: NIP-02 follow list ───────────────────────────────────────────
-
-    private suspend fun handleKind3(obj: kotlinx.serialization.json.JsonObject, userPubkeyHex: String) {
-        val tags      = obj["tags"]?.jsonArray ?: return
-        val createdAt = obj["created_at"]?.jsonPrimitive?.longOrNull ?: return
-
-        val follows = tags
-            .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "p" }
-            .mapNotNull { tag -> tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content }
-            .map { followedPubkey -> FollowEntity(pubkey = followedPubkey, followedAt = createdAt) }
-
-        followDao.replaceAll(follows)
-        Log.d(TAG, "Stored ${follows.size} follows from kind 3 for $userPubkeyHex")
-    }
-
-    // ── Kind 10002: NIP-65 relay list metadata ────────────────────────────────
-
-    private suspend fun handleKind10002(obj: kotlinx.serialization.json.JsonObject) {
-        val pubkey    = obj["pubkey"]?.jsonPrimitive?.content ?: return
-        val tags      = obj["tags"]?.jsonArray ?: return
-        val createdAt = obj["created_at"]?.jsonPrimitive?.longOrNull ?: return
-
-        // r tags: ["r", "<url>", "write"] → write relay
-        //         ["r", "<url>", "read"]  → read relay (skip for outbox routing)
-        //         ["r", "<url>"]          → both read+write (include)
-        val writeRelays = tags
-            .filter { tag ->
-                val arr   = tag.jsonArray
-                val type  = arr.getOrNull(0)?.jsonPrimitive?.content
-                val marker = arr.getOrNull(2)?.jsonPrimitive?.content
-                type == "r" && (marker == null || marker.isBlank() || marker == "write")
-            }
-            .mapNotNull { tag ->
-                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                normalizeRelayUrl(raw)
-            }
-
-        if (writeRelays.isEmpty()) return
-
-        relayListDao.upsert(
-            RelayListEntity(
-                pubkey      = pubkey,
-                writeRelays = Json.encodeToString(writeRelays),
-                updatedAt   = createdAt,
-            )
-        )
-
-        // Room relay_configs write removed (T5a): MES handles kind-10002 state via handleRelayList().
     }
 
     // ── Outbox routing: connect to top write relays ───────────────────────────
 
-    private fun routeToWriteRelays(relayLists: List<RelayListEntity>) {
+    private fun routeToWriteRelays(relayLists: Map<String, RelayList>) {
         // Build relay URL → [pubkeys that write there]
         val relayToAuthors = mutableMapOf<String, MutableList<String>>()
-        for (entity in relayLists) {
-            val urls = runCatching {
-                Json.decodeFromString<List<String>>(entity.writeRelays)
-            }.getOrDefault(emptyList())
-            for (url in urls) {
-                relayToAuthors.getOrPut(url) { mutableListOf() }.add(entity.pubkey)
+        for ((pubkey, relayList) in relayLists) {
+            for (url in relayList.write) {
+                relayToAuthors.getOrPut(url) { mutableListOf() }.add(pubkey)
             }
         }
 

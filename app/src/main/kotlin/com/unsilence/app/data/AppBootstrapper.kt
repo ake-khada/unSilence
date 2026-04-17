@@ -11,12 +11,6 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.work.BackgroundSyncWorker
 import java.util.concurrent.TimeUnit
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.DatabaseMaintenanceJob
-import com.unsilence.app.data.db.dao.EventDao
-import com.unsilence.app.data.db.dao.EventStatsDao
-import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.dao.RelayTrustScoreDao
-import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
@@ -78,18 +72,12 @@ class AppBootstrapper @Inject constructor(
     private val keyManager: KeyManager,
     private val eventProcessor: EventProcessor,
     private val outboxRouter: OutboxRouter,
-    private val maintenanceJob: DatabaseMaintenanceJob,
-    private val eventDao: EventDao,
     private val signingManager: SigningManager,
-    private val followDao: FollowDao,
-    private val userDao: UserDao,
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
     private val relayPreferencesStore: RelayPreferencesStore,
-    private val eventStatsDao: EventStatsDao,
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
-    private val relayTrustScoreDao: RelayTrustScoreDao,
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
 ) {
@@ -143,23 +131,12 @@ class AppBootstrapper @Inject constructor(
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
-        // Step 2: Fetch kind-3, wait for follows
+        // Step 2: Fetch kind-3, wait for follows in MES
         relayPool.fetchFollowList(pubkeyHex)
         val follows = withTimeoutOrNull(10_000L) {
-            followDao.followsFlow().filter { it.isNotEmpty() }.first()
+            memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
         }
         Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded")
-
-        // Seed MES with Room follows so FeedVM auto-switches to Following.
-        // Without this, MES follows stay empty until a kind-3 arrives from the
-        // network (which may never happen if indexer relays fail to connect).
-        // createdAt=0 ensures any network-fetched kind-3 takes precedence.
-        if (!follows.isNullOrEmpty()) {
-            memoryEventStore.updateFollows(
-                pubkeyHex, follows.map { it.pubkey }.toSet(), 0L
-            )
-            Log.d(TAG, "Phase1 Step2: seeded MES with ${follows.size} follows from Room")
-        }
 
         // Step 3: Fetch kind-10002 (relay list) — wait for response via MES
         val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
@@ -197,7 +174,7 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         delay(1000L)
 
-        val followPubkeys = follows?.map { it.pubkey }.orEmpty() + pubkeyHex
+        val followPubkeys = (follows?.toList().orEmpty()) + pubkeyHex
         val staleFollows = profileResolver.filterUnresolved(followPubkeys.distinct().toSet())
         if (staleFollows.isNotEmpty()) {
             profileResolver.request(staleFollows.toList())
@@ -220,20 +197,10 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         delay(1500L)
 
-        maintenanceJob.start()
-
-        val spamRemoved = eventDao.pruneJsonSpam()
-        if (spamRemoved > 0) Log.d(TAG, "Phase3: cleaned $spamRemoved JSON-spam events")
-
-        eventStatsDao.recalculateCounts()
-        Log.d(TAG, "Phase3: recalculated engagement counts")
-
-        // Fetch relay trust scores if stale (24 h cache)
-        val lastTrustUpdate = relayTrustScoreDao.lastUpdatedAt() ?: 0L
-        if (System.currentTimeMillis() - lastTrustUpdate > 24 * 60 * 60 * 1000L) {
-            relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY)
-            Log.d(TAG, "Phase3: fetching relay trust scores (kind 30385)")
-        }
+        // Fetch relay trust scores (kind 30385) — always fetch on bootstrap.
+        // MES trust scores are ephemeral (not snapshot-persisted), so they're empty after restart.
+        relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY)
+        Log.d(TAG, "Phase3: fetching relay trust scores (kind 30385)")
 
         // Media preconnect is fire-and-forget — never block the bootstrap mutex.
         // supervisorScope inside warmUp waits for all HEAD requests; if one hangs
@@ -287,7 +254,6 @@ class AppBootstrapper @Inject constructor(
         // 3. Clear ALL in-memory state — eventsById, profiles, stats, follows, relays.
         //    clearUserState() preserved eventsById which leaked old user's cached events
         //    into the new user's Global feed after re-login.
-        followDao.clearAll()
         memoryEventStore.clear()
 
         // 3b. Delete snapshot file — prevents restoreIfPresent() from reloading
@@ -302,7 +268,6 @@ class AppBootstrapper @Inject constructor(
         // 5. Cancel child scopes (NOT this scope — it must survive for next login)
         outboxRouter.stop()
         eventProcessor.stop()
-        maintenanceJob.stop()
 
         // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
         withContext(Dispatchers.Main) { sharedPlayerHolder.release() }

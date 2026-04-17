@@ -101,3 +101,105 @@ data class FeedFilter(
     val contentFilter: Int = 0,
     val relayUrls: Set<String>? = null,
 )
+
+// ── Types moved from Room entity/dao layer (A.8) ────────────────────────────
+
+/**
+ * Event data class. Formerly a Room @Entity; now a plain data class
+ * used throughout the app as the canonical event representation.
+ */
+data class EventEntity(
+    val id: String,
+    val pubkey: String,
+    val kind: Int,
+    val content: String,
+    val createdAt: Long,
+    /** JSON-serialized List<List<String>> */
+    val tags: String,
+    val sig: String = "",
+    val relayUrl: String = "",
+    val replyToId: String? = null,
+    val rootId: String? = null,
+    val hasContentWarning: Boolean = false,
+    val contentWarningReason: String? = null,
+    val cachedAt: Long = 0,
+    val zapTotalSats: Long = 0,
+    val firstSeenAt: Long = 0,
+)
+
+/**
+ * User profile data class. Formerly a Room @Entity; now a plain data class.
+ */
+data class UserEntity(
+    val pubkey: String,
+    val name: String? = null,
+    val displayName: String? = null,
+    val about: String? = null,
+    val picture: String? = null,
+    val nip05: String? = null,
+    val lud16: String? = null,
+    val banner: String? = null,
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+    val followerCount: Long? = null,
+    val followerCountUpdatedAt: Long? = null,
+)
+
+/**
+ * Flattened feed row — event + author + engagement counts.
+ * Formerly defined in EventDao with @ColumnInfo; now a plain data class.
+ */
+@androidx.compose.runtime.Immutable
+data class FeedRow(
+    val id: String,
+    val pubkey: String,
+    val kind: Int,
+    val content: String,
+    val createdAt: Long,
+    val tags: String,
+    val relayUrl: String,
+    val replyToId: String?,
+    val rootId: String?,
+    val hasContentWarning: Boolean,
+    val contentWarningReason: String?,
+    val cachedAt: Long,
+    val zapTotalSats: Long,
+    val authorName: String?,
+    val authorDisplayName: String?,
+    val authorPicture: String?,
+    val authorNip05: String?,
+    val reactionCount: Int,
+    val replyCount: Int,
+    val repostCount: Int,
+    val zapCount: Int,
+)
+
+/**
+ * Session-scoped relay sync state. Formerly a Room @Entity; now a plain data class
+ * used by SyncTracker (in-memory ConcurrentHashMap).
+ */
+data class SyncStateEntity(
+    val subscriptionKey: String,
+    val lastSyncAt: Long,
+    val lastEventCount: Int,
+    val source: String,
+)
+
+/**
+ * Relay trust score (kind 30385). Formerly a Room @Entity; now a plain data class.
+ * Populated by MES handleTrustScore() from kind-30385 events fetched via
+ * RelayPool.fetchTrustScores(). UI renders colored dots in Relay Settings.
+ */
+data class RelayTrustScoreEntity(
+    val relayUrl: String,
+    val score: Int,
+    val reliability: Int,
+    val quality: Int,
+    val accessibility: Int,
+    val confidence: String,
+    val observations: Int,
+    val policy: String? = null,
+    val countryCode: String? = null,
+    val operatorVerified: String? = null,
+    val updatedAt: Long = System.currentTimeMillis(),
+)
