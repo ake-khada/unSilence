@@ -72,6 +72,8 @@ class RelayPool @Inject constructor(
     private val coverageTracker: dagger.Lazy<com.unsilence.app.data.cache.CoverageTracker>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
     private val syncTracker: dagger.Lazy<com.unsilence.app.data.cache.SyncTracker>,
+    private val keyManager: com.unsilence.app.data.auth.KeyManager,
+    private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -473,8 +475,9 @@ class RelayPool @Inject constructor(
      * Pre-load blocked relay URLs into the in-memory snapshot.
      * Must be called during bootstrap BEFORE any connect() calls.
      */
-    suspend fun refreshBlockedRelays() {
-        blockedUrls = relayConfigDao.get().blockedRelayUrls().toSet()
+    fun refreshBlockedRelays() {
+        val ownPubkey = keyManager.getPublicKeyHex() ?: return
+        blockedUrls = memoryEventStore.get().getBlockedRelayUrls(ownPubkey).toSet()
         Log.d(TAG, "Blocked relay snapshot loaded: ${blockedUrls.size} URL(s)")
     }
 

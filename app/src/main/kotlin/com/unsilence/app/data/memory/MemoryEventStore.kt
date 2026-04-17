@@ -915,6 +915,12 @@ class MemoryEventStore @Inject constructor() {
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    fun favoriteRelayConfigsFlow(pubkey: String): Flow<List<FavoriteEntry>> =
+        _relayConfigSignal
+            .map { getFavoriteRelayConfigs(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {

@@ -22,6 +22,7 @@ import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
@@ -88,6 +89,7 @@ class AppBootstrapper @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val relayTrustScoreDao: RelayTrustScoreDao,
     private val snapshotScheduler: SnapshotScheduler,
+    private val memoryEventStore: MemoryEventStore,
 ) {
     private val bootstrapMutex = Mutex()
 
@@ -138,16 +140,16 @@ class AppBootstrapper @Inject constructor(
         }
         Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded")
 
-        // Step 3: Fetch kind-10002 (relay list) — wait for response
-        val relaysBefore = relayConfigDao.getAllReadWriteRelays()
+        // Step 3: Fetch kind-10002 (relay list) — wait for response via MES
+        val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
         relayPool.fetchRelayLists(listOf(pubkeyHex))
         val freshRelays = withTimeoutOrNull(5_000L) {
             if (relaysBefore.isEmpty()) {
-                relayConfigDao.getReadWriteRelays()
+                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
                     .filter { it.isNotEmpty() }
                     .first()
             } else {
-                relayConfigDao.getReadWriteRelays()
+                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
                     .filter { it != relaysBefore }
                     .first()
             }
@@ -158,9 +160,9 @@ class AppBootstrapper @Inject constructor(
         relayPool.refreshBlockedRelays()
 
         // Step 5: Connect to global relays — feed subscriptions start HERE
-        val readRelays = (freshRelays ?: relayConfigDao.getAllReadWriteRelays())
+        val readRelays = (freshRelays ?: memoryEventStore.getReadWriteRelayConfigs(pubkeyHex))
             .filter { it.marker == null || it.marker == "read" }
-            .map { it.relayUrl }
+            .map { it.url }
             .take(8)
         val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
         for (url in globalUrls) {
