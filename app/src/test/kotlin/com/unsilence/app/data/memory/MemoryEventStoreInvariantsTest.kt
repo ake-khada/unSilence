@@ -2670,4 +2670,473 @@ class MemoryEventStoreInvariantsTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // ── Kind 30002: Relay set materialization ───────────────────────────────
+
+    @Test
+    fun `handleRelaySetMaterialized parses title and members from kind-30002`() {
+        store.insert(event(
+            id = "set-1", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(
+                listOf("d", "my-set"),
+                listOf("title", "My Relay Set"),
+                listOf("description", "A test set"),
+                listOf("image", "https://example.com/img.png"),
+                listOf("relay", "wss://relay-z.com"),
+                listOf("relay", "wss://relay-a.com"),
+            ),
+        ))
+        val sets = store.getAllRelaySets("pk1")
+        assertEquals(1, sets.size)
+        val set = sets[0]
+        assertEquals("my-set", set.dTag)
+        assertEquals("pk1", set.ownerPubkey)
+        assertEquals("My Relay Set", set.title)
+        assertEquals("A test set", set.description)
+        assertEquals("https://example.com/img.png", set.image)
+        assertEquals(2, set.members.size)
+        assertEquals("wss://relay-z.com", set.members[0])
+        assertEquals("wss://relay-a.com", set.members[1])
+    }
+
+    @Test
+    fun `handleRelaySetMaterialized respects createdAt dedup per coordinate`() {
+        store.insert(event(
+            id = "set-old", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(
+                listOf("d", "my-set"),
+                listOf("title", "Old Title"),
+                listOf("relay", "wss://old.com"),
+            ),
+        ))
+        store.insert(event(
+            id = "set-new", pubkey = "pk1", kind = 30002, createdAt = 200,
+            tags = listOf(
+                listOf("d", "my-set"),
+                listOf("title", "New Title"),
+                listOf("relay", "wss://new.com"),
+            ),
+        ))
+        val sets = store.getAllRelaySets("pk1")
+        assertEquals(1, sets.size)
+        assertEquals("New Title", sets[0].title)
+        assertEquals("wss://new.com", sets[0].members[0])
+    }
+
+    @Test
+    fun `handleRelaySetMaterialized deduplicates member URLs within event`() {
+        store.insert(event(
+            id = "set-dup", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(
+                listOf("d", "dup-set"),
+                listOf("relay", "wss://relay.com"),
+                listOf("relay", "wss://relay.com"),
+            ),
+        ))
+        val sets = store.getAllRelaySets("pk1")
+        assertEquals(1, sets[0].members.size)
+    }
+
+    @Test
+    fun `handleRelaySetMaterialized supports multiple sets per owner`() {
+        store.insert(event(
+            id = "set-a", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(listOf("d", "set-alpha"), listOf("relay", "wss://a.com")),
+        ))
+        store.insert(event(
+            id = "set-b", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(listOf("d", "set-beta"), listOf("relay", "wss://b.com")),
+        ))
+        val sets = store.getAllRelaySets("pk1")
+        assertEquals(2, sets.size)
+    }
+
+    @Test
+    fun `getAllSetsFlow re-emits on kind-30002 insert`() = runTest {
+        store.getAllSetsFlow("pk1").test {
+            assertEquals(emptyList<RelaySet>(), awaitItem())
+
+            store.insert(event(
+                id = "set-1", pubkey = "pk1", kind = 30002, createdAt = 100,
+                tags = listOf(listOf("d", "test-set"), listOf("relay", "wss://r.com")),
+            ))
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+            assertEquals("test-set", updated[0].dTag)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `getSetMembersFlow returns members for specific dTag`() = runTest {
+        store.getSetMembersFlow("pk1", "my-set").test {
+            assertEquals(emptyList<String>(), awaitItem())
+
+            store.insert(event(
+                id = "set-1", pubkey = "pk1", kind = 30002, createdAt = 100,
+                tags = listOf(
+                    listOf("d", "my-set"),
+                    listOf("relay", "wss://r1.com"),
+                    listOf("relay", "wss://r2.com"),
+                ),
+            ))
+            val members = awaitItem()
+            assertEquals(2, members.size)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Relay set CRUD (optimistic mutations) ──────────────────────────────
+
+    @Test
+    fun `upsertRelaySet adds set optimistically`() {
+        store.upsertRelaySet(RelaySet(
+            dTag = "new-set", ownerPubkey = "pk1",
+            title = "Optimistic Set",
+            members = listOf("wss://opt.com"),
+        ))
+        val sets = store.getAllRelaySets("pk1")
+        assertEquals(1, sets.size)
+        assertEquals("Optimistic Set", sets[0].title)
+    }
+
+    @Test
+    fun `deleteRelaySet removes set and blocks re-materialization from older events`() {
+        store.insert(event(
+            id = "set-del", pubkey = "pk1", kind = 30002, createdAt = 100,
+            tags = listOf(listOf("d", "doomed"), listOf("relay", "wss://d.com")),
+        ))
+        assertEquals(1, store.getAllRelaySets("pk1").size)
+
+        store.deleteRelaySet("pk1", "doomed", deletedAtCreatedAt = 100)
+        assertEquals(0, store.getAllRelaySets("pk1").size)
+
+        // Older event should NOT re-materialize
+        store.insert(event(
+            id = "set-old-echo", pubkey = "pk1", kind = 30002, createdAt = 50,
+            tags = listOf(listOf("d", "doomed"), listOf("relay", "wss://old.com")),
+        ))
+        assertEquals(0, store.getAllRelaySets("pk1").size)
+
+        // Newer event SHOULD re-materialize (clears tombstone)
+        store.insert(event(
+            id = "set-new", pubkey = "pk1", kind = 30002, createdAt = 200,
+            tags = listOf(listOf("d", "doomed"), listOf("relay", "wss://new.com")),
+        ))
+        assertEquals(1, store.getAllRelaySets("pk1").size)
+    }
+
+    @Test
+    fun `addRelayToSet appends member`() {
+        store.upsertRelaySet(RelaySet(
+            dTag = "append-set", ownerPubkey = "pk1",
+            members = listOf("wss://existing.com"),
+        ))
+        store.addRelayToSet("pk1", "append-set", "wss://new-member.com")
+        val set = store.getAllRelaySets("pk1").first()
+        assertEquals(2, set.members.size)
+        assertTrue(set.members.contains("wss://new-member.com"))
+    }
+
+    @Test
+    fun `removeRelayFromSet removes member`() {
+        store.upsertRelaySet(RelaySet(
+            dTag = "remove-set", ownerPubkey = "pk1",
+            members = listOf("wss://keep.com", "wss://remove.com"),
+        ))
+        store.removeRelayFromSet("pk1", "remove-set", "wss://remove.com")
+        val set = store.getAllRelaySets("pk1").first()
+        assertEquals(1, set.members.size)
+        assertEquals("wss://keep.com", set.members[0])
+    }
+
+    // ── Echo coherence: optimistic write then relay echo ────────────────────
+
+    @Test
+    fun `optimistic upsertRelaySet then identical relay echo produces no second emission`() = runTest {
+        store.getAllSetsFlow("pk1").test {
+            assertEquals(emptyList<RelaySet>(), awaitItem())
+
+            // Optimistic write
+            store.upsertRelaySet(RelaySet(
+                dTag = "echo-set", ownerPubkey = "pk1",
+                title = "Echo Test",
+                members = listOf("wss://echo.com"),
+            ))
+            val first = awaitItem()
+            assertEquals(1, first.size)
+
+            // Relay echo with same content — should NOT re-emit
+            store.insert(event(
+                id = "echo-event", pubkey = "pk1", kind = 30002, createdAt = 500,
+                tags = listOf(
+                    listOf("d", "echo-set"),
+                    listOf("title", "Echo Test"),
+                    listOf("relay", "wss://echo.com"),
+                ),
+            ))
+            // distinctUntilChanged suppresses because parsed state is identical
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 2: Optimistic relay config mutations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `removeReadWriteRelay removes matching URL from list`() = runTest {
+        store.insert(event(
+            id = "rw1", pubkey = "pk1", kind = 10002, createdAt = 100,
+            tags = listOf(
+                listOf("r", "wss://a.com"),
+                listOf("r", "wss://b.com", "read"),
+            ),
+        ))
+        assertEquals(2, store.getReadWriteRelayConfigs("pk1").size)
+
+        store.removeReadWriteRelay("pk1", "wss://a.com")
+
+        val remaining = store.getReadWriteRelayConfigs("pk1")
+        assertEquals(1, remaining.size)
+        assertEquals("wss://b.com", remaining[0].url)
+    }
+
+    @Test
+    fun `removeReadWriteRelay no-ops for unknown URL`() = runTest {
+        store.insert(event(
+            id = "rw2", pubkey = "pk1", kind = 10002, createdAt = 100,
+            tags = listOf(listOf("r", "wss://a.com")),
+        ))
+
+        store.removeReadWriteRelay("pk1", "wss://unknown.com")
+        assertEquals(1, store.getReadWriteRelayConfigs("pk1").size)
+    }
+
+    @Test
+    fun `updateRelayMarker changes marker for existing URL`() = runTest {
+        store.insert(event(
+            id = "rw3", pubkey = "pk1", kind = 10002, createdAt = 100,
+            tags = listOf(listOf("r", "wss://a.com", "read")),
+        ))
+        assertEquals("read", store.getReadWriteRelayConfigs("pk1")[0].marker)
+
+        store.updateRelayMarker("pk1", "wss://a.com", "write")
+
+        val updated = store.getReadWriteRelayConfigs("pk1")
+        assertEquals(1, updated.size)
+        assertEquals("write", updated[0].marker)
+    }
+
+    @Test
+    fun `addBlockedRelay appends URL, dedup prevents duplicate`() = runTest {
+        store.insert(event(
+            id = "bl1", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://spam.com")),
+        ))
+        assertEquals(1, store.getBlockedRelayUrls("pk1").size)
+
+        store.addBlockedRelay("pk1", "wss://evil.com")
+        assertEquals(2, store.getBlockedRelayUrls("pk1").size)
+
+        // Duplicate is no-op
+        store.addBlockedRelay("pk1", "wss://evil.com")
+        assertEquals(2, store.getBlockedRelayUrls("pk1").size)
+    }
+
+    @Test
+    fun `removeBlockedRelay removes matching URL`() = runTest {
+        store.insert(event(
+            id = "bl2", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://spam.com"),
+                listOf("relay", "wss://evil.com"),
+            ),
+        ))
+
+        store.removeBlockedRelay("pk1", "wss://spam.com")
+
+        val remaining = store.getBlockedRelayUrls("pk1")
+        assertEquals(1, remaining.size)
+        assertEquals("wss://evil.com", remaining[0])
+    }
+
+    @Test
+    fun `addSearchRelay appends URL, dedup prevents duplicate`() = runTest {
+        store.insert(event(
+            id = "sr1", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://search1.com")),
+        ))
+        assertEquals(1, store.getSearchRelayUrls("pk1").size)
+
+        store.addSearchRelay("pk1", "wss://search2.com")
+        assertEquals(2, store.getSearchRelayUrls("pk1").size)
+
+        // Duplicate is no-op
+        store.addSearchRelay("pk1", "wss://search2.com")
+        assertEquals(2, store.getSearchRelayUrls("pk1").size)
+    }
+
+    @Test
+    fun `removeSearchRelay removes matching URL`() = runTest {
+        store.insert(event(
+            id = "sr2", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://search1.com"),
+                listOf("relay", "wss://search2.com"),
+            ),
+        ))
+
+        store.removeSearchRelay("pk1", "wss://search1.com")
+
+        val remaining = store.getSearchRelayUrls("pk1")
+        assertEquals(1, remaining.size)
+        assertEquals("wss://search2.com", remaining[0])
+    }
+
+    @Test
+    fun `addFavoriteRelay appends entry, dedup by URL`() = runTest {
+        store.insert(event(
+            id = "fav1", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://fav1.com")),
+        ))
+        assertEquals(1, store.getFavoriteRelayConfigs("pk1").size)
+
+        store.addFavoriteRelay("pk1", FavoriteEntry("wss://fav2.com", null))
+        assertEquals(2, store.getFavoriteRelayConfigs("pk1").size)
+
+        // Duplicate URL is no-op
+        store.addFavoriteRelay("pk1", FavoriteEntry("wss://fav2.com", null))
+        assertEquals(2, store.getFavoriteRelayConfigs("pk1").size)
+    }
+
+    @Test
+    fun `removeFavoriteRelay removes by URL`() = runTest {
+        store.insert(event(
+            id = "fav2", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://fav1.com"),
+                listOf("relay", "wss://fav2.com"),
+            ),
+        ))
+
+        store.removeFavoriteRelay("pk1", "wss://fav1.com")
+
+        val remaining = store.getFavoriteRelayConfigs("pk1")
+        assertEquals(1, remaining.size)
+        assertEquals("wss://fav2.com", remaining[0].url)
+    }
+
+    @Test
+    fun `removeFavoriteBySetRef removes entry by set reference`() = runTest {
+        store.insert(event(
+            id = "fav3", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://fav1.com"),
+                listOf("a", "30002:pk2:my-set"),
+            ),
+        ))
+        assertEquals(2, store.getFavoriteRelayConfigs("pk1").size)
+
+        store.removeFavoriteBySetRef("pk1", "30002:pk2:my-set")
+
+        val remaining = store.getFavoriteRelayConfigs("pk1")
+        assertEquals(1, remaining.size)
+        assertEquals("wss://fav1.com", remaining[0].url)
+    }
+
+    @Test
+    fun `optimistic addBlockedRelay then identical echo produces no second emission`() = runTest {
+        store.insert(event(
+            id = "bl-seed", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://existing.com")),
+        ))
+
+        store.blockedRelayUrlsFlow("pk1").test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+
+            // Optimistic add
+            store.addBlockedRelay("pk1", "wss://new.com")
+            val afterAdd = awaitItem()
+            assertEquals(2, afterAdd.size)
+
+            // Relay echo with same full list — should NOT re-emit
+            store.insert(event(
+                id = "bl-echo", pubkey = "pk1", kind = 10006, createdAt = 200,
+                tags = listOf(
+                    listOf("relay", "wss://existing.com"),
+                    listOf("relay", "wss://new.com"),
+                ),
+            ))
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `optimistic addSearchRelay then identical echo produces no second emission`() = runTest {
+        store.insert(event(
+            id = "sr-seed", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://existing.com")),
+        ))
+
+        store.searchRelayUrlsFlow("pk1").test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+
+            // Optimistic add
+            store.addSearchRelay("pk1", "wss://new.com")
+            val afterAdd = awaitItem()
+            assertEquals(2, afterAdd.size)
+
+            // Relay echo with same full list — should NOT re-emit
+            store.insert(event(
+                id = "sr-echo", pubkey = "pk1", kind = 10007, createdAt = 200,
+                tags = listOf(
+                    listOf("relay", "wss://existing.com"),
+                    listOf("relay", "wss://new.com"),
+                ),
+            ))
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `optimistic addReadWriteRelay then identical relay echo produces no second emission`() = runTest {
+        // Seed initial relay config
+        store.insert(event(
+            id = "rw-seed", pubkey = "pk1", kind = 10002, createdAt = 100,
+            tags = listOf(listOf("r", "wss://existing.com")),
+        ))
+
+        store.readWriteRelayConfigsFlow("pk1").test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+
+            // Optimistic add
+            store.addReadWriteRelay("pk1", RelayConfig("wss://new.com", null))
+            val afterAdd = awaitItem()
+            assertEquals(2, afterAdd.size)
+
+            // Relay echo with same full list — should NOT re-emit
+            store.insert(event(
+                id = "rw-echo", pubkey = "pk1", kind = 10002, createdAt = 200,
+                tags = listOf(
+                    listOf("r", "wss://existing.com"),
+                    listOf("r", "wss://new.com"),
+                ),
+            ))
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }
