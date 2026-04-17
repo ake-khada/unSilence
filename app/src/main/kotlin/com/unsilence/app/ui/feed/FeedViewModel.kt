@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.PinnedRelayDao
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.db.entity.PinnedRelayEntity
 import com.unsilence.app.data.db.entity.NostrRelaySetEntity
@@ -85,7 +84,6 @@ class FeedViewModel @Inject constructor(
     private val coverageTracker: CoverageTracker,
     private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
-    private val relayConfigDao: RelayConfigDao,
     private val nostrRelaySetDao: NostrRelaySetDao,
     private val pinnedRelayDao: PinnedRelayDao,
     private val memoryEventStore: MemoryEventStore,
@@ -328,11 +326,12 @@ class FeedViewModel @Inject constructor(
         Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=${_displayLimit.value}, relays=${currentRelayUrls.size}")
     }
 
-    /** Read kind-10002 read relays from Room, falling back to hardcoded defaults. */
-    private suspend fun resolveGlobalUrls(): List<String> {
-        val readRelays = relayConfigDao.getAllReadWriteRelays()
+    /** Read kind-10002 read relays from MES, falling back to hardcoded defaults. */
+    private fun resolveGlobalUrls(): List<String> {
+        val ownPubkey = keyManager.getPublicKeyHex() ?: return GLOBAL_RELAY_URLS
+        val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
             .filter { it.marker == null || it.marker == "read" }
-            .mapNotNull { normalizeRelayUrl(it.relayUrl) }
+            .mapNotNull { normalizeRelayUrl(it.url) }
         return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
     }
 
