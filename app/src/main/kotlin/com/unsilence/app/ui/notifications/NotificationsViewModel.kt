@@ -1,25 +1,25 @@
 package com.unsilence.app.ui.notifications
 
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.db.dao.NotificationRow
-import com.unsilence.app.data.db.dao.NotificationsDao
+import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NotificationItem
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class NotificationsUiState(
-    val items: List<NotificationRow> = emptyList(),
+    val items: List<NotificationItem> = emptyList(),
     val loading: Boolean = true,
 )
 
@@ -27,10 +27,10 @@ enum class NotifFilter { Following, Global }
 
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
-    @ApplicationContext private val context: Context,
     private val keyManager: KeyManager,
-    private val notificationsDao: NotificationsDao,
+    private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
+    private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
 ) : ViewModel() {
 
@@ -43,16 +43,14 @@ class NotificationsViewModel @Inject constructor(
     private val _hasNew = MutableStateFlow(false)
     val hasNewNotifications: StateFlow<Boolean> = _hasNew.asStateFlow()
 
-    private val notifPrefs by lazy {
-        context.getSharedPreferences("notif_state", Context.MODE_PRIVATE)
-    }
-    private fun getLastSeenTimestamp(): Long = notifPrefs.getLong("last_seen_ts", 0L)
-
     /** Mark current notifications as seen — clears the blue dot. */
     fun markSeen() {
         val items = _uiState.value.items
         if (items.isNotEmpty()) {
-            notifPrefs.edit().putLong("last_seen_ts", items.first().createdAt).apply()
+            val pubkey = keyManager.getPublicKeyHex() ?: return
+            viewModelScope.launch {
+                relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().createdAt)
+            }
         }
         _hasNew.value = false
     }
@@ -76,25 +74,24 @@ class NotificationsViewModel @Inject constructor(
     private fun startCollecting(pubkey: String) {
         collectJob?.cancel()
         collectJob = viewModelScope.launch {
-            val flow = if (_filter.value == NotifFilter.Following)
-                notificationsDao.notificationsFollowingFlow(pubkey)
-            else
-                notificationsDao.notificationsFlow(pubkey)
+            val followedOnly = _filter.value == NotifFilter.Following
+            val lastSeen = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
 
-            flow.collect { rows ->
-                _uiState.update { it.copy(items = rows, loading = false) }
-                if (rows.isNotEmpty()) {
-                    _hasNew.value = rows.first().createdAt > getLastSeenTimestamp()
-                }
+            memoryEventStore.notificationsFlow(pubkey, limit = 100, followedOnly = followedOnly)
+                .collect { items ->
+                    _uiState.update { it.copy(items = items, loading = false) }
+                    if (items.isNotEmpty()) {
+                        _hasNew.value = items.first().createdAt > lastSeen
+                    }
 
-                val missingPubkeys = rows
-                    .filter { it.actorPicture == null }
-                    .map { it.actorPubkey }
-                    .distinct()
-                if (missingPubkeys.isNotEmpty()) {
-                    userRepository.fetchMissingProfiles(missingPubkeys)
+                    val missingPubkeys = items
+                        .filter { it.actorPicture == null }
+                        .map { it.actorPubkey }
+                        .distinct()
+                    if (missingPubkeys.isNotEmpty()) {
+                        userRepository.fetchMissingProfiles(missingPubkeys)
+                    }
                 }
-            }
         }
     }
 }
