@@ -3139,4 +3139,254 @@ class MemoryEventStoreInvariantsTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // ── Notification recipient-side queries (A.5.2) ─────────────────────────
+
+    private val myPubkey = "my-pubkey-hex"
+    private val otherPubkey = "other-pubkey-hex"
+
+    @Test
+    fun `kind-7 reaction with p-tag appears in recipient notifications`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "hello world", createdAt = 100))
+        store.insert(event(
+            id = "reaction-1", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals("Should have 1 notification", 1, notifs.size)
+        assertEquals("reaction", notifs[0].notifType)
+        assertEquals(otherPubkey, notifs[0].actorPubkey)
+        assertEquals("my-note", notifs[0].targetNoteId)
+        assertEquals("hello world", notifs[0].targetNoteContent)
+    }
+
+    @Test
+    fun `kind-1 reply with p-tag appears as reply notification`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "original", createdAt = 100))
+        store.insert(event(
+            id = "reply-1", pubkey = otherPubkey, kind = 1, content = "nice post!", createdAt = 200,
+            replyToId = "my-note",
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(1, notifs.size)
+        assertEquals("reply", notifs[0].notifType)
+        assertEquals("reply-1", notifs[0].targetNoteId)
+        assertEquals("nice post!", notifs[0].targetNoteContent)
+        assertEquals("original", notifs[0].parentNoteContent)
+    }
+
+    @Test
+    fun `kind-6 repost with p-tag appears as repost notification`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "great content", createdAt = 100))
+        store.insert(event(
+            id = "repost-1", pubkey = otherPubkey, kind = 6, content = "", createdAt = 200,
+            rootId = "my-note",
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(1, notifs.size)
+        assertEquals("repost", notifs[0].notifType)
+        assertEquals("my-note", notifs[0].targetNoteId)
+        assertEquals("great content", notifs[0].targetNoteContent)
+    }
+
+    @Test
+    fun `kind-9735 zap receipt with p-tag appears as zap notification`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "zap me", createdAt = 100))
+        store.insert(event(
+            id = "zap-1", pubkey = "zap-provider", kind = 9735, content = "", createdAt = 200,
+            rootId = "my-note",
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey), listOf("bolt11", "lnbc10u1...")),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(1, notifs.size)
+        assertEquals("zap", notifs[0].notifType)
+        assertEquals("my-note", notifs[0].targetNoteId)
+    }
+
+    @Test
+    fun `kind-1 mention without reply to my note appears as mention notification`() = runTest {
+        store.insert(event(
+            id = "mention-1", pubkey = otherPubkey, kind = 1, content = "hey @user check this", createdAt = 200,
+            tags = listOf(listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(1, notifs.size)
+        assertEquals("mention", notifs[0].notifType)
+        assertEquals("mention-1", notifs[0].targetNoteId)
+        assertEquals("hey @user check this", notifs[0].targetNoteContent)
+    }
+
+    @Test
+    fun `reply to my note is reply not mention even with p-tag`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "original", createdAt = 100))
+        store.insert(event(
+            id = "reply-2", pubkey = otherPubkey, kind = 1, content = "replying", createdAt = 200,
+            replyToId = "my-note",
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals("Should have exactly 1 notification, not 2", 1, notifs.size)
+        assertEquals("reply", notifs[0].notifType)
+    }
+
+    @Test
+    fun `notifications ordered by createdAt DESC`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 50))
+        store.insert(event(
+            id = "old-react", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 100,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        store.insert(event(
+            id = "new-react", pubkey = "pk-3", kind = 7, content = "+", createdAt = 300,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        store.insert(event(
+            id = "mid-reply", pubkey = "pk-4", kind = 1, content = "reply", createdAt = 200,
+            replyToId = "my-note",
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(3, notifs.size)
+        assertEquals("new-react", notifs[0].id)
+        assertEquals("mid-reply", notifs[1].id)
+        assertEquals("old-react", notifs[2].id)
+    }
+
+    @Test
+    fun `duplicate event from second relay produces no second notification`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 100))
+        val react = event(
+            id = "react-dup", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+            relayUrl = "wss://relay1.com",
+        )
+        store.insert(react)
+        store.insert(react.copy(relayUrl = "wss://relay2.com", relaysSeen = mutableSetOf("wss://relay2.com")))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals("Duplicate event should not create second notification", 1, notifs.size)
+    }
+
+    @Test
+    fun `self-notifications are excluded`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 100))
+        store.insert(event(
+            id = "self-react", pubkey = myPubkey, kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val notifs = store.getNotifications(myPubkey, limit = 50)
+        assertEquals("Self-notifications should be excluded", 0, notifs.size)
+    }
+
+    @Test
+    fun `notifications for pubkey A not visible to pubkey B`() = runTest {
+        store.insert(event(id = "noteA", pubkey = myPubkey, kind = 1, content = "A's note", createdAt = 100))
+        store.insert(event(
+            id = "react-for-A", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "noteA"), listOf("p", myPubkey)),
+        ))
+
+        assertEquals(1, store.getNotifications(myPubkey, limit = 50).size)
+        assertEquals(0, store.getNotifications("pubkey-B", limit = 50).size)
+    }
+
+    @Test
+    fun `clear removes all notification data`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 100))
+        store.insert(event(
+            id = "react", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        assertEquals(1, store.getNotifications(myPubkey, limit = 50).size)
+
+        store.clear()
+        assertEquals(0, store.getNotifications(myPubkey, limit = 50).size)
+    }
+
+    @Test
+    fun `notificationCountSince returns correct count`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 50))
+        store.insert(event(
+            id = "old-react", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 100,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        store.insert(event(
+            id = "new-react", pubkey = "pk-3", kind = 7, content = "+", createdAt = 300,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        assertEquals(2, store.notificationCountSince(myPubkey, since = 0))
+        assertEquals(1, store.notificationCountSince(myPubkey, since = 200))
+        assertEquals(0, store.notificationCountSince(myPubkey, since = 300))
+    }
+
+    @Test
+    fun `notificationsFlow emits on new notification`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 100))
+
+        store.notificationsFlow(myPubkey, limit = 50).test {
+            val initial = awaitItem()
+            assertEquals(0, initial.size)
+
+            store.insert(event(
+                id = "react-flow", pubkey = otherPubkey, kind = 7, content = "+", createdAt = 200,
+                tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+            ))
+
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+            assertEquals("reaction", updated[0].notifType)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `limit parameter caps notification count`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 50))
+        repeat(5) { i ->
+            store.insert(event(
+                id = "react-$i", pubkey = "pk-$i", kind = 7, content = "+", createdAt = (100 + i).toLong(),
+                tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+            ))
+        }
+
+        val limited = store.getNotifications(myPubkey, limit = 3)
+        assertEquals(3, limited.size)
+        assertEquals("react-4", limited[0].id)
+        assertEquals("react-3", limited[1].id)
+        assertEquals("react-2", limited[2].id)
+    }
+
+    @Test
+    fun `following-only filter respects follows set`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 100))
+        store.updateFollows(myPubkey, setOf("followed-pk"), 1L)
+
+        store.insert(event(
+            id = "react-followed", pubkey = "followed-pk", kind = 7, content = "+", createdAt = 200,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        store.insert(event(
+            id = "react-stranger", pubkey = "stranger-pk", kind = 7, content = "+", createdAt = 300,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+
+        val all = store.getNotifications(myPubkey, limit = 50)
+        assertEquals("All notifications should be 2", 2, all.size)
+
+        val followingOnly = store.getNotifications(myPubkey, limit = 50, followedOnly = true)
+        assertEquals("Following-only should be 1", 1, followingOnly.size)
+        assertEquals("followed-pk", followingOnly[0].actorPubkey)
+    }
 }
