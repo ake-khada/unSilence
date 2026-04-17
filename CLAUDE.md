@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 17, 2026 (A.7 shipped — deleted 8 dead DAOs, 6 dead entities, CoverageRepository; dropped 7 tables via migration v18→v19)
+**Last updated:** April 17, 2026 (A.8 shipped — Room eliminated entirely. MES is sole data layer. No Room dependency, no DAOs, no entities, no migrations.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -31,7 +31,6 @@ Any runtime behavior change MUST use human-in-the-loop validation. See `VALIDATI
 | Kotlin | 2.3.0 |
 | Compose | BOM 2025.12.00 (1.10, pausable composition) |
 | Hilt (KSP) | 2.58 |
-| Room | 2.7.1 (v18, 14 tables) |
 | Media3 | 1.5.1 (+HLS) |
 | Coil | 3 (64MB memory cache cap) |
 | Nostr | Quartz library |
@@ -63,10 +62,10 @@ Any runtime behavior change MUST use human-in-the-loop validation. See `VALIDATI
 
 ```
 Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → Compose UI
-                                  └→ Room DB (persistence, snapshots)
+                                  └→ SnapshotScheduler (disk persistence)
 ```
 
-**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.7 complete — all consumer read paths migrated to MES/DataStore, dead Room artifacts deleted, 7 tables dropped. Remaining: outbox model (A.6).
+**Core principle:** MES-only (in-memory ConcurrentHashMap), 0ms screen render, snapshot persistence to disk. No Room, no SQLite. A.8 complete — Room eliminated entirely. All data classes (EventEntity, UserEntity, FeedRow, SyncStateEntity, RelayTrustScoreEntity) live in `data/memory/Models.kt` as plain Kotlin data classes.
 
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
@@ -75,20 +74,14 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, structural dedup
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, low-pass filter, per-item bitmask ledger (PHASE_PROFILE/REFS/ENGAGEMENT), REST cancellation of in-flight jobs. Sampled at 60ms (16 Hz) via Flow.sample in FeedScreen's snapshotFlow wiring — the state machine has natural transition rates of hundreds of milliseconds; per-frame evaluation at display refresh rate (120 Hz on Pixel 9 Pro XL) is wasteful and produces frame drops. Scroll edge detection (onScrollStarted/onScrollStopped) uses a separate snapshotFlow with distinctUntilChanged() to capture edges immediately without sampling delay
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection: layout shift cooldown (500ms, stationary only), 250ms confirmation window (flatMapLatest cancellation), oscillation detection (A→B→A block within 3s). Fullscreen handoff: inline player detaches surface via `isFullscreen` flag, dialog gets exclusive surface ownership
-- **MemoryEventStore** — in-memory ConcurrentHashMap store (eventsById, profilesByPubkey, statsByTarget, followsByPubkey, reactionsByActor, repostsByActor). Signal-driven reactive Flows: `_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal` drive `.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)` patterns. All scan Flows MUST use `flowOn(Dispatchers.Default)` — MES has no internal IO dispatching like Room; without flowOn, scans run on Main thread causing ANR
+- **MemoryEventStore** — in-memory ConcurrentHashMap store (eventsById, profilesByPubkey, statsByTarget, followsByPubkey, reactionsByActor, repostsByActor, trustScoresByUrl). Signal-driven reactive Flows: `_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal` drive `.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)` patterns. All scan Flows MUST use `flowOn(Dispatchers.Default)` — MES has no internal IO dispatching; without flowOn, scans run on Main thread causing ANR. Kind 30385 trust scores parsed by `handleTrustScore()` handler, exposed via `trustScoresFlow()`
 - **CoverageTracker / SyncTracker** — in-memory replacements for CoverageDao+SyncStateDao (ephemeral session-scoped relay sync state). ConcurrentHashMap-backed, not suspend, no Room dependency
 - **SearchViewModel** — NIP-50 search with 1000ms debounce, min 3-char filter, distinctUntilChanged, collectLatest cancellation. Local results from MES (`searchNotesFlow`, `searchUsersFlow`), relay results via token-correlated SharedFlow + `feedRowsByIdsFlow`. Token-based session tracking: each new query generates a token, `relayPool.closeSearch(token)` sends CLOSE frames for prior search subs before issuing new REQs. Search sub-IDs (`search-profiles-$token`, `search-notes-$token`) registered in `_activeOneShotSubs` so EOSE auto-closes work. `onCleared()` sends final CLOSE. RelayPool.searchNotes also runs a 10-second safety-net timeout that force-closes any search subscription whose EOSE never arrives — this handles relays (e.g. ditto.pub for search-notes) that treat NIP-50 search as a streaming subscription rather than a bounded query
 - **RelayPreferencesStore** — DataStore-backed persistence for kind-99 indexer URLs, pinned relays, and notification lastSeen timestamps (per-user). StateFlow cache with suspending and snapshot reads. Replaces relayConfigDao for indexer URL reads across all VMs and RelayPool
-- **AppBootstrapper** — 3-phase staggered init, bootstrap job cancellation (new login cancels in-progress bootstrap), MES follows seeded from Room, MediaPreconnect fire-and-forget, BackgroundSyncWorker (skeleton)
+- **AppBootstrapper** — 3-phase staggered init, bootstrap job cancellation (new login cancels in-progress bootstrap), MES snapshot restore, trust score fetch (kind 30385), MediaPreconnect fire-and-forget, BackgroundSyncWorker (skeleton)
 
-### Room v19 Tables (9 remaining)
-events, users, follows, reactions, event_stats, tags, event_relays, relay_trust_scores, relay_list_metadata
-
-**A.7 cleanup:** Dropped 7 tables (coverage, relay_configs, nostr_relay_sets, nostr_relay_set_members, own_relays, pinned_relays, sync_state) via MIGRATION_18_19. Deleted 8 DAOs, 6 entity classes, CoverageRepository. Surviving DAOs: EventDao, UserDao, FollowDao, ReactionDao, RelayListDao, EventStatsDao, RelayTrustScoreDao. SyncStateEntity kept as data class (used by SyncTracker). TagEntity/EventRelayEntity kept in @Database (tables used by EventDao SQL).
-
-### Room Migrations
-- Index names: `index_tablename_col1_col2` convention (backticks in SQL)
-- Every migration index must also be declared in `@Entity(indices=[...])`
+### Room — Eliminated (A.8)
+Room was fully removed in A.8. No `data/db/` directory, no DAOs, no entities, no AppDatabase, no Migrations, no DatabaseModule, no Room dependency in build.gradle.kts. Data classes (EventEntity, UserEntity, FeedRow, SyncStateEntity, RelayTrustScoreEntity) moved to `data/memory/Models.kt` as plain Kotlin data classes. EventRepository deleted (all callers migrated to MES). OutboxRouter reads follows/relay lists from MES. ComposeVM/ThreadVM do optimistic insert via `memoryEventStore.insert(NostrEvent(...))`. UserRepository reads from MES.
 
 ---
 
@@ -102,7 +95,7 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_trust_
 
 **Profiles:** Avatar/banner/bio, edit profile, tabs (Notes/Replies/Longform), follow/unfollow, followers count (NIP-45), NIP-65 outbox
 
-**Engagement:** Reactions, reposts, zaps (NWC NIP-47), zap persistence (kind-9734 → Room), action bar with share
+**Engagement:** Reactions, reposts, zaps (NWC NIP-47), zap persistence (kind-9734 → MES), action bar with share
 
 **Relay:** NIP-51 ecosystem (10002/10006/10007/10012/30002), relay sets, trust scores (kind 30385), blocked relays
 
@@ -122,7 +115,7 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_trust_
 3. Image pinch-zoom in fullscreen dialog
 
 ### High Priority — Privacy
-4. NIP-36 content-warning blur overlay (data already in Room)
+4. NIP-36 content-warning blur overlay (data already in MES — `hasContentWarning`/`contentWarningReason` on NostrEvent)
 5. NIP-51 mute lists (kind 10000), keyword filters
 6. TOR (Phase 1: Orbot SOCKS5, Phase 2: embedded tor-android-binary)
 
@@ -154,8 +147,8 @@ events, users, follows, reactions, event_stats, tags, event_relays, relay_trust_
 13. **Search subscriptions MUST send CLOSE frames when superseded** — every `relayPool.searchNotes()` call must be preceded by `relayPool.closeSearch(priorToken)`. Search sub-IDs must be registered in `_activeOneShotSubs`. Verify with `grep closeSearch logcat` — count must equal or exceed NIP-50 query count minus 1
 14. **NIP-50 search subscriptions are protected by a 10-second timeout in RelayPool.searchNotes** as a safety net against relays that never send EOSE. If you see `Search EVENT received` log lines more than ~11 seconds after the query was issued, the timeout mechanism is broken. Grep for `10s timeout elapsed` to verify it's firing
 15. **Never write `_state.value` directly in FeedStateReducer** — always route through `emitCoalesced` (for ID-changing emissions) or `emitCoalescedDataRefresh` (for data-only refreshes). Direct writes bypass the coalescing window and trigger immediate Compose recompositions on every hydration write, defeating the feedback-loop protection. The only exception is `flush()` which deliberately bypasses coalescing for user-initiated actions (blue dot tap, scroll-to-top)
-16. **The current architecture is render-then-hydrate, not hydrate-then-render.** Room emissions flow directly to the reducer, which updates visible state immediately. The WARM zone catches up with hydration AFTER cards are visible. Any design that requires cards to be fully hydrated BEFORE entering visible state must first restructure this flow — by buffering Room emissions until hydration completes, or by driving display from a hydration-completion signal instead of from Room. Patching the gate at the reducer level will always fail because the hydration work hasn't started yet when the reducer runs. P_WARM_READINESS_PAGINATION attempted this patch twice and failed both times; the sprint was reverted and deferred
-17. **In Kotlin coroutines, `viewModelScope.launch { }` inside a `collectLatest` block does NOT participate in collectLatest's cancellation semantics** — the inner launch is scoped to `viewModelScope`, so each re-emission spawns a new coroutine while old ones continue running. On Room Flows with multi-table JOINs this creates a feedback loop: hydration writes → Room re-emission → new coroutine → more writes. Use `withContext(Dispatchers.IO)` instead (participates in cancellation), and add an ID-set guard to skip data-only re-emissions. P_PROFILE_VM_LEAK measured 452 leaked coroutines from this pattern in a 7.5-minute session
+16. **The current architecture is render-then-hydrate, not hydrate-then-render.** MES signal emissions flow directly to the reducer, which updates visible state immediately. The WARM zone catches up with hydration AFTER cards are visible. Any design that requires cards to be fully hydrated BEFORE entering visible state must first restructure this flow — by buffering MES emissions until hydration completes, or by driving display from a hydration-completion signal instead of from MES. Patching the gate at the reducer level will always fail because the hydration work hasn't started yet when the reducer runs. P_WARM_READINESS_PAGINATION attempted this patch twice and failed both times; the sprint was reverted and deferred
+17. **In Kotlin coroutines, `viewModelScope.launch { }` inside a `collectLatest` block does NOT participate in collectLatest's cancellation semantics** — the inner launch is scoped to `viewModelScope`, so each re-emission spawns a new coroutine while old ones continue running. On signal-driven MES Flows this creates a feedback loop: hydration writes → MES signal re-emission → new coroutine → more writes. Use `withContext(Dispatchers.IO)` instead (participates in cancellation), and add an ID-set guard to skip data-only re-emissions. P_PROFILE_VM_LEAK measured 452 leaked coroutines from this pattern in a 7.5-minute session
 18. **Engagement freshness checks use tiered thresholds based on post age** (`freshnessThreshold` in FeedHydrationController). The flat 5-minute threshold previously used was appropriate for fresh posts but produced ~71% wasted fetches on the dominant case (posts >1 hour old). If adding a new engagement dispatch path, route it through this function or replicate the tiering logic. Do NOT use the raw `ENGAGEMENT_STALE_MS` constant as the sole threshold — it's the Tier 1 value only. P_ENGAGEMENT_TIERED_FRESHNESS measured 43% batch reduction on return visits and 57% thermal rate reduction
 19. **Every MES signal-driven scan Flow MUST use `flowOn(Dispatchers.Default)`** — unlike Room (which dispatches to its own IO pool), MES scans run inline on the calling coroutine's thread. Without `flowOn`, all ConcurrentHashMap iteration + filtering + sorting runs on Main, causing ANR ("close app" dialog). A.5.1 T3 discovered this when search scans stalled the UI; T6 hardened all existing Flows. Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`
 20. **Kind 10012 relay set references require hint-relay resolution** — kind-10012 (favorites) events contain `["a", "30002:pubkey:dtag", "hint-relay"]` tags referencing kind-30002 relay sets that exist on specific hint relays, NOT indexers. EventProcessor.resolveRelaySetRefs() parses these tags and dispatches fetches via RelaySetRefFetcher (fun interface, same pattern as PrefetchDispatcher). RelayPool.fetchRelaySetsByCoordinate() connects to hint relays and sends `#d`-filtered REQs. Without this, relay sets from Jumble/Keychat only appear if the user also stores them on indexer relays
@@ -178,13 +171,13 @@ Validation discipline: When validation criteria fail, revert first, investigate 
 
 ## Key Patterns
 
-**Room feed query:** events JOIN users JOIN event_stats, kind 6 engagement resolves via `COALESCE(root_id, id)`, follows via IN-subquery (not LEFT JOIN)
+**MES feed query:** `feedFlow()` scans `idsByKind` + `eventEntitiesByNoteId`, filters by FeedFilter (kinds, followedPubkeys, contentFilter, relayUrls), joins profilesByPubkey + statsByTarget, returns FeedRow list. Kind 6 engagement resolves via rootId fallback
 
 **Shared composables:** NostrRichText, AvatarImage, relativeTime, ThreadParentCard, EmptyState, ActionButton, ZapButton
 
 **Logout:** `isLoggedIn=false` (destroys Compose tree) → `bootstrapper.teardown()` (cancel bootstrap, disconnect, MES.clear(), delete snapshot, clear credentials, release ExoPlayer on Main). No exitProcess — singletons survive, `key(sessionKey)` forces fresh VM creation on re-login
 
-**Relay config:** 5 indexers (purplepag.es etc.) in DataStore (kind 99), 5 search (NIP-50) in MES, 6 global defaults, cap 13+3 browse. All relay config read from MES signal-driven Flows + RelayPreferencesStore; Room tables are write-only (outbox echo) pending A.7 deletion
+**Relay config:** 5 indexers (purplepag.es etc.) in DataStore (kind 99), 5 search (NIP-50) in MES, 6 global defaults, cap 13+3 browse. All relay config read from MES signal-driven Flows + RelayPreferencesStore
 
 **Notifications:** MES scan-based — `getNotifications()` walks `idsByKind` for kinds 1/6/7/9735, filters by `#p` tag match, resolves actor profiles and target note content inline. No insert-time index. `notificationsFlow()` driven by `combine(_feedSignal, _statsSignal)`. Read/unread (blue dot) via DataStore per-user `notif_last_seen_{pubkey}` key in RelayPreferencesStore
 
@@ -197,11 +190,10 @@ app/src/main/kotlin/com/unsilence/app/
 ├── data/
 │   ├── auth/        KeyManager, SigningManager
 │   ├── cache/       CoverageTracker, SyncTracker (in-memory ephemeral state)
-│   ├── db/          dao/, entity/, AppDatabase, migrations
 │   ├── memory/      MemoryEventStore, Models, SnapshotScheduler
 │   ├��─ relay/       RelayPool, EventProcessor, ProfileResolver, CardHydrator, OgFetcher, RelayPreferencesStore
-│   ├── repository/  EventRepository, UserRepository, ZapRepository
-│   ├── wallet/      ZapRepository, NwcManager, LnurlResolver
+│   ├── repository/  UserRepository, ZapRepository
+│   ├── wallet/      NwcManager, LnurlResolver
 │   └── AppBootstrapper.kt
 ├── di/              Hilt modules
 ├── ui/
