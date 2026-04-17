@@ -67,6 +67,15 @@ class MemoryEventStore @Inject constructor() {
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
 
+    // ─── A.5.1 T5a: Relay config state (kinds 10002/10006/10007/10012) ──────
+    private val blockedRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
+    private val searchRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
+    private val favoritesByPubkey = ConcurrentHashMap<String, List<FavoriteEntry>>()
+    private val readWriteRelayConfigsByPubkey = ConcurrentHashMap<String, List<RelayConfig>>()
+    /** Tracks createdAt of the latest accepted replaceable event per pubkey+kind.
+     *  Key: "$pubkey:$kind". Used for replaceable dedup without scanning eventsById. */
+    private val relayKindCreatedAt = ConcurrentHashMap<String, Long>()
+
     // ─── Follower count cache (NIP-45 COUNT results) ─────────────────────────
     // Key: pubkey → (count, updatedAtSeconds)
     private val followerCountCache = ConcurrentHashMap<String, Pair<Long, Long>>()
@@ -81,6 +90,7 @@ class MemoryEventStore @Inject constructor() {
     private val _statsSignal = MutableStateFlow(0L)
     private val _followsSignal = MutableStateFlow(0L)
     private val _actionSignal = MutableStateFlow(0L)
+    private val _relayConfigSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -149,6 +159,9 @@ class MemoryEventStore @Inject constructor() {
             9735 -> handleZapReceipt(event)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event)
+            10006 -> handleBlocked(event)
+            10007 -> handleSearchRelays(event)
+            10012 -> handleFavorites(event)
             30002 -> handleParameterizedReplaceable(event)
         }
 
@@ -325,34 +338,107 @@ class MemoryEventStore @Inject constructor() {
     }
 
     private fun handleRelayList(event: NostrEvent) {
+        val key = "${event.pubkey}:10002"
+        val existingTs = relayKindCreatedAt[key]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
         val readRelays = mutableListOf<String>()
         val writeRelays = mutableListOf<String>()
+        val configs = mutableListOf<RelayConfig>()
 
         for (tag in event.tags) {
             if (tag.size < 2 || tag[0] != "r") continue
             val url = tag[1]
-            val marker = tag.getOrNull(2)
+            val marker = tag.getOrNull(2)?.takeIf { it.isNotEmpty() }
+            configs.add(RelayConfig(url, marker))
             when (marker) {
                 "read" -> readRelays.add(url)
                 "write" -> writeRelays.add(url)
                 else -> {
-                    // No marker or empty string = both read and write
                     readRelays.add(url)
                     writeRelays.add(url)
                 }
             }
         }
 
-        relayListsByPubkey.compute(event.pubkey) { _, existing ->
-            if (existing != null) {
-                val existingEvent = eventsById.values.firstOrNull {
-                    it.pubkey == event.pubkey && it.kind == 10002 && it.id != event.id
+        relayKindCreatedAt[key] = event.createdAt
+        relayListsByPubkey[event.pubkey] = RelayList(readRelays, writeRelays)
+
+        val existingConfigs = readWriteRelayConfigsByPubkey[event.pubkey]
+        if (existingConfigs != configs) {
+            readWriteRelayConfigsByPubkey[event.pubkey] = configs
+            _relayConfigSignal.value = System.nanoTime()
+        }
+    }
+
+    private fun handleBlocked(event: NostrEvent) {
+        val key = "${event.pubkey}:10006"
+        val existingTs = relayKindCreatedAt[key]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val urls = event.tags
+            .filter { it.size >= 2 && it[0] == "relay" }
+            .map { it[1] }
+            .distinct()
+
+        relayKindCreatedAt[key] = event.createdAt
+        val existing = blockedRelaysByPubkey[event.pubkey]
+        if (existing != urls) {
+            blockedRelaysByPubkey[event.pubkey] = urls
+            _relayConfigSignal.value = System.nanoTime()
+        }
+    }
+
+    private fun handleSearchRelays(event: NostrEvent) {
+        val key = "${event.pubkey}:10007"
+        val existingTs = relayKindCreatedAt[key]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val urls = event.tags
+            .filter { it.size >= 2 && it[0] == "relay" }
+            .map { it[1] }
+            .distinct()
+
+        relayKindCreatedAt[key] = event.createdAt
+        val existing = searchRelaysByPubkey[event.pubkey]
+        if (existing != urls) {
+            searchRelaysByPubkey[event.pubkey] = urls
+            _relayConfigSignal.value = System.nanoTime()
+        }
+    }
+
+    private fun handleFavorites(event: NostrEvent) {
+        val key = "${event.pubkey}:10012"
+        val existingTs = relayKindCreatedAt[key]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val entries = mutableListOf<FavoriteEntry>()
+        val seenRelayUrls = mutableSetOf<String>()
+        val seenSetRefs = mutableSetOf<String>()
+
+        for (tag in event.tags) {
+            if (tag.size < 2) continue
+            when (tag[0]) {
+                "relay" -> {
+                    val url = tag[1]
+                    if (seenRelayUrls.add(url)) {
+                        entries.add(FavoriteEntry(url = url, setRef = null))
+                    }
                 }
-                if (existingEvent != null && existingEvent.createdAt > event.createdAt) {
-                    return@compute existing
+                "a" -> {
+                    val ref = tag[1]
+                    if (seenSetRefs.add(ref)) {
+                        entries.add(FavoriteEntry(url = null, setRef = ref))
+                    }
                 }
             }
-            RelayList(readRelays, writeRelays)
+        }
+
+        relayKindCreatedAt[key] = event.createdAt
+        val existing = favoritesByPubkey[event.pubkey]
+        if (existing != entries) {
+            favoritesByPubkey[event.pubkey] = entries
+            _relayConfigSignal.value = System.nanoTime()
         }
     }
 
@@ -795,6 +881,40 @@ class MemoryEventStore @Inject constructor() {
     fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
+    // ─── A.5.1 T5a: Relay config query APIs ────────────────────────────────
+
+    fun getBlockedRelayUrls(pubkey: String): List<String> =
+        blockedRelaysByPubkey[pubkey] ?: emptyList()
+
+    fun getSearchRelayUrls(pubkey: String): List<String> =
+        searchRelaysByPubkey[pubkey] ?: emptyList()
+
+    fun getFavoriteRelayConfigs(pubkey: String): List<FavoriteEntry> =
+        favoritesByPubkey[pubkey] ?: emptyList()
+
+    fun getReadWriteRelayConfigs(pubkey: String): List<RelayConfig> =
+        readWriteRelayConfigsByPubkey[pubkey] ?: emptyList()
+
+    // ─── A.5.1 T5a: Relay config reactive Flows ────────────────────────────
+
+    fun blockedRelayUrlsFlow(pubkey: String): Flow<List<String>> =
+        _relayConfigSignal
+            .map { getBlockedRelayUrls(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    fun searchRelayUrlsFlow(pubkey: String): Flow<List<String>> =
+        _relayConfigSignal
+            .map { getSearchRelayUrls(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    fun readWriteRelayConfigsFlow(pubkey: String): Flow<List<RelayConfig>> =
+        _relayConfigSignal
+            .map { getReadWriteRelayConfigs(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
@@ -927,6 +1047,9 @@ class MemoryEventStore @Inject constructor() {
             3 -> handleFollows(event)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event)
+            10006 -> handleBlocked(event)
+            10007 -> handleSearchRelays(event)
+            10012 -> handleFavorites(event)
             30002 -> handleParameterizedReplaceable(event)
         }
     }
@@ -1050,6 +1173,11 @@ class MemoryEventStore @Inject constructor() {
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
+        blockedRelaysByPubkey.clear()
+        searchRelaysByPubkey.clear()
+        favoritesByPubkey.clear()
+        readWriteRelayConfigsByPubkey.clear()
+        relayKindCreatedAt.clear()
         replaceableByCoordinate.clear()
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
@@ -1059,6 +1187,7 @@ class MemoryEventStore @Inject constructor() {
         _statsSignal.value = 0L
         _followsSignal.value = 0L
         _actionSignal.value = 0L
+        _relayConfigSignal.value = 0L
     }
 }
 

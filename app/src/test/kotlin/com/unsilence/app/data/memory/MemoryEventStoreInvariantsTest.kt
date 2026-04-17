@@ -2371,4 +2371,303 @@ class MemoryEventStoreInvariantsTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // ── Kind 10006: Blocked relays ──────────────────────────────────────────
+
+    @Test
+    fun `handleBlocked parses relay tags preserving tag order`() {
+        store.insert(event(
+            id = "blocked-1", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://zebra.relay.com"),
+                listOf("relay", "wss://alpha.relay.com"),
+                listOf("p", "ignored-tag"),
+            ),
+        ))
+        val blocked = store.getBlockedRelayUrls("pk1")
+        assertEquals(2, blocked.size)
+        // Tag order preserved, NOT alphabetical
+        assertEquals("wss://zebra.relay.com", blocked[0])
+        assertEquals("wss://alpha.relay.com", blocked[1])
+    }
+
+    @Test
+    fun `handleBlocked deduplicates URLs within single event`() {
+        store.insert(event(
+            id = "blocked-dup", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://evil.relay.com"),
+                listOf("relay", "wss://evil.relay.com"),
+                listOf("relay", "wss://other.relay.com"),
+            ),
+        ))
+        val blocked = store.getBlockedRelayUrls("pk1")
+        assertEquals(2, blocked.size)
+    }
+
+    @Test
+    fun `handleBlocked replaces older event (replaceable dedup)`() {
+        store.insert(event(
+            id = "blocked-old", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://old.relay.com")),
+        ))
+        store.insert(event(
+            id = "blocked-new", pubkey = "pk1", kind = 10006, createdAt = 200,
+            tags = listOf(listOf("relay", "wss://new.relay.com")),
+        ))
+        val blocked = store.getBlockedRelayUrls("pk1")
+        assertEquals(1, blocked.size)
+        assertEquals("wss://new.relay.com", blocked[0])
+    }
+
+    @Test
+    fun `handleBlocked skips event with older createdAt`() {
+        store.insert(event(
+            id = "blocked-new", pubkey = "pk1", kind = 10006, createdAt = 200,
+            tags = listOf(listOf("relay", "wss://new.relay.com")),
+        ))
+        store.insert(event(
+            id = "blocked-old", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://old.relay.com")),
+        ))
+        val blocked = store.getBlockedRelayUrls("pk1")
+        assertEquals(1, blocked.size)
+        assertEquals("wss://new.relay.com", blocked[0])
+    }
+
+    @Test
+    fun `handleBlocked tie on createdAt keeps existing`() {
+        store.insert(event(
+            id = "blocked-first", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://first.relay.com")),
+        ))
+        store.insert(event(
+            id = "blocked-tie", pubkey = "pk1", kind = 10006, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://tie.relay.com")),
+        ))
+        val blocked = store.getBlockedRelayUrls("pk1")
+        assertEquals(1, blocked.size)
+        assertEquals("wss://first.relay.com", blocked[0])
+    }
+
+    @Test
+    fun `getBlockedRelayUrls returns empty for unknown pubkey`() {
+        assertEquals(emptyList<String>(), store.getBlockedRelayUrls("unknown"))
+    }
+
+    @Test
+    fun `blockedRelayUrlsFlow re-emits on kind-10006 insert`() = runTest {
+        store.blockedRelayUrlsFlow("pk1").test {
+            assertEquals(emptyList<String>(), awaitItem())
+
+            store.insert(event(
+                id = "blocked-1", pubkey = "pk1", kind = 10006, createdAt = 100,
+                tags = listOf(listOf("relay", "wss://evil.relay.com")),
+            ))
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+            assertEquals("wss://evil.relay.com", updated[0])
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Kind 10007: Search relays ───────────────────────────────────────────
+
+    @Test
+    fun `handleSearch parses relay tags preserving tag order`() {
+        store.insert(event(
+            id = "search-1", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://search-z.com"),
+                listOf("relay", "wss://search-a.com"),
+            ),
+        ))
+        val search = store.getSearchRelayUrls("pk1")
+        assertEquals(2, search.size)
+        assertEquals("wss://search-z.com", search[0])
+        assertEquals("wss://search-a.com", search[1])
+    }
+
+    @Test
+    fun `handleSearch deduplicates URLs within single event`() {
+        store.insert(event(
+            id = "search-dup", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://dup.com"),
+                listOf("relay", "wss://dup.com"),
+            ),
+        ))
+        val search = store.getSearchRelayUrls("pk1")
+        assertEquals(1, search.size)
+    }
+
+    @Test
+    fun `handleSearch replaces older event (replaceable dedup)`() {
+        store.insert(event(
+            id = "search-old", pubkey = "pk1", kind = 10007, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://old-search.com")),
+        ))
+        store.insert(event(
+            id = "search-new", pubkey = "pk1", kind = 10007, createdAt = 200,
+            tags = listOf(listOf("relay", "wss://new-search.com")),
+        ))
+        val search = store.getSearchRelayUrls("pk1")
+        assertEquals(1, search.size)
+        assertEquals("wss://new-search.com", search[0])
+    }
+
+    @Test
+    fun `getSearchRelayUrls returns empty for unknown pubkey`() {
+        assertEquals(emptyList<String>(), store.getSearchRelayUrls("unknown"))
+    }
+
+    @Test
+    fun `searchRelayUrlsFlow re-emits on kind-10007 insert`() = runTest {
+        store.searchRelayUrlsFlow("pk1").test {
+            assertEquals(emptyList<String>(), awaitItem())
+
+            store.insert(event(
+                id = "search-1", pubkey = "pk1", kind = 10007, createdAt = 100,
+                tags = listOf(listOf("relay", "wss://search1.com")),
+            ))
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Kind 10012: Favorite relays ─────────────────────────────────────────
+
+    @Test
+    fun `handleFavorites parses relay and set-ref tags preserving tag order`() {
+        store.insert(event(
+            id = "fav-1", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://fav1.com"),
+                listOf("a", "30002:pk1:my-set"),
+                listOf("relay", "wss://fav2.com"),
+                listOf("p", "ignored"),
+            ),
+        ))
+        val favs = store.getFavoriteRelayConfigs("pk1")
+        assertEquals(3, favs.size)
+        // Tag order preserved
+        assertEquals("wss://fav1.com", favs[0].url)
+        assertNull(favs[0].setRef)
+        assertNull(favs[1].url)
+        assertEquals("30002:pk1:my-set", favs[1].setRef)
+        assertEquals("wss://fav2.com", favs[2].url)
+    }
+
+    @Test
+    fun `handleFavorites deduplicates relay URLs and set refs within event`() {
+        store.insert(event(
+            id = "fav-dup", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(
+                listOf("relay", "wss://dup.com"),
+                listOf("relay", "wss://dup.com"),
+                listOf("a", "30002:pk1:set1"),
+                listOf("a", "30002:pk1:set1"),
+            ),
+        ))
+        val favs = store.getFavoriteRelayConfigs("pk1")
+        assertEquals(2, favs.size)
+    }
+
+    @Test
+    fun `handleFavorites replaces older event`() {
+        store.insert(event(
+            id = "fav-old", pubkey = "pk1", kind = 10012, createdAt = 100,
+            tags = listOf(listOf("relay", "wss://old-fav.com")),
+        ))
+        store.insert(event(
+            id = "fav-new", pubkey = "pk1", kind = 10012, createdAt = 200,
+            tags = listOf(listOf("relay", "wss://new-fav.com")),
+        ))
+        val favs = store.getFavoriteRelayConfigs("pk1")
+        assertEquals(1, favs.size)
+        assertEquals("wss://new-fav.com", favs[0].url)
+    }
+
+    @Test
+    fun `getFavoriteRelayConfigs returns empty for unknown pubkey`() {
+        assertEquals(emptyList<FavoriteEntry>(), store.getFavoriteRelayConfigs("unknown"))
+    }
+
+    // ── Kind 10002: Enriched relay configs ──────────────────────────────────
+
+    @Test
+    fun `enriched handleRelayList stores marker info preserving tag order`() {
+        store.insert(event(
+            id = "relay-1", pubkey = "pk1", kind = 10002, createdAt = 100,
+            tags = listOf(
+                listOf("r", "wss://both.relay.com"),
+                listOf("r", "wss://read.relay.com", "read"),
+                listOf("r", "wss://write.relay.com", "write"),
+            ),
+        ))
+        val configs = store.getReadWriteRelayConfigs("pk1")
+        assertEquals(3, configs.size)
+        // Tag order preserved
+        assertEquals("wss://both.relay.com", configs[0].url)
+        assertNull(configs[0].marker)
+        assertEquals("wss://read.relay.com", configs[1].url)
+        assertEquals("read", configs[1].marker)
+        assertEquals("wss://write.relay.com", configs[2].url)
+        assertEquals("write", configs[2].marker)
+    }
+
+    @Test
+    fun `getReadWriteRelayConfigs returns empty for unknown pubkey`() {
+        assertEquals(emptyList<RelayConfig>(), store.getReadWriteRelayConfigs("unknown"))
+    }
+
+    @Test
+    fun `readWriteRelayConfigsFlow re-emits on kind-10002 insert`() = runTest {
+        store.readWriteRelayConfigsFlow("pk1").test {
+            assertEquals(emptyList<RelayConfig>(), awaitItem())
+
+            store.insert(event(
+                id = "relay-1", pubkey = "pk1", kind = 10002, createdAt = 100,
+                tags = listOf(listOf("r", "wss://relay.com")),
+            ))
+            val updated = awaitItem()
+            assertEquals(1, updated.size)
+            assertEquals("wss://relay.com", updated[0].url)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ── Bootstrap wait-for-arrival ──────────────────────────────────────────
+
+    @Test
+    fun `readWriteRelayConfigsFlow emits empty then non-empty then suppresses duplicate relay arrival`() = runTest {
+        store.readWriteRelayConfigsFlow("pk1").test {
+            // Starts with empty
+            assertEquals(emptyList<RelayConfig>(), awaitItem())
+
+            // Insert kind-10002 event
+            store.insert(event(
+                id = "relay-boot", pubkey = "pk1", kind = 10002, createdAt = 100,
+                tags = listOf(listOf("r", "wss://relay.com")),
+            ))
+            val first = awaitItem()
+            assertEquals(1, first.size)
+
+            // Same event from another relay (duplicate) — should NOT re-emit
+            // because parsed state is identical (distinctUntilChanged)
+            store.insert(event(
+                id = "relay-boot", pubkey = "pk1", kind = 10002, createdAt = 100,
+                tags = listOf(listOf("r", "wss://relay.com")),
+                relayUrl = "wss://other-relay.com",
+            ))
+            // No new emission expected — expectNoEvents would throw if one arrives
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }
