@@ -41,6 +41,24 @@ data class RelayConfig(val url: String, val marker: String?)
 /** Kind-10012 favorite entry — either a relay URL or a set reference (["a", "30002:pubkey:dtag"]). */
 data class FavoriteEntry(val url: String?, val setRef: String?)
 
+/** Kind-30002 relay set metadata. One per (ownerPubkey, dTag). */
+data class RelaySet(
+    val dTag: String,
+    val ownerPubkey: String,
+    val title: String? = null,
+    val description: String? = null,
+    val image: String? = null,
+    val members: List<String> = emptyList(),
+)
+
+/** Pinned relay in the feed picker. Pure local config, not a Nostr event. */
+data class PinnedRelay(
+    val pubkey: String,
+    val url: String,
+    val displayLabel: String?,
+    val addedAt: Long = System.currentTimeMillis() / 1000,
+)
+
 /**
  * Entry in the createdAt-sorted index. Implements comparison for
  * ConcurrentSkipListSet ordering: descending by createdAt, ascending by id

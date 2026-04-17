@@ -97,6 +97,15 @@ class SnapshotScheduler @Inject constructor(
         save()
     }
 
+    /**
+     * Delete snapshot file on disk. Called during teardown to prevent
+     * restoreIfPresent() from reloading old user's events after re-login.
+     */
+    fun deleteSnapshot() {
+        snapshotFile.delete()
+        Log.d(TAG, "Snapshot deleted")
+    }
+
     private suspend fun save() {
         mutex.withLock {
             val stream = snapshotFile.startWrite()

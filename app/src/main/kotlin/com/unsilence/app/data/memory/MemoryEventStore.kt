@@ -1,6 +1,7 @@
 package com.unsilence.app.data.memory
 
 import android.os.Trace
+import android.util.Log
 import com.unsilence.app.data.db.dao.FeedRow
 import com.unsilence.app.data.db.entity.EventEntity
 import com.unsilence.app.data.db.entity.UserEntity
@@ -17,6 +18,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
 import javax.inject.Inject
@@ -80,6 +82,13 @@ class MemoryEventStore @Inject constructor() {
     // Key: pubkey → (count, updatedAtSeconds)
     private val followerCountCache = ConcurrentHashMap<String, Pair<Long, Long>>()
 
+    // ─── A.5.1 T5b: Relay sets (kind 30002 materialized) ──────────────────
+    // Key: "$ownerPubkey:$dTag" → RelaySet
+    private val relaySetsByCoordinate = ConcurrentHashMap<String, RelaySet>()
+    /** Tombstones for deleted relay sets. Key: "$ownerPubkey:$dTag" → deletedAtCreatedAt.
+     *  Blocks re-materialization from older events. Cleared by a newer upsert. */
+    private val deletedRelaySetTombstones = ConcurrentHashMap<String, Long>()
+
     // ─── Parameterized replaceable events (kind 30002 etc.) ─────────────────
     // Key: "$pubkey:$kind:$dTag" → event ID of the latest version
     private val replaceableByCoordinate = ConcurrentHashMap<String, String>()
@@ -91,6 +100,7 @@ class MemoryEventStore @Inject constructor() {
     private val _followsSignal = MutableStateFlow(0L)
     private val _actionSignal = MutableStateFlow(0L)
     private val _relayConfigSignal = MutableStateFlow(0L)
+    private val _relaySetSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -162,7 +172,10 @@ class MemoryEventStore @Inject constructor() {
             10006 -> handleBlocked(event)
             10007 -> handleSearchRelays(event)
             10012 -> handleFavorites(event)
-            30002 -> handleParameterizedReplaceable(event)
+            30002 -> {
+                handleParameterizedReplaceable(event)
+                handleRelaySetMaterialized(event)
+            }
         }
 
         // 5. Bump signals
@@ -378,7 +391,7 @@ class MemoryEventStore @Inject constructor() {
 
         val urls = event.tags
             .filter { it.size >= 2 && it[0] == "relay" }
-            .map { it[1] }
+            .mapNotNull { normalizeRelayUrl(it[1]) }
             .distinct()
 
         relayKindCreatedAt[key] = event.createdAt
@@ -396,7 +409,7 @@ class MemoryEventStore @Inject constructor() {
 
         val urls = event.tags
             .filter { it.size >= 2 && it[0] == "relay" }
-            .map { it[1] }
+            .mapNotNull { normalizeRelayUrl(it[1]) }
             .distinct()
 
         relayKindCreatedAt[key] = event.createdAt
@@ -420,7 +433,7 @@ class MemoryEventStore @Inject constructor() {
             if (tag.size < 2) continue
             when (tag[0]) {
                 "relay" -> {
-                    val url = tag[1]
+                    val url = normalizeRelayUrl(tag[1]) ?: continue
                     if (seenRelayUrls.add(url)) {
                         entries.add(FavoriteEntry(url = url, setRef = null))
                     }
@@ -439,6 +452,45 @@ class MemoryEventStore @Inject constructor() {
         if (existing != entries) {
             favoritesByPubkey[event.pubkey] = entries
             _relayConfigSignal.value = System.nanoTime()
+        }
+    }
+
+    private fun handleRelaySetMaterialized(event: NostrEvent) {
+        val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
+        val coordKey = "${event.pubkey}:$dTag"
+
+        // Check tombstone — deleted sets block older events
+        val tombstoneTs = deletedRelaySetTombstones[coordKey]
+        if (tombstoneTs != null && event.createdAt <= tombstoneTs) return
+        if (tombstoneTs != null) deletedRelaySetTombstones.remove(coordKey)
+
+        // Replaceable dedup per coordinate (ownerPubkey:dTag)
+        val dedupKey = "${event.pubkey}:30002:$dTag"
+        val existingTs = relayKindCreatedAt[dedupKey]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val title = event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.get(1)
+        val description = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)
+        val image = event.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.get(1)
+        val members = event.tags
+            .filter { it.size >= 2 && it[0] == "relay" }
+            .map { it[1] }
+            .distinct()
+
+        val newSet = RelaySet(
+            dTag = dTag,
+            ownerPubkey = event.pubkey,
+            title = title,
+            description = description,
+            image = image,
+            members = members,
+        )
+
+        relayKindCreatedAt[dedupKey] = event.createdAt
+        val existing = relaySetsByCoordinate[coordKey]
+        if (existing != newSet) {
+            relaySetsByCoordinate[coordKey] = newSet
+            _relaySetSignal.value = System.nanoTime()
         }
     }
 
@@ -556,10 +608,12 @@ class MemoryEventStore @Inject constructor() {
     fun updateFollows(pubkey: String, followedPubkeys: Set<String>, createdAt: Long) {
         followsCreatedAt.compute(pubkey) { _, existingTs ->
             if (existingTs != null && existingTs > createdAt) {
+                Log.d("MES", "updateFollows: stale for ${pubkey.take(8)}… (existing=$existingTs > new=$createdAt)")
                 return@compute existingTs // stale — ignore
             }
             followsByPubkey[pubkey] = followedPubkeys
             _followsSignal.value = System.nanoTime()
+            Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt)")
             createdAt
         }
     }
@@ -788,9 +842,11 @@ class MemoryEventStore @Inject constructor() {
 
     fun followsFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { getFollows(pubkey) ?: emptySet() }
+            .flowOn(Dispatchers.Default)
 
     fun profileFlow(pubkey: String): Flow<NostrEvent?> =
         _profileSignal.map { getProfile(pubkey) }
+            .flowOn(Dispatchers.Default)
 
     /** Thread flow with fixpoint collection — re-emits when feed signal bumps. */
     fun threadFlow(rootId: String): Flow<List<NostrEvent>> =
@@ -920,6 +976,142 @@ class MemoryEventStore @Inject constructor() {
             .map { getFavoriteRelayConfigs(pubkey) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
+
+    // ─── A.5.1 T5b: Relay set query APIs ───────────────────────────────────
+
+    fun getAllRelaySets(ownerPubkey: String): List<RelaySet> =
+        relaySetsByCoordinate.values.filter { it.ownerPubkey == ownerPubkey && it.members.isNotEmpty() }
+
+    fun getSetMembers(ownerPubkey: String, dTag: String): List<String> =
+        relaySetsByCoordinate["$ownerPubkey:$dTag"]?.members ?: emptyList()
+
+    fun getAllSetsFlow(ownerPubkey: String): Flow<List<RelaySet>> =
+        _relaySetSignal
+            .map { getAllRelaySets(ownerPubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    fun getSetMembersFlow(ownerPubkey: String, dTag: String): Flow<List<String>> =
+        _relaySetSignal
+            .map { getSetMembers(ownerPubkey, dTag) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    // ─── A.5.1 T5b: Relay set CRUD mutations ──────────────────────────────
+
+    fun upsertRelaySet(set: RelaySet) {
+        val coordKey = "${set.ownerPubkey}:${set.dTag}"
+        deletedRelaySetTombstones.remove(coordKey)
+        val existing = relaySetsByCoordinate[coordKey]
+        if (existing != set) {
+            relaySetsByCoordinate[coordKey] = set
+            _relaySetSignal.value = System.nanoTime()
+        }
+    }
+
+    fun deleteRelaySet(ownerPubkey: String, dTag: String, deletedAtCreatedAt: Long) {
+        val coordKey = "$ownerPubkey:$dTag"
+        deletedRelaySetTombstones[coordKey] = deletedAtCreatedAt
+        if (relaySetsByCoordinate.remove(coordKey) != null) {
+            _relaySetSignal.value = System.nanoTime()
+        }
+    }
+
+    fun addRelayToSet(ownerPubkey: String, dTag: String, url: String) {
+        val coordKey = "$ownerPubkey:$dTag"
+        val existing = relaySetsByCoordinate[coordKey] ?: return
+        if (url in existing.members) return
+        relaySetsByCoordinate[coordKey] = existing.copy(members = existing.members + url)
+        _relaySetSignal.value = System.nanoTime()
+    }
+
+    fun removeRelayFromSet(ownerPubkey: String, dTag: String, url: String) {
+        val coordKey = "$ownerPubkey:$dTag"
+        val existing = relaySetsByCoordinate[coordKey] ?: return
+        val newMembers = existing.members.filter { it != url }
+        if (newMembers.size == existing.members.size) return
+        relaySetsByCoordinate[coordKey] = existing.copy(members = newMembers)
+        _relaySetSignal.value = System.nanoTime()
+    }
+
+    // ─── A.5.1 T5b: Optimistic relay config mutations ─────────────────────
+
+    fun addReadWriteRelay(pubkey: String, config: RelayConfig) {
+        val existing = readWriteRelayConfigsByPubkey[pubkey] ?: emptyList()
+        if (existing.any { it.url == config.url }) return
+        readWriteRelayConfigsByPubkey[pubkey] = existing + config
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun removeReadWriteRelay(pubkey: String, url: String) {
+        val existing = readWriteRelayConfigsByPubkey[pubkey] ?: return
+        val filtered = existing.filter { it.url != url }
+        if (filtered.size == existing.size) return
+        readWriteRelayConfigsByPubkey[pubkey] = filtered
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun updateRelayMarker(pubkey: String, url: String, newMarker: String?) {
+        val existing = readWriteRelayConfigsByPubkey[pubkey] ?: return
+        val updated = existing.map { if (it.url == url) it.copy(marker = newMarker) else it }
+        if (updated == existing) return
+        readWriteRelayConfigsByPubkey[pubkey] = updated
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun addBlockedRelay(pubkey: String, url: String) {
+        val existing = blockedRelaysByPubkey[pubkey] ?: emptyList()
+        if (url in existing) return
+        blockedRelaysByPubkey[pubkey] = existing + url
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun removeBlockedRelay(pubkey: String, url: String) {
+        val existing = blockedRelaysByPubkey[pubkey] ?: return
+        val filtered = existing.filter { it != url }
+        if (filtered.size == existing.size) return
+        blockedRelaysByPubkey[pubkey] = filtered
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun addSearchRelay(pubkey: String, url: String) {
+        val existing = searchRelaysByPubkey[pubkey] ?: emptyList()
+        if (url in existing) return
+        searchRelaysByPubkey[pubkey] = existing + url
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun removeSearchRelay(pubkey: String, url: String) {
+        val existing = searchRelaysByPubkey[pubkey] ?: return
+        val filtered = existing.filter { it != url }
+        if (filtered.size == existing.size) return
+        searchRelaysByPubkey[pubkey] = filtered
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun addFavoriteRelay(pubkey: String, entry: FavoriteEntry) {
+        val existing = favoritesByPubkey[pubkey] ?: emptyList()
+        if (entry.url != null && existing.any { it.url == entry.url }) return
+        if (entry.setRef != null && existing.any { it.setRef == entry.setRef }) return
+        favoritesByPubkey[pubkey] = existing + entry
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun removeFavoriteRelay(pubkey: String, url: String) {
+        val existing = favoritesByPubkey[pubkey] ?: return
+        val filtered = existing.filter { it.url != url }
+        if (filtered.size == existing.size) return
+        favoritesByPubkey[pubkey] = filtered
+        _relayConfigSignal.value = System.nanoTime()
+    }
+
+    fun removeFavoriteBySetRef(pubkey: String, setRef: String) {
+        val existing = favoritesByPubkey[pubkey] ?: return
+        val filtered = existing.filter { it.setRef != setRef }
+        if (filtered.size == existing.size) return
+        favoritesByPubkey[pubkey] = filtered
+        _relayConfigSignal.value = System.nanoTime()
+    }
 
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
@@ -1056,7 +1248,10 @@ class MemoryEventStore @Inject constructor() {
             10006 -> handleBlocked(event)
             10007 -> handleSearchRelays(event)
             10012 -> handleFavorites(event)
-            30002 -> handleParameterizedReplaceable(event)
+            30002 -> {
+                handleParameterizedReplaceable(event)
+                handleRelaySetMaterialized(event)
+            }
         }
     }
 
@@ -1160,6 +1355,33 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt.keys.removeAll(removeIds)
     }
 
+    /**
+     * Clear user-specific state (follows, relay configs, actions) but preserve
+     * the event/profile/stats cache. Used during logout so the next user
+     * benefits from already-cached public Nostr data (events, profiles, stats).
+     */
+    fun clearUserState() {
+        followsByPubkey.clear()
+        followsCreatedAt.clear()
+        followerCountCache.clear()
+        relayListsByPubkey.clear()
+        muteListsByPubkey.clear()
+        blockedRelaysByPubkey.clear()
+        searchRelaysByPubkey.clear()
+        favoritesByPubkey.clear()
+        readWriteRelayConfigsByPubkey.clear()
+        relayKindCreatedAt.clear()
+        relaySetsByCoordinate.clear()
+        deletedRelaySetTombstones.clear()
+        reactedTargetsByActor.clear()
+        repostedTargetsByActor.clear()
+        zappedTargetsByActor.clear()
+        _followsSignal.value++
+        _actionSignal.value++
+        _relayConfigSignal.value++
+        _relaySetSignal.value++
+    }
+
     fun clear() {
         eventsById.clear()
         pendingRelays.clear()
@@ -1194,6 +1416,9 @@ class MemoryEventStore @Inject constructor() {
         _followsSignal.value = 0L
         _actionSignal.value = 0L
         _relayConfigSignal.value = 0L
+        relaySetsByCoordinate.clear()
+        deletedRelaySetTombstones.clear()
+        _relaySetSignal.value = 0L
     }
 }
 
