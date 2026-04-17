@@ -93,7 +93,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.RelaySet
-import com.unsilence.app.data.memory.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.RelayHealthInfo
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
@@ -177,7 +178,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
-    val trustScores   by relayManagementVm.trustScores.collectAsStateWithLifecycle(initialValue = emptyMap())
+    val relayHealth   by relayManagementVm.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
@@ -447,7 +448,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     hasFollows      = hasFollows,
                     userSets        = userSets,
                     pinnedRelays    = pinnedRelays,
-                    trustScores     = trustScores,
+                    relayHealth     = relayHealth,
                     onFeedChanged   = { type ->
                         feedViewModel.setFeedType(type)
                         showFeedSheet = false
@@ -807,7 +808,7 @@ private fun FeedSelectorSheet(
     hasFollows: Boolean,
     userSets: List<RelaySet>,
     pinnedRelays: List<FeedType.SingleRelay>,
-    trustScores: Map<String, RelayTrustScoreEntity>,
+    relayHealth: Map<String, RelayHealthInfo>,
     onFeedChanged: (FeedType) -> Unit,
     onRemoveFavorite: (String) -> Unit,
     onNewRelaySet: () -> Unit,
@@ -891,12 +892,12 @@ private fun FeedSelectorSheet(
                 SectionLabel("Favorite Relays")
                 for (relay in visiblePinned) {
                     val selected = isSelected(relay)
-                    val trustScore = trustScores[relay.url]?.score
+                    val healthScore = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.score
                     val dotColor = when {
-                        trustScore == null -> Color(0xFF666666)
-                        trustScore >= 70   -> Color(0xFF4CAF50)
-                        trustScore >= 40   -> Color(0xFFFFC107)
-                        else               -> Color(0xFFFF5252)
+                        healthScore == null -> Color(0xFF666666)
+                        healthScore >= 70   -> Color(0xFF4CAF50)
+                        healthScore >= 40   -> Color(0xFFFFC107)
+                        else                -> Color(0xFFFF5252)
                     }
                     Row(
                         modifier = Modifier

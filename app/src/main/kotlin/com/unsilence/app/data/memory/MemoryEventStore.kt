@@ -71,6 +71,9 @@ class MemoryEventStore @Inject constructor() {
     // ─── Trust scores (kind 30385) ────────────────────────────────────────────
     private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
 
+    // ─── Relay monitors (kind 30166 / NIP-66) ─────────────────────────────────
+    private val relayMonitorsByUrl = ConcurrentHashMap<String, RelayMonitorEntity>()
+
     // ─── A.5.1 T5a: Relay config state (kinds 10002/10006/10007/10012) ──────
     private val blockedRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
     private val searchRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
@@ -104,6 +107,7 @@ class MemoryEventStore @Inject constructor() {
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
+    private val _relayMonitorSignal = MutableStateFlow(0L)
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
@@ -179,6 +183,7 @@ class MemoryEventStore @Inject constructor() {
                 handleParameterizedReplaceable(event)
                 handleRelaySetMaterialized(event)
             }
+            30166 -> handleRelayMonitor(event)
             30385 -> handleTrustScore(event)
         }
 
@@ -466,7 +471,8 @@ class MemoryEventStore @Inject constructor() {
             it.size >= 2 && it[0] == name
         }?.get(1)
 
-        val relayUrl = tag("d") ?: return
+        val rawUrl = tag("d") ?: return
+        val relayUrl = normalizeRelayUrl(rawUrl) ?: return
         val score = tag("score")?.toIntOrNull() ?: return
         val reliability = tag("reliability")?.toIntOrNull() ?: return
         val quality = tag("quality")?.toIntOrNull() ?: return
@@ -474,19 +480,76 @@ class MemoryEventStore @Inject constructor() {
         val confidence = tag("confidence") ?: return
         val observations = tag("observations")?.toIntOrNull() ?: 0
 
-        trustScoresByUrl[relayUrl] = RelayTrustScoreEntity(
-            relayUrl = relayUrl,
-            score = score,
-            reliability = reliability,
-            quality = quality,
-            accessibility = accessibility,
-            confidence = confidence,
-            observations = observations,
-            policy = tag("policy"),
-            countryCode = tag("country_code"),
-            operatorVerified = tag("operator_verified"),
-        )
+        trustScoresByUrl.compute(relayUrl) { _, existing ->
+            if (existing != null && existing.updatedAt >= event.createdAt) existing
+            else RelayTrustScoreEntity(
+                relayUrl = relayUrl,
+                score = score,
+                reliability = reliability,
+                quality = quality,
+                accessibility = accessibility,
+                confidence = confidence,
+                observations = observations,
+                policy = tag("policy"),
+                countryCode = tag("country_code"),
+                operatorVerified = tag("operator_verified"),
+                updatedAt = event.createdAt,
+            )
+        }
         _trustScoreSignal.value = System.nanoTime()
+    }
+
+    // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
+
+    private fun handleRelayMonitor(event: NostrEvent) {
+        fun tag(name: String): String? = event.tags.firstOrNull {
+            it.size >= 2 && it[0] == name
+        }?.get(1)
+
+        val rawUrl = tag("d") ?: return
+        val relayUrl = normalizeRelayUrl(rawUrl) ?: return
+
+        val rttOpen = tag("rtt-open")?.toIntOrNull()
+        val rttRead = tag("rtt-read")?.toIntOrNull()
+        val rttWrite = tag("rtt-write")?.toIntOrNull()
+
+        val supportedNips = event.tags
+            .filter { it.size >= 2 && it[0] == "N" }
+            .mapNotNull { it[1].toIntOrNull() }
+
+        val network = tag("network")
+        val geohash = tag("g")
+
+        // Extract relay icon from NIP-11 JSON in event content
+        val iconUrl = try {
+            if (event.content.isNotBlank()) {
+                val obj = NostrJson.parseToJsonElement(event.content).jsonObject
+                val icon = obj["icon"]
+                if (icon != null && icon !is JsonNull && icon is JsonPrimitive) icon.content else null
+            } else null
+        } catch (_: Exception) { null }
+
+        val requirements = event.tags
+            .filter { it.size >= 2 && it[0] == "R" }
+            .map { it[1] }
+
+        relayMonitorsByUrl.compute(relayUrl) { _, existing ->
+            if (existing != null && existing.createdAt >= event.createdAt) existing
+            else RelayMonitorEntity(
+                relayUrl = relayUrl,
+                rttOpen = rttOpen,
+                rttRead = rttRead,
+                rttWrite = rttWrite,
+                supportedNips = supportedNips,
+                network = network,
+                requirements = requirements,
+                geohash = geohash,
+                iconUrl = iconUrl,
+                monitorPubkey = event.pubkey,
+                createdAt = event.createdAt,
+            )
+        }
+        _relayMonitorSignal.value = System.nanoTime()
     }
 
     private fun handleRelaySetMaterialized(event: NostrEvent) {
@@ -1033,6 +1096,50 @@ class MemoryEventStore @Inject constructor() {
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    // ─── Relay monitor query APIs (kind 30166 / NIP-66) ──────────────────
+
+    fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
+        HashMap(relayMonitorsByUrl)
+
+    fun relayMonitorsFlow(): Flow<Map<String, RelayMonitorEntity>> =
+        _relayMonitorSignal
+            .map { getRelayMonitors() }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    // ─── Combined relay health (trust + monitor) ─────────────────────────
+
+    /**
+     * Look up health info for a relay URL, trying both raw and normalized forms.
+     * Handles the case where configured relay URLs (from kind-10002) aren't
+     * normalized but health data keys are.
+     */
+    fun getRelayHealth(url: String): RelayHealthInfo? {
+        val score = trustScoresByUrl[url] ?: normalizeRelayUrl(url)?.let { trustScoresByUrl[it] }
+        val monitor = relayMonitorsByUrl[url] ?: normalizeRelayUrl(url)?.let { relayMonitorsByUrl[it] }
+        if (score == null && monitor == null) return null
+        return RelayHealthInfo(relayUrl = url, trustScore = score, monitor = monitor)
+    }
+
+    fun relayHealthFlow(): Flow<Map<String, RelayHealthInfo>> =
+        combine(_trustScoreSignal, _relayMonitorSignal) { _, _ ->
+            val result = mutableMapOf<String, RelayHealthInfo>()
+            for ((url, score) in trustScoresByUrl) {
+                result[url] = RelayHealthInfo(url, trustScore = score, monitor = relayMonitorsByUrl[url])
+            }
+            for ((url, monitor) in relayMonitorsByUrl) {
+                val existing = result[url]
+                if (existing != null) {
+                    if (existing.monitor == null) {
+                        result[url] = existing.copy(monitor = monitor)
+                    }
+                } else {
+                    result[url] = RelayHealthInfo(url, monitor = monitor)
+                }
+            }
+            result.toMap()
+        }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
     // ─── A.5.1 T5b: Relay set query APIs ───────────────────────────────────
 
     fun getAllRelaySets(ownerPubkey: String): List<RelaySet> =
@@ -1397,32 +1504,36 @@ class MemoryEventStore @Inject constructor() {
             writer.write("zap|$id|${zap.count}|${zap.totalSats}")
             writer.newLine()
         }
+        // Write relay health section
+        writer.write("---RELAY_HEALTH---")
+        writer.newLine()
+        for ((url, ts) in trustScoresByUrl) {
+            writer.write("trust|$url|${ts.score}|${ts.reliability}|${ts.quality}|${ts.accessibility}|${ts.confidence}|${ts.observations}|${ts.policy ?: ""}|${ts.countryCode ?: ""}|${ts.operatorVerified ?: ""}|${ts.updatedAt}")
+            writer.newLine()
+        }
+        for ((url, m) in relayMonitorsByUrl) {
+            writer.write("monitor|$url|${m.rttOpen ?: ""}|${m.rttRead ?: ""}|${m.rttWrite ?: ""}|${m.monitorPubkey}|${m.createdAt}|${m.network ?: ""}|${m.geohash ?: ""}|${m.iconUrl ?: ""}|${m.supportedNips.joinToString(",")}")
+            writer.newLine()
+        }
     }
 
     suspend fun restoreSnapshotFrom(reader: BufferedReader) {
-        var inAggregates = false
+        var section = 0  // 0=events, 1=aggregates, 2=relay_health
         var versionChecked = false
 
         reader.useLines { lines ->
             for (line in lines) {
-                // First line must be the version header
                 if (!versionChecked) {
                     versionChecked = true
-                    if (line != SNAPSHOT_VERSION) {
-                        // Unknown format — treat as missing snapshot
-                        return
-                    }
+                    if (line != SNAPSHOT_VERSION) return
                     continue
                 }
-                if (line == "---AGGREGATES---") {
-                    inAggregates = true
-                    continue
-                }
-                if (inAggregates) {
-                    restoreAggregate(line)
-                } else {
-                    val event = deserializeEvent(line) ?: continue
-                    insertFromSnapshot(event)
+                if (line == "---AGGREGATES---") { section = 1; continue }
+                if (line == "---RELAY_HEALTH---") { section = 2; continue }
+                when (section) {
+                    0 -> { val event = deserializeEvent(line) ?: continue; insertFromSnapshot(event) }
+                    1 -> restoreAggregate(line)
+                    2 -> restoreRelayHealth(line)
                 }
             }
         }
@@ -1433,6 +1544,8 @@ class MemoryEventStore @Inject constructor() {
         _profileSignal.value = now
         _statsSignal.value = now
         _followsSignal.value = now
+        _trustScoreSignal.value = now
+        _relayMonitorSignal.value = now
     }
 
     private fun insertFromSnapshot(event: NostrEvent) {
@@ -1477,6 +1590,46 @@ class MemoryEventStore @Inject constructor() {
                     val total = parts[3].toLongOrNull() ?: return
                     zapStatsByEventId[parts[1]] = ZapAggregate(count, total)
                 }
+            }
+        }
+    }
+
+    private fun restoreRelayHealth(line: String) {
+        val parts = line.split("|")
+        if (parts.size < 2) return
+        when (parts[0]) {
+            "trust" -> {
+                if (parts.size < 12) return
+                val url = parts[1]
+                trustScoresByUrl[url] = RelayTrustScoreEntity(
+                    relayUrl = url,
+                    score = parts[2].toIntOrNull() ?: return,
+                    reliability = parts[3].toIntOrNull() ?: return,
+                    quality = parts[4].toIntOrNull() ?: return,
+                    accessibility = parts[5].toIntOrNull() ?: return,
+                    confidence = parts[6],
+                    observations = parts[7].toIntOrNull() ?: 0,
+                    policy = parts[8].ifEmpty { null },
+                    countryCode = parts[9].ifEmpty { null },
+                    operatorVerified = parts[10].ifEmpty { null },
+                    updatedAt = parts[11].toLongOrNull() ?: 0L,
+                )
+            }
+            "monitor" -> {
+                if (parts.size < 11) return
+                val url = parts[1]
+                relayMonitorsByUrl[url] = RelayMonitorEntity(
+                    relayUrl = url,
+                    rttOpen = parts[2].toIntOrNull(),
+                    rttRead = parts[3].toIntOrNull(),
+                    rttWrite = parts[4].toIntOrNull(),
+                    monitorPubkey = parts[5],
+                    createdAt = parts[6].toLongOrNull() ?: 0L,
+                    network = parts[7].ifEmpty { null },
+                    geohash = parts[8].ifEmpty { null },
+                    iconUrl = parts[9].ifEmpty { null },
+                    supportedNips = parts[10].split(",").mapNotNull { it.toIntOrNull() },
+                )
             }
         }
     }
@@ -1583,6 +1736,7 @@ class MemoryEventStore @Inject constructor() {
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
         trustScoresByUrl.clear()
+        relayMonitorsByUrl.clear()
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
@@ -1591,6 +1745,7 @@ class MemoryEventStore @Inject constructor() {
         _relayConfigSignal.value++
         _relaySetSignal.value++
         _trustScoreSignal.value++
+        _relayMonitorSignal.value++
     }
 
     fun clear() {
@@ -1630,8 +1785,10 @@ class MemoryEventStore @Inject constructor() {
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
         trustScoresByUrl.clear()
+        relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L
         _trustScoreSignal.value = 0L
+        _relayMonitorSignal.value = 0L
     }
 }
 

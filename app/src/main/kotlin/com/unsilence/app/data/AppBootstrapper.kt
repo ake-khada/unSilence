@@ -197,10 +197,23 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         delay(1500L)
 
-        // Fetch relay trust scores (kind 30385) — always fetch on bootstrap.
-        // MES trust scores are ephemeral (not snapshot-persisted), so they're empty after restart.
-        relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY)
-        Log.d(TAG, "Phase3: fetching relay trust scores (kind 30385)")
+        // Collect all relay URLs the user has configured (read/write, search, favorites, indexers)
+        // to fetch health data only for those specific relays.
+        val userRelayUrls = buildSet {
+            addAll(memoryEventStore.getReadWriteRelayConfigs(pubkeyHex).map { it.url })
+            addAll(memoryEventStore.getSearchRelayUrls(pubkeyHex))
+            addAll(memoryEventStore.getFavoriteRelayConfigs(pubkeyHex).mapNotNull { it.url })
+            addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
+            addAll(GLOBAL_RELAY_URLS)
+        }.toList()
+        Log.d(TAG, "Phase3: fetching relay health for ${userRelayUrls.size} configured relays")
+
+        // Fetch trust scores + relay monitors concurrently, targeted to user's relays only.
+        // Snapshot-persisted so data is available immediately on next restart.
+        val trustJob = scope.launch { relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls) }
+        val monitorJob = scope.launch { relayPool.fetchRelayMonitors() }
+        trustJob.join()
+        monitorJob.join()
 
         // Media preconnect is fire-and-forget — never block the bootstrap mutex.
         // supervisorScope inside warmUp waits for all HEAD requests; if one hangs
