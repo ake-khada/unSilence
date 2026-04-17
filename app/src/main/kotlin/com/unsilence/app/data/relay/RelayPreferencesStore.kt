@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -26,6 +27,7 @@ private val Context.relayPrefs: DataStore<Preferences> by preferencesDataStore(n
 
 private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
+private const val LAST_SEEN_PREFIX = "notif_last_seen_"
 
 @Singleton
 class RelayPreferencesStore @Inject constructor(
@@ -120,5 +122,18 @@ class RelayPreferencesStore @Inject constructor(
                 PinnedRelay(pubkey = pubkey, url = url, displayLabel = label, addedAt = addedAt)
             }
             .sortedBy { it.addedAt }
+    }
+
+    // ─── Notification Last-Seen ────────────────────────────────────────────
+
+    fun getLastSeenTimestamp(pubkey: String): Flow<Long> =
+        dataStore.data
+            .map { prefs -> prefs[longPreferencesKey("$LAST_SEEN_PREFIX$pubkey")] ?: 0L }
+            .distinctUntilChanged()
+
+    suspend fun setLastSeenTimestamp(pubkey: String, timestamp: Long) {
+        dataStore.edit { prefs ->
+            prefs[longPreferencesKey("$LAST_SEEN_PREFIX$pubkey")] = timestamp
+        }
     }
 }

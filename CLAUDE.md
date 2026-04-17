@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 17, 2026 (A.5.1 T5b shipped — relay config UI/VM, relay set resolution, login pipeline migrated to MES/DataStore)
+**Last updated:** April 17, 2026 (A.5.2 shipped — notifications migrated from Room DAO to MES scan-based queries + DataStore lastSeen)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -66,7 +66,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
                                   └→ Room DB (persistence, snapshots)
 ```
 
-**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.5.1 migration complete through T6 — feed, search, actions, threads, profiles, ephemeral trackers, relay config all read from MES/DataStore. Remaining: outbox model (A.6), Room read-path deletion (A.7).
+**Core principle:** MES-first (in-memory ConcurrentHashMap), 0ms screen render, Room for persistence only. Network fills gaps invisibly. A.5.2 complete — feed, search, actions, threads, profiles, ephemeral trackers, relay config, notifications all read from MES/DataStore. Remaining: outbox model (A.6), Room read-path deletion (A.7).
 
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
@@ -78,13 +78,13 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **MemoryEventStore** — in-memory ConcurrentHashMap store (eventsById, profilesByPubkey, statsByTarget, followsByPubkey, reactionsByActor, repostsByActor). Signal-driven reactive Flows: `_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal` drive `.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)` patterns. All scan Flows MUST use `flowOn(Dispatchers.Default)` — MES has no internal IO dispatching like Room; without flowOn, scans run on Main thread causing ANR
 - **CoverageTracker / SyncTracker** — in-memory replacements for CoverageDao+SyncStateDao (ephemeral session-scoped relay sync state). ConcurrentHashMap-backed, not suspend, no Room dependency
 - **SearchViewModel** — NIP-50 search with 1000ms debounce, min 3-char filter, distinctUntilChanged, collectLatest cancellation. Local results from MES (`searchNotesFlow`, `searchUsersFlow`), relay results via token-correlated SharedFlow + `feedRowsByIdsFlow`. Token-based session tracking: each new query generates a token, `relayPool.closeSearch(token)` sends CLOSE frames for prior search subs before issuing new REQs. Search sub-IDs (`search-profiles-$token`, `search-notes-$token`) registered in `_activeOneShotSubs` so EOSE auto-closes work. `onCleared()` sends final CLOSE. RelayPool.searchNotes also runs a 10-second safety-net timeout that force-closes any search subscription whose EOSE never arrives — this handles relays (e.g. ditto.pub for search-notes) that treat NIP-50 search as a streaming subscription rather than a bounded query
-- **RelayPreferencesStore** — DataStore-backed persistence for kind-99 indexer URLs and pinned relays. StateFlow cache with suspending and snapshot reads. Replaces relayConfigDao for indexer URL reads across all VMs and RelayPool
+- **RelayPreferencesStore** — DataStore-backed persistence for kind-99 indexer URLs, pinned relays, and notification lastSeen timestamps (per-user). StateFlow cache with suspending and snapshot reads. Replaces relayConfigDao for indexer URL reads across all VMs and RelayPool
 - **AppBootstrapper** — 3-phase staggered init, bootstrap job cancellation (new login cancels in-progress bootstrap), MES follows seeded from Room, MediaPreconnect fire-and-forget, BackgroundSyncWorker (skeleton)
 
 ### Room v18 Tables
 events, users, follows, reactions, event_stats, tags, event_relays, relay_configs, nostr_relay_sets, nostr_relay_set_members, coverage, pinned_relays, relay_trust_scores, sync_state
 
-**Note:** `coverage`, `sync_state`, `relay_configs`, `nostr_relay_sets`, `nostr_relay_set_members`, and `pinned_relays` tables are no longer read at runtime — replaced by MES + DataStore (A.5.1 T5/T6). Tables remain in schema but are dead code pending A.7 cleanup. `relay_trust_scores` is still read from Room (not yet migrated).
+**Note:** `coverage`, `sync_state`, `relay_configs`, `nostr_relay_sets`, `nostr_relay_set_members`, and `pinned_relays` tables are no longer read at runtime — replaced by MES + DataStore (A.5.1 T5/T6). NotificationsDao queries (5-branch UNION ALL over events/users/reactions/event_stats) are no longer used — replaced by MES scan-based `getNotifications()` (A.5.2). Tables remain in schema but are dead code pending A.7 cleanup. `relay_trust_scores` is still read from Room (not yet migrated).
 
 ### Room Migrations
 - Index names: `index_tablename_col1_col2` convention (backticks in SQL)
@@ -185,6 +185,8 @@ Validation discipline: When validation criteria fail, revert first, investigate 
 **Logout:** `isLoggedIn=false` (destroys Compose tree) → `bootstrapper.teardown()` (cancel bootstrap, disconnect, MES.clear(), delete snapshot, clear credentials, release ExoPlayer on Main). No exitProcess — singletons survive, `key(sessionKey)` forces fresh VM creation on re-login
 
 **Relay config:** 5 indexers (purplepag.es etc.) in DataStore (kind 99), 5 search (NIP-50) in MES, 6 global defaults, cap 13+3 browse. All relay config read from MES signal-driven Flows + RelayPreferencesStore; Room tables are write-only (outbox echo) pending A.7 deletion
+
+**Notifications:** MES scan-based — `getNotifications()` walks `idsByKind` for kinds 1/6/7/9735, filters by `#p` tag match, resolves actor profiles and target note content inline. No insert-time index. `notificationsFlow()` driven by `combine(_feedSignal, _statsSignal)`. Read/unread (blue dot) via DataStore per-user `notif_last_seen_{pubkey}` key in RelayPreferencesStore
 
 ---
 
