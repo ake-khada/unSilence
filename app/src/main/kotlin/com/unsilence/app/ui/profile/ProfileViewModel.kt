@@ -49,7 +49,7 @@ class ProfileViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val relayListDao: RelayListDao,
     private val cardHydrator: CardHydrator,
-    private val relayConfigDao: com.unsilence.app.data.db.dao.RelayConfigDao,
+    private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -257,7 +257,7 @@ class ProfileViewModel @Inject constructor(
 
             // Also publish to indexer relays for discoverability
             val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
-            val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+            val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             val targetUrls = (writeUrls + indexerUrls).distinct()
             relayPool.publishToRelays(toEventJson(signed), targetUrls)
 

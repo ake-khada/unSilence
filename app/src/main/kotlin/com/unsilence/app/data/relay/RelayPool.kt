@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -67,7 +66,7 @@ enum class ConnectionPurpose { PERSISTENT, BROWSE, OUTBOX }
 class RelayPool @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val processor: EventProcessor,
-    private val relayConfigDao: dagger.Lazy<com.unsilence.app.data.db.dao.RelayConfigDao>,
+    private val relayPreferencesStore: dagger.Lazy<RelayPreferencesStore>,
     private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
     private val coverageTracker: dagger.Lazy<com.unsilence.app.data.cache.CoverageTracker>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
@@ -208,11 +207,18 @@ class RelayPool @Inject constructor(
      * Send a one-shot REQ to a relay, queuing if the relay is at its concurrent sub limit.
      * Drops REQs when the relay is in rate-limit cooldown or token-starved.
      * Call this instead of conn.send(req) for all one-shot subscription REQs.
+     *
+     * Prefetch subs (sub-ID starting with "prefetch-") are capped at 8 slots,
+     * reserving 2 slots for high-priority work (profile fetches, user posts,
+     * relay ecosystem). Without this reservation, prefetch floods all 10 slots
+     * and starves profile page content.
      */
     private fun sendOneShotToRelay(conn: RelayConnection, req: String) {
         val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
+        val isPrefetch = req.contains("\"prefetch-")
+        val effectiveCap = if (isPrefetch) MAX_CONCURRENT_REQS_PER_RELAY - 2 else MAX_CONCURRENT_REQS_PER_RELAY
         // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
-        if (count.get() >= MAX_CONCURRENT_REQS_PER_RELAY || !canSendToRelay(conn.url)) {
+        if (count.get() >= effectiveCap || !canSendToRelay(conn.url)) {
             val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
             queue.add(req)
             Log.d(TAG, "Queued REQ for ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
@@ -311,6 +317,9 @@ class RelayPool @Inject constructor(
     init {
         processor.prefetchDispatcher = PrefetchDispatcher { relayUrl, eventIds ->
             fetchEventsByIdsFromRelay(relayUrl, eventIds)
+        }
+        processor.relaySetRefFetcher = RelaySetRefFetcher { author, dTags, hintRelayUrls ->
+            scope.launch { fetchRelaySetsByCoordinate(author, dTags, hintRelayUrls) }
         }
     }
 
@@ -864,7 +873,7 @@ class RelayPool @Inject constructor(
 
                 // Ensure indexer relays are connected before sending the kind-3 REQ —
                 // they may have been evicted by idle timer or not yet connected on navigation.
-                val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+                val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
                 connectAndAwait(indexerUrls, timeoutMs = 3_000, forceEvict = true)
                 val targets = indexerUrls.mapNotNull { connections[it] }
                     .ifEmpty { connections.values.take(3).toList() }
@@ -940,7 +949,7 @@ class RelayPool @Inject constructor(
     fun fetchRelayLists(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
         // Send to indexer relays only (not all connections) to avoid broadcast storm
-        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
         val indexerConns = indexerUrls.mapNotNull { connections[it] }
         val targets = indexerConns.ifEmpty { connections.values.take(3) }
         // Chunk to keep individual filters under 500 authors
@@ -966,8 +975,9 @@ class RelayPool @Inject constructor(
      * replaceable events, so we only need the latest for the logged-in user.
      */
     fun fetchRelayEcosystem(pubkeyHex: String, rawIndexerRelayUrls: List<String>) {
-        val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }
+        val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val subId = "relay-ecosystem-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -982,10 +992,59 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(50))
             })
         }.toString()
-        for (url in indexerRelayUrls) {
+        // Send to indexers + user's connected write relays. NIP-51 replaceable events
+        // are published to write relays (by Jumble, Keychat, etc.), not indexers.
+        // Indexers (purplepag.es etc.) focus on kind 0/3/10002 and may not store
+        // kinds 10006/10007/10012/30002.
+        val writeRelayUrls = connections.keys
+            .filter { hasPurpose(it, ConnectionPurpose.OUTBOX) }
+            .filter { it !in indexerRelayUrls }
+        val allTargets = indexerRelayUrls + writeRelayUrls
+        for (url in allTargets) {
             connections[url]?.let { sendOneShotToRelay(it, req) }
         }
-        Log.d(TAG, "Fetching NIP-51 relay ecosystem for $pubkeyHex from ${indexerRelayUrls.size} indexers")
+        Log.d(TAG, "Fetching NIP-51 relay ecosystem for ${pubkeyHex.take(8)}… from ${indexerRelayUrls.size} indexers + ${writeRelayUrls.size} write relays")
+    }
+
+    /**
+     * Fetch kind-30002 relay sets by coordinate (author + d-tags) from hint relays.
+     * Used to resolve ["a", "30002:pubkey:dtag", "hint-relay"] references in kind-10012.
+     * Connects to hint relays if not already connected, sends a single REQ with
+     * #d filter to fetch all referenced sets in one subscription.
+     */
+    suspend fun fetchRelaySetsByCoordinate(
+        authorPubkey: String,
+        dTags: List<String>,
+        hintRelayUrls: List<String>,
+    ) {
+        if (dTags.isEmpty() || hintRelayUrls.isEmpty()) return
+        val normalized = hintRelayUrls.mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in blockedUrls }
+        if (normalized.isEmpty()) return
+
+        connectAndAwait(normalized, timeoutMs = 3_000)
+
+        val subId = "setref-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30002)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(authorPubkey)) })
+                put("#d", buildJsonArray { dTags.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(dTags.size))
+            })
+        }.toString()
+
+        var sent = 0
+        for (url in normalized) {
+            connections[url]?.let { conn ->
+                sendOneShotToRelay(conn, req)
+                sent++
+            }
+        }
+        Log.d(TAG, "fetchRelaySetsByCoordinate: ${dTags.size} sets from $sent hint relay(s) for ${authorPubkey.take(8)}…")
     }
 
     /**
@@ -1109,7 +1168,7 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
         val indexerConns = indexerUrls.mapNotNull { connections[it] }.take(maxRelays)
         // Supplement with general relays if needed (at least 1 target)
         val minTargets = minOf(maxRelays, 3)
@@ -1349,7 +1408,7 @@ class RelayPool @Inject constructor(
         // Broadened relay targeting: non-indexer relays first, then indexer relays
         // for coverage. Previously limited to 3 non-indexer relays which missed
         // events on less-replicated relays.
-        val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
         val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
         val indexer = connections.values.filter { it.url in indexerUrls }
@@ -1423,7 +1482,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        val indexerUrls = relayConfigDao.get().getIndexerRelayUrls()
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
 
         if (relayHints.isNotEmpty()) {
@@ -1720,7 +1779,7 @@ class RelayPool @Inject constructor(
         val targets = if (browseTargets.isNotEmpty()) {
             browseTargets.mapNotNull { connections[it] }
         } else {
-            val indexerUrls = runBlocking { relayConfigDao.get().getIndexerRelayUrls() }
+            val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
                 .mapNotNull { normalizeRelayUrl(it) }.toSet()
             connections.values.filter { it.url !in indexerUrls }.take(3)
         }

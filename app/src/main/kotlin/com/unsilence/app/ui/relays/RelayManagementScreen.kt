@@ -66,9 +66,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
-import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.FavoriteEntry
+import com.unsilence.app.data.memory.RelayConfig
+import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -187,13 +188,13 @@ fun RelayManagementScreen(
                                 viewModel.addReadWriteRelay(url)
                             }
                         }
-                        items(readWriteRelays, key = { it.id }) { relay ->
+                        items(readWriteRelays, key = { it.url }) { relay ->
                             ReadWriteRelayRow(
                                 relay          = relay,
-                                trustScore     = trustScores[relay.relayUrl],
+                                trustScore     = trustScores[relay.url],
                                 onToggleMarker = { viewModel.toggleMarker(relay) },
-                                onRemove       = { viewModel.removeReadWriteRelay(relay.relayUrl) },
-                                onTrustTap     = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
+                                onRemove       = { viewModel.removeReadWriteRelay(relay.url) },
+                                onTrustTap     = { trustScores[relay.url]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -216,12 +217,12 @@ fun RelayManagementScreen(
                                 )
                             }
                         }
-                        items(indexerRelays, key = { it.id }) { relay ->
+                        items(indexerRelays, key = { it }) { url ->
                             SimpleRelayRow(
-                                url        = relay.relayUrl,
-                                onRemove   = { viewModel.removeIndexerRelay(relay.relayUrl) },
-                                trustScore = trustScores[relay.relayUrl],
-                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
+                                url        = url,
+                                onRemove   = { viewModel.removeIndexerRelay(url) },
+                                trustScore = trustScores[url],
+                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -234,12 +235,12 @@ fun RelayManagementScreen(
                                 viewModel.addSearchRelay(url)
                             }
                         }
-                        items(searchRelays, key = { it.id }) { relay ->
+                        items(searchRelays, key = { it }) { url ->
                             SimpleRelayRow(
-                                url        = relay.relayUrl,
-                                onRemove   = { viewModel.removeSearchRelay(relay.relayUrl) },
-                                trustScore = trustScores[relay.relayUrl],
-                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
+                                url        = url,
+                                onRemove   = { viewModel.removeSearchRelay(url) },
+                                trustScore = trustScores[url],
+                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -274,34 +275,18 @@ fun RelayManagementScreen(
                                 viewModel.addFavoriteRelay(url)
                             }
                         }
-                        // Individual relay favorites
-                        val relayFavorites = favoriteRelays.filter { it.setRef == null }
-                        items(relayFavorites, key = { it.id }) { relay ->
+                        val relayFavorites = favoriteRelays.filter { it.setRef == null && it.url != null }
+                        items(relayFavorites, key = { it.url!! }) { fav ->
                             FavoriteRelayRow(
-                                url        = relay.relayUrl,
+                                url        = fav.url!!,
                                 relaySets  = relaySets,
-                                onRemove   = { viewModel.removeFavoriteRelay(relay.relayUrl) },
-                                onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, relay.relayUrl) },
+                                trustScore = trustScores[fav.url],
+                                onRemove   = { viewModel.removeFavoriteRelay(fav.url!!) },
+                                onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, fav.url!!) },
+                                onTrustTap = { trustScores[fav.url]?.let { trustDetailRelay = it } },
                                 onStartFeed = onStartFeed?.let { cb ->
-                                    { cb(relay.relayUrl, displayUrl(relay.relayUrl)) }
+                                    { cb(fav.url!!, displayUrl(fav.url!!)) }
                                 },
-                            )
-                        }
-                        // Set-reference favorites
-                        val setRefs = favoriteRelays.mapNotNull { it.setRef }.distinct()
-                        items(setRefs, key = { "setref_$it" }) { ref ->
-                            SimpleRelayRow(
-                                url      = ref,
-                                onRemove = { viewModel.removeFavoriteSetRef(ref) },
-                            )
-                        }
-                        // Set picker
-                        item {
-                            FavoriteSetPicker(
-                                ownerPubkey    = viewModel.ownerPubkey,
-                                relaySets      = relaySets,
-                                favoriteRelays = favoriteRelays,
-                                onAddSetRef    = { viewModel.addFavoriteSetRef(it) },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -314,12 +299,12 @@ fun RelayManagementScreen(
                                 viewModel.addBlockedRelay(url)
                             }
                         }
-                        items(blockedRelays, key = { it.id }) { relay ->
+                        items(blockedRelays, key = { it }) { url ->
                             SimpleRelayRow(
-                                url        = relay.relayUrl,
-                                onRemove   = { viewModel.removeBlockedRelay(relay.relayUrl) },
-                                trustScore = trustScores[relay.relayUrl],
-                                onTrustTap = { trustScores[relay.relayUrl]?.let { trustDetailRelay = it } },
+                                url        = url,
+                                onRemove   = { viewModel.removeBlockedRelay(url) },
+                                trustScore = trustScores[url],
+                                onTrustTap = { trustScores[url]?.let { trustDetailRelay = it } },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -415,7 +400,7 @@ private fun SimpleRelayRow(
 
 @Composable
 private fun ReadWriteRelayRow(
-    relay: RelayConfigEntity,
+    relay: RelayConfig,
     trustScore: RelayTrustScoreEntity?,
     onToggleMarker: () -> Unit,
     onRemove: () -> Unit,
@@ -431,7 +416,7 @@ private fun ReadWriteRelayRow(
         TrustScoreDot(trustScore, onClick = onTrustTap)
         Spacer(Modifier.width(8.dp))
         Text(
-            text     = displayUrl(relay.relayUrl),
+            text     = displayUrl(relay.url),
             color    = Color.White,
             fontSize = 13.sp,
             modifier = Modifier.weight(1f),
@@ -466,9 +451,11 @@ private fun ReadWriteRelayRow(
 @Composable
 private fun FavoriteRelayRow(
     url: String,
-    relaySets: List<NostrRelaySetEntity>,
+    relaySets: List<RelaySet>,
+    trustScore: RelayTrustScoreEntity? = null,
     onRemove: () -> Unit,
     onAddToSet: (dTag: String) -> Unit,
+    onTrustTap: () -> Unit = {},
     onStartFeed: (() -> Unit)?,
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -479,6 +466,8 @@ private fun FavoriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        TrustScoreDot(trustScore, onClick = onTrustTap)
+        Spacer(Modifier.width(8.dp))
         Text(
             text = displayUrl(url),
             color = Color.White,
@@ -532,43 +521,8 @@ private fun FavoriteRelayRow(
 }
 
 @Composable
-private fun FavoriteSetPicker(
-    ownerPubkey: String?,
-    relaySets: List<NostrRelaySetEntity>,
-    favoriteRelays: List<RelayConfigEntity>,
-    onAddSetRef: (String) -> Unit,
-) {
-    val pk = ownerPubkey ?: return
-    if (relaySets.isEmpty()) return
-    val unfavorited = relaySets.filter { set ->
-        val ref = "30002:$pk:${set.dTag}"
-        favoriteRelays.none { it.setRef == ref }
-    }
-    if (unfavorited.isEmpty()) return
-    Text(
-        text = "Add relay set to favorites",
-        color = TextSecondary,
-        fontSize = 12.sp,
-        modifier = Modifier.padding(start = Spacing.medium, top = 8.dp, bottom = 4.dp),
-    )
-    unfavorited.forEach { set ->
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onAddSetRef("30002:$pk:${set.dTag}") }
-                .padding(horizontal = Spacing.medium, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Cyan, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(text = set.title ?: set.dTag, color = Color.White, fontSize = 14.sp)
-        }
-    }
-}
-
-@Composable
 private fun RelaySetRow(
-    set: NostrRelaySetEntity,
+    set: RelaySet,
     viewModel: RelayManagementViewModel,
     onDelete: () -> Unit,
 ) {
@@ -605,9 +559,9 @@ private fun RelaySetRow(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(displayUrl(member.relayUrl), color = TextSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Text(displayUrl(member), color = TextSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
                         IconButton(
-                            onClick = { viewModel.removeRelayFromSet(set.dTag, member.relayUrl) },
+                            onClick = { viewModel.removeRelayFromSet(set.dTag, member) },
                             modifier = Modifier.size(24.dp),
                         ) {
                             Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(14.dp))

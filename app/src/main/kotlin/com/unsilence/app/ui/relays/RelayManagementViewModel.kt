@@ -4,14 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.NostrRelaySetDao
-import com.unsilence.app.data.db.dao.RelayConfigDao
 import com.unsilence.app.data.db.dao.RelayTrustScoreDao
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
 import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
-import com.unsilence.app.data.db.entity.NostrRelaySetMemberEntity
-import com.unsilence.app.data.db.entity.RelayConfigEntity
+import com.unsilence.app.data.memory.FavoriteEntry
+import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.RelayConfig
+import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -31,8 +31,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class RelayManagementViewModel @Inject constructor(
-    private val relayConfigDao: RelayConfigDao,
-    private val nostrRelaySetDao: NostrRelaySetDao,
+    private val memoryEventStore: MemoryEventStore,
+    private val relayPreferencesStore: RelayPreferencesStore,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
@@ -42,23 +42,27 @@ class RelayManagementViewModel @Inject constructor(
     val ownerPubkey: String? get() = keyManager.getPublicKeyHex()
 
     /** Kind 10002 read/write relays. */
-    val readWriteRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getReadWriteRelays()
+    val readWriteRelays: Flow<List<RelayConfig>> =
+        ownerPubkey?.let { memoryEventStore.readWriteRelayConfigsFlow(it) } ?: emptyFlow()
 
     /** Kind 10006 blocked relays. */
-    val blockedRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getBlockedRelays()
+    val blockedRelays: Flow<List<String>> =
+        ownerPubkey?.let { memoryEventStore.blockedRelayUrlsFlow(it) } ?: emptyFlow()
 
     /** Kind 10007 search relays. */
-    val searchRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getSearchRelays()
+    val searchRelays: Flow<List<String>> =
+        ownerPubkey?.let { memoryEventStore.searchRelayUrlsFlow(it) } ?: emptyFlow()
 
     /** Kind 10012 favorite relays. */
-    val favoriteRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getFavoriteRelays()
+    val favoriteRelays: Flow<List<FavoriteEntry>> =
+        ownerPubkey?.let { memoryEventStore.favoriteRelayConfigsFlow(it) } ?: emptyFlow()
 
     /** Kind 99 (local-only) indexer relays. */
-    val indexerRelays: Flow<List<RelayConfigEntity>> = relayConfigDao.getIndexerRelays()
+    val indexerRelays: Flow<List<String>> = relayPreferencesStore.indexerRelayUrlsFlow()
 
     /** Kind 30002 relay sets. */
-    val relaySets: Flow<List<NostrRelaySetEntity>> =
-        ownerPubkey?.let { nostrRelaySetDao.getAllSets(it) } ?: emptyFlow()
+    val relaySets: Flow<List<RelaySet>> =
+        ownerPubkey?.let { memoryEventStore.getAllSetsFlow(it) } ?: emptyFlow()
 
     /** Relay trust scores keyed by URL for quick lookup. */
     val trustScores: Flow<Map<String, RelayTrustScoreEntity>> =
@@ -73,36 +77,31 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addReadWriteRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(
-                    kind = 10002,
-                    relayUrl = normalized,
-                    marker = null,  // both read + write
-                    eventCreatedAt = nowSeconds(),
-                )
-            )
+            memoryEventStore.addReadWriteRelay(pk, RelayConfig(normalized, null))
             publishChanges(10002)
         }
     }
 
     fun removeReadWriteRelay(url: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteRelay(10002, url)
+            memoryEventStore.removeReadWriteRelay(pk, url)
             publishChanges(10002)
         }
     }
 
-    fun toggleMarker(relay: RelayConfigEntity) {
+    fun toggleMarker(relay: RelayConfig) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            // Cycle: both → read-only → write-only → both
             val newMarker = when (relay.marker) {
                 null    -> "read"
                 "read"  -> "write"
                 "write" -> null
                 else    -> null
             }
-            relayConfigDao.insert(relay.copy(marker = newMarker, eventCreatedAt = nowSeconds()))
+            memoryEventStore.updateRelayMarker(pk, relay.url, newMarker)
             publishChanges(10002)
         }
     }
@@ -111,19 +110,19 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addBlockedRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(kind = 10006, relayUrl = normalized, eventCreatedAt = nowSeconds())
-            )
-            relayPool.onBlockedRelaysChanged(relayConfigDao.blockedRelayUrls().toSet())
+            memoryEventStore.addBlockedRelay(pk, normalized)
+            relayPool.onBlockedRelaysChanged(memoryEventStore.getBlockedRelayUrls(pk).toSet())
             publishChanges(10006)
         }
     }
 
     fun removeBlockedRelay(url: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteRelay(10006, url)
-            relayPool.refreshBlockedRelays()
+            memoryEventStore.removeBlockedRelay(pk, url)
+            relayPool.onBlockedRelaysChanged(memoryEventStore.getBlockedRelayUrls(pk).toSet())
             publishChanges(10006)
         }
     }
@@ -132,17 +131,17 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addSearchRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(kind = 10007, relayUrl = normalized, eventCreatedAt = nowSeconds())
-            )
+            memoryEventStore.addSearchRelay(pk, normalized)
             publishChanges(10007)
         }
     }
 
     fun removeSearchRelay(url: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteRelay(10007, url)
+            memoryEventStore.removeSearchRelay(pk, url)
             publishChanges(10007)
         }
     }
@@ -151,33 +150,33 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addFavoriteRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(kind = 10012, relayUrl = normalized, eventCreatedAt = nowSeconds())
-            )
+            memoryEventStore.addFavoriteRelay(pk, FavoriteEntry(normalized, null))
             publishChanges(10012)
         }
     }
 
     fun removeFavoriteRelay(url: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteRelay(10012, url)
+            memoryEventStore.removeFavoriteRelay(pk, url)
             publishChanges(10012)
         }
     }
 
     fun addFavoriteSetRef(setRef: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(kind = 10012, relayUrl = "", setRef = setRef, eventCreatedAt = nowSeconds())
-            )
+            memoryEventStore.addFavoriteRelay(pk, FavoriteEntry(null, setRef))
             publishChanges(10012)
         }
     }
 
     fun removeFavoriteSetRef(setRef: String) {
+        val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteBySetRef(10012, setRef)
+            memoryEventStore.removeFavoriteBySetRef(pk, setRef)
             publishChanges(10012)
         }
     }
@@ -187,15 +186,13 @@ class RelayManagementViewModel @Inject constructor(
     fun addIndexerRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.insert(
-                RelayConfigEntity(kind = 99, relayUrl = normalized)
-            )
+            relayPreferencesStore.addIndexerUrl(normalized)
         }
     }
 
     fun removeIndexerRelay(url: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            relayConfigDao.deleteRelay(99, url)
+            relayPreferencesStore.removeIndexerUrl(url)
         }
     }
 
@@ -208,17 +205,16 @@ class RelayManagementViewModel @Inject constructor(
             // Handle d-tag collision: append numeric suffix if needed
             var dTag = baseDTag
             var suffix = 1
-            while (nostrRelaySetDao.maxCreatedAt(dTag, pk) != null) {
+            val existingSets = memoryEventStore.getAllRelaySets(pk)
+            val existingDTags = existingSets.map { it.dTag }.toSet()
+            while (dTag in existingDTags) {
                 suffix++
                 dTag = "$baseDTag-$suffix"
             }
 
             val members = relays.mapNotNull { normalizeRelayUrl(it) }
-                .map { NostrRelaySetMemberEntity(setDTag = dTag, ownerPubkey = pk, relayUrl = it) }
-            nostrRelaySetDao.replaceSet(
-                NostrRelaySetEntity(dTag = dTag, ownerPubkey = pk, title = name),
-                members,
-                nowSeconds(),
+            memoryEventStore.upsertRelaySet(
+                RelaySet(dTag = dTag, ownerPubkey = pk, title = name, members = members)
             )
             publishRelaySet(dTag)
         }
@@ -227,25 +223,21 @@ class RelayManagementViewModel @Inject constructor(
     fun deleteRelaySet(dTag: String) {
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            nostrRelaySetDao.deleteMembersByDTag(dTag, pk)
-            nostrRelaySetDao.deleteSet(dTag, pk)
-            // Publish empty relay set to delete on relays (NIP-51 deletion)
+            memoryEventStore.deleteRelaySet(pk, dTag, nowSeconds())
             publishRelaySet(dTag)
         }
     }
 
-    fun getSetMembers(dTag: String): Flow<List<NostrRelaySetMemberEntity>> {
+    fun getSetMembers(dTag: String): Flow<List<String>> {
         val pk = ownerPubkey ?: return emptyFlow()
-        return nostrRelaySetDao.getSetMembers(dTag, pk)
+        return memoryEventStore.getSetMembersFlow(pk, dTag)
     }
 
     fun addRelayToSet(dTag: String, url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            nostrRelaySetDao.insertMembers(
-                listOf(NostrRelaySetMemberEntity(setDTag = dTag, ownerPubkey = pk, relayUrl = normalized))
-            )
+            memoryEventStore.addRelayToSet(pk, dTag, normalized)
             publishRelaySet(dTag)
         }
     }
@@ -253,7 +245,7 @@ class RelayManagementViewModel @Inject constructor(
     fun removeRelayFromSet(dTag: String, url: String) {
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            nostrRelaySetDao.deleteMember(dTag, pk, url)
+            memoryEventStore.removeRelayFromSet(pk, dTag, url)
             publishRelaySet(dTag)
         }
     }
@@ -261,24 +253,24 @@ class RelayManagementViewModel @Inject constructor(
     // ── Publishing ────────────────────────────────────────────────────────────
 
     private suspend fun publishChanges(kind: Int): Unit = publishMutex.withLock {
+        val pk = ownerPubkey ?: return
         publishing.value = true
         try {
             val now = nowSeconds()
-            val configs = relayConfigDao.getAllReadWriteRelays()
 
             val tags: Array<Array<String>>
             val publishKind: Int
 
             when (kind) {
                 10002 -> {
-                    val allKind10002 = relayConfigDao.getAllReadWriteRelays()
-                    tags = allKind10002.mapNotNull { relay ->
+                    val allRelays = memoryEventStore.getReadWriteRelayConfigs(pk)
+                    tags = allRelays.mapNotNull { relay ->
                         val isRead = relay.marker == null || relay.marker == "read"
                         val isWrite = relay.marker == null || relay.marker == "write"
                         when {
-                            isRead && isWrite -> arrayOf("r", relay.relayUrl)
-                            isRead            -> arrayOf("r", relay.relayUrl, "read")
-                            isWrite           -> arrayOf("r", relay.relayUrl, "write")
+                            isRead && isWrite -> arrayOf("r", relay.url)
+                            isRead            -> arrayOf("r", relay.url, "read")
+                            isWrite           -> arrayOf("r", relay.url, "write")
                             else              -> null
                         }
                     }.toTypedArray()
@@ -286,21 +278,21 @@ class RelayManagementViewModel @Inject constructor(
                 }
                 10006, 10007 -> {
                     val list = when (kind) {
-                        10006 -> relayConfigDao.blockedRelayUrls()
-                        10007 -> relayConfigDao.searchRelayUrls()
+                        10006 -> memoryEventStore.getBlockedRelayUrls(pk)
+                        10007 -> memoryEventStore.getSearchRelayUrls(pk)
                         else -> emptyList()
                     }
                     tags = list.map { arrayOf("relay", it) }.toTypedArray()
                     publishKind = kind
                 }
                 10012 -> {
-                    val favoriteConfigs = relayConfigDao.getAllFavoriteRelays()
+                    val favorites = memoryEventStore.getFavoriteRelayConfigs(pk)
                     val tagsList = mutableListOf<Array<String>>()
-                    for (config in favoriteConfigs) {
-                        if (config.setRef != null) {
-                            tagsList.add(arrayOf("a", config.setRef))
-                        } else {
-                            tagsList.add(arrayOf("relay", config.relayUrl))
+                    for (fav in favorites) {
+                        if (fav.setRef != null) {
+                            tagsList.add(arrayOf("a", fav.setRef))
+                        } else if (fav.url != null) {
+                            tagsList.add(arrayOf("relay", fav.url))
                         }
                     }
                     tags = tagsList.toTypedArray()
@@ -318,8 +310,10 @@ class RelayManagementViewModel @Inject constructor(
             val signed = signingManager.sign(template) ?: return
 
             val eventJson = toEventJson(signed)
-            val writeUrls = configs.filter { it.marker == null || it.marker == "write" }.map { it.relayUrl }
-            val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+            val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
+                .filter { it.marker == null || it.marker == "write" }
+                .map { it.url }
+            val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
         } finally {
             publishing.value = false
@@ -331,11 +325,11 @@ class RelayManagementViewModel @Inject constructor(
         publishing.value = true
         try {
             val now = nowSeconds()
-            val members = nostrRelaySetDao.getSetMembersSnapshot(dTag, pk)
+            val members = memoryEventStore.getSetMembers(pk, dTag)
             val tagsList = mutableListOf<Array<String>>()
             tagsList.add(arrayOf("d", dTag))
-            for (member in members) {
-                tagsList.add(arrayOf("relay", member.relayUrl))
+            for (url in members) {
+                tagsList.add(arrayOf("relay", url))
             }
 
             val template = EventTemplate<Event>(
@@ -347,9 +341,10 @@ class RelayManagementViewModel @Inject constructor(
             val signed = signingManager.sign(template) ?: return
 
             val eventJson = toEventJson(signed)
-            val configs = relayConfigDao.getAllReadWriteRelays()
-            val writeUrls = configs.filter { it.marker == null || it.marker == "write" }.map { it.relayUrl }
-            val indexerUrls = relayConfigDao.getIndexerRelayUrls()
+            val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
+                .filter { it.marker == null || it.marker == "write" }
+                .map { it.url }
+            val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
         } finally {
             publishing.value = false

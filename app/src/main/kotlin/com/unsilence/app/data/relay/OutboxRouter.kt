@@ -3,12 +3,8 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.db.dao.FollowDao
-import com.unsilence.app.data.db.dao.NostrRelaySetDao
 import com.unsilence.app.data.db.dao.RelayListDao
 import com.unsilence.app.data.db.entity.FollowEntity
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
-import com.unsilence.app.data.db.entity.NostrRelaySetMemberEntity
-import com.unsilence.app.data.db.entity.RelayConfigEntity
 import com.unsilence.app.data.db.entity.RelayListEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,7 +45,6 @@ class OutboxRouter @Inject constructor(
     private val keyManager: KeyManager,
     private val followDao: FollowDao,
     private val relayListDao: RelayListDao,
-    private val nostrRelaySetDao: NostrRelaySetDao,
     private val relayPool: RelayPool,
 ) {
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -143,35 +138,24 @@ class OutboxRouter @Inject constructor(
 
     /**
      * Called by EventProcessor for kind 10006 (blocked) and 10007 (search) events.
-     * Parses ["relay", url] tags → RelayConfigEntity list.
+     * MES handles state via insert() handlers; this just logs.
      */
     suspend fun handleRelayKindList(obj: kotlinx.serialization.json.JsonObject, kind: Int) {
         val pubkey    = obj["pubkey"]?.jsonPrimitive?.content ?: return
         val tags      = obj["tags"]?.jsonArray ?: return
         val createdAt = obj["created_at"]?.jsonPrimitive?.longOrNull ?: return
 
-        // Only process our own lists
         if (pubkey != keyManager.getPublicKeyHex()) return
 
-        val entities = tags
-            .filter { tag ->
-                val arr = tag.jsonArray
-                arr.getOrNull(0)?.jsonPrimitive?.content == "relay"
-            }
-            .mapNotNull { tag ->
-                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
-                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
-                RelayConfigEntity(kind = kind, relayUrl = url)
-            }
-
-        // Room write removed (T5a): MES handles relay config state via insert() handlers.
-        Log.d(TAG, "Received ${entities.size} relay configs for kind $kind (created_at=$createdAt)")
+        val count = tags.count { tag ->
+            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "relay"
+        }
+        Log.d(TAG, "Received $count relay configs for kind $kind (created_at=$createdAt)")
     }
 
     /**
      * Called by EventProcessor for kind 10012 (favorite/browsable relays).
-     * Parses both ["relay", url] tags AND ["a", "30002:pubkey:d-tag"] references.
+     * MES handles state via insert() handlers; this just logs.
      */
     suspend fun handleFavoriteRelays(obj: kotlinx.serialization.json.JsonObject) {
         val pubkey    = obj["pubkey"]?.jsonPrimitive?.content ?: return
@@ -180,27 +164,11 @@ class OutboxRouter @Inject constructor(
 
         if (pubkey != keyManager.getPublicKeyHex()) return
 
-        val entities = tags.mapNotNull { tag ->
-            val arr = tag.jsonArray
-            val tagName = arr.getOrNull(0)?.jsonPrimitive?.content ?: return@mapNotNull null
-            when (tagName) {
-                "relay" -> {
-                    val raw = arr.getOrNull(1)?.jsonPrimitive?.content
-                        ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
-                    RelayConfigEntity(kind = 10012, relayUrl = url)
-                }
-                "a" -> {
-                    val ref = arr.getOrNull(1)?.jsonPrimitive?.content
-                        ?.takeIf { it.startsWith("30002:") } ?: return@mapNotNull null
-                    RelayConfigEntity(kind = 10012, relayUrl = "", setRef = ref)
-                }
-                else -> null
-            }
+        val count = tags.count { tag ->
+            val tagName = tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content
+            tagName == "relay" || tagName == "a"
         }
-
-        // Room write removed (T5a): MES handles favorite relay state via insert() handlers.
-        Log.d(TAG, "Received ${entities.size} favorite relay entries (created_at=$createdAt)")
+        Log.d(TAG, "Received $count favorite relay entries (created_at=$createdAt)")
     }
 
     /**
@@ -230,25 +198,11 @@ class OutboxRouter @Inject constructor(
             tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "image"
         }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
 
-        val members = tags
-            .filter { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "relay" }
-            .mapNotNull { tag ->
-                val raw = tag.jsonArray.getOrNull(1)?.jsonPrimitive?.content
-                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val url = normalizeRelayUrl(raw) ?: return@mapNotNull null
-                NostrRelaySetMemberEntity(setDTag = dTag, ownerPubkey = pubkey, relayUrl = url)
-            }
+        val memberCount = tags
+            .count { tag -> tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "relay" }
 
-        val setEntity = NostrRelaySetEntity(
-            dTag = dTag,
-            ownerPubkey = pubkey,
-            title = title,
-            description = description,
-            image = image,
-        )
-
-        nostrRelaySetDao.replaceSet(setEntity, members, createdAt)
-        Log.d(TAG, "Stored relay set '$dTag' with ${members.size} members (created_at=$createdAt)")
+        // Room write removed (T5b): MES handles relay set state via insert() → handleRelaySetMaterialized().
+        Log.d(TAG, "Received relay set '$dTag' with $memberCount members (created_at=$createdAt)")
     }
 
     // ── Kind 3: NIP-02 follow list ───────────────────────────────────────────

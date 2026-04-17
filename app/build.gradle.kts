@@ -110,6 +110,9 @@ dependencies {
     // Pubkey-derived identicons (Maven Central)
     implementation(libs.identikon.android)
 
+    // DataStore (local config: indexer relays, pinned relays)
+    implementation("androidx.datastore:datastore-preferences:1.1.4")
+
     // WorkManager (background sync scheduling)
     implementation("androidx.work:work-runtime-ktx:2.9.0")
     implementation("androidx.hilt:hilt-work:1.2.0")

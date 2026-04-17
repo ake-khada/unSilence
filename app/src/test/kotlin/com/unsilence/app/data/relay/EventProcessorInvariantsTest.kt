@@ -184,10 +184,10 @@ class EventProcessorInvariantsTest {
         assertEquals("Kind-0 profile with JSON content should be stored", 1, profileEvents.size)
     }
 
-    // ── Test 5: Kind 3 updates follows via direct path (not channeled) ─────
+    // ── Test 5: Kind 3 updates follows via direct path AND is channeled ─────
 
     @Test
-    fun `kind 3 updates MemoryEventStore follows without channeling`() = runTest {
+    fun `kind 3 updates MemoryEventStore follows and is stored for snapshots`() = runTest {
         // Kind 3 contact list with two followed pubkeys
         val followedPk1 = "d".repeat(64)
         val followedPk2 = "e".repeat(64)
@@ -200,7 +200,7 @@ class EventProcessorInvariantsTest {
         processor.process(raw, relay)
         processor.drainForTest()
 
-        // Follows should be populated
+        // Follows should be populated via direct-path updateFollows()
         val authorPk = "b".repeat(64)  // rawEvent uses "b" * 64 as pubkey
         val follows = store.getFollows(authorPk)
         assertNotNull("getFollows should return non-null after kind-3", follows)
@@ -208,9 +208,11 @@ class EventProcessorInvariantsTest {
         assertTrue("Should contain followedPk1", followedPk1 in follows)
         assertTrue("Should contain followedPk2", followedPk2 in follows)
 
-        // Kind 3 should NOT be in the main event store (not channeled)
+        // Kind 3 IS channeled into eventsById for snapshot persistence.
+        // The direct-path updateFollows() provides immediate MES update;
+        // the cold channel provides the eventsById entry for serialization.
         val storedEvents = store.eventsByIds(setOf(eventId(30)))
-        assertTrue("Kind-3 event should NOT be in main store", storedEvents.isEmpty())
+        assertTrue("Kind-3 event should be in main store for snapshot persistence", storedEvents.isNotEmpty())
     }
 
     // ── Test 6: NIP-40 expiry filter ────────────────────────────────────────

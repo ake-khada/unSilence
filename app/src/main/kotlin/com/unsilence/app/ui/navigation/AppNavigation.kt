@@ -92,7 +92,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
-import com.unsilence.app.data.db.entity.NostrRelaySetEntity
+import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.db.entity.RelayTrustScoreEntity
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
@@ -146,7 +146,7 @@ private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
 }
 
 @Composable
-fun AppNavigation(onLogout: () -> Unit) {
+fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val showSnackbar: (String) -> Unit = { message ->
@@ -168,9 +168,12 @@ fun AppNavigation(onLogout: () -> Unit) {
 
     val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
 
-    val feedViewModel: FeedViewModel = hiltViewModel()
-    val relayManagementVm: RelayManagementViewModel = hiltViewModel()
-    val notifViewModel: NotificationsViewModel = hiltViewModel()
+    // Key VMs by pubkey so logout → re-login with a different npub creates fresh
+    // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
+    // captured the old user's pubkey at init and never re-initializes.
+    val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
+    val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
+    val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
@@ -275,6 +278,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                         onNoteClick        = { eventId -> threadEventId = eventId },
                         onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                        viewModel          = feedViewModel,
                     )
                     1    -> Box(Modifier.padding(top = staticTopPadding)) {
                         SearchScreen(
@@ -288,7 +292,7 @@ fun AppNavigation(onLogout: () -> Unit) {
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick)
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick, viewModel = hiltViewModel(key = "profile-$userPubkey"))
                     else -> PlaceholderScreen()
                 }
             }
@@ -801,7 +805,7 @@ private fun NotifFilterCarousel(
 private fun FeedSelectorSheet(
     feedType: FeedType,
     hasFollows: Boolean,
-    userSets: List<NostrRelaySetEntity>,
+    userSets: List<RelaySet>,
     pinnedRelays: List<FeedType.SingleRelay>,
     trustScores: Map<String, RelayTrustScoreEntity>,
     onFeedChanged: (FeedType) -> Unit,
