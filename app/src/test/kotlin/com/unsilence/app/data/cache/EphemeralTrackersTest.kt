@@ -1,6 +1,6 @@
 package com.unsilence.app.data.cache
 
-import com.unsilence.app.data.db.entity.SyncStateEntity
+import com.unsilence.app.data.memory.SyncStateEntity
 import com.unsilence.app.data.relay.CoverageHandle
 import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus

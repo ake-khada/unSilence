@@ -2,9 +2,9 @@ package com.unsilence.app.ui.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.RelayPool
 import dagger.hilt.android.lifecycle.HiltViewModel

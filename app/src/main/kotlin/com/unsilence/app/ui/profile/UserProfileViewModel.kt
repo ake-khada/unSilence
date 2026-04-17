@@ -5,9 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -52,7 +51,6 @@ class UserProfileViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
-    private val relayListDao: RelayListDao,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
 ) : ViewModel() {
@@ -211,12 +209,8 @@ class UserProfileViewModel @Inject constructor(
         }
     }
 
-    private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
-        val relayList = relayListDao.getByPubkey(pubkey) ?: return GLOBAL_RELAY_URLS
-        return runCatching {
-            Json.decodeFromString<List<String>>(relayList.writeRelays)
-        }.getOrDefault(GLOBAL_RELAY_URLS)
-    }
+    private fun getWriteRelayUrls(pubkey: String): List<String> =
+        memoryEventStore.getRelayList(pubkey)?.write ?: GLOBAL_RELAY_URLS
 
     private fun toEventJson(event: Event): String = buildJsonObject {
         put("id",         event.id)
@@ -311,35 +305,28 @@ class UserProfileViewModel @Inject constructor(
      * Falls back to 5 general relays if no kind 10002 found.
      */
     private suspend fun resolveOutboxRelays(pubkey: String): List<String> {
-        // Step 1: check Room cache
-        var relayList = userRepository.getRelayList(pubkey)
+        // Step 1: check MES cache
+        var writeUrls = memoryEventStore.getRelayList(pubkey)?.write
 
         // Step 2: if not cached, fetch from indexer relays and wait
-        if (relayList == null) {
+        if (writeUrls == null) {
             relayPool.fetchRelayLists(listOf(pubkey))
-            relayList = withTimeoutOrNull(5_000) {
-                var result: com.unsilence.app.data.db.entity.RelayListEntity? = null
-                while (result == null) {
+            writeUrls = withTimeoutOrNull(5_000) {
+                while (true) {
                     delay(500)
-                    result = userRepository.getRelayList(pubkey)
+                    val list = memoryEventStore.getRelayList(pubkey)?.write
+                    if (list != null) return@withTimeoutOrNull list
                 }
-                result
+                @Suppress("UNREACHABLE_CODE") null
             }
         }
 
-        if (relayList == null) {
+        if (writeUrls.isNullOrEmpty()) {
             Log.d(TAG, "No relay list found for $pubkey — using general relays")
             return GLOBAL_RELAY_URLS.take(5)
         }
 
-        // Step 3: parse write relay URLs (max 5)
-        val writeUrls = runCatching {
-            Json.decodeFromString<List<String>>(relayList.writeRelays)
-        }.getOrDefault(emptyList()).take(5)
-
-        if (writeUrls.isNotEmpty()) {
-            Log.d(TAG, "Resolved ${writeUrls.size} outbox relays for $pubkey")
-        }
-        return writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
+        Log.d(TAG, "Resolved ${writeUrls.size} outbox relays for $pubkey")
+        return writeUrls.take(5)
     }
 }

@@ -2,7 +2,7 @@ package com.unsilence.app.ui.feed
 
 import android.os.Trace
 import android.util.Log
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.RelayPool

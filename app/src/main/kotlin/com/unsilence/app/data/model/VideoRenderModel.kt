@@ -1,6 +1,6 @@
 package com.unsilence.app.data.model
 
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.NostrJson

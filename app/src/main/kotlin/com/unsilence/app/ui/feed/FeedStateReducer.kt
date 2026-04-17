@@ -4,7 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Trace
 import android.util.Log
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

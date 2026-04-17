@@ -7,9 +7,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.entity.EventEntity
+import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,7 +32,7 @@ class ComposeViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
-    private val eventRepository: EventRepository,
+    private val memoryEventStore: MemoryEventStore,
     private val userRepository: UserRepository,
 ) : ViewModel() {
 
@@ -46,7 +46,7 @@ class ComposeViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     } ?: MutableStateFlow(null)
 
-    /** True once the note has been signed, published, and inserted into Room. */
+    /** True once the note has been signed, published, and inserted into MES. */
     var published by mutableStateOf(false)
         private set
 
@@ -58,20 +58,25 @@ class ComposeViewModel @Inject constructor(
             // Publish wire command to all connected relays
             relayPool.publish(toEventJson(signed))
 
-            // Optimistic insert → appears in feed immediately (relay_url must match feed query)
-            val nowSeconds = System.currentTimeMillis() / 1000L
-            eventRepository.insertEvent(
-                EventEntity(
-                    id        = signed.id,
-                    pubkey    = signed.pubKey,
-                    kind      = signed.kind,
-                    content   = signed.content,
+            // Optimistic insert into MES → appears in feed immediately
+            val nowMs = System.currentTimeMillis()
+            val parsedTags = signed.tags.map { it.toList() }
+            memoryEventStore.insert(
+                NostrEvent(
+                    id = signed.id,
+                    pubkey = signed.pubKey,
+                    kind = signed.kind,
+                    content = signed.content,
                     createdAt = signed.createdAt,
-                    tags      = tagsToJson(signed.tags),
-                    sig       = signed.sig,
-                    // Use first relay so the event appears in the connected-relay feed
-                    relayUrl  = "wss://relay.damus.io",
-                    cachedAt  = nowSeconds,
+                    tags = parsedTags,
+                    sig = signed.sig,
+                    relayUrl = "local",
+                    replyToId = null,
+                    rootId = null,
+                    hasContentWarning = false,
+                    contentWarningReason = null,
+                    firstSeenAt = nowMs / 1000L,
+                    relaysSeen = mutableSetOf("local"),
                 )
             )
 
@@ -94,12 +99,5 @@ class ComposeViewModel @Inject constructor(
         })
         put("content",    event.content)
         put("sig",        event.sig)
-    }.toString()
-
-    /** Convert Array<Array<String>> tags to the JSON string stored in Room. */
-    private fun tagsToJson(tags: Array<Array<String>>): String = buildJsonArray {
-        tags.forEach { row ->
-            add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-        }
     }.toString()
 }

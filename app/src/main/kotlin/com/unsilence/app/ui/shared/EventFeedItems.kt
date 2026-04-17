@@ -28,9 +28,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.entity.EventEntity
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.feed.ArticleCard

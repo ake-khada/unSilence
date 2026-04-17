@@ -1,6 +1,6 @@
 package com.unsilence.app.data.cache
 
-import com.unsilence.app.data.db.entity.SyncStateEntity
+import com.unsilence.app.data.memory.SyncStateEntity
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton

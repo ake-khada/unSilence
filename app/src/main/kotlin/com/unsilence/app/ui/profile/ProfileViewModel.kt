@@ -5,9 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.dao.RelayListDao
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -47,7 +46,6 @@ class ProfileViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
-    private val relayListDao: RelayListDao,
     private val cardHydrator: CardHydrator,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
 ) : ViewModel() {
@@ -269,12 +267,8 @@ class ProfileViewModel @Inject constructor(
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private suspend fun getWriteRelayUrls(pubkey: String): List<String> {
-        val relayList = relayListDao.getByPubkey(pubkey) ?: return emptyList()
-        return runCatching {
-            kotlinx.serialization.json.Json.decodeFromString<List<String>>(relayList.writeRelays)
-        }.getOrDefault(emptyList())
-    }
+    private fun getWriteRelayUrls(pubkey: String): List<String> =
+        memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
 
     private fun toEventJson(event: Event): String = buildJsonObject {
         put("id",         event.id)

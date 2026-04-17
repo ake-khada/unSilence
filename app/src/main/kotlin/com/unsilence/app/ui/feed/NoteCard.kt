@@ -100,9 +100,9 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
-import com.unsilence.app.data.db.dao.FeedRow
-import com.unsilence.app.data.db.entity.EventEntity
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.ImetaParser

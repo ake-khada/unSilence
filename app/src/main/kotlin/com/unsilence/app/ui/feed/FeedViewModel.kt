@@ -3,7 +3,7 @@ package com.unsilence.app.ui.feed
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.unsilence.app.data.db.dao.FeedRow
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -16,7 +16,6 @@ import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.cache.CoverageTracker
 import com.unsilence.app.data.relay.CardHydrator
-import com.unsilence.app.data.repository.EventRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -39,7 +38,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import com.unsilence.app.data.db.entity.UserEntity
+import com.unsilence.app.data.memory.UserEntity
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
@@ -74,7 +73,6 @@ data class FeedUiState(
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class FeedViewModel @Inject constructor(
-    private val eventRepository: EventRepository,
     private val userRepository: UserRepository,
     private val relayPool: RelayPool,
     private val outboxRouter: OutboxRouter,

@@ -1,7 +1,6 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
-import com.unsilence.app.data.db.dao.UserDao
 import com.unsilence.app.data.memory.MemoryEventStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +30,6 @@ private const val TAG = "ProfileResolver"
  */
 @Singleton
 class ProfileResolver @Inject constructor(
-    private val userDao: UserDao,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: dagger.Lazy<RelayPool>,
 ) {
