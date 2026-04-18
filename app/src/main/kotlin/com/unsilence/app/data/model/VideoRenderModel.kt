@@ -52,17 +52,18 @@ private const val DEFAULT_ASPECT_RATIO = 16f / 9f
  * that previously lived inside NoteCard's remember {} block.
  */
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
-    val imetaMedia = ImetaParser.parse(row.tags)
-
-    // For kind-6 reposts, extract effective content from embedded JSON
-    // (mirrors NoteCard's boostedJson → effectiveContent logic).
-    val effectiveContent = if (row.kind == 6 && row.content.isNotBlank()) {
+    // For kind-6 reposts, extract effective content AND tags from the embedded
+    // inner event JSON.  The outer wrapper's tags have no imeta; using them
+    // would produce zero video metadata (wrong aspect ratio, no poster URL).
+    val (effectiveContent, imetaMedia) = if (row.kind == 6 && row.content.isNotBlank()) {
         runCatching {
-            NostrJson.parseToJsonElement(row.content).jsonObject["content"]
-                ?.jsonPrimitive?.content
-        }.getOrNull() ?: row.content
+            val inner = NostrJson.parseToJsonElement(row.content).jsonObject
+            val content = inner["content"]?.jsonPrimitive?.content ?: row.content
+            val tags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
+            content to tags
+        }.getOrElse { row.content to ImetaParser.parse(row.tags) }
     } else {
-        row.content
+        row.content to ImetaParser.parse(row.tags)
     }
 
     // Strip YouTube URLs first (they're web pages, not playable files)

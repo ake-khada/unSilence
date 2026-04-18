@@ -3389,4 +3389,61 @@ class MemoryEventStoreInvariantsTest {
         assertEquals("Following-only should be 1", 1, followingOnly.size)
         assertEquals("followed-pk", followingOnly[0].actorPubkey)
     }
+
+    // ── Snapshot escape-sequence round-trip ─────────────────────────────────
+
+    @Test
+    fun `snapshot round-trip preserves backslash and escape sequences in content`() = runTest {
+        // Kind-6 repost: content is the raw JSON of the inner event.
+        // It naturally contains literal \n (backslash-n) inside JSON strings.
+        val innerJson = """{"id":"inner1","pubkey":"pk","kind":1,"content":"line1\nline2\ttab","tags":[["imeta","url https://x.com/v.mp4","m video/mp4"]],"sig":"s"}"""
+        store.insert(event(id = "k6-escape", kind = 6, content = innerJson, rootId = "inner1"))
+
+        // Also test content with real newlines and tabs
+        store.insert(event(id = "real-esc", kind = 1, content = "real\nnewline\tand\ttab"))
+
+        // Content with consecutive backslashes: \\n should survive as \\n, not become \<newline>
+        store.insert(event(id = "double-bs", kind = 1, content = "escaped: \\\\n and \\\\t end"))
+
+        // Tags with commas, semicolons, and backslashes in values
+        store.insert(event(
+            id = "tag-esc", kind = 1, content = "tagged",
+            tags = listOf(
+                listOf("imeta", "url https://x.com/img.jpg", "x abc,def;ghi"),
+                listOf("r", "wss://relay.example.com/path?a=1;b=2"),
+                listOf("blurhash", "data\\with\\backslashes"),
+            ),
+        ))
+
+        val sw = StringWriter()
+        sw.buffered().use { store.saveSnapshotTo(it) }
+        val snapshotData = sw.toString()
+
+        val restored = MemoryEventStore()
+        restored.restoreSnapshotFrom(StringReader(snapshotData).buffered())
+
+        // Verify kind-6 JSON content survived intact
+        val k6 = restored.eventsByIds(setOf("k6-escape"))
+        assertEquals(1, k6.size)
+        assertEquals(innerJson, k6[0].content)
+
+        // Verify real newline/tab survived
+        val real = restored.eventsByIds(setOf("real-esc"))
+        assertEquals(1, real.size)
+        assertEquals("real\nnewline\tand\ttab", real[0].content)
+
+        // Verify double-backslash survived
+        val dbs = restored.eventsByIds(setOf("double-bs"))
+        assertEquals(1, dbs.size)
+        assertEquals("escaped: \\\\n and \\\\t end", dbs[0].content)
+
+        // Verify tags with special characters survived
+        val tagged = restored.eventsByIds(setOf("tag-esc"))
+        assertEquals(1, tagged.size)
+        val tags = tagged[0].tags
+        assertEquals(3, tags.size)
+        assertEquals(listOf("imeta", "url https://x.com/img.jpg", "x abc,def;ghi"), tags[0])
+        assertEquals(listOf("r", "wss://relay.example.com/path?a=1;b=2"), tags[1])
+        assertEquals(listOf("blurhash", "data\\with\\backslashes"), tags[2])
+    }
 }
