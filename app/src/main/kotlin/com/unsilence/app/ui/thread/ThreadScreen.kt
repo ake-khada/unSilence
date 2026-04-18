@@ -59,6 +59,7 @@ import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.NoteActionsViewModel
+import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -182,6 +183,7 @@ fun ThreadScreen(
                                         onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
                                         onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                                         thumbnailCache  = actionsViewModel.videoThumbnailCache,
+                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
                                         lookupProfile   = actionsViewModel::lookupProfile,
                                         lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
@@ -241,6 +243,7 @@ fun ThreadScreen(
                                         onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
                                         onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
                                         thumbnailCache  = actionsViewModel.videoThumbnailCache,
+                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
                                         lookupProfile   = actionsViewModel::lookupProfile,
                                         lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
                                         fetchOgMetadata = actionsViewModel::fetchOgMetadata,

@@ -5,6 +5,9 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
+import com.unsilence.app.ui.feed.ImageDimensionCache
+import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -55,6 +58,7 @@ class CardHydrator @Inject constructor(
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
+    private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
 ) {
     /** Event IDs that were fetched from relays but never arrived — stop retrying. */
@@ -369,8 +373,21 @@ class CardHydrator @Inject constructor(
             }
         }
 
+        // Prefetch image dimensions (lightweight: header-only BitmapFactory decode)
+        val imageUrls = mutableListOf<String>()
+        for (event in events) {
+            if (event.kind == 30023) continue
+            val content = event.content
+            val afterVideos = VIDEO_URL_REGEX.replace(content, "")
+            IMAGE_URL_REGEX.findAll(afterVideos).forEach { imageUrls.add(it.value) }
+        }
+        val uniqueImageUrls = imageUrls.distinct().filter { imageDimensionCache.getCached(it) == null }
+        if (uniqueImageUrls.isNotEmpty()) {
+            imageDimensionCache.resolveAll(uniqueImageUrls)
+        }
+
         val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
-        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved), $thumbnailCount thumbnails")
+        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved), $thumbnailCount thumbnails, ${uniqueImageUrls.size} img dims")
     }
 
     /**

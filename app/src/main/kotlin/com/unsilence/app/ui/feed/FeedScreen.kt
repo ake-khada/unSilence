@@ -252,6 +252,7 @@ fun FeedScreen(
                         newEventIds = newEventIds.keys,
                         onNewPostAnimated = { newEventIds.remove(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
+                        imageDimensionCache = actionsViewModel.imageDimensionCache,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                     )
 

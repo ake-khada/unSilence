@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,18 +30,30 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.Image
+import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.AvatarImage
+import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
+import com.unsilence.app.ui.feed.LINK_URL_REGEX
+import com.unsilence.app.ui.feed.LinkPreviewCard
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
+import com.unsilence.app.ui.feed.ImageDimensionCache
+import com.unsilence.app.ui.feed.feedImageAspectRatio
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
+import com.unsilence.app.ui.theme.Sizing
+import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
@@ -92,6 +106,7 @@ fun LazyListScope.eventFeedItems(
     newEventIds: Set<String> = emptySet(),
     onNewPostAnimated: (String) -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
     showThreadParents: Boolean = false,
 ) {
     items(
@@ -113,6 +128,7 @@ fun LazyListScope.eventFeedItems(
                 isNewPost = row.id in newEventIds,
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
+                imageDimensionCache = imageDimensionCache,
             )
         } else {
             EventFeedItem(
@@ -124,6 +140,7 @@ fun LazyListScope.eventFeedItems(
                 isNewPost = row.id in newEventIds,
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
+                imageDimensionCache = imageDimensionCache,
             )
         }
     }
@@ -144,6 +161,7 @@ private fun ThreadedReplyItem(
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -182,23 +200,40 @@ private fun ThreadedReplyItem(
         isNewPost = isNewPost,
         onNewPostAnimated = onNewPostAnimated,
         thumbnailCache = thumbnailCache,
+        imageDimensionCache = imageDimensionCache,
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
     )
 }
 
 /**
- * Compact parent note card — shows author, timestamp, and truncated content.
- * No action bar. Clickable to navigate to the parent note.
- * Uses EventEntity + UserEntity (fetched via lookupEvent/lookupProfile).
+ * Compact parent note card — shows author, timestamp, content with media.
+ * Extracts image URLs and link previews from content so they render
+ * instead of showing as raw text. No action bar.
+ * Clickable to navigate to the parent note.
  */
 @Composable
 internal fun ThreadParentCard(
     event: EventEntity,
     author: UserEntity?,
     onNoteClick: (String) -> Unit,
+    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
     modifier: Modifier = Modifier,
 ) {
+    // Extract media URLs from content
+    val content = event.content.trim()
+    val mediaExtraction = remember(event.id) {
+        val imageUrls = IMAGE_URL_REGEX.findAll(content).map { it.value }.distinct().toList()
+        val afterImages = IMAGE_URL_REGEX.replace(content, "")
+        val videoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.distinct().toList()
+        val afterVideos = VIDEO_URL_REGEX.replace(afterImages, "")
+        val linkUrls = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(1).toList()
+        val textContent = LINK_URL_REGEX.replace(afterVideos, "").trim()
+        Triple(imageUrls, linkUrls, textContent)
+    }
+    val (imageUrls, linkUrls, textContent) = mediaExtraction
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -239,15 +274,45 @@ internal fun ThreadParentCard(
                 fontSize = AppType.bodySmall,
             )
         }
-        if (event.content.isNotBlank()) {
+        if (textContent.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
             Text(
-                text = event.content.trim(),
+                text = textContent,
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = AppType.body,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        // Render images extracted from content — collapse on error (no gap)
+        if (imageUrls.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.small))
+            imageUrls.take(2).forEach { url ->
+                val cachedAspect = imageDimensionCache?.getCached(url)
+                val aspect = feedImageAspectRatio(cachedAspect)
+                SubcomposeAsyncImage(
+                    model = rememberFullWidthImageRequest(url, aspectRatio = aspect),
+                    contentDescription = null,
+                    error = { /* collapse — no gap */ },
+                    success = {
+                        Image(
+                            painter = painter,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(aspect, matchHeightConstraintsFirst = false)
+                                .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        // OG link preview for first non-media URL
+        if (linkUrls.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.small))
+            LinkPreviewCard(url = linkUrls.first(), fetchOgMetadata = fetchOgMetadata)
         }
     }
 }
@@ -262,6 +327,7 @@ private fun EventFeedItem(
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
 ) {
@@ -323,6 +389,7 @@ private fun EventFeedItem(
             onOpenFullscreen = { videoScope?.openFullscreen(row.id) },
             videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
             thumbnailCache = thumbnailCache,
+            imageDimensionCache = imageDimensionCache,
             lookupProfile = callbacks.lookupProfile,
             lookupEvent = callbacks.lookupEvent,
             fetchOgMetadata = callbacks.fetchOgMetadata,

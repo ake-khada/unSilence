@@ -147,7 +147,7 @@ internal val ActionTint = Color(0xFF555555)
 private val MediaPlaceholder = Surface1
 
 // Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
-private val IMAGE_URL_REGEX = Regex(
+internal val IMAGE_URL_REGEX = Regex(
     """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+|https?://\S+/xrpc/com\.atproto\.sync\.getBlob\?\S+""",
     RegexOption.IGNORE_CASE,
 )
@@ -175,7 +175,7 @@ private fun rewriteBskyUrl(url: String): String {
 }
 
 // Matches any remaining http/https URL (applied after stripping image + video URLs).
-private val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+internal val LINK_URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
 // Matches nostr: URIs (bech32-encoded entities).
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
@@ -268,6 +268,7 @@ fun NoteCard(
     onOpenFullscreen: () -> Unit = {},
     videoRenderModels: List<VideoRenderModel> = emptyList(),
     thumbnailCache: VideoThumbnailCache? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -547,6 +548,8 @@ fun NoteCard(
                 event = parentEvent,
                 author = parentAuthor,
                 onNoteClick = onNoteClick,
+                fetchOgMetadata = fetchOgMetadata,
+                imageDimensionCache = imageDimensionCache,
                 modifier = Modifier.padding(bottom = Spacing.small),
             )
         }
@@ -614,6 +617,7 @@ fun NoteCard(
                 imageUrls  = imageUrls,
                 imetaMedia = imetaMedia,
                 onImageClick = { url -> fullscreenImageIndex = imageUrls.indexOf(url).coerceAtLeast(0) },
+                imageDimensionCache = imageDimensionCache,
                 modifier   = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -943,7 +947,7 @@ internal fun ZapButton(
 
 // ── BUG #4 FIX: Media grid composable ─────────────────────────────────────────
 
-/** Single image cell — always constrained by aspect ratio (4:3 fallback, updated on load). */
+/** Single image cell — aspect ratio from imeta or pre-fetched cache, updated on load. Crop fills the container. */
 @Composable
 private fun MediaImage(
     url: String,
@@ -951,13 +955,17 @@ private fun MediaImage(
     onImageClick: (String) -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
+    imageDimensionCache: ImageDimensionCache? = null,
 ) {
     val imetaAspect = imetaMedia
         .firstOrNull { it.url == url && it.width != null && it.height != null }
         ?.let { it.width!!.toFloat() / it.height!! }
 
+    // Priority: imeta > pre-fetched cache > default 4:3
+    val initialAspect = imetaAspect ?: imageDimensionCache?.getCached(url)
+
     var displayAspect by remember(url, forceSquare) {
-        mutableStateOf(feedImageAspectRatio(imetaAspect, forceSquare))
+        mutableStateOf(feedImageAspectRatio(initialAspect, forceSquare))
     }
 
     val imageModifier = modifier
@@ -985,11 +993,13 @@ private fun MediaImage(
             }
         },
         success = {
-            // Coil 3: read painter intrinsic size to update container aspect ratio
             val size = painter.intrinsicSize
             if (!forceSquare && size.width > 0f && size.height > 0f) {
                 val trueAspect = feedImageAspectRatio(size.width / size.height, false)
-                LaunchedEffect(trueAspect) { displayAspect = trueAspect }
+                LaunchedEffect(trueAspect) {
+                    displayAspect = trueAspect
+                    imageDimensionCache?.put(url, size.width / size.height)
+                }
             }
             Image(
                 painter            = painter,
@@ -1008,6 +1018,7 @@ private fun MediaGrid(
     imageUrls: List<String>,
     imetaMedia: List<ImetaMedia>,
     onImageClick: (String) -> Unit,
+    imageDimensionCache: ImageDimensionCache? = null,
     modifier: Modifier = Modifier,
 ) {
     val count = imageUrls.size
@@ -1018,6 +1029,7 @@ private fun MediaGrid(
                 imetaMedia = imetaMedia,
                 onImageClick = onImageClick,
                 modifier = modifier,
+                imageDimensionCache = imageDimensionCache,
             )
         }
         count == 2 -> {
@@ -1052,6 +1064,7 @@ private fun MediaGrid(
                     onImageClick = onImageClick,
                     modifier = Modifier.fillMaxWidth(),
                     forceSquare = false,
+                    imageDimensionCache = imageDimensionCache,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1750,12 +1763,11 @@ private fun EmbeddedQuoteCard(
                     Spacer(Modifier.height(6.dp))
                     if (quotedImages.size == 1) {
                         AsyncImage(
-                            model              = rememberSizedImageRequest(quotedImages.first(), quoteWidthPx, quoteMaxHeightPx),
+                            model              = rememberFullWidthImageRequest(quotedImages.first()),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 300.dp)
                                 .clip(RoundedCornerShape(8.dp)),
                         )
                     } else {
@@ -2070,7 +2082,7 @@ private fun MentionChip(
 
 /** OpenGraph link preview card. Falls back to a simple domain chip if OG fetch fails. */
 @Composable
-private fun LinkPreviewCard(
+internal fun LinkPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
 ) {

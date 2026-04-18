@@ -9,9 +9,5 @@ internal fun feedImageAspectRatio(
     forceSquare: Boolean = false,
 ): Float {
     if (forceSquare) return 1f
-    val raw = rawAspectRatio?.takeIf { it > 0f } ?: (4f / 3f) // default: 4:3 (most common photo)
-    return when {
-        raw >= 1f -> raw              // landscape: use actual
-        else -> maxOf(raw, 9f / 16f)  // portrait: cap at 9:16
-    }
+    return rawAspectRatio?.takeIf { it > 0f } ?: (4f / 3f) // default: 4:3 (most common photo)
 }

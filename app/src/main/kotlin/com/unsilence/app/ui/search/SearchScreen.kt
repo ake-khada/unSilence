@@ -305,6 +305,7 @@ fun SearchScreen(
                                 videoScope = null,
                                 context = RenderContext.Search,
                                 thumbnailCache = actionsViewModel.videoThumbnailCache,
+                                imageDimensionCache = actionsViewModel.imageDimensionCache,
                             )
                         }
                     }
