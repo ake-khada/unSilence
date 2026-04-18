@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.unsilence.app.data.memory.UserEntity
@@ -301,15 +302,12 @@ class FeedViewModel @Inject constructor(
     fun loadMore() {
         val now = System.currentTimeMillis()
         if (now - lastLoadMoreTime < 1000) return  // 1s cooldown — immune to Flow resets
+        if (_isLoadingMore.value) return  // coalesce redundant calls during fling
 
-        // Find the actual oldest timestamp in the visible list. Can't use
-        // lastOrNull() because the list isn't maintained in sorted order —
-        // trickle APPEND of real-time events puts newer items at the tail.
-        // Clamp to the monotonic pagination cursor so we never re-request
-        // time ranges we already paginated past.
-        val visibleOldest = _activeReducer.value.state.value.visibleEvents
-            .minOfOrNull { it.createdAt } ?: return
-        val oldest = minOf(visibleOldest, paginationCursor)
+        // Pagination cursor is reducer-owned. Read it directly — no list walk.
+        val reducerOldest = _activeReducer.value.state.value.oldestCreatedAt
+        if (reducerOldest == Long.MAX_VALUE) return  // no events yet
+        val oldest = minOf(reducerOldest, paginationCursor)
 
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
@@ -317,8 +315,14 @@ class FeedViewModel @Inject constructor(
         lastLoadMoreTime = now
         _isLoadingMore.value = true  // For spinner UI
         _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
-        relayPool.fetchOlderEvents(currentRelayUrls, oldest)
-        Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=${_displayLimit.value}, relays=${currentRelayUrls.size}")
+
+        // Dispatch relay work off Main — fetchOlderEvents sends to 14+ relays synchronously.
+        val urls = currentRelayUrls
+        val limit = _displayLimit.value
+        viewModelScope.launch(Dispatchers.IO) {
+            Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=$limit, relays=${urls.size}")
+            relayPool.fetchOlderEvents(urls, oldest)
+        }
     }
 
     /** Read kind-10002 read relays from MES, falling back to hardcoded defaults. */

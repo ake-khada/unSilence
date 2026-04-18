@@ -106,6 +106,9 @@ dependencies {
     // Pubkey-derived identicons (Maven Central)
     implementation(libs.identikon.android)
 
+    // Immutable collections (persistent sets/maps for reducer state)
+    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.3.8")
+
     // DataStore (local config: indexer relays, pinned relays)
     implementation("androidx.datastore:datastore-preferences:1.1.4")
 
