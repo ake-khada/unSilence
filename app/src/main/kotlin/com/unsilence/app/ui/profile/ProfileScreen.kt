@@ -406,6 +406,7 @@ fun ProfileScreen(
                     videoScope = videoScope,
                     context = RenderContext.Profile,
                     thumbnailCache = actionsViewModel.videoThumbnailCache,
+                    imageDimensionCache = actionsViewModel.imageDimensionCache,
                     showThreadParents = selectedTab == ProfileTab.REPLIES,
                 )
             }
