@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentSkipListSet
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val SNAPSHOT_VERSION = "SNAPSHOT_V1"
+private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
@@ -1525,7 +1525,10 @@ class MemoryEventStore @Inject constructor() {
             for (line in lines) {
                 if (!versionChecked) {
                     versionChecked = true
-                    if (line != SNAPSHOT_VERSION) return
+                    if (line != SNAPSHOT_VERSION) {
+                        Log.w("MES", "Snapshot version mismatch (found=$line, expected=$SNAPSHOT_VERSION), discarding")
+                        return
+                    }
                     continue
                 }
                 if (line == "---AGGREGATES---") { section = 1; continue }
@@ -1641,7 +1644,7 @@ class MemoryEventStore @Inject constructor() {
         sb.append(event.id).append('\t')
         sb.append(event.pubkey).append('\t')
         sb.append(event.kind).append('\t')
-        sb.append(event.content.replace("\t", "\\t").replace("\n", "\\n")).append('\t')
+        sb.append(event.content.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")).append('\t')
         sb.append(event.createdAt).append('\t')
         sb.append(serializeTags(event.tags)).append('\t')
         sb.append(event.sig).append('\t')
@@ -1662,7 +1665,7 @@ class MemoryEventStore @Inject constructor() {
             id = parts[0],
             pubkey = parts[1],
             kind = parts[2].toIntOrNull() ?: return null,
-            content = parts[3].replace("\\t", "\t").replace("\\n", "\n"),
+            content = unescapeContent(parts[3]),
             createdAt = parts[4].toLongOrNull() ?: return null,
             tags = deserializeTags(parts[5]),
             sig = parts[6],
@@ -1680,15 +1683,65 @@ class MemoryEventStore @Inject constructor() {
 
     private fun serializeTags(tags: List<List<String>>): String {
         return tags.joinToString(";") { tag ->
-            tag.joinToString(",") { it.replace(",", "\\,").replace(";", "\\;") }
+            tag.joinToString(",") {
+                it.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;")
+            }
         }
     }
 
     private fun deserializeTags(s: String): List<List<String>> {
         if (s.isEmpty()) return emptyList()
-        return s.split(";").map { tagStr ->
-            tagStr.split(",").map { it.replace("\\,", ",").replace("\\;", ";") }
+        return escapedSplit(s, ';').map { tagStr ->
+            escapedSplit(tagStr, ',').map(::unescapeTagValue)
         }
+    }
+
+    /** Split [s] on [delimiter] but skip occurrences preceded by a backslash. */
+    private fun escapedSplit(s: String, delimiter: Char): List<String> {
+        val result = mutableListOf<String>()
+        val buf = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            when {
+                s[i] == '\\' && i + 1 < s.length -> { buf.append(s[i]); buf.append(s[i + 1]); i += 2 }
+                s[i] == delimiter -> { result.add(buf.toString()); buf.clear(); i++ }
+                else -> { buf.append(s[i]); i++ }
+            }
+        }
+        result.add(buf.toString())
+        return result
+    }
+
+    /** Unescape \\, \, and \; back to their literal characters. */
+    private fun unescapeTagValue(s: String): String {
+        val buf = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            if (s[i] == '\\' && i + 1 < s.length) { buf.append(s[i + 1]); i += 2 }
+            else { buf.append(s[i]); i++ }
+        }
+        return buf.toString()
+    }
+
+    /** Unescape content field: single-pass handling of \\, \n, \t sequences. */
+    private fun unescapeContent(s: String): String {
+        val buf = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            if (s[i] == '\\' && i + 1 < s.length) {
+                when (s[i + 1]) {
+                    'n' -> buf.append('\n')
+                    't' -> buf.append('\t')
+                    '\\' -> buf.append('\\')
+                    else -> { buf.append(s[i]); buf.append(s[i + 1]) }
+                }
+                i += 2
+            } else {
+                buf.append(s[i])
+                i++
+            }
+        }
+        return buf.toString()
     }
 
     // ─── Maintenance ────────────────────────────────────────────────────────
