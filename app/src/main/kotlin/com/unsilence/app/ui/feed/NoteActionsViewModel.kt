@@ -263,16 +263,16 @@ class NoteActionsViewModel @Inject constructor(
         val outboxHints = authorPubkey?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList()
         val allHints = (relayHints + outboxHints).distinct()
 
-        // Trigger relay fetch only once per event ID
+        // Trigger relay fetch only once per event ID.
+        // withContext(IO): produceState runs on Main; relay dispatch must not block UI.
         val shouldFetch = synchronized(fetchedQuoteIds) { fetchedQuoteIds.add(eventId) }
         if (shouldFetch) {
-            if (allHints.isNotEmpty()) {
-                // bypassDedup: if we reach here, the event wasn't found by prior
-                // prefetch — outbox hints deserve a fresh attempt regardless of
-                // eventFetchInFlight state from the source-relay prefetch.
-                relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
-            } else {
-                relayPool.fetchEventById(eventId)
+            withContext(Dispatchers.IO) {
+                if (allHints.isNotEmpty()) {
+                    relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
+                } else {
+                    relayPool.fetchEventById(eventId)
+                }
             }
         }
 
