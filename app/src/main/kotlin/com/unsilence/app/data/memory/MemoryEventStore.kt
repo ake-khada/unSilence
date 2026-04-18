@@ -1672,7 +1672,9 @@ class MemoryEventStore @Inject constructor() {
             hasContentWarning = parts[10].toBooleanStrictOrNull() ?: false,
             contentWarningReason = parts[11].ifEmpty { null },
             firstSeenAt = parts[12].toLongOrNull() ?: 0L,
-            relaysSeen = parts[13].split(",").filter { it.isNotEmpty() }.toMutableSet(),
+            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply {
+                addAll(parts[13].split(",").filter { it.isNotEmpty() })
+            },
         )
     }
 

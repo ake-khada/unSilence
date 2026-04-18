@@ -16,6 +16,7 @@ import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
+import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -348,7 +349,7 @@ class NoteActionsViewModel @Inject constructor(
             hasContentWarning = false,
             contentWarningReason = null,
             firstSeenAt = now,
-            relaysSeen = mutableSetOf(),
+            relaysSeen = ConcurrentHashMap.newKeySet(),
         )
     }
 }

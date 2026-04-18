@@ -7,6 +7,8 @@ package com.unsilence.app.data.memory
  * NOT a UI-facing type — never passed to @Composable functions.
  * The MutableSet<String> on relaysSeen is intentional: relay provenance
  * accumulates across duplicate arrivals via insert()'s dedup path.
+ * Must be a ConcurrentHashMap.newKeySet() — iterated on Default dispatcher
+ * (feedFlow scans) while mutated on IO (addRelaySeen, insert dedup).
  */
 data class NostrEvent(
     val id: String,

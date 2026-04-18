@@ -14,6 +14,7 @@ import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
+import java.util.concurrent.ConcurrentHashMap
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -159,7 +160,7 @@ class ThreadViewModel @Inject constructor(
                     hasContentWarning = false,
                     contentWarningReason = null,
                     firstSeenAt = nowSeconds,
-                    relaysSeen = mutableSetOf("local"),
+                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                 )
             )
 

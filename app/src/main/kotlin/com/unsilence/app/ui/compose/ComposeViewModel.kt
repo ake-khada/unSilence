@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
+import java.util.concurrent.ConcurrentHashMap
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -76,7 +77,7 @@ class ComposeViewModel @Inject constructor(
                     hasContentWarning = false,
                     contentWarningReason = null,
                     firstSeenAt = nowMs / 1000L,
-                    relaysSeen = mutableSetOf("local"),
+                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                 )
             )
 

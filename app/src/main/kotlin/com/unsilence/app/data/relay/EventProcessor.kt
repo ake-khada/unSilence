@@ -443,7 +443,7 @@ class EventProcessor @Inject constructor(
             hasContentWarning = hasCw,
             contentWarningReason = cwReason,
             firstSeenAt = System.currentTimeMillis(),
-            relaysSeen = mutableSetOf(relayUrl),
+            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
         )
 
         // ── Pre-fetch all semantically-referenced events from the source relay ─
