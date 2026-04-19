@@ -41,8 +41,12 @@ class VideoPlaybackScope(
     private val ownerId: String,
 ) {
     companion object {
-        /** A candidate must hold ≥60% visibility for this long before activation. */
-        internal const val ACTIVATION_CONFIRMATION_MS = 250L
+        /** A candidate must hold ≥60% visibility for this long before activation.
+         *  After this delay, scroll must have settled before activation fires. */
+        internal const val ACTIVATION_CONFIRMATION_MS = 400L
+        /** After scroll stops, wait this long before activating to avoid
+         *  triggering during momentary scroll pauses. */
+        internal const val SCROLL_SETTLE_MS = 250L
         /** After visible item count changes, freeze detection for this long. */
         internal const val LAYOUT_SHIFT_COOLDOWN_MS = 500L
         /** Block A→B→A bounce-back transitions within this window. */
@@ -96,6 +100,7 @@ fun rememberVideoPlaybackScope(
     holder: SharedPlayerHolder,
     events: List<FeedRow>,
     listState: LazyListState,
+    videoModelProvider: ((String) -> List<VideoRenderModel>)? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
@@ -122,12 +127,14 @@ fun rememberVideoPlaybackScope(
         exoPlayer.volume = if (scope.isMuted) 0f else 1f
     }
 
-    // Precompute VideoRenderModels for all events (moved from NoteCard composable)
+    // Read pre-computed VideoRenderModels from MES sidecar cache (populated at insert time).
+    // Falls back to buildVideoRenderModels(row) for events not in cache (e.g. optimistic inserts).
     val renderModelsMap = remember(events) {
         events
             .filter { it.kind != 30023 }
             .mapNotNull { row ->
-                val models = buildVideoRenderModels(row)
+                val models = videoModelProvider?.invoke(row.id)?.takeIf { it.isNotEmpty() }
+                    ?: buildVideoRenderModels(row)
                 if (models.isNotEmpty()) row.id to models else null
             }
             .toMap()
@@ -256,10 +263,20 @@ fun rememberVideoPlaybackScope(
                         return@flow
                     }
 
-                    // Confirmation window — candidate must hold 250ms.
-                    // If a different candidate arrives, flatMapLatest cancels this
-                    // coroutine and starts a new one for the new candidate.
+                    // Confirmation window — candidate must hold for the
+                    // confirmation period. If a different candidate arrives,
+                    // flatMapLatest cancels this coroutine automatically.
                     delay(VideoPlaybackScope.ACTIVATION_CONFIRMATION_MS)
+
+                    // Wait for scroll to fully settle — don't activate during
+                    // momentary scroll pauses. The user must be stationary for
+                    // SCROLL_SETTLE_MS after the last scroll gesture.
+                    do {
+                        while (listState.isScrollInProgress) {
+                            delay(50)
+                        }
+                        delay(VideoPlaybackScope.SCROLL_SETTLE_MS)
+                    } while (listState.isScrollInProgress)
 
                     emit(candidate)
                 }

@@ -41,11 +41,6 @@ class FeedHydrationController(
         const val WARM_CATCHUP_TIMEOUT_MS = 3000L
         const val ENGAGEMENT_REFRESH_INTERVAL_MS = 30_000L
         const val REF_DEBOUNCE_MS = 500L               // IDLE
-        const val REF_DEBOUNCE_SLOW_SCROLL_MS = 2000L  // SLOW_SCROLL — refs can wait while browsing
-        const val SLOW_SCROLL_PROFILE_CAP = 4          // max profiles per SLOW_SCROLL pass
-        const val SLOW_SCROLL_REF_CAP = 2              // max refs per SLOW_SCROLL pass
-        const val BACKFILL_BATCH_SIZE = 15             // engagement backfill batch size
-        const val BACKFILL_DELAY_MS = 2500L            // delay between backfill batches
         const val ENGAGEMENT_STALE_MS = 5 * 60 * 1000L // 5 minutes — warm zone freshness threshold
         const val WARM_ZONE_ENGAGEMENT_CAP = 5         // max warm zone engagement fetches per pass
         const val ENGAGEMENT_COALESCE_MS = 750L          // coalesce window for engagement batches
@@ -98,7 +93,6 @@ class FeedHydrationController(
     private val profileHydratedPubkeys = mutableSetOf<String>() // Phase 1 done (author pubkeys — cross-event dedup)
     private val engagementFetchedIds = mutableSetOf<String>()
     private val fanOutPendingIds = mutableSetOf<String>()     // indexer-only, needs fan-out in IDLE
-    private val backfillFetchedIds = mutableSetOf<String>()  // background engagement accumulation
     private var lastEngagementRefreshTime = 0L
     private var lastRefStartTime = 0L           // Phase 2 debounce
 
@@ -107,9 +101,9 @@ class FeedHydrationController(
     private var idleToRestJob: Job? = null
     private var catchupTimeoutJob: Job? = null
     private var profileJob: Job? = null     // Phase 1: profiles
-    private var refJob: Job? = null         // Phase 2: refs + thumbnails
+    private var refJob: Job? = null         // Phase 2: refs (relay queries)
+    private var mediaJob: Job? = null      // Independent: image dims + video thumbnails
     private var engagementJob: Job? = null
-    private var backfillJob: Job? = null    // Background engagement accumulation
     private var warmEngagementJob: Job? = null // Warm zone engagement pre-check
     private var engagementCoalesceJob: Job? = null // Coalescing window for engagement batches
 
@@ -122,9 +116,6 @@ class FeedHydrationController(
     // ── Window dedup ────────────────────────────────────────────────
     private var lastProcessedWindowHash: Int = 0
     private var lastProcessedWindowSize: Int = 0
-
-    // ── Backfill batch dedup ─────────────────────────────────────────
-    private var lastBackfillBatchHash: Int = 0
 
     // ── Latest data from FeedScreen ──────────────────────────────────
     private var lastVisibleItems: List<FeedRow> = emptyList()
@@ -161,7 +152,6 @@ class FeedHydrationController(
 
         // Store latest data
         lastVisibleItems = visibleItems
-        val feedGrew = allEvents.size > lastAllEvents.size
         lastAllEvents = allEvents
         lastVisibleIds = visibleItems.map { it.id }.toSet()
 
@@ -172,11 +162,6 @@ class FeedHydrationController(
 
         // REST: no discretionary work
         if (state == ScrollState.REST) return
-
-        // Start/restart backfill when feed data arrives or grows
-        if (feedGrew && allEvents.size >= 3 && backfillJob?.isActive != true) {
-            startBackfill()
-        }
 
         // State transitions (velocity-based — gated by hard dwell lock)
         val candidate = nextState(isScrollInProgress)
@@ -203,8 +188,8 @@ class FeedHydrationController(
         catchupTimeoutJob?.cancel()
         profileJob?.cancel()
         refJob?.cancel()
+        mediaJob?.cancel()
         engagementJob?.cancel()
-        backfillJob?.cancel()
         warmEngagementJob?.cancel()
         engagementCoalesceJob?.cancel()
         pendingEngagementIds.clear()
@@ -212,7 +197,6 @@ class FeedHydrationController(
         profileHydratedPubkeys.clear()
         engagementFetchedIds.clear()
         fanOutPendingIds.clear()
-        backfillFetchedIds.clear()
         scrollSamples.clear()
         velocityPxPerSec = 0f
         smoothedVelocity = 0f
@@ -225,7 +209,6 @@ class FeedHydrationController(
         pendingQueueSize = 0
         lastProcessedWindowHash = 0
         lastProcessedWindowSize = 0
-        lastBackfillBatchHash = 0
         state = ScrollState.WARM_CATCHUP
         stateEnteredAt = System.currentTimeMillis()
         startCatchupTimeout()
@@ -381,20 +364,22 @@ class FeedHydrationController(
                 // Cancel all hydration work immediately — total blackout
                 profileJob?.cancel()
                 refJob?.cancel()
-                // Reset window + backfill hash so we reprocess when exiting FAST_SCROLL
+                mediaJob?.cancel()
+                // Reset window hash so we reprocess when exiting FAST_SCROLL
                 lastProcessedWindowHash = 0
                 lastProcessedWindowSize = 0
-                lastBackfillBatchHash = 0
             }
             ScrollState.REST -> {
-                // Absolute rest — cancel all in-flight discretionary work
+                // Absolute rest — cancel all in-flight discretionary work,
+                // then launch REST-specific media (MMR allowed)
                 profileJob?.cancel()
                 refJob?.cancel()
+                mediaJob?.cancel()
                 engagementJob?.cancel()
                 warmEngagementJob?.cancel()
                 engagementCoalesceJob?.cancel()
-                backfillJob?.cancel()
-                Log.d(TAG, "Entering REST — cancelled all in-flight work")
+                startRestMedia()
+                Log.d(TAG, "Entering REST — cancelled scroll work, started REST media")
             }
         }
     }
@@ -409,55 +394,36 @@ class FeedHydrationController(
         val warmZone = computeWarmZone()
         val combined = (lastVisibleItems + warmZone).distinctBy { it.id }
         val toProfile = combined.filter { !isHydrated(it.id, PHASE_PROFILE) && it.pubkey !in profileHydratedPubkeys }
-        if (toProfile.isEmpty()) return
+        if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
+            toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
+            profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
+            fanOutPendingIds.addAll(toProfile.map { it.id })
+            profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "WARM_CATCHUP")
+        }
 
-        if (profileJob?.isActive == true) return
-        toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
-        profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
-        fanOutPendingIds.addAll(toProfile.map { it.id })
-        profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "WARM_CATCHUP")
+        // Pre-resolve video thumbnails early so first-visible items have correct
+        // aspect ratios before the first IDLE fires (~3.5s after load).
+        if (mediaJob?.isActive != true) {
+            val mediaItems = combined.filter { !isHydrated(it.id, PHASE_REFS) }
+            if (mediaItems.isNotEmpty()) {
+                mediaJob = scope.launch(Dispatchers.IO) {
+                    cardHydrator.hydrateMedia(mediaItems, mmrAllowed = true, mmrCap = 3)
+                    Log.d(TAG, "WARM_CATCHUP: media (MMR cap 3) for ${mediaItems.size} items")
+                }
+            }
+        }
 
         // Evict ledger entries for items no longer in visible + warm zone
         retainOnly(combined.map { it.id }.toSet())
     }
 
     /**
-     * SLOW_SCROLL: Phase 1 first for warm zone, then Phase 2 for items
-     * that already have profiles resolved. Hard-capped per pass to avoid
-     * competing with UI layout during scroll.
+     * SLOW_SCROLL: cache-only — zero relay work during active scroll.
+     * All relay dispatches (profiles, refs, engagement) happen in IDLE.
+     * The SLOW_SCROLL↔IDLE bounce (~500ms) provides frequent hydration windows.
      */
     private fun handleSlowScroll() {
-        val warmZone = computeWarmZone()
-        if (isWindowUnchanged(lastVisibleItems, warmZone)) return
-        val combined = lastVisibleItems + warmZone
-        val viewportCenter = lastVisibleItems.size / 2
-
-        // Phase 1: profiles — max 4 per pass, closest to viewport center first
-        val toProfile = combined.filter { !isHydrated(it.id, PHASE_PROFILE) && it.pubkey !in profileHydratedPubkeys }
-            .sortedByProximity(combined, viewportCenter)
-            .take(SLOW_SCROLL_PROFILE_CAP)
-        if (toProfile.isNotEmpty() && profileJob?.isActive != true) {
-            toProfile.forEach { markHydrated(it.id, PHASE_PROFILE) }
-            profileHydratedPubkeys.addAll(toProfile.map { it.pubkey })
-            fanOutPendingIds.addAll(toProfile.map { it.id })
-            profileJob = launchProfileHydration(toProfile, fanOut = false, tag = "SLOW_SCROLL")
-        }
-
-        // Phase 2: refs — max 2 per pass, 2000ms debounce (gated by queue)
-        if (pendingQueueSize == 0) {
-            val now = System.currentTimeMillis()
-            val toRef = combined.filter { isHydrated(it.id, PHASE_PROFILE) && !isHydrated(it.id, PHASE_REFS) }
-                .sortedByProximity(combined, viewportCenter)
-                .take(SLOW_SCROLL_REF_CAP)
-            if (toRef.isNotEmpty() && refJob?.isActive != true && now - lastRefStartTime >= REF_DEBOUNCE_SLOW_SCROLL_MS) {
-                lastRefStartTime = now
-                toRef.forEach { markHydrated(it.id, PHASE_REFS) }
-                refJob = launchRefHydration(toRef, tag = "SLOW_SCROLL")
-            }
-        }
-
-        // Engagement freshness pre-check (warm zone items approaching viewport)
-        checkEngagementFreshness(warmZone)
+        // No-op: all relay work moved to IDLE
     }
 
     /**
@@ -486,6 +452,18 @@ class FeedHydrationController(
                 lastRefStartTime = now
                 toRef.forEach { markHydrated(it.id, PHASE_REFS) }
                 refJob = launchRefHydration(toRef, tag = "IDLE")
+            }
+        }
+
+        // Independent media pipeline: image dims (IDLE-safe, no codec work)
+        if (mediaJob?.isActive != true) {
+            val mediaItems = combined.filter { !isHydrated(it.id, PHASE_REFS) }
+            if (mediaItems.isNotEmpty()) {
+                mediaJob = scope.launch(Dispatchers.IO) {
+                    if (state == ScrollState.FAST_SCROLL || state == ScrollState.REST) return@launch
+                    cardHydrator.hydrateMedia(mediaItems, mmrAllowed = true, mmrCap = 3)
+                    Log.d(TAG, "IDLE: media (MMR cap 3) for ${mediaItems.size} items")
+                }
             }
         }
 
@@ -592,10 +570,8 @@ class FeedHydrationController(
             }
         }
 
-        // No dedicated visible-item engagement fetch — hot zone is read-only from Room.
-        // checkEngagementFreshness() in handleIdle() covers visible + warm zone items
-        // using Room's updated_at freshness check. Background backfill covers the full feed.
-        // 30s stale cycle: clears in-memory dedup so freshness check re-evaluates via Room.
+        // 30s stale cycle: clears in-memory dedup so freshness check re-evaluates.
+        // checkEngagementFreshness() in handleIdle() covers visible + warm zone items.
         engagementJob = scope.launch(Dispatchers.IO) {
             while (true) {
                 delay(ENGAGEMENT_REFRESH_INTERVAL_MS)
@@ -610,53 +586,17 @@ class FeedHydrationController(
         }
     }
 
-    // ── Background engagement accumulation ─────────────────────────────
-
     /**
-     * Starts a low-priority background drip that slowly accumulates engagement
-     * data for all feed events. NOT tied to scroll state — runs as long as the
-     * feed is active. One batch every 2.5s. Cancelled and restarted on feed switch.
+     * REST media: launch MediaMetadataRetriever for videos without imeta poster URL.
+     * REST means the user has been stationary for seconds — safe for heavyweight work.
      */
-    fun startBackfill() {
-        backfillJob?.cancel()
-        backfillJob = scope.launch(Dispatchers.IO) {
-            // Initial delay — let WARM_CATCHUP + IDLE fetch visible engagement first
-            delay(5_000L)
-            Log.d(TAG, "Backfill: starting (${lastAllEvents.size} feed events)")
-
-            while (true) {
-                // Pause backfill during REST or while user has pending items queued
-                if (state == ScrollState.REST || pendingQueueSize > 0) {
-                    delay(BACKFILL_DELAY_MS)
-                    continue
-                }
-
-                val allTargetIds = lastAllEvents.map { engagementTargetId(it) }.distinct()
-
-                // P0: skip if feed structure unchanged since last iteration
-                var feedHash = 0
-                for (id in allTargetIds) feedHash = feedHash * 31 + id.hashCode()
-                if (feedHash == lastBackfillBatchHash) {
-                    Log.d(TAG, "Backfill: batch unchanged, skipping iteration")
-                    delay(BACKFILL_DELAY_MS)
-                    continue
-                }
-                lastBackfillBatchHash = feedHash
-
-                val novel = allTargetIds.filter { it !in backfillFetchedIds && it !in engagementFetchedIds }
-                if (novel.isEmpty()) {
-                    Log.d(TAG, "Backfill: complete — all ${allTargetIds.size} events covered")
-                    break
-                }
-
-                val batch = novel.take(BACKFILL_BATCH_SIZE)
-                backfillFetchedIds.addAll(batch)
-                engagementFetchedIds.addAll(batch)
-                queueEngagementFetch(batch)
-                Log.d(TAG, "Backfill: batch ${batch.size} items (${novel.size - batch.size} remaining)")
-
-                delay(BACKFILL_DELAY_MS)
-            }
+    private fun startRestMedia() {
+        val warmZone = computeWarmZone()
+        val combined = (lastVisibleItems + warmZone).distinctBy { it.id }
+        if (combined.isEmpty()) return
+        mediaJob = scope.launch(Dispatchers.IO) {
+            cardHydrator.hydrateMedia(combined, mmrAllowed = true)
+            Log.d(TAG, "REST: media (MMR allowed) for ${combined.size} items")
         }
     }
 
@@ -721,9 +661,8 @@ class FeedHydrationController(
     // ── Engagement coalescing ───────────────────────────────────────
 
     /**
-     * Coalesces engagement fetches into fat batches. Multiple call sites
-     * (checkEngagementFreshness, startBackfill) dump IDs here; a single
-     * 750ms timer flushes them all in one relay round-trip.
+     * Coalesces engagement fetches into fat batches. checkEngagementFreshness
+     * dumps IDs here; a 750ms timer flushes them in one relay round-trip.
      */
     private fun queueEngagementFetch(ids: List<String>) {
         pendingEngagementIds.addAll(ids)

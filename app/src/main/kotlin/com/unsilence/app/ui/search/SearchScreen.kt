@@ -306,6 +306,7 @@ fun SearchScreen(
                                 context = RenderContext.Search,
                                 thumbnailCache = actionsViewModel.videoThumbnailCache,
                                 imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
                             )
                         }
                     }

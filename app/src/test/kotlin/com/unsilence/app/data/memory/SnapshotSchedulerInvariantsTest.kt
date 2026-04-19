@@ -141,7 +141,7 @@ class SnapshotSchedulerInvariantsTest {
 
         // First line should be the version header
         val firstLine = snapshotFile.bufferedReader().use { it.readLine() }
-        assertEquals("SNAPSHOT_V1", firstLine)
+        assertEquals("SNAPSHOT_V2", firstLine)
     }
 
     // ── Test 4: Corrupt file does not crash, store stays empty ─────────────

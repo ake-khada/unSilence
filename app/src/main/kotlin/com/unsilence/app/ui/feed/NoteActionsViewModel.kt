@@ -71,6 +71,12 @@ class NoteActionsViewModel @Inject constructor(
     var isNwcConfigured by mutableStateOf(nwcManager.isConfigured)
         private set
 
+    /** MES sidecar cache lookup — pre-computed at EventProcessor insert time. */
+    fun getVideoRenderModels(eventId: String) = memoryEventStore.getVideoRenderModels(eventId)
+
+    /** MES sidecar cache lookup — image aspect ratios from imeta dims at insert time. */
+    fun getImetaImageDims(eventId: String) = memoryEventStore.getImetaImageDims(eventId)
+
     /**
      * Set of event IDs the current user has reacted to.
      * MES re-emits via _actionSignal on every kind-7 insert.

@@ -349,31 +349,21 @@ class CardHydrator @Inject constructor(
             userRepository.fetchMissingProfiles(allRefAuthors)
         }
 
-        // Prefetch video thumbnails (capped at 3 per batch)
-        var thumbnailCount = 0
-        var videoFound = 0
-        for (event in events) {
-            if (thumbnailCount >= 3) break
-            if (event.kind == 30023) continue
-            val models = buildVideoRenderModels(event)
-            videoFound += models.size
-            for (model in models) {
-                if (thumbnailCount >= 3) break
-                if (model.widthPx != null && model.heightPx != null) continue
-                if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
-                try {
-                    withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
-                    thumbnailCount++
-                    Log.d(TAG, "Prefetched thumbnail: ${model.videoUrl.take(60)}")
-                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "Thumbnail prefetch failed: ${e.message}")
-                }
-            }
-        }
+        val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
+        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
+    }
 
-        // Prefetch image dimensions (lightweight: header-only BitmapFactory decode)
+    /**
+     * Independent media pipeline — no relay queries, no dependencies on ref resolution.
+     *
+     * @param mmrAllowed When true, MediaMetadataRetriever is used for video thumbnails
+     *   (REST-only — 300ms/video codec work). When false, only image dimensions are
+     *   resolved (IDLE-safe — BitmapFactory header-only, ~50ms each).
+     */
+    suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
+        if (events.isEmpty()) return
+
+        // Image dimensions (always — lightweight header-only BitmapFactory decode)
         val imageUrls = mutableListOf<String>()
         for (event in events) {
             if (event.kind == 30023) continue
@@ -384,20 +374,45 @@ class CardHydrator @Inject constructor(
         val uniqueImageUrls = imageUrls.distinct().filter { imageDimensionCache.getCached(it) == null }
         if (uniqueImageUrls.isNotEmpty()) {
             imageDimensionCache.resolveAll(uniqueImageUrls)
+            Log.d(TAG, "Media: resolved ${uniqueImageUrls.size} image dims")
         }
 
-        val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
-        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved), $thumbnailCount thumbnails, ${uniqueImageUrls.size} img dims")
+        // Video thumbnails via MediaMetadataRetriever (REST-only, capped at 3)
+        if (mmrAllowed) {
+            var thumbnailCount = 0
+            for (event in events) {
+                if (thumbnailCount >= mmrCap) break
+                if (event.kind == 30023) continue
+                val models = buildVideoRenderModels(event)
+                for (model in models) {
+                    if (thumbnailCount >= mmrCap) break
+                    // Skip if poster URL exists (Coil handles it) or dims already resolved
+                    if (!model.posterUrl.isNullOrBlank()) continue
+                    if (model.widthPx != null && model.heightPx != null) continue
+                    if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
+                    try {
+                        withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+                        thumbnailCount++
+                        Log.d(TAG, "Media: MMR thumbnail ${model.videoUrl.take(60)}")
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Media: MMR thumbnail failed: ${e.message}")
+                    }
+                }
+            }
+        }
     }
 
     /**
-     * Full hydration: profiles + refs + thumbnails. Used by IDLE state where
+     * Full hydration: profiles + refs + media. Used by IDLE state where
      * there's no urgency to split phases.
      */
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         if (events.isEmpty()) return
         hydrateProfiles(events)
         hydrateRefs(events)
+        hydrateMedia(events, mmrAllowed = false)
     }
 }
 

@@ -151,6 +151,7 @@ fun UserProfileScreen(
         holder = actionsViewModel.sharedPlayerHolder,
         events = posts,
         listState = listState,
+        videoModelProvider = actionsViewModel::getVideoRenderModels,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -474,6 +475,7 @@ fun UserProfileScreen(
                     thumbnailCache = actionsViewModel.videoThumbnailCache,
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                     showThreadParents = selectedTab == ProfileTab.REPLIES,
+                    imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
                 )
             }
 
