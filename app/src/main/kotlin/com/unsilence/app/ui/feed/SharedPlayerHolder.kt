@@ -1,6 +1,8 @@
 package com.unsilence.app.ui.feed
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -27,7 +29,8 @@ class SharedPlayerHolder @Inject constructor(
      */
     private var _retained: Boolean = false
 
-    private var _retentionTimer: java.util.Timer? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var _retentionRunnable: Runnable? = null
 
     private val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
@@ -111,19 +114,17 @@ class SharedPlayerHolder @Inject constructor(
 
     private fun startRetentionTimer() {
         cancelRetentionTimer()
-        _retentionTimer = java.util.Timer("player-retention", true).apply {
-            schedule(object : java.util.TimerTask() {
-                override fun run() {
-                    if (_retained && _currentOwner == null) {
-                        evictRetained()
-                    }
-                }
-            }, RETENTION_TIMEOUT_MS)
+        val runnable = Runnable {
+            if (_retained && _currentOwner == null) {
+                evictRetained()
+            }
         }
+        _retentionRunnable = runnable
+        mainHandler.postDelayed(runnable, RETENTION_TIMEOUT_MS)
     }
 
     private fun cancelRetentionTimer() {
-        _retentionTimer?.cancel()
-        _retentionTimer = null
+        _retentionRunnable?.let { mainHandler.removeCallbacks(it) }
+        _retentionRunnable = null
     }
 }
