@@ -125,6 +125,11 @@ fun VideoPreviewCard(
         else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
+    // Track whether ratio has been resolved from a real source (imeta or MMR).
+    // Allow ONE update from default → resolved, then lock permanently.
+    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+        mutableStateOf(imetaKnown || cachedRatio != null)
+    }
 
     Box(
         modifier = modifier
@@ -139,8 +144,12 @@ fun VideoPreviewCard(
             model = model,
             thumbnailCache = thumbnailCache,
             modifier = Modifier.matchParentSize(),
-            // Only update aspect ratio from bitmap if imeta didn't provide dimensions
-            onAspectRatioResolved = { if (!forceSquare && !imetaKnown) displayAspect = feedVideoAspectRatio(it, false) },
+            onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
+                { ratio ->
+                    displayAspect = feedVideoAspectRatio(ratio, false)
+                    hasBeenResolved = true
+                }
+            } else null,
         )
 
         // Play icon overlay
@@ -194,6 +203,11 @@ fun InlineVideoPlayer(
         else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
+    // Track whether ratio has been resolved from a real source (imeta or MMR).
+    // Allow ONE update from default → resolved, then lock permanently.
+    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+        mutableStateOf(imetaKnown || resolvedRatio != null)
+    }
 
     var isFirstFrameRendered by remember { mutableStateOf(false) }
 
@@ -209,11 +223,12 @@ fun InlineVideoPlayer(
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     val ratio = videoSize.width.toFloat() / videoSize.height
-                    if (!forceSquare && !imetaKnown) {
-                        displayAspect = feedVideoAspectRatio(ratio, false)
-                    }
-                    // Persist so future preview cards and re-entries use correct ratio
                     thumbnailCache?.resolvedAspectRatios?.put(model.videoUrl, ratio)
+                    // Allow ONE update from default → resolved for unresolved videos
+                    if (!hasBeenResolved && !forceSquare) {
+                        displayAspect = feedVideoAspectRatio(ratio, false)
+                        hasBeenResolved = true
+                    }
                 }
             }
         }
@@ -236,7 +251,8 @@ fun InlineVideoPlayer(
                 model = model,
                 thumbnailCache = thumbnailCache,
                 modifier = Modifier.matchParentSize(),
-                onAspectRatioResolved = { if (!forceSquare && !imetaKnown) displayAspect = feedVideoAspectRatio(it, false) },
+                // Layout locked — no resize after first compose
+                onAspectRatioResolved = null,
             )
         }
 

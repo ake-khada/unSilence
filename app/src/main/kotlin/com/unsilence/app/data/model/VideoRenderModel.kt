@@ -51,6 +51,36 @@ private const val DEFAULT_ASPECT_RATIO = 16f / 9f
  * with regex-detected video URLs from content. Mirrors the extraction logic
  * that previously lived inside NoteCard's remember {} block.
  */
+/**
+ * Overload for insert-time population of the MES sidecar cache.
+ * Avoids FeedRow construction and JSON round-trip of tags.
+ */
+fun buildVideoRenderModels(
+    kind: Int,
+    content: String,
+    tags: List<List<String>>,
+): List<VideoRenderModel> {
+    val (effectiveContent, imetaMedia) = if (kind == 6 && content.isNotBlank()) {
+        runCatching {
+            val inner = NostrJson.parseToJsonElement(content).jsonObject
+            val innerContent = inner["content"]?.jsonPrimitive?.content ?: content
+            val innerTags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
+            innerContent to innerTags
+        }.getOrElse { content to ImetaParser.parseFromList(tags) }
+    } else {
+        content to ImetaParser.parseFromList(tags)
+    }
+
+    val youtubeStripped = YOUTUBE_REGEX.replace(effectiveContent, "")
+    val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped).map { it.value }.toList()
+    val imetaVideoUrls = imetaMedia
+        .filter { it.mimeType?.startsWith("video/") == true && isDirectVideoUrl(it.url) }
+        .map { it.url }
+    val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinct().filter(::isDirectVideoUrl)
+    if (allVideoUrls.isEmpty()) return emptyList()
+    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia) }
+}
+
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
     // For kind-6 reposts, extract effective content AND tags from the embedded
     // inner event JSON.  The outer wrapper's tags have no imeta; using them

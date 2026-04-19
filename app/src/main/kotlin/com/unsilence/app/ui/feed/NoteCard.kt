@@ -269,6 +269,7 @@ fun NoteCard(
     videoRenderModels: List<VideoRenderModel> = emptyList(),
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDims: Map<String, Float> = emptyMap(),
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -618,6 +619,7 @@ fun NoteCard(
                 imetaMedia = imetaMedia,
                 onImageClick = { url -> fullscreenImageIndex = imageUrls.indexOf(url).coerceAtLeast(0) },
                 imageDimensionCache = imageDimensionCache,
+                imetaImageDims = imetaImageDims,
                 modifier   = Modifier
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.small),
@@ -956,13 +958,14 @@ private fun MediaImage(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDims: Map<String, Float> = emptyMap(),
 ) {
     val imetaAspect = imetaMedia
         .firstOrNull { it.url == url && it.width != null && it.height != null }
         ?.let { it.width!!.toFloat() / it.height!! }
 
-    // Priority: imeta > pre-fetched cache > default 4:3
-    val initialAspect = imetaAspect ?: imageDimensionCache?.getCached(url)
+    // Priority: sidecar cache (insert-time imeta) > inline imeta > pre-fetched cache > default 4:3
+    val initialAspect = imetaImageDims[url] ?: imetaAspect ?: imageDimensionCache?.getCached(url)
 
     var displayAspect by remember(url, forceSquare) {
         mutableStateOf(feedImageAspectRatio(initialAspect, forceSquare))
@@ -995,9 +998,9 @@ private fun MediaImage(
         success = {
             val size = painter.intrinsicSize
             if (!forceSquare && size.width > 0f && size.height > 0f) {
-                val trueAspect = feedImageAspectRatio(size.width / size.height, false)
-                LaunchedEffect(trueAspect) {
-                    displayAspect = trueAspect
+                // Populate cache for future views but DON'T resize this card —
+                // layout stability requires locking aspect ratio after first compose.
+                LaunchedEffect(Unit) {
                     imageDimensionCache?.put(url, size.width / size.height)
                 }
             }
@@ -1019,6 +1022,7 @@ private fun MediaGrid(
     imetaMedia: List<ImetaMedia>,
     onImageClick: (String) -> Unit,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDims: Map<String, Float> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val count = imageUrls.size
@@ -1030,6 +1034,7 @@ private fun MediaGrid(
                 onImageClick = onImageClick,
                 modifier = modifier,
                 imageDimensionCache = imageDimensionCache,
+                imetaImageDims = imetaImageDims,
             )
         }
         count == 2 -> {
@@ -1065,6 +1070,7 @@ private fun MediaGrid(
                     modifier = Modifier.fillMaxWidth(),
                     forceSquare = false,
                     imageDimensionCache = imageDimensionCache,
+                    imetaImageDims = imetaImageDims,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1190,6 +1196,7 @@ private fun VideoGridCell(
             posterUrl      = model.posterUrl,
             thumbnailCache = thumbnailCache,
             forceSquare    = forceSquare,
+            imetaKnown     = model.widthPx != null && model.heightPx != null,
             modifier       = modifier,
         )
     } else {
@@ -1201,6 +1208,7 @@ private fun VideoGridCell(
             posterUrl      = posterUrl,
             thumbnailCache = thumbnailCache,
             forceSquare    = forceSquare,
+            imetaKnown     = aspectRatio != null,
             modifier       = modifier,
         )
     }
@@ -1425,9 +1433,20 @@ private fun VideoThumbnailCard(
     posterUrl: String? = null,
     thumbnailCache: VideoThumbnailCache? = null,
     forceSquare: Boolean = false,
+    imetaKnown: Boolean = false,
 ) {
-    val baseAspect = feedVideoAspectRatio(aspectRatio, forceSquare)
-    var displayAspect by remember(url, forceSquare) { mutableStateOf(baseAspect) }
+    // Use imeta, then cached MMR ratio, then provided ratio (which may be default 16:9)
+    val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(url)
+    val initialAspect = when {
+        imetaKnown -> feedVideoAspectRatio(aspectRatio, forceSquare)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
+        else -> feedVideoAspectRatio(aspectRatio, forceSquare)
+    }
+    var displayAspect by remember(url, forceSquare) { mutableStateOf(initialAspect) }
+    // Allow ONE update from default → resolved, then lock permanently.
+    var hasBeenResolved by remember(url, forceSquare) {
+        mutableStateOf(imetaKnown || cachedRatio != null)
+    }
 
     Box(
         modifier          = modifier
@@ -1451,7 +1470,10 @@ private fun VideoThumbnailCard(
             LaunchedEffect(url) {
                 thumbnailCache.getThumbnail(url)?.let {
                     thumbnail = it
-                    if (!forceSquare) displayAspect = feedVideoAspectRatio(it.aspectRatio, false)
+                    if (!forceSquare && !hasBeenResolved) {
+                        displayAspect = feedVideoAspectRatio(it.aspectRatio, false)
+                        hasBeenResolved = true
+                    }
                 }
             }
             if (thumbnail != null) {
@@ -1768,7 +1790,9 @@ private fun EmbeddedQuoteCard(
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp)),
+                                .aspectRatio(4f / 3f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MediaPlaceholder),
                         )
                     } else {
                         // 2x2 grid for multiple images
@@ -1854,20 +1878,19 @@ private fun EmbeddedQuoteCard(
                 }
             }
         } else {
-            // Fallback: event unavailable (e.g. bridge post never propagated)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector        = Icons.Filled.FormatQuote,
-                    contentDescription = null,
-                    tint               = TextSecondary,
-                    modifier           = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text     = "Quoted post unavailable",
-                    color    = TextSecondary,
-                    fontSize = AppType.bodySmall,
-                )
+            // Loading skeleton — fixed height matches typical resolved quote.
+            // Provides visual continuity and prevents massive layout shift
+            // when the referenced event loads asynchronously.
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(24.dp).clip(CircleShape).background(Surface1))
+                    Spacer(Modifier.width(6.dp))
+                    Box(Modifier.width(100.dp).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
+                }
+                Spacer(Modifier.height(6.dp))
+                Box(Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.fillMaxWidth(0.7f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
             }
         }
     }
@@ -2091,8 +2114,12 @@ internal fun LinkPreviewCard(
         runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
     }
 
+    var ogLoaded by remember(url) { mutableStateOf(fetchOgMetadata == null) }
     val og by produceState<OgMetadata?>(null, url) {
-        if (fetchOgMetadata != null) value = fetchOgMetadata(url)
+        if (fetchOgMetadata != null) {
+            value = fetchOgMetadata(url)
+            ogLoaded = true
+        }
     }
 
     val loadedOg = og
@@ -2168,8 +2195,26 @@ internal fun LinkPreviewCard(
                 )
             }
         }
+    } else if (!ogLoaded) {
+        // Loading state — fixed height placeholder matching rich preview card.
+        // Prevents massive height jump from chip (~32dp) to rich card (~250dp).
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                .background(SurfaceVariant)
+                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .clickable { runCatching { uriHandler.openUri(url) } },
+        ) {
+            Box(Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(MediaPlaceholder))
+            Column(modifier = Modifier.padding(Spacing.small)) {
+                Box(Modifier.fillMaxWidth(0.8f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.fillMaxWidth(0.5f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
+            }
+        }
     } else {
-        // Fallback: simple domain chip (also shown while loading)
+        // OG fetch returned nothing useful — compact chip
         LinkChip(url = url)
     }
 }

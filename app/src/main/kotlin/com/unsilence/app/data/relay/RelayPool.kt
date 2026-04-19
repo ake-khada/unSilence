@@ -327,11 +327,8 @@ class RelayPool @Inject constructor(
         return false
     }
 
-    // Wire EventProcessor prefetch → RelayPool.fetchEventsByIdsFromRelay
+    // Wire EventProcessor relay set ref fetcher
     init {
-        processor.prefetchDispatcher = PrefetchDispatcher { relayUrl, eventIds ->
-            fetchEventsByIdsFromRelay(relayUrl, eventIds)
-        }
         processor.relaySetRefFetcher = RelaySetRefFetcher { author, dTags, hintRelayUrls ->
             scope.launch { fetchRelaySetsByCoordinate(author, dTags, hintRelayUrls) }
         }

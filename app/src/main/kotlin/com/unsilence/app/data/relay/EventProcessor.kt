@@ -5,9 +5,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -19,16 +17,12 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import com.unsilence.app.data.model.buildVideoRenderModels
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "EventProcessor"
-
-/** Fire-and-forget dispatch of event ID fetches to a specific relay. */
-fun interface PrefetchDispatcher {
-    fun dispatch(relayUrl: String, eventIds: List<String>)
-}
 
 /** Fetches kind-30002 relay sets by coordinate from hint relays.
  *  Called when kind-10012 arrives with ["a", "30002:pubkey:dtag", "hint-relay"] tags. */
@@ -99,111 +93,8 @@ class EventProcessor @Inject constructor(
         }
     }
 
-    // ── Prefetch infrastructure ─────────────────────────────────────────────
-
-    /** Set by RelayPool after construction to avoid circular dependency. */
-    internal var prefetchDispatcher: PrefetchDispatcher? = null
-
     /** Set by RelayPool — resolves kind-30002 relay set references from kind-10012 hint tags. */
     internal var relaySetRefFetcher: RelaySetRefFetcher? = null
-
-    /** Event IDs already requested via prefetch (prevents duplicate fetches). */
-    internal val prefetchedRefs: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-    // Observability counters
-    internal val prefetchEnqueuedCount = java.util.concurrent.atomic.AtomicLong(0)
-    internal val prefetchDedupedCount = java.util.concurrent.atomic.AtomicLong(0)
-    internal val prefetchSkippedAlreadyCachedCount = java.util.concurrent.atomic.AtomicLong(0)
-    internal val prefetchFetchedBySourceRelayCount = java.util.concurrent.atomic.AtomicLong(0)
-    internal val outboxPrefetchDispatchedCount = java.util.concurrent.atomic.AtomicLong(0)
-
-    private companion object {
-        const val PREFETCH_RATE_CAP = 50
-        const val PREFETCH_CHANNEL_CAP = 500
-        const val OUTBOX_RELAY_BUDGET = 5
-        const val OUTBOX_AUTHOR_BUDGET = 3
-        val EVENT_ID_HEX_REGEX = Regex("^[0-9a-f]{64}$")
-    }
-
-    private val prefetchChannel = Channel<Pair<String, String>>(
-        capacity = PREFETCH_CHANNEL_CAP,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-
-    /**
-     * Enqueue a referenced event ID for prefetch from the source relay.
-     * Skip rules: malformed ID, blank/non-wss URL, already cached, already prefetched.
-     */
-    private fun requestPrefetch(eventId: String, sourceRelayUrl: String) {
-        if (!EVENT_ID_HEX_REGEX.matches(eventId)) return
-        if (sourceRelayUrl.isBlank() || !sourceRelayUrl.startsWith("wss://")) return
-        if (memoryEventStore.getEventEntity(eventId) != null) {
-            prefetchSkippedAlreadyCachedCount.incrementAndGet()
-            return
-        }
-        if (!prefetchedRefs.add(eventId)) {
-            prefetchDedupedCount.incrementAndGet()
-            return
-        }
-        prefetchEnqueuedCount.incrementAndGet()
-        prefetchChannel.trySend(eventId to sourceRelayUrl)
-    }
-
-    /**
-     * Drain the prefetch channel and dispatch batched fetches.
-     * Production: runs as an infinite loop via drainPrefetch().
-     * Tests: call drainPrefetchForTest() after process() + drainForTest().
-     */
-    internal fun drainPrefetchForTest() {
-        val batch = mutableListOf<Pair<String, String>>()
-        while (true) {
-            val item = prefetchChannel.tryReceive().getOrNull() ?: break
-            batch.add(item)
-        }
-        if (batch.isEmpty()) return
-        dispatchPrefetchBatch(batch)
-    }
-
-    private fun dispatchPrefetchBatch(batch: List<Pair<String, String>>) {
-        val dispatcher = prefetchDispatcher ?: return
-        val byRelay = batch.groupBy({ it.second }, { it.first })
-        for ((relayUrl, ids) in byRelay) {
-            dispatcher.dispatch(relayUrl, ids)
-            prefetchFetchedBySourceRelayCount.addAndGet(ids.size.toLong())
-        }
-        if (prefetchEnqueuedCount.get() % 100 == 0L) {
-            Log.d(TAG, "prefetch counters: enqueued=${prefetchEnqueuedCount.get()} " +
-                "deduped=${prefetchDedupedCount.get()} " +
-                "skipped_cached=${prefetchSkippedAlreadyCachedCount.get()} " +
-                "fetched=${prefetchFetchedBySourceRelayCount.get()}")
-        }
-    }
-
-    /**
-     * A.6 outbox-aware prefetch: dispatch referenced event IDs to the author's
-     * NIP-65 write relays. Bypasses prefetchedRefs dedup (source relay already
-     * claimed that slot) and dispatches directly (no channel — budget-capped
-     * volume doesn't need rate limiting).
-     *
-     * @param refIds referenced event IDs (already validated by requestPrefetch)
-     * @param outboxRelays write relay URLs to try (budget-capped by caller)
-     */
-    private fun dispatchOutboxPrefetch(refIds: List<String>, outboxRelays: List<String>) {
-        val missing = refIds.filter {
-            EVENT_ID_HEX_REGEX.matches(it) && memoryEventStore.getEventEntity(it) == null
-        }
-        if (missing.isEmpty()) return
-        // Route through the prefetch channel for batching instead of dispatching
-        // individual REQs directly. The drainer's 250ms coalescing window groups
-        // IDs by relay, producing fewer multi-ID REQs instead of many 1-ID REQs.
-        for (relay in outboxRelays) {
-            if (relay.isBlank() || !relay.startsWith("wss://")) continue
-            for (id in missing) {
-                prefetchChannel.trySend(id to relay)
-            }
-            outboxPrefetchDispatchedCount.addAndGet(missing.size.toLong())
-        }
-    }
 
     /**
      * Resolve kind-30002 relay set references from a kind-10012 (favorites) event.
@@ -236,28 +127,6 @@ class EventProcessor @Inject constructor(
         for ((hintRelay, dTags) in byHintRelay) {
             fetcher.fetch(author, dTags, listOf(hintRelay))
             Log.d(TAG, "Relay set ref resolve: ${dTags.size} sets → $hintRelay for ${author.take(8)}…")
-        }
-    }
-
-    /**
-     * PREFETCH drainer: collects items from the channel, coalesces for 250ms,
-     * then dispatches as batched REQs grouped by relay.
-     *
-     * The 250ms coalescing window is critical: without it, tryReceive returns
-     * empty between rapid dispatches, producing 1-event-per-REQ subscriptions
-     * that saturate the 10-slot cap and starve profile/user fetches.
-     */
-    private suspend fun drainPrefetch() {
-        while (true) {
-            val first = withTimeoutOrNull(1_000L) { prefetchChannel.receive() } ?: continue
-            val batch = mutableListOf(first)
-            // Coalescing window: wait 250ms for more items to accumulate
-            delay(250L)
-            while (batch.size < PREFETCH_RATE_CAP) {
-                val next = prefetchChannel.tryReceive().getOrNull() ?: break
-                batch.add(next)
-            }
-            dispatchPrefetchBatch(batch)
         }
     }
 
@@ -309,7 +178,6 @@ class EventProcessor @Inject constructor(
         val drainerScope = CoroutineScope(scope.coroutineContext + drainerJob!!)
         drainerScope.launch { drainHot() }
         drainerScope.launch { drainCold() }
-        drainerScope.launch { drainPrefetch() }
         Log.d(TAG, "Drainers started")
     }
 
@@ -318,11 +186,9 @@ class EventProcessor @Inject constructor(
         drainerJob?.cancel()
         drainerJob = null
         seenIds.clear()
-        prefetchedRefs.clear()
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
-        while (prefetchChannel.tryReceive().isSuccess) { /* discard */ }
         Log.d(TAG, "Stopped and cleared state")
     }
 
@@ -446,54 +312,6 @@ class EventProcessor @Inject constructor(
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
         )
 
-        // ── Pre-fetch all semantically-referenced events from the source relay ─
-        // Forward fix for A.4.3 deferred bug: prevents parent notes, repost
-        // targets, and notification refs from being missing when the UI looks
-        // them up. Generalized: prefetches all event refs the event exposes.
-        nostrEvent.replyToId?.let { requestPrefetch(it, relayUrl) }
-        nostrEvent.rootId?.let { requestPrefetch(it, relayUrl) }
-        tagsList
-            .filter { it.size >= 2 && it[0] == "e" }
-            .forEach { requestPrefetch(it[1], relayUrl) }
-
-        // ── A.6 outbox-aware prefetch: also try author's NIP-65 write relays ─
-        // When the event references other events (via e-tags) and mentions
-        // authors (via p-tags), resolve those authors' write relays from cached
-        // kind-10002 data and dispatch prefetch there too. This catches events
-        // that only exist on the author's outbox relays.
-        val pTagPubkeys = tagsList
-            .filter { it.size >= 2 && it[0] == "p" }
-            .map { it[1] }
-            .distinct()
-            .take(OUTBOX_AUTHOR_BUDGET)
-        // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
-        // etc.), use the wrapper's own pubkey as fallback author. Self-reposts
-        // (wrapper author == target author) are the common case for bridged content.
-        val outboxAuthors = if (pTagPubkeys.isNotEmpty()) {
-            pTagPubkeys
-        } else if (kind == 6) {
-            listOf(pubkey)
-        } else {
-            emptyList()
-        }
-        if (outboxAuthors.isNotEmpty()) {
-            val outboxRelays = outboxAuthors
-                .flatMap { memoryEventStore.writeRelaysFor(it) }
-                .mapNotNull { normalizeRelayUrl(it) }
-                .filter { it != relayUrl } // skip source relay (already tried)
-                .distinct()
-                .take(OUTBOX_RELAY_BUDGET)
-            if (outboxRelays.isNotEmpty()) {
-                val refIds = buildList {
-                    nostrEvent.replyToId?.let { add(it) }
-                    nostrEvent.rootId?.let { add(it) }
-                    tagsList.filter { it.size >= 2 && it[0] == "e" }.forEach { add(it[1]) }
-                }.distinct()
-                dispatchOutboxPrefetch(refIds, outboxRelays)
-                Log.d(TAG, "outbox prefetch: ${refIds.size} refs → ${outboxRelays.size} write relays for ${outboxAuthors.size} authors")
-            }
-        }
-
         // ── Direct-path control-plane updates (not channeled) ────────────────
         // Control-plane kinds (3, 10002) update MemoryEventStore state directly
         // without entering the feed-content channels. They are NOT feed items.
@@ -607,6 +425,18 @@ class EventProcessor @Inject constructor(
 
         for (event in events.values) {
             memoryEventStore.insert(event)
+            // Pre-compute media metadata at insert time (sidecar caches).
+            // Composables read from MES cache instead of parsing per-recomposition.
+            if (event.kind in setOf(1, 6, 20, 21)) {
+                val models = buildVideoRenderModels(event.kind, event.content, event.tags)
+                memoryEventStore.putVideoRenderModels(event.id, models)
+                // Image aspect ratios from imeta dim tags
+                val imetaMedia = ImetaParser.parseFromList(event.tags)
+                val imageDims = imetaMedia
+                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null }
+                    .associate { it.url to (it.width!!.toFloat() / it.height!!) }
+                memoryEventStore.putImetaImageDims(event.id, imageDims)
+            }
         }
     }
 

@@ -107,6 +107,7 @@ fun LazyListScope.eventFeedItems(
     onNewPostAnimated: (String) -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDimsProvider: ((String) -> Map<String, Float>)? = null,
     showThreadParents: Boolean = false,
 ) {
     items(
@@ -129,6 +130,7 @@ fun LazyListScope.eventFeedItems(
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
+                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: emptyMap(),
             )
         } else {
             EventFeedItem(
@@ -141,6 +143,7 @@ fun LazyListScope.eventFeedItems(
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
+                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: emptyMap(),
             )
         }
     }
@@ -162,6 +165,7 @@ private fun ThreadedReplyItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDims: Map<String, Float> = emptyMap(),
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -201,6 +205,7 @@ private fun ThreadedReplyItem(
         onNewPostAnimated = onNewPostAnimated,
         thumbnailCache = thumbnailCache,
         imageDimensionCache = imageDimensionCache,
+        imetaImageDims = imetaImageDims,
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
     )
@@ -305,7 +310,9 @@ internal fun ThreadParentCard(
                                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
                         )
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(aspect, matchHeightConstraintsFirst = false),
                 )
             }
         }
@@ -328,6 +335,7 @@ private fun EventFeedItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    imetaImageDims: Map<String, Float> = emptyMap(),
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
 ) {
@@ -390,6 +398,7 @@ private fun EventFeedItem(
             videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
             thumbnailCache = thumbnailCache,
             imageDimensionCache = imageDimensionCache,
+            imetaImageDims = imetaImageDims,
             lookupProfile = callbacks.lookupProfile,
             lookupEvent = callbacks.lookupEvent,
             fetchOgMetadata = callbacks.fetchOgMetadata,

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -97,6 +98,28 @@ class MemoryEventStore @Inject constructor() {
     // ─── Parameterized replaceable events (kind 30002 etc.) ─────────────────
     // Key: "$pubkey:$kind:$dTag" → event ID of the latest version
     private val replaceableByCoordinate = ConcurrentHashMap<String, String>()
+
+    // ─── Media metadata sidecar cache (populated at insert time) ─────────
+    // Key: event ID → pre-computed video render models from imeta tags.
+    // Read-only after insert — zero cost during feedFlow scans.
+    private val videoRenderModelsByEventId = ConcurrentHashMap<String, List<com.unsilence.app.data.model.VideoRenderModel>>()
+
+    fun getVideoRenderModels(eventId: String): List<com.unsilence.app.data.model.VideoRenderModel> =
+        videoRenderModelsByEventId[eventId] ?: emptyList()
+
+    fun putVideoRenderModels(eventId: String, models: List<com.unsilence.app.data.model.VideoRenderModel>) {
+        if (models.isNotEmpty()) videoRenderModelsByEventId[eventId] = models
+    }
+
+    // Image aspect ratios from imeta, keyed by event ID → (url → aspect ratio)
+    private val imetaImageDimsByEventId = ConcurrentHashMap<String, Map<String, Float>>()
+
+    fun getImetaImageDims(eventId: String): Map<String, Float> =
+        imetaImageDimsByEventId[eventId] ?: emptyMap()
+
+    fun putImetaImageDims(eventId: String, dims: Map<String, Float>) {
+        if (dims.isNotEmpty()) imetaImageDimsByEventId[eventId] = dims
+    }
 
     // ─── Reactive signals ───────────────────────────────────────────────────
     private val _feedSignal = MutableStateFlow(0L)
@@ -922,11 +945,14 @@ class MemoryEventStore @Inject constructor() {
 
     // ─── Reactive flows ─────────────────────────────────────────────────────
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun feedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+            .sample(200)
             .map { feedEvents(filter, limit).map { toFeedRow(it) } }
             .flowOn(Dispatchers.Default)
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun userFeedFlow(
         pubkey: String,
         contentFilter: Int = 0,
@@ -934,6 +960,7 @@ class MemoryEventStore @Inject constructor() {
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
         combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+            .sample(200)
             .map { userFeedEvents(pubkey, contentFilter, kinds, limit).map { toFeedRow(it) } }
             .flowOn(Dispatchers.Default)
 
@@ -1564,6 +1591,20 @@ class MemoryEventStore @Inject constructor() {
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
+        // Pre-compute media metadata for feed content kinds
+        if (event.kind in setOf(1, 6, 20, 21)) {
+            val models = com.unsilence.app.data.model.buildVideoRenderModels(
+                event.kind, event.content, event.tags,
+            )
+            if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
+            // Image aspect ratios from imeta dim tags
+            val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
+            val imageDims = imetaMedia
+                .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null }
+                .associate { it.url to (it.width!!.toFloat() / it.height!!) }
+            if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
+        }
+
         // Restore kind-derived state (profiles, follows, relay lists)
         when (event.kind) {
             0 -> handleProfile(event)
@@ -1839,6 +1880,8 @@ class MemoryEventStore @Inject constructor() {
         _relayConfigSignal.value = 0L
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
+        videoRenderModelsByEventId.clear()
+        imetaImageDimsByEventId.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L

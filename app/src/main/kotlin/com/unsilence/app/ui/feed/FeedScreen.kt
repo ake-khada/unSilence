@@ -135,6 +135,7 @@ fun FeedScreen(
         holder = actionsViewModel.sharedPlayerHolder,
         events = events,
         listState = listState,
+        videoModelProvider = actionsViewModel::getVideoRenderModels,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -253,6 +254,7 @@ fun FeedScreen(
                         onNewPostAnimated = { newEventIds.remove(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
+                        imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                     )
 
