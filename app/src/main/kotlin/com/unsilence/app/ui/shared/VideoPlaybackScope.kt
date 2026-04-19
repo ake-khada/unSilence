@@ -136,7 +136,11 @@ fun rememberVideoPlaybackScope(
 
     val noteIdsWithVideo = remember(renderModelsMap) { renderModelsMap.keys }
 
-    // Playback transitions: swap media source on active note change
+    // Playback transitions: swap media source on active note change.
+    // B2 contract:
+    //   Deactivation: playWhenReady=false (retain codec+media). No stop(), no clearMediaItems().
+    //   Reactivation same URL: playWhenReady=true. No prepare(), no codec realloc.
+    //   Reactivation different URL: stop()+clearMediaItems(), then setMediaItem()+prepare().
     val activeVideoUrl = remember(scope.activeVideoNoteId, renderModelsMap) {
         scope.activeVideoNoteId?.let { noteId ->
             renderModelsMap[noteId]?.firstOrNull()?.videoUrl
@@ -145,16 +149,27 @@ fun rememberVideoPlaybackScope(
 
     LaunchedEffect(activeVideoUrl) {
         if (activeVideoUrl != null) {
+            val retainedUrl = holder.currentUrl
             holder.claim(ownerId)
-            val currentUrl = exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-            if (currentUrl != activeVideoUrl) {
+            if (retainedUrl == activeVideoUrl && holder.isRetained.not()) {
+                // Same URL, player was already claimed (not retained) — just ensure playing
+                exoPlayer.playWhenReady = true
+            } else if (retainedUrl == activeVideoUrl) {
+                // Same URL, player was retained (codec alive) — resume without re-prepare
+                exoPlayer.playWhenReady = true
+            } else {
+                // Different URL — full media swap (the one path where codec realloc is correct)
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
                 exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
                 exoPlayer.prepare()
+                exoPlayer.playWhenReady = true
             }
-            exoPlayer.playWhenReady = true
         } else {
             if (holder.isOwner(ownerId)) {
-                exoPlayer.stop()
+                // B2: retain codec — just release ownership (sets playWhenReady=false,
+                // starts 15s retention timer)
+                holder.releaseOwnership(ownerId)
             }
         }
     }
