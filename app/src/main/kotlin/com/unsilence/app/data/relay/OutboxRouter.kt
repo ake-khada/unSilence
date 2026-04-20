@@ -221,6 +221,12 @@ class OutboxRouter @Inject constructor(
         for (url in removed) {
             relayPool.removePurpose(url, ConnectionPurpose.OUTBOX)
         }
+
+        // Skip redundant routing if the URL set hasn't changed
+        if (newOutboxUrls == currentOutboxUrls && removed.isEmpty()) {
+            Log.d(TAG, "Routing unchanged (${newOutboxUrls.size} write relays, ${relayLists.size} relay lists) — skipping")
+            return
+        }
         currentOutboxUrls = newOutboxUrls
 
         Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} relay lists, ${removed.size} removed)")
