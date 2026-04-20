@@ -7,9 +7,9 @@ import org.junit.Test
 class SubscriptionRulesTest {
 
     /**
-     * All 21 one-shot prefixes verified against RelayPool.isOneShotSubscription()
-     * at commit 201d067. Sprint 0 inventory said "17 one-shot prefix types" —
-     * actual count is 21.
+     * All 19 one-shot prefixes verified against RelayPool.isOneShotSubscription().
+     * Was 21 before engagement consolidation (3 engagement-{replies,reactions,zaps}-
+     * merged into single "engagement-" prefix).
      */
     @Test
     fun `all one-shot prefixes are recognized`() {
@@ -30,9 +30,7 @@ class SubscriptionRulesTest {
             "user-posts-",
             "user-longform-",
             "user-engagement-",
-            "engagement-replies-",
-            "engagement-reactions-",
-            "engagement-zaps-",
+            "engagement-",
             "batch-events-",
             "trust-scores-",
         )
