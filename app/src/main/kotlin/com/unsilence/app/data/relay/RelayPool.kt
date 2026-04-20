@@ -538,9 +538,7 @@ class RelayPool @Inject constructor(
         val lanes = mutableSetOf<Lane>()
         for (url in relayUrls) {
             val hash = url.hashCode()
-            lanes.add(Lane("feed-posts-$hash", url))
-            lanes.add(Lane("feed-media-$hash", url))
-            lanes.add(Lane("feed-longform-$hash", url))
+            lanes.add(Lane("feed-$hash", url))
         }
         if (lanes.isEmpty()) return
         val handle = CoverageHandle(
@@ -602,47 +600,31 @@ class RelayPool @Inject constructor(
     private suspend fun subscribeAfterConnect(conn: RelayConnection) {
         val hash = conn.url.hashCode()
 
-        // REQ 1: posts and reposts — the main feed content
-        val postsSubId = "feed-posts-$hash"
-        val postsReq = buildJsonArray {
+        // Clean up legacy per-type feed subs from prior versions
+        persistentSubs.keys.removeIf {
+            it == "feed-posts-$hash" || it == "feed-media-$hash" || it == "feed-longform-$hash"
+        }
+
+        // Single combined feed subscription: notes, reposts, pictures, videos, longform
+        val feedSubId = "feed-$hash"
+        val feedReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(postsSubId))
+            add(JsonPrimitive(feedSubId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(6)) })
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(20))
+                    add(JsonPrimitive(21))
+                    add(JsonPrimitive(30023))
+                })
                 put("limit", JsonPrimitive(300))
             })
         }.toString()
 
-        // REQ 2: pictures and videos
-        val mediaSubId = "feed-media-$hash"
-        val mediaReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(mediaSubId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(20)); add(JsonPrimitive(21)) })
-                put("limit", JsonPrimitive(100))
-            })
-        }.toString()
-
-        // REQ 3: longform articles (NIP-23)
-        val longformSubId = "feed-longform-$hash"
-        val longformReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(longformSubId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(30023)) })
-                put("limit", JsonPrimitive(50))
-            })
-        }.toString()
-
-        registerPersistentSub(postsSubId, postsReq, targetRelayUrl = conn.url)
-        registerPersistentSub(mediaSubId, mediaReq, targetRelayUrl = conn.url)
-        registerPersistentSub(longformSubId, longformReq, targetRelayUrl = conn.url)
-
-        conn.send(postsReq)
-        conn.send(mediaReq)
-        conn.send(longformReq)
-        Log.d(TAG, "Subscribed to ${conn.url} (3 feed subscriptions)")
+        registerPersistentSub(feedSubId, feedReq, targetRelayUrl = conn.url)
+        conn.send(feedReq)
+        Log.d(TAG, "Subscribed to ${conn.url} (1 combined feed subscription)")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -840,10 +822,9 @@ class RelayPool @Inject constructor(
 
     /** Map persistent subscription IDs to sync_state keys. */
     private fun mapSubIdToSyncKey(subId: String): String? = when {
-        subId.startsWith("feed-following") -> "following-feed"
-        subId.startsWith("feed-global")    -> "global-feed"
-        subId.startsWith("notifs-")        -> "own-engagement"
-        subId.startsWith("follows-")       -> "follow-list"
+        subId.startsWith("feed-")     -> "following-feed"
+        subId.startsWith("notifs-")   -> "own-engagement"
+        subId.startsWith("follows-")  -> "follow-list"
         else -> null
     }
 

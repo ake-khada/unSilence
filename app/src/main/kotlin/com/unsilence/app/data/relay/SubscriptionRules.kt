@@ -44,7 +44,7 @@ object SubscriptionRules {
 
     /**
      * Only PERSISTENT-purpose relays receive home feed subscriptions
-     * (feed-posts, feed-media, feed-longform, follows-, notifs-).
+     * (feed-, follows-, notifs-).
      * BROWSE and OUTBOX relays must not receive these.
      */
     fun shouldReceiveHomeSubs(purpose: ConnectionPurpose): Boolean =
