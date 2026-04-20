@@ -1475,7 +1475,7 @@ class MemoryEventStore @Inject constructor() {
             kind = event.kind,
             content = event.content,
             createdAt = event.createdAt,
-            tags = tagsToJson(event.tags),
+            tags = event.tagsJson,
             relayUrl = event.relayUrl,
             replyToId = event.replyToId,
             rootId = event.rootId,
@@ -1492,15 +1492,6 @@ class MemoryEventStore @Inject constructor() {
             repostCount = repostCount(statsId),
             zapCount = zap.count,
         )
-    }
-
-    /** Serialize tags to JSON format matching Room's storage: [["tag","val"],["tag","val"]] */
-    private fun tagsToJson(tags: List<List<String>>): String {
-        return tags.joinToString(",", "[", "]") { tag ->
-            tag.joinToString(",", "[", "]") { value ->
-                "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-            }
-        }
     }
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
@@ -1702,13 +1693,15 @@ class MemoryEventStore @Inject constructor() {
     private fun deserializeEvent(line: String): NostrEvent? {
         val parts = line.split('\t')
         if (parts.size < 14) return null
+        val tags = deserializeTags(parts[5])
         return NostrEvent(
             id = parts[0],
             pubkey = parts[1],
             kind = parts[2].toIntOrNull() ?: return null,
             content = unescapeContent(parts[3]),
             createdAt = parts[4].toLongOrNull() ?: return null,
-            tags = deserializeTags(parts[5]),
+            tags = tags,
+            tagsJson = tagsToJson(tags),
             sig = parts[6],
             relayUrl = parts[7],
             replyToId = parts[8].ifEmpty { null },
@@ -1892,17 +1885,22 @@ class MemoryEventStore @Inject constructor() {
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
+/** Serialize tags to JSON format matching Room's storage: [["tag","val"],["tag","val"]] */
+internal fun tagsToJson(tags: List<List<String>>): String {
+    return tags.joinToString(",", "[", "]") { tag ->
+        tag.joinToString(",", "[", "]") { value ->
+            "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        }
+    }
+}
+
 internal fun NostrEvent.toEventEntity(): EventEntity = EventEntity(
     id = id,
     pubkey = pubkey,
     kind = kind,
     content = content,
     createdAt = createdAt,
-    tags = tags.joinToString(",", "[", "]") { tag ->
-        tag.joinToString(",", "[", "]") { value ->
-            "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-        }
-    },
+    tags = tagsJson,
     sig = sig,
     relayUrl = relayUrl,
     replyToId = replyToId,

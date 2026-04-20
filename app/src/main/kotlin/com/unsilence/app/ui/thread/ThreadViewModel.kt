@@ -10,6 +10,7 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
@@ -153,6 +154,7 @@ class ThreadViewModel @Inject constructor(
                     content = signed.content,
                     createdAt = signed.createdAt,
                     tags = parsedTags,
+                    tagsJson = tagsToJson(parsedTags),
                     sig = signed.sig,
                     relayUrl = "local",
                     replyToId = replyToId,

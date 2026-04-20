@@ -17,6 +17,7 @@ data class NostrEvent(
     val content: String,
     val createdAt: Long,
     val tags: List<List<String>>,
+    val tagsJson: String,
     val sig: String,
     val relayUrl: String,
     val replyToId: String?,

@@ -11,6 +11,7 @@ import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.OgMetadata
@@ -349,6 +350,7 @@ class NoteActionsViewModel @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = tagsList,
+            tagsJson = tagsToJson(tagsList),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,
