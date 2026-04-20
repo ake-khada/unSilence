@@ -26,6 +26,8 @@ import javax.inject.Singleton
 private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
+private const val MAX_CONTENT_EVENTS = 10_000
+private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
@@ -150,6 +152,9 @@ class MemoryEventStore @Inject constructor() {
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
 
+    // ─── Eviction bookkeeping ─────────────────────────────────────────────
+    private var insertsSinceLastEviction = 0
+
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
     // Buffer for relay URLs that arrive via addRelaySeen before the event
@@ -239,6 +244,12 @@ class MemoryEventStore @Inject constructor() {
         // Actor-side signal: bumped for kinds that populate the action indexes
         if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
             _actionSignal.value = System.nanoTime()
+        }
+
+        // Periodic eviction check (every 500 inserts)
+        if (++insertsSinceLastEviction >= 500) {
+            insertsSinceLastEviction = 0
+            evictOldContentEvents()
         }
 
         return true
@@ -659,6 +670,44 @@ class MemoryEventStore @Inject constructor() {
         idsByKind[event.kind]?.remove(event.id)
         idsByPubkey[event.pubkey]?.remove(event.id)
         recentByCreatedAt.remove(EventEntry(event.id, event.createdAt))
+    }
+
+    /**
+     * Evict oldest content events when the store exceeds [MAX_CONTENT_EVENTS].
+     * Non-content kinds (profiles, follows, relay config, etc.) are never evicted.
+     * Cleans up all indexes, caches, and aggregates for evicted events.
+     */
+    private fun evictOldContentEvents() {
+        var contentCount = 0
+        val toEvict = mutableListOf<EventEntry>()
+
+        for (entry in recentByCreatedAt) {
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in CONTENT_KINDS) continue
+            contentCount++
+            if (contentCount > MAX_CONTENT_EVENTS) {
+                toEvict.add(entry)
+            }
+        }
+
+        if (toEvict.isEmpty()) return
+
+        for (entry in toEvict) {
+            val event = eventsById.remove(entry.id) ?: continue
+            recentByCreatedAt.remove(entry)
+            idsByKind[event.kind]?.remove(entry.id)
+            idsByPubkey[event.pubkey]?.remove(entry.id)
+            if (event.replyToId != null) {
+                idsByReplyTarget[event.replyToId]?.remove(entry.id)
+            }
+            if (event.rootId != null && event.rootId != event.replyToId) {
+                idsByReplyTarget[event.rootId]?.remove(entry.id)
+            }
+            // Clean up caches
+            feedRowCache.remove(entry.id)
+        }
+
+        Log.d("MES", "Evicted ${toEvict.size} old content events (${contentCount} total, cap=$MAX_CONTENT_EVENTS)")
     }
 
     // ─── Query API ──────────────────────────────────────────────────────────
@@ -1525,7 +1574,21 @@ class MemoryEventStore @Inject constructor() {
     suspend fun saveSnapshotTo(writer: BufferedWriter) {
         writer.write(SNAPSHOT_VERSION)
         writer.newLine()
+        // Write all non-content events + most recent content events (capped)
+        val contentEvents = mutableListOf<NostrEvent>()
+        val nonContentEvents = mutableListOf<NostrEvent>()
         for (event in eventsById.values) {
+            if (event.kind in CONTENT_KINDS) contentEvents.add(event)
+            else nonContentEvents.add(event)
+        }
+        contentEvents.sortByDescending { it.createdAt }
+        val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
+
+        for (event in nonContentEvents) {
+            writer.write(serializeEvent(event))
+            writer.newLine()
+        }
+        for (event in cappedContent) {
             writer.write(serializeEvent(event))
             writer.newLine()
         }
@@ -1593,6 +1656,9 @@ class MemoryEventStore @Inject constructor() {
         _followsSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
+
+        // Evict old content events from snapshot (may contain stale data)
+        evictOldContentEvents()
     }
 
     private fun insertFromSnapshot(event: NostrEvent) {
