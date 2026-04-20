@@ -36,6 +36,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,6 +98,11 @@ fun FeedScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+
+    DisposableEffect(Unit) {
+        viewModel.setFeedVisible(true)
+        onDispose { viewModel.setFeedVisible(false) }
+    }
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 

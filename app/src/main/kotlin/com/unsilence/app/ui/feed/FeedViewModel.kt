@@ -238,6 +238,13 @@ class FeedViewModel @Inject constructor(
     private val _hasFollows = MutableStateFlow(false)
     val hasFollows: StateFlow<Boolean> = _hasFollows.asStateFlow()
 
+    /** Set to false when FeedScreen leaves composition (navigating to thread/profile/etc.) */
+    private val _feedVisible = MutableStateFlow(true)
+
+    fun setFeedVisible(visible: Boolean) {
+        _feedVisible.value = visible
+    }
+
     fun setFeedType(type: FeedType) { _feedType.value = type }
 
     /** Ordered list of available feeds for cycling. */
@@ -535,8 +542,10 @@ class FeedViewModel @Inject constructor(
                     } else feedFlow
 
                     // Post-query media type filter: Text/Images/Video within kind 1
-                    if (filter.needsMediaFilter) filtered.map { rows -> applyMediaFilter(rows, filter.showTypes) }
+                    val finalFlow = if (filter.needsMediaFilter) filtered.map { rows -> applyMediaFilter(rows, filter.showTypes) }
                     else filtered
+
+                    combine(finalFlow, _feedVisible) { rows, visible -> rows to visible }
                 }
                 // Drop intermediate emissions when the collector is busy (scroll scenarios).
                 // Without conflate(), rapid Room re-queries queue up and force Compose
@@ -545,7 +554,8 @@ class FeedViewModel @Inject constructor(
                 // Skip duplicate Room emissions: any write to users/event_stats/event_relays
                 // triggers re-query even when this feed's data hasn't changed.
                 .distinctUntilChanged()
-                .collectLatest { rows ->
+                .collectLatest { (rows, visible) ->
+                    if (!visible) return@collectLatest
                     _isLoadingMore.value = false
                     val sig = Triple(rows.size, rows.firstOrNull()?.id, rows.lastOrNull()?.id)
                     if (sig != lastLoggedEmissionSig) {
