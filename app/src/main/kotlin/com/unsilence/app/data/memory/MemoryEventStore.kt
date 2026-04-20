@@ -27,7 +27,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private const val MAX_CONTENT_EVENTS = 10_000
-private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 30023)
+private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
@@ -673,19 +673,34 @@ class MemoryEventStore @Inject constructor() {
     }
 
     /**
-     * Evict oldest content events when the store exceeds [MAX_CONTENT_EVENTS].
-     * Non-content kinds (profiles, follows, relay config, etc.) are never evicted.
-     * Cleans up all indexes, caches, and aggregates for evicted events.
+     * Type-aware eviction: each content kind has its own cap.
+     * Root notes (kind 1) are most valuable — highest cap.
+     * Engagement events (kind 7, 9734, 9735) are reconstructible from relays — lowest cap.
+     * Mirrors Amethyst's pruning strategy.
      */
     private fun evictOldContentEvents() {
-        var contentCount = 0
-        val toEvict = mutableListOf<EventEntry>()
+        val kindCaps = mapOf(
+            1 to 5000,      // notes (roots + replies combined)
+            6 to 1000,      // reposts
+            7 to 1000,      // reactions (reconstructible)
+            20 to 500,      // pictures
+            21 to 500,      // videos
+            9734 to 250,    // zap requests (reconstructible)
+            9735 to 250,    // zap receipts (reconstructible)
+            30023 to 500,   // articles
+        )
 
+        val toEvict = mutableListOf<EventEntry>()
+        val countByKind = mutableMapOf<Int, Int>()
+
+        // Walk newest → oldest (recentByCreatedAt is desc-sorted)
         for (entry in recentByCreatedAt) {
             val event = eventsById[entry.id] ?: continue
-            if (event.kind !in CONTENT_KINDS) continue
-            contentCount++
-            if (contentCount > MAX_CONTENT_EVENTS) {
+            val kind = event.kind
+            val cap = kindCaps[kind] ?: continue
+            val count = countByKind.getOrPut(kind) { 0 } + 1
+            countByKind[kind] = count
+            if (count > cap) {
                 toEvict.add(entry)
             }
         }
@@ -703,11 +718,24 @@ class MemoryEventStore @Inject constructor() {
             if (event.rootId != null && event.rootId != event.replyToId) {
                 idsByReplyTarget[event.rootId]?.remove(entry.id)
             }
-            // Clean up caches
+            // Clean up caches and sidecar data
             feedRowCache.remove(entry.id)
+            videoRenderModelsByEventId.remove(entry.id)
+            imetaImageDimsByEventId.remove(entry.id)
         }
 
-        Log.d("MES", "Evicted ${toEvict.size} old content events (${contentCount} total, cap=$MAX_CONTENT_EVENTS)")
+        // Clean up aggregates that only reference removed events
+        val removeIds = toEvict.map { it.id }.toSet()
+        replyCounts.keys.removeAll(removeIds)
+        repostCounts.keys.removeAll(removeIds)
+        reactionCounts.keys.removeAll(removeIds)
+        zapStatsByEventId.keys.removeAll(removeIds)
+        statsUpdatedAt.keys.removeAll(removeIds)
+
+        val breakdown = countByKind.entries
+            .filter { (kind, count) -> count > (kindCaps[kind] ?: Int.MAX_VALUE) }
+            .joinToString(", ") { (kind, count) -> "k$kind: ${count - (kindCaps[kind] ?: 0)} evicted" }
+        Log.d("MES", "Evicted ${toEvict.size} events ($breakdown)")
     }
 
     // ─── Query API ──────────────────────────────────────────────────────────
@@ -1877,29 +1905,7 @@ class MemoryEventStore @Inject constructor() {
     // ─── Maintenance ────────────────────────────────────────────────────────
 
     fun trimToLast(events: Int = 5000) {
-        val allEntries = recentByCreatedAt.toList() // already sorted desc by createdAt
-        if (allEntries.size <= events) return
-
-        val toRemove = allEntries.subList(events, allEntries.size)
-        val removeIds = toRemove.map { it.id }.toSet()
-
-        for (entry in toRemove) {
-            val event = eventsById.remove(entry.id) ?: continue
-            recentByCreatedAt.remove(entry)
-            idsByKind[event.kind]?.remove(event.id)
-            idsByPubkey[event.pubkey]?.remove(event.id)
-            event.replyToId?.let { idsByReplyTarget[it]?.remove(event.id) }
-            if (event.rootId != null && event.rootId != event.replyToId) {
-                idsByReplyTarget[event.rootId]?.remove(event.id)
-            }
-        }
-
-        // Clean up aggregates that only reference removed events
-        replyCounts.keys.removeAll(removeIds)
-        repostCounts.keys.removeAll(removeIds)
-        reactionCounts.keys.removeAll(removeIds)
-        zapStatsByEventId.keys.removeAll(removeIds)
-        statsUpdatedAt.keys.removeAll(removeIds)
+        evictOldContentEvents()
     }
 
     /**
