@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 19, 2026 (Layout-locked cards + video first-frame pipeline shipped. A.8 complete — MES-only.)
+**Last updated:** April 20, 2026 (Logo system + splash/feed-type determination shipped. A.8 complete — MES-only.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -104,6 +104,8 @@ Room was fully removed in A.8. No `data/db/` directory, no DAOs, no entities, no
 
 **Auth:** nsec + Amber (NIP-55), signing for all operations, logout with process restart
 
+**Branding:** Waveform LogoMark (Canvas-drawn, 1Hz cursor blink), adaptive icon (foreground vector + black background), full lockup splash (mark + wordmark + tagline), LogoMark in top bar (32dp). Splash gates bars until feed type determined (2s timeout for follows detection — no Global→Following flicker)
+
 **Empty states:** Contextual icon + message on all empty screens (feed, notifications, search, profile tabs)
 
 ---
@@ -184,7 +186,9 @@ Validation discipline: When validation criteria fail, revert first, investigate 
 
 **MES feed query:** `feedFlow()` scans `idsByKind` + `eventEntitiesByNoteId`, filters by FeedFilter (kinds, followedPubkeys, contentFilter, relayUrls), joins profilesByPubkey + statsByTarget, returns FeedRow list. Kind 6 engagement resolves via rootId fallback
 
-**Shared composables:** NostrRichText, AvatarImage, relativeTime, ThreadParentCard, EmptyState, ActionButton, ZapButton
+**Shared composables:** NostrRichText, AvatarImage, relativeTime, ThreadParentCard, EmptyState, ActionButton, ZapButton, LogoMark
+
+**Splash/feed-type determination:** FeedViewModel.splashDone gated by `withTimeoutOrNull(2000L)` on `followsFlow.filter { isNotEmpty() }.first()`. If follows arrive within 2s → feedType = Following, else Global. AppNavigation hides bars (`topBarShown`/`bottomBarShown`) while `!splashDone`. FeedScreen shows `LoadingScreen()` (full logo lockup) while `!splashDone`. No delay-based timers — purely reactive on MES snapshot restore
 
 **Logout:** `isLoggedIn=false` (destroys Compose tree) → `bootstrapper.teardown()` (cancel bootstrap, disconnect, MES.clear(), delete snapshot, clear credentials, release ExoPlayer on Main). No exitProcess — singletons survive, `key(sessionKey)` forces fresh VM creation on re-login
 
@@ -210,7 +214,7 @@ app/src/main/kotlin/com/unsilence/app/
 │   └── AppBootstrapper.kt
 ├── di/              Hilt modules
 ├── ui/
-│   ├── common/      EmptyState, ShimmerNoteCard, IdentIcon, LoadingScreen, ImageRequestHelpers
+│   ├── common/      LogoMark, LoadingScreen, EmptyState, ShimmerNoteCard, IdentIcon, ImageRequestHelpers
 │   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, FeedHydrationController,
 │   │                NoteCard, ArticleCard, ArticleReaderScreen, FilterScreen, ZapDialogs,
 │   │                ImageDimensionCache, ImageSizing, VideoThumbnailCache

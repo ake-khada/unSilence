@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.ui.common.LogoMark
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -74,17 +75,13 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         horizontalAlignment   = Alignment.CenterHorizontally,
     ) {
         // ── Brand ─────────────────────────────────────────────────────────────
+        LogoMark(sizeDp = 88.dp)
         Text(
-            text       = "unSilence",
-            color      = Color.White,
-            fontSize   = 24.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            text     = "Nostr client",
+            text     = "A RELAY BROWSER",
             color    = TextSecondary,
-            fontSize = 14.sp,
-            modifier = Modifier.padding(top = 6.dp),
+            fontSize = 11.sp,
+            letterSpacing = 2.5.sp,
+            modifier = Modifier.padding(top = 8.dp),
         )
 
         Spacer(Modifier.height(48.dp))
