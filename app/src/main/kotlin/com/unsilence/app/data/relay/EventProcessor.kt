@@ -3,6 +3,7 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.tagsToJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -302,6 +303,7 @@ class EventProcessor @Inject constructor(
             content = content,
             createdAt = createdAt,
             tags = tagsList,
+            tagsJson = tagsToJson(tagsList),
             sig = sig,
             relayUrl = relayUrl,
             replyToId = replyToId,

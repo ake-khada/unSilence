@@ -9,6 +9,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.flow.SharingStarted
@@ -70,6 +71,7 @@ class ComposeViewModel @Inject constructor(
                     content = signed.content,
                     createdAt = signed.createdAt,
                     tags = parsedTags,
+                    tagsJson = tagsToJson(parsedTags),
                     sig = signed.sig,
                     relayUrl = "local",
                     replyToId = null,
