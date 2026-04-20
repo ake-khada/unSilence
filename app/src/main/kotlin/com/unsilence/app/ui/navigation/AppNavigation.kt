@@ -91,6 +91,7 @@ import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.LogoMark
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.RelayHealthInfo
@@ -175,6 +176,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
+    val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
@@ -206,8 +208,8 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
-    val topBarShown    = barsVisible && selectedTab != 3
-    val bottomBarShown = barsVisible
+    val topBarShown    = splashDone && barsVisible && selectedTab != 3
+    val bottomBarShown = splashDone && barsVisible
 
     val topBarOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
@@ -315,13 +317,10 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.medium),
                 ) {
-                    // Left: app name
-                    Text(
-                        text = "unSilence",
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp,
+                    // Left: app logo mark
+                    LogoMark(
+                        sizeDp = 32.dp,
+                        static = false,
                         modifier = Modifier.align(Alignment.CenterStart),
                     )
 

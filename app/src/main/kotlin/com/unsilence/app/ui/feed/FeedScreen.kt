@@ -97,6 +97,8 @@ fun FeedScreen(
     val showSnackbar    = LocalShowSnackbar.current
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
+
+    val splashDone by viewModel.splashDone.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     DisposableEffect(Unit) {
@@ -192,6 +194,7 @@ fun FeedScreen(
 
         Crossfade(
             targetState = when {
+                !splashDone -> "loading"
                 state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
                     && events.isEmpty() -> "loading"
                 state.coverageStatus == CoverageStatus.FAILED && events.isEmpty() -> "failed"

@@ -25,6 +25,7 @@ import com.unsilence.app.domain.model.ShowType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +34,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -90,6 +93,10 @@ class FeedViewModel @Inject constructor(
 
     private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
+
+    /** False until feed type is determined (follows loaded or 2s timeout). Hides bars during splash. */
+    private val _splashDone = MutableStateFlow(false)
+    val splashDone: StateFlow<Boolean> = _splashDone.asStateFlow()
 
     /** All relay sets (NIP-51 kind 30002) for the dropdown. */
     val userSetsFlow: StateFlow<List<RelaySet>> =
@@ -342,21 +349,37 @@ class FeedViewModel @Inject constructor(
     }
 
     init {
-        // Reactively track follows — auto-switch to Following on first follow
+        // Determine initial feed type: wait for follows (snapshot restore) or 2s timeout.
+        // Splash stays visible until this resolves — no Global→Following flicker.
         val ownPubkey = keyManager.getPublicKeyHex()
         Log.d("FeedVM", "init: ownPubkey=${ownPubkey?.take(8)}…")
         if (ownPubkey != null) {
             viewModelScope.launch {
+                val hasFollows = withTimeoutOrNull(2000L) {
+                    memoryEventStore.followsFlow(ownPubkey)
+                        .filter { it.isNotEmpty() }
+                        .first()
+                } != null
+                if (hasFollows) {
+                    _feedType.value = FeedType.Following
+                    _hasFollows.value = true
+                }
+                _splashDone.value = true
+                Log.d("FeedVM", "Splash done: feedType=${_feedType.value} hasFollows=$hasFollows")
+            }
+            // Continue tracking follows reactively (for later changes)
+            viewModelScope.launch {
                 memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
                     val had = _hasFollows.value
                     _hasFollows.value = count > 0
-                    Log.d("FeedVM", "followsCollector: count=$count had=$had feedType=${_feedType.value}")
-                    if (!had && count > 0 && _feedType.value is FeedType.Global) {
+                    if (!had && count > 0 && _feedType.value is FeedType.Global && _splashDone.value) {
                         Log.d("FeedVM", "Auto-switch → Following")
                         _feedType.value = FeedType.Following
                     }
                 }
             }
+        } else {
+            _splashDone.value = true
         }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
