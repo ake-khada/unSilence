@@ -956,7 +956,7 @@ class RelayPool @Inject constructor(
      *                                thread-event-, thread-replies-, thread-reactions-,
      *                                thread-zaps-, user-posts-, user-longform-,
      *                                user-engagement-, hint-event-, trust-scores-,
-     *                                engagement-replies-, engagement-reactions-, engagement-zaps-
+     *                                engagement-
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
     private fun isOneShotSubscription(subId: String): Boolean =
@@ -1975,43 +1975,21 @@ class RelayPool @Inject constructor(
         novel.forEach { engagementFetched[it] = now }
         val ts = now
 
-        val repliesSubId = "engagement-replies-$ts"
-        val reactionsSubId = "engagement-reactions-$ts"
-        val zapsSubId = "engagement-zaps-$ts"
-        _activeOneShotSubs.add(repliesSubId)
-        _activeOneShotSubs.add(reactionsSubId)
-        _activeOneShotSubs.add(zapsSubId)
+        // Single consolidated subscription for all engagement kinds
+        val subId = "engagement-$ts"
+        _activeOneShotSubs.add(subId)
 
-        // Replies (kind 1 referencing these events)
-        val repliesReq = buildJsonArray {
+        val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(repliesSubId))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(9735))
+                })
                 put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("limit", JsonPrimitive(500))
-            })
-        }.toString()
-
-        // Reactions (kind 7 referencing these events)
-        val reactionsReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(reactionsSubId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
-                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(500))
-            })
-        }.toString()
-
-        // Zap receipts (kind 9735 referencing these events)
-        val zapsReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(zapsSubId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
-                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(200))
             })
         }.toString()
 
@@ -2027,12 +2005,10 @@ class RelayPool @Inject constructor(
             connections.values.filter { it.url !in indexerUrls }.take(3)
         }
 
-        // Register coverage lanes: 3 subs × N relays
+        // Register coverage lanes: 1 sub × N relays (was 3 subs × N relays)
         val lanes = mutableSetOf<Lane>()
         for (conn in targets) {
-            lanes.add(Lane(repliesSubId, conn.url))
-            lanes.add(Lane(reactionsSubId, conn.url))
-            lanes.add(Lane(zapsSubId, conn.url))
+            lanes.add(Lane(subId, conn.url))
         }
         val scopeKeyHash = novel.sorted().joinToString(",")
             .let {
@@ -2049,9 +2025,7 @@ class RelayPool @Inject constructor(
         subscriptionRegistry.get().register(handle)
 
         targets.forEach { conn ->
-            sendOneShotToRelay(conn, repliesReq)
-            sendOneShotToRelay(conn, reactionsReq)
-            sendOneShotToRelay(conn, zapsReq)
+            sendOneShotToRelay(conn, req)
         }
         Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s) (${lanes.size} lanes, ${eventIds.size - novel.size} deduped)")
     }

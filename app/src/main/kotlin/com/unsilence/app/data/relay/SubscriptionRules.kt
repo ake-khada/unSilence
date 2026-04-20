@@ -13,10 +13,8 @@ object SubscriptionRules {
     /**
      * One-shot subscription prefixes: relay sends CLOSE after EOSE.
      *
-     * 21 prefixes verified against RelayPool.isOneShotSubscription()
-     * at commit 201d067. Sprint 0 inventory documented "17 one-shot
-     * prefix types" — that count was wrong; the actual implementation
-     * has 21.
+     * 19 prefixes (was 21 before engagement consolidation merged
+     * engagement-{replies,reactions,zaps}- into single "engagement-").
      */
     private val oneShotPrefixes = listOf(
         "kind3-",
@@ -35,9 +33,7 @@ object SubscriptionRules {
         "user-posts-",
         "user-longform-",
         "user-engagement-",
-        "engagement-replies-",
-        "engagement-reactions-",
-        "engagement-zaps-",
+        "engagement-",
         "batch-events-",
         "trust-scores-",
         "prefetch-",
