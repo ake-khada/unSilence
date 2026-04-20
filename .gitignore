@@ -20,6 +20,7 @@ unsilence-stabilization-sprint.md
 # Claude Code / Superpowers working files
 .claude/
 .superpowers/
+.worktrees/
 _audit_dump/
 
 # Kotlin build artifacts
