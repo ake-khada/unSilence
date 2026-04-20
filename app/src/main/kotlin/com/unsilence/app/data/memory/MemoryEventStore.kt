@@ -799,9 +799,13 @@ class MemoryEventStore @Inject constructor() {
                 Log.d("MES", "updateFollows: stale for ${pubkey.take(8)}… (existing=$existingTs > new=$createdAt)")
                 return@compute existingTs // stale — ignore
             }
+            val existing = followsByPubkey[pubkey]
+            val changed = existing == null || existing != followedPubkeys
             followsByPubkey[pubkey] = followedPubkeys
-            _followsSignal.value = System.nanoTime()
-            Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt)")
+            if (changed) {
+                _followsSignal.value = System.nanoTime()
+            }
+            Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt, changed=$changed)")
             createdAt
         }
     }
