@@ -992,6 +992,18 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt[eventId] = System.currentTimeMillis()
     }
 
+    /**
+     * Invalidate cached FeedRows for the given event IDs so the next feedFlow scan
+     * rebuilds them with fresh stats. Called after engagement batch completion.
+     */
+    fun invalidateFeedRowCache(eventIds: Collection<String>) {
+        if (eventIds.isEmpty()) return
+        for (id in eventIds) {
+            feedRowCache.remove(id)
+        }
+        _statsSignal.value = System.nanoTime()
+    }
+
     // ─── A.5.1 T3: Search flows ────────────────────────────────────────────
 
     /** Reactive note search: kind 1 + 30023, case-insensitive substring, createdAt DESC, limit 50. */

@@ -121,6 +121,9 @@ class RelayPool @Inject constructor(
     /** Global engagement dedup — event IDs already fetched (60s TTL). */
     private val engagementFetched = ConcurrentHashMap<String, Long>()
 
+    /** Tracks event IDs per engagement subscription for post-EOSE cache invalidation. */
+    private val engagementSubEventIds = ConcurrentHashMap<String, List<String>>()
+
     /** Global event-by-ID dedup — prevents duplicate fetchEventById calls (30s TTL). */
     private val eventFetchInFlight = ConcurrentHashMap<String, Long>()
 
@@ -341,6 +344,7 @@ class RelayPool @Inject constructor(
                 delay(300_000)
                 val cutoff = System.currentTimeMillis() - 300_000
                 engagementFetched.entries.removeIf { it.value < cutoff }
+                engagementSubEventIds.entries.removeIf { true } // clear all — subs should be completed by now
                 eventFetchInFlight.entries.removeIf { it.value < cutoff }
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
             }
@@ -788,6 +792,10 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
+            // Invalidate FeedRow cache for engagement subs so counts update in UI
+            engagementSubEventIds.remove(subId)?.let { eventIds ->
+                memoryEventStore.get().invalidateFeedRowCache(eventIds)
+            }
             // Free per-relay slot and flush queued REQs
             relayOneShotCount[conn.url]?.let { count ->
                 val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
@@ -1959,6 +1967,7 @@ class RelayPool @Inject constructor(
         // Single consolidated subscription for all engagement kinds
         val subId = "engagement-$ts"
         _activeOneShotSubs.add(subId)
+        engagementSubEventIds[subId] = novel
 
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
