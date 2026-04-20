@@ -66,6 +66,13 @@ class MemoryEventStore @Inject constructor() {
     private val profileUpdatedAt = ConcurrentHashMap<String, Long>()
     // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
     private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
+    // ─── FeedRow cache (R2: version-stamped, invalidated on profile/stats change) ──
+    private data class CachedFeedRow(
+        val row: FeedRow,
+        val profileVersion: Long,
+        val statsVersion: Long,
+    )
+    private val feedRowCache = ConcurrentHashMap<String, CachedFeedRow>()
 
     /** Get cached profile fields for a pubkey. Returns empty map if no profile stored. */
     private fun cachedProfileFields(pubkey: String): Map<String, String?> =
@@ -1470,16 +1477,22 @@ class MemoryEventStore @Inject constructor() {
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
-        val fields = cachedProfileFields(event.pubkey)
-        val authorName = fields["name"]
-        val authorDisplayName = fields["display_name"]
-        val authorPicture = fields["picture"]
-        val authorNip05 = fields["nip05"]
+        val currentProfileVersion = _profileSignal.value
+        val currentStatsVersion = _statsSignal.value
 
+        val cached = feedRowCache[event.id]
+        if (cached != null
+            && cached.profileVersion == currentProfileVersion
+            && cached.statsVersion == currentStatsVersion
+        ) {
+            return cached.row
+        }
+
+        val fields = cachedProfileFields(event.pubkey)
         val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
         val zap = zapStats(statsId)
 
-        return FeedRow(
+        val row = FeedRow(
             id = event.id,
             pubkey = event.pubkey,
             kind = event.kind,
@@ -1493,15 +1506,18 @@ class MemoryEventStore @Inject constructor() {
             contentWarningReason = event.contentWarningReason,
             cachedAt = event.firstSeenAt,
             zapTotalSats = zap.totalSats,
-            authorName = authorName,
-            authorDisplayName = authorDisplayName,
-            authorPicture = authorPicture,
-            authorNip05 = authorNip05,
+            authorName = fields["name"],
+            authorDisplayName = fields["display_name"],
+            authorPicture = fields["picture"],
+            authorNip05 = fields["nip05"],
             reactionCount = reactionCount(statsId),
             replyCount = replyCount(statsId),
             repostCount = repostCount(statsId),
             zapCount = zap.count,
         )
+
+        feedRowCache[event.id] = CachedFeedRow(row, currentProfileVersion, currentStatsVersion)
+        return row
     }
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
@@ -1862,6 +1878,7 @@ class MemoryEventStore @Inject constructor() {
         profilesByPubkey.clear()
         profileUpdatedAt.clear()
         profileFieldsCache.clear()
+        feedRowCache.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
         followerCountCache.clear()
