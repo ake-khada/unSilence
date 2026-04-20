@@ -64,6 +64,17 @@ class MemoryEventStore @Inject constructor() {
     /** Local cache freshness — when each profile was last updated in MemoryEventStore (epoch ms).
      *  NOT the kind-0 event's original createdAt. Used by ProfileResolver. */
     private val profileUpdatedAt = ConcurrentHashMap<String, Long>()
+    // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
+    private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
+
+    /** Get cached profile fields for a pubkey. Returns empty map if no profile stored. */
+    private fun cachedProfileFields(pubkey: String): Map<String, String?> =
+        profileFieldsCache[pubkey]
+            ?: profilesByPubkey[pubkey]?.content?.let { content ->
+                parseProfileJson(content).also { profileFieldsCache[pubkey] = it }
+            }
+            ?: emptyMap()
+
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
@@ -232,6 +243,7 @@ class MemoryEventStore @Inject constructor() {
         profilesByPubkey.compute(event.pubkey) { _, existing ->
             if (existing == null || event.createdAt >= existing.createdAt) {
                 profileUpdatedAt[event.pubkey] = System.currentTimeMillis()
+                profileFieldsCache[event.pubkey] = parseProfileJson(event.content)
                 event
             } else {
                 existing
@@ -1030,7 +1042,7 @@ class MemoryEventStore @Inject constructor() {
     /** Convert profile NostrEvent to UserEntity. Returns null if no profile stored. */
     fun getUserEntity(pubkey: String): UserEntity? {
         val profile = profilesByPubkey[pubkey] ?: return null
-        val fields = parseProfileJson(profile.content)
+        val fields = cachedProfileFields(pubkey)
         return UserEntity(
             pubkey = pubkey,
             name = fields["name"],
@@ -1388,8 +1400,7 @@ class MemoryEventStore @Inject constructor() {
      */
     private fun buildNotificationItem(event: NostrEvent, recipientPubkey: String): NotificationItem? {
         val notifType = deriveNotifType(event, recipientPubkey)
-        val profile = profilesByPubkey[event.pubkey]
-        val fields = profile?.content?.let { parseProfileJson(it) } ?: emptyMap()
+        val fields = cachedProfileFields(event.pubkey)
 
         val targetNoteId: String?
         val targetNoteContent: String
@@ -1459,8 +1470,7 @@ class MemoryEventStore @Inject constructor() {
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
-        val profile = profilesByPubkey[event.pubkey]
-        val fields = profile?.content?.let { parseProfileJson(it) } ?: emptyMap()
+        val fields = cachedProfileFields(event.pubkey)
         val authorName = fields["name"]
         val authorDisplayName = fields["display_name"]
         val authorPicture = fields["picture"]
@@ -1851,6 +1861,7 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt.clear()
         profilesByPubkey.clear()
         profileUpdatedAt.clear()
+        profileFieldsCache.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
         followerCountCache.clear()
