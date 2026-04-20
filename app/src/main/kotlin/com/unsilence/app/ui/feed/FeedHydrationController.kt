@@ -42,8 +42,8 @@ class FeedHydrationController(
         const val ENGAGEMENT_REFRESH_INTERVAL_MS = 30_000L
         const val REF_DEBOUNCE_MS = 500L               // IDLE
         const val ENGAGEMENT_STALE_MS = 5 * 60 * 1000L // 5 minutes — warm zone freshness threshold
-        const val WARM_ZONE_ENGAGEMENT_CAP = 5         // max warm zone engagement fetches per pass
-        const val ENGAGEMENT_COALESCE_MS = 750L          // coalesce window for engagement batches
+        const val WARM_ZONE_ENGAGEMENT_CAP = 8         // max warm zone engagement fetches per pass
+        const val ENGAGEMENT_COALESCE_MS = 400L          // coalesce window for engagement batches
         const val STATE_DWELL_MS = 200L                    // hard lock: ignore velocity transitions for this duration
         const val IDLE_TO_REST_DWELL_MS = 1000L            // how long in IDLE before transitioning to REST
         const val REST_MINIMUM_DWELL_MS = 3000L            // minimum time to stay in REST before non-user exit
