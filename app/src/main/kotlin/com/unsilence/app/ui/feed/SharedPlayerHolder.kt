@@ -1,8 +1,6 @@
 package com.unsilence.app.ui.feed
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -12,25 +10,12 @@ import javax.inject.Singleton
 
 private const val TAG = "SharedPlayerHolder"
 
-/** How long to keep the player+codec alive after the last owner releases. */
-private const val RETENTION_TIMEOUT_MS = 15_000L
-
 @Singleton
 class SharedPlayerHolder @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private var _player: ExoPlayer? = null
     private var _currentOwner: String? = null
-
-    /**
-     * True when the player has a loaded media item and an allocated codec,
-     * but no active owner. The retention timer is running — if no claim()
-     * arrives within [RETENTION_TIMEOUT_MS], full teardown fires.
-     */
-    private var _retained: Boolean = false
-
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var _retentionRunnable: Runnable? = null
 
     private val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
@@ -58,73 +43,52 @@ class SharedPlayerHolder @Inject constructor(
     val currentUrl: String?
         get() = _player?.currentMediaItem?.localConfiguration?.uri?.toString()
 
-    /** True when the player is retained (codec alive, no active owner). */
-    val isRetained: Boolean get() = _retained
+    /** True when the player has a loaded media item but no active owner. */
+    val isRetained: Boolean
+        get() = _currentOwner == null && _player?.currentMediaItem != null
 
     fun claim(ownerId: String): ExoPlayer {
-        cancelRetentionTimer()
         _currentOwner = ownerId
-        _retained = false
         return player
     }
 
     /**
      * Release ownership without tearing down the player. Sets playWhenReady=false
-     * to pause playback, but keeps the codec and media item alive. Starts the
-     * retention timer — if no claim() arrives within [RETENTION_TIMEOUT_MS],
-     * full teardown fires.
+     * to pause playback, but keeps the codec and media item alive for the rest of
+     * the foreground session. Codec teardown is lifecycle-driven only
+     * (app background, memory pressure, logout).
      */
     fun releaseOwnership(ownerId: String) {
         if (_currentOwner == ownerId) {
             _player?.playWhenReady = false
             _currentOwner = null
-            _retained = true
-            startRetentionTimer()
-            Log.d(TAG, "Released ownership ($ownerId) — retained, timer started")
+            Log.d(TAG, "Released ownership ($ownerId) — codec retained for session")
         }
     }
 
     fun isOwner(ownerId: String): Boolean = _currentOwner == ownerId
 
     /**
+     * Lifecycle-driven codec teardown: stop playback and clear media items,
+     * freeing the hardware codec. Keeps the ExoPlayer instance for fast
+     * re-use on return to foreground.
+     */
+    fun releaseForLifecycle(reason: String) {
+        _player?.stop()
+        _player?.clearMediaItems()
+        _currentOwner = null
+        Log.d(TAG, "Codec released — $reason")
+    }
+
+    /**
      * Full teardown: stop + clear media items + release the ExoPlayer instance.
-     * Called on logout and when the retention timer expires.
+     * Called on logout and severe memory pressure.
      */
     fun release() {
-        cancelRetentionTimer()
         _player?.stop()
         _player?.clearMediaItems()
         _player?.release()
         _player = null
         _currentOwner = null
-        _retained = false
-    }
-
-    /**
-     * Evict the retained media item without releasing the ExoPlayer instance.
-     * Called when the retention timer expires — frees the codec but keeps the
-     * player ready for the next video.
-     */
-    private fun evictRetained() {
-        _player?.stop()
-        _player?.clearMediaItems()
-        _retained = false
-        Log.d(TAG, "Retention timeout — evicted codec and media item")
-    }
-
-    private fun startRetentionTimer() {
-        cancelRetentionTimer()
-        val runnable = Runnable {
-            if (_retained && _currentOwner == null) {
-                evictRetained()
-            }
-        }
-        _retentionRunnable = runnable
-        mainHandler.postDelayed(runnable, RETENTION_TIMEOUT_MS)
-    }
-
-    private fun cancelRetentionTimer() {
-        _retentionRunnable?.let { mainHandler.removeCallbacks(it) }
-        _retentionRunnable = null
     }
 }
