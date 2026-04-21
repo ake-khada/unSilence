@@ -58,9 +58,14 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
 
+// Stable empty-collection singletons — Compose sees the same reference across recompositions
+private val EMPTY_IMETA_DIMS: Map<String, Float> = emptyMap()
+private val EMPTY_VIDEO_MODELS: List<com.unsilence.app.data.model.VideoRenderModel> = emptyList()
+
 /**
  * Parameters bundle for engagement actions — avoids 15-parameter lambda pollution.
  */
+@androidx.compose.runtime.Stable
 data class EventActionCallbacks(
     val onNoteClick: (String) -> Unit = {},
     val onAuthorClick: (pubkey: String) -> Unit = {},
@@ -79,6 +84,7 @@ data class EventActionCallbacks(
 /**
  * Engagement state snapshot — avoids re-collecting in every item.
  */
+@androidx.compose.runtime.Immutable
 data class EngagementSnapshot(
     val reactedIds: Set<String> = emptySet(),
     val repostedIds: Set<String> = emptySet(),
@@ -130,7 +136,7 @@ fun LazyListScope.eventFeedItems(
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
-                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: emptyMap(),
+                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: EMPTY_IMETA_DIMS,
             )
         } else {
             EventFeedItem(
@@ -143,7 +149,7 @@ fun LazyListScope.eventFeedItems(
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
-                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: emptyMap(),
+                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: EMPTY_IMETA_DIMS,
             )
         }
     }
@@ -165,7 +171,7 @@ private fun ThreadedReplyItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
-    imetaImageDims: Map<String, Float> = emptyMap(),
+    imetaImageDims: Map<String, Float> = EMPTY_IMETA_DIMS,
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -335,19 +341,42 @@ private fun EventFeedItem(
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
-    imetaImageDims: Map<String, Float> = emptyMap(),
+    imetaImageDims: Map<String, Float> = EMPTY_IMETA_DIMS,
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
 ) {
+    // ── Remembered lambdas — stable across recompositions ─────────────────
+    val onReact = remember(row.id, row.pubkey) {
+        { callbacks.react(row.id, row.pubkey) }
+    }
+    val onRepost = remember(row.id, row.pubkey, row.relayUrl) {
+        { callbacks.repost(row.id, row.pubkey, row.relayUrl) }
+    }
+    val onZap: (Long) -> Unit = remember(row.id, row.pubkey, row.relayUrl) {
+        { amt: Long -> callbacks.zap(row.id, row.pubkey, row.relayUrl, amt) }
+    }
+    val onToggleMute = remember(videoScope) {
+        { videoScope?.toggleMute(); Unit }
+    }
+    val onOpenFullscreen = remember(videoScope, row.id) {
+        { videoScope?.openFullscreen(row.id); Unit }
+    }
+    val onArticleClick = remember(row) {
+        { callbacks.onArticleClick(row) }
+    }
+    val onNewPostAnimatedCb = remember(row.id) {
+        { onNewPostAnimated() }
+    }
+
     if (row.kind == 30023) {
         ArticleCard(
             row = row,
-            onClick = { callbacks.onArticleClick(row) },
+            onClick = onArticleClick,
             onNoteClick = callbacks.onNoteClick,
-            onReact = { callbacks.react(row.id, row.pubkey) },
-            onRepost = { callbacks.repost(row.id, row.pubkey, row.relayUrl) },
+            onReact = onReact,
+            onRepost = onRepost,
             onQuote = callbacks.onQuote,
-            onZap = { amt -> callbacks.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onZap = onZap,
             onSaveNwcUri = callbacks.saveNwcUri,
             hasReacted = row.engagementId in engagement.reactedIds,
             hasReposted = row.engagementId in engagement.repostedIds,
@@ -384,18 +413,18 @@ private fun EventFeedItem(
             hasZapped = row.engagementId in engagement.zappedIds,
             isNwcConfigured = engagement.isNwcConfigured,
             originalAuthorProfile = originalAuthorProfile,
-            onReact = { callbacks.react(row.id, row.pubkey) },
-            onRepost = { callbacks.repost(row.id, row.pubkey, row.relayUrl) },
+            onReact = onReact,
+            onRepost = onRepost,
             onQuote = callbacks.onQuote,
-            onZap = { amt -> callbacks.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onZap = onZap,
             onSaveNwcUri = callbacks.saveNwcUri,
             exoPlayer = if (showVideo) videoScope.exoPlayer else null,
             isMuted = videoScope?.isMuted ?: true,
-            onToggleMute = { videoScope?.toggleMute() },
+            onToggleMute = onToggleMute,
             isActiveVideo = showVideo && videoScope.isActiveVideo(row.id),
             isFullscreen = videoScope?.showFullscreenVideo ?: false,
-            onOpenFullscreen = { videoScope?.openFullscreen(row.id) },
-            videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id].orEmpty() else emptyList(),
+            onOpenFullscreen = onOpenFullscreen,
+            videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id] ?: EMPTY_VIDEO_MODELS else EMPTY_VIDEO_MODELS,
             thumbnailCache = thumbnailCache,
             imageDimensionCache = imageDimensionCache,
             imetaImageDims = imetaImageDims,
@@ -403,7 +432,7 @@ private fun EventFeedItem(
             lookupEvent = callbacks.lookupEvent,
             fetchOgMetadata = callbacks.fetchOgMetadata,
             isNewPost = isNewPost,
-            onNewPostAnimated = onNewPostAnimated,
+            onNewPostAnimated = onNewPostAnimatedCb,
             parentEvent = parentEvent,
             parentAuthor = parentAuthor,
             isZapLoading = row.id in engagement.zapLoadingIds,
