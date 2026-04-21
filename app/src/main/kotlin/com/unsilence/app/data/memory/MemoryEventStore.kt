@@ -1727,7 +1727,7 @@ class MemoryEventStore @Inject constructor() {
             // Image aspect ratios from imeta dim tags
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
             val imageDims = imetaMedia
-                .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null }
+                .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
                 .associate { it.url to (it.width!!.toFloat() / it.height!!) }
             if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
         }

@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,6 +37,7 @@ class RelayPreferencesStore @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val dataStore get() = context.relayPrefs
+    private val editMutex = Mutex()
 
     // ─── Indexer URLs ───────────────────────────────────────────────────────
 
@@ -54,20 +57,20 @@ class RelayPreferencesStore @Inject constructor(
     /** Reactive Flow of indexer URLs. */
     fun indexerRelayUrlsFlow(): Flow<List<String>> = _indexerUrls
 
-    suspend fun setIndexerUrls(urls: List<String>) {
+    suspend fun setIndexerUrls(urls: List<String>) = editMutex.withLock {
         dataStore.edit { prefs ->
             prefs[KEY_INDEXER_URLS] = urls.toSet()
         }
     }
 
-    suspend fun addIndexerUrl(url: String) {
+    suspend fun addIndexerUrl(url: String) = editMutex.withLock {
         dataStore.edit { prefs ->
             val current = prefs[KEY_INDEXER_URLS] ?: emptySet()
             prefs[KEY_INDEXER_URLS] = current + url
         }
     }
 
-    suspend fun removeIndexerUrl(url: String) {
+    suspend fun removeIndexerUrl(url: String) = editMutex.withLock {
         dataStore.edit { prefs ->
             val current = prefs[KEY_INDEXER_URLS] ?: emptySet()
             prefs[KEY_INDEXER_URLS] = current - url

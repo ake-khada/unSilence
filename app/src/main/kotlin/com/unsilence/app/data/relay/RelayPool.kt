@@ -23,6 +23,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -138,6 +139,9 @@ class RelayPool @Inject constructor(
 
     /** Relays that sent CLOSED auth-required without a prior AUTH challenge — suppress repeated warnings. */
     private val authFailedRelays = ConcurrentHashMap.newKeySet<String>()
+
+    /** Auth event IDs awaiting OK response — maps eventId → relay URL. */
+    private val pendingAuthEventIds = ConcurrentHashMap<String, String>()
 
     /** Last time each relay received a message — used for idle eviction. */
     private val connectionLastActivity = ConcurrentHashMap<String, Long>()
@@ -655,6 +659,11 @@ class RelayPool @Inject constructor(
                 if (raw.startsWith("[\"NOTICE\"")) {
                     val notice = raw.substringAfter("\"NOTICE\",\"", "").substringBefore("\"")
                     Log.w(TAG, "Relay NOTICE ${conn.url}: $notice")
+                    return@consumeEach
+                }
+                // NIP-42 OK response — ["OK", "<event-id>", <success>, "<message>"]
+                if (raw.startsWith("[\"OK\"")) {
+                    handleOk(conn, raw)
                     return@consumeEach
                 }
                 // NIP-42 AUTH challenge — sign and respond automatically
@@ -2088,6 +2097,7 @@ class RelayPool @Inject constructor(
                 authenticatedRelays.remove(url)
                 pendingChallenges.remove(url)
                 authFailedRelays.remove(url)
+                pendingAuthEventIds.values.removeAll { it == url }
                 val conn = RelayConnection(url, okHttpClient)
                 connections[url] = conn
                 connectionLastActivity[url] = System.currentTimeMillis()
@@ -2186,26 +2196,67 @@ class RelayPool @Inject constructor(
                 val sent = conn.send(authJson)
 
                 if (sent) {
-                    // TODO: NIP-42 specifies relay responds with ["OK",...] —
-                    // for now we optimistically mark as authenticated after send.
-                    authenticatedRelays.add(url)
-                    Log.d(TAG, "AUTH: sent auth response to $url")
-                    // Replay persistent subs only on PERSISTENT relays.
-                    // Browse/OUTBOX-only relays get notified via onRelayReconnected instead.
-                    if (hasPurpose(url, ConnectionPurpose.PERSISTENT)) {
-                        replayPersistentSubs(conn)
-                    } else {
-                        Log.d(TAG, "AUTH: non-PERSISTENT $url (purposes=${connectionPurposes[url] ?: "none"}) — skip persistent replay, notify browse session")
-                        onRelayReconnected?.invoke(url)
+                    // Track event ID — relay will respond with ["OK", eventId, true/false, "..."]
+                    pendingAuthEventIds[signed.id] = url
+                    Log.d(TAG, "AUTH: sent auth response to $url (eventId=${signed.id.take(8)}…)")
+
+                    // 10s fallback: if the relay never sends OK, optimistically mark as authenticated.
+                    // Prevents indefinite auth-pending state for non-compliant relays.
+                    scope.launch {
+                        delay(10_000)
+                        if (pendingAuthEventIds.remove(signed.id) != null) {
+                            Log.w(TAG, "AUTH: OK timeout for $url — falling back to optimistic auth")
+                            completeAuth(conn, url)
+                        }
                     }
                 } else {
                     Log.w(TAG, "AUTH: failed to send auth to $url (connection closed?)")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "AUTH: error authenticating to $url", e)
-            } finally {
                 authInFlight.remove(url)
             }
+            // authInFlight removed by handleOk/completeAuth/timeout, not here
+        }
+    }
+
+    /**
+     * Handle ["OK", "<event-id>", <success>, "<message>"] from relay.
+     * Used for NIP-42 auth confirmation.
+     */
+    private fun handleOk(conn: RelayConnection, raw: String) {
+        try {
+            val arr = NostrJson.parseToJsonElement(raw).jsonArray
+            val eventId = arr[1].jsonPrimitive.content
+            val success = arr[2].jsonPrimitive.boolean
+
+            // Check if this OK is for a pending auth event
+            val url = pendingAuthEventIds.remove(eventId) ?: return
+            if (success) {
+                Log.d(TAG, "AUTH OK: relay $url accepted auth (eventId=${eventId.take(8)}…)")
+                completeAuth(conn, url)
+            } else {
+                val message = arr.getOrNull(3)?.jsonPrimitive?.content ?: ""
+                Log.w(TAG, "AUTH REJECTED: relay $url rejected auth: $message")
+                authInFlight.remove(url)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse OK message from ${conn.url}: ${raw.take(100)}", e)
+        }
+    }
+
+    /**
+     * Mark relay as authenticated and replay subscriptions.
+     * Shared by OK handler and timeout fallback.
+     */
+    private fun completeAuth(conn: RelayConnection, url: String) {
+        authenticatedRelays.add(url)
+        authInFlight.remove(url)
+        if (hasPurpose(url, ConnectionPurpose.PERSISTENT)) {
+            scope.launch { replayPersistentSubs(conn) }
+        } else {
+            Log.d(TAG, "AUTH: non-PERSISTENT $url — notify browse session")
+            onRelayReconnected?.invoke(url)
         }
     }
 
@@ -2258,6 +2309,7 @@ class RelayPool @Inject constructor(
         authInFlight.clear()
         pendingChallenges.clear()
         authFailedRelays.clear()
+        pendingAuthEventIds.clear()
         relayOneShotCount.clear()
         relayReqQueue.clear()
         connectionLastActivity.clear()

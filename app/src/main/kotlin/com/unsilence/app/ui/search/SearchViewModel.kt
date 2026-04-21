@@ -6,6 +6,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.RelayPool
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 data class SearchUiState(
@@ -48,8 +50,10 @@ class SearchViewModel @Inject constructor(
     /** Accumulates event IDs that arrive on search-notes-* subscriptions from RelayPool. */
     private val _searchResultEventIds = MutableStateFlow<Set<String>>(emptySet())
 
-    /** Token of the current search session — late results from old tokens are dropped. */
-    private var currentSearchToken: Long? = null
+    /** Token of the current search session — late results from old tokens are dropped.
+     *  AtomicLong eliminates the race between the relay-result collector (IO) and
+     *  collectLatest / onScreenLeft / onCleared (Main). 0L = no active search. */
+    private val currentSearchToken = AtomicLong(0L)
 
     fun search(query: String) {
         _queryFlow.value = query
@@ -62,7 +66,7 @@ class SearchViewModel @Inject constructor(
         // late arrivals from previous queries are silently dropped.
         viewModelScope.launch {
             relayPool.searchResults.collect { result ->
-                if (result.token == currentSearchToken) {
+                if (result.token == currentSearchToken.get()) {
                     _searchResultEventIds.update { it + result.eventId }
                 }
             }
@@ -75,10 +79,12 @@ class SearchViewModel @Inject constructor(
                 .distinctUntilChanged()
                 .collectLatest { query ->
                     // Close prior search sub-IDs on relays before doing anything else.
-                    currentSearchToken?.let { relayPool.closeSearch(it) }
+                    currentSearchToken.get().let { prev ->
+                        if (prev != 0L) relayPool.closeSearch(prev)
+                    }
 
                     if (query.isEmpty()) {
-                        currentSearchToken = null
+                        currentSearchToken.set(0L)
                         _searchResultEventIds.value = emptySet()
                         _uiState.update {
                             it.copy(
@@ -100,7 +106,7 @@ class SearchViewModel @Inject constructor(
                     // Generate token and set it BEFORE sending any REQ so the collector
                     // is ready to accept the first fast result.
                     val token = System.currentTimeMillis()
-                    currentSearchToken = token
+                    currentSearchToken.set(token)
                     _searchResultEventIds.value = emptySet()
 
                     // Send NIP-50 REQ to search relays — results flow into MES via EventProcessor.
@@ -145,8 +151,9 @@ class SearchViewModel @Inject constructor(
 
     /** Called by DisposableEffect when SearchScreen exits composition (nav back). */
     fun onScreenLeft() {
-        currentSearchToken?.let { relayPool.closeSearch(it) }
-        currentSearchToken = null
+        currentSearchToken.getAndSet(0L).let { prev ->
+            if (prev != 0L) relayPool.closeSearch(prev)
+        }
         _queryFlow.value = ""
         _searchResultEventIds.value = emptySet()
         _uiState.update {
@@ -162,7 +169,9 @@ class SearchViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        currentSearchToken?.let { relayPool.closeSearch(it) }
+        currentSearchToken.get().let { token ->
+            if (token != 0L) relayPool.closeSearch(token)
+        }
     }
 
     companion object {
@@ -170,7 +179,7 @@ class SearchViewModel @Inject constructor(
             "wss://nostr.wine",
             "wss://relay.noswhere.com",
             "wss://search.nos.today",
-            "wss://antiprimal.net",
+            ANTIPRIMAL_RELAY_URL,
             "wss://relay.ditto.pub",
         )
     }

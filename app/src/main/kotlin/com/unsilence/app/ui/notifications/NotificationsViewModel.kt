@@ -46,13 +46,15 @@ class NotificationsViewModel @Inject constructor(
     /** Mark current notifications as seen — clears the blue dot. */
     fun markSeen() {
         val items = _uiState.value.items
-        if (items.isNotEmpty()) {
-            val pubkey = keyManager.getPublicKeyHex() ?: return
-            viewModelScope.launch {
-                relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().createdAt)
-            }
+        if (items.isEmpty()) {
+            _hasNew.value = false
+            return
         }
-        _hasNew.value = false
+        val pubkey = keyManager.getPublicKeyHex() ?: return
+        viewModelScope.launch {
+            relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().createdAt)
+            _hasNew.value = false
+        }
     }
 
     private var collectJob: Job? = null

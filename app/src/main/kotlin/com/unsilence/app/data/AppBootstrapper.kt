@@ -22,6 +22,7 @@ import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.CoroutineScope
@@ -57,7 +58,7 @@ private val DEFAULT_SEARCH_URLS = listOf(
     "wss://nostr.wine",
     "wss://relay.noswhere.com",
     "wss://search.nos.today",
-    "wss://antiprimal.net",
+    ANTIPRIMAL_RELAY_URL,
     "wss://relay.ditto.pub",
 )
 

@@ -121,7 +121,7 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
 }
 
 private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRenderModel {
-    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
+    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null && it.height != 0 }
     val aspect = meta?.let { it.width!!.toFloat() / it.height!! } ?: DEFAULT_ASPECT_RATIO
     val poster = imetaMedia.firstOrNull { it.url == url }?.thumb
     val mimeType = imetaMedia.firstOrNull { it.url == url }?.mimeType

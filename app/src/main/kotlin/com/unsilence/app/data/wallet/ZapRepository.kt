@@ -4,15 +4,12 @@ import android.util.Log
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import javax.inject.Inject
@@ -152,17 +149,4 @@ class ZapRepository @Inject constructor(
             obj["pr"]?.jsonPrimitive?.content
         }.getOrNull()
 
-    private fun toEventJson(event: Event) = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags", buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content", event.content)
-        put("sig",     event.sig)
-    }.toString()
 }

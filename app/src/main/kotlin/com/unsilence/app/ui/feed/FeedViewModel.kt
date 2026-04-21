@@ -139,7 +139,7 @@ class FeedViewModel @Inject constructor(
     val userAvatarUrl: StateFlow<String?> = keyManager.getPublicKeyHex()?.let { pubkey ->
         userRepository.userFlow(pubkey)
             .map { it?.picture }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
     private val _displayLimit = MutableStateFlow(200)

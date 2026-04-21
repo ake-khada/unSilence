@@ -7,6 +7,9 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 
 class FeedStateReducerTest {
 
@@ -239,5 +242,110 @@ class FeedStateReducerTest {
         reducer2.onNewEvents(listOf(updatedRow, row("b", 200)))
         // When scrolled down, data-only refreshes are deferred (pendingDataRefresh)
         assertSame(stateBefore, reducer2.state.value)
+    }
+
+    // ── Coalescing: concurrent emissions must not post duplicate flushes ───
+
+    @Test
+    fun `concurrent MERGE emissions post exactly one flush per coalesce window`() {
+        val postCount = AtomicInteger(0)
+        val capturedRunnables = CopyOnWriteArrayList<Runnable>()
+
+        val reducer2 = FeedStateReducer("test-coalesce") { runnable, _ ->
+            postCount.incrementAndGet()
+            capturedRunnables.add(runnable)
+        }
+
+        // First population (empty → direct write, bypasses coalescing)
+        reducer2.onNewEvents(listOf(row("seed", 1000)))
+        assertEquals(0, postCount.get()) // direct write, no post
+
+        // Stay at top so subsequent emissions take the MERGE→emitCoalesced path.
+        reducer2.onScrollPositionChanged(0, 0)
+
+        // Fire 20 concurrent MERGE emissions from different threads.
+        val threadCount = 20
+        val latch = CountDownLatch(threadCount)
+        val threads = (1..threadCount).map { i ->
+            Thread {
+                latch.countDown()
+                latch.await() // all threads start simultaneously
+                reducer2.onNewEvents(
+                    listOf(row("seed", 1000), row("new-$i", 900L - i))
+                )
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(5000) }
+
+        // The synchronized check-then-act in emitCoalesced must ensure exactly
+        // one postDelayed call per coalesce window, regardless of thread count.
+        assertEquals(
+            "Expected exactly 1 postDelayed call per coalesce window, got ${postCount.get()}",
+            1,
+            postCount.get(),
+        )
+
+        // Simulate the Handler firing the flush runnable.
+        capturedRunnables.single().run()
+
+        // After flush, the last writer's state should be applied.
+        val state = reducer2.state.value
+        assertTrue(
+            "Visible events should contain more than the seed after flush",
+            state.visibleEvents.size > 1,
+        )
+
+        // Fire another round — should open a NEW coalesce window (exactly 1 more post).
+        reducer2.onNewEvents(listOf(row("seed", 1000), row("round2", 500)))
+        assertEquals(
+            "Second emission after flush should open a new window",
+            2,
+            postCount.get(),
+        )
+    }
+
+    @Test
+    fun `concurrent data-only emissions post exactly one flush per coalesce window`() {
+        val postCount = AtomicInteger(0)
+        val capturedRunnables = CopyOnWriteArrayList<Runnable>()
+
+        val reducer2 = FeedStateReducer("test-data-coalesce") { runnable, _ ->
+            postCount.incrementAndGet()
+            capturedRunnables.add(runnable)
+        }
+
+        // First population (empty → direct write)
+        val initial = listOf(row("a", 300), row("b", 200))
+        reducer2.onNewEvents(initial)
+        assertEquals(0, postCount.get())
+
+        // Stay at top so data-only refreshes go through emitCoalescedDataRefresh.
+        reducer2.onScrollPositionChanged(0, 0)
+
+        // Fire 20 concurrent data-only emissions (same IDs, different data).
+        val threadCount = 20
+        val latch = CountDownLatch(threadCount)
+        val threads = (1..threadCount).map { i ->
+            Thread {
+                latch.countDown()
+                latch.await()
+                reducer2.onNewEvents(
+                    listOf(
+                        row("a", 300).copy(reactionCount = i),
+                        row("b", 200).copy(reactionCount = i),
+                    )
+                )
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(5000) }
+
+        // Exactly one postDelayed for the data coalesce window.
+        assertEquals(
+            "Expected exactly 1 data-coalesce postDelayed, got ${postCount.get()}",
+            1,
+            postCount.get(),
+        )
     }
 }

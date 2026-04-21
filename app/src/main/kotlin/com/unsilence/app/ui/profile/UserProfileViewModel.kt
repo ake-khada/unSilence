@@ -9,6 +9,8 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.toEventJson
+import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
@@ -191,17 +193,27 @@ class UserProfileViewModel @Inject constructor(
                 )
                 val signed = signingManager.sign(template) ?: return@launch
 
-                // Publish to write relays + indexer relays
-                val writeUrls = getWriteRelayUrls(myPubkey)
-                val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
-                val targetUrls = (writeUrls + indexerUrls).distinct()
-                relayPool.publishToRelays(toEventJson(signed), targetUrls)
-
-                // Optimistic local mutation via MES
+                // Optimistic local mutation FIRST — UI updates immediately
                 if (nowFollowing) {
                     memoryEventStore.removeFollow(myPubkey, targetPubkey)
                 } else {
                     memoryEventStore.addFollow(myPubkey, targetPubkey)
+                }
+
+                // Publish to write relays + indexer relays
+                val writeUrls = getWriteRelayUrls(myPubkey)
+                val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
+                val targetUrls = (writeUrls + indexerUrls).distinct()
+                try {
+                    relayPool.publishToRelays(toEventJson(signed), targetUrls)
+                } catch (e: Exception) {
+                    // Rollback optimistic mutation on publish failure
+                    if (nowFollowing) {
+                        memoryEventStore.addFollow(myPubkey, targetPubkey)
+                    } else {
+                        memoryEventStore.removeFollow(myPubkey, targetPubkey)
+                    }
+                    Log.w("UserProfileVM", "Follow publish failed, rolled back", e)
                 }
             } finally {
                 followLoading.value = false
@@ -211,20 +223,6 @@ class UserProfileViewModel @Inject constructor(
 
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: GLOBAL_RELAY_URLS
-
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
 
     fun loadProfile(pubkey: String) {
         if (_pubkeyHex.value == pubkey) return
@@ -258,9 +256,9 @@ class UserProfileViewModel @Inject constructor(
             // Ensure antiprimal.net is connected before sending COUNT — it may have been
             // evicted by the 60s idle timer or not yet connected on fresh navigation.
             // forceEvict=true because the pool may be at cap with all PERSISTENT connections.
-            relayPool.connectAndAwait(listOf("wss://antiprimal.net"), timeoutMs = 3_000, forceEvict = true)
+            relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
             val count = relayPool.sendCount(
-                relayUrl = "wss://antiprimal.net",
+                relayUrl = ANTIPRIMAL_RELAY_URL,
                 filter = buildJsonObject {
                     put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
                     put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })

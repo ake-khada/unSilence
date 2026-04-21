@@ -961,7 +961,7 @@ private fun MediaImage(
     imetaImageDims: Map<String, Float> = emptyMap(),
 ) {
     val imetaAspect = imetaMedia
-        .firstOrNull { it.url == url && it.width != null && it.height != null }
+        .firstOrNull { it.url == url && it.width != null && it.height != null && it.height != 0 }
         ?.let { it.width!!.toFloat() / it.height!! }
 
     // Priority: sidecar cache (insert-time imeta) > inline imeta > pre-fetched cache > default 4:3
@@ -1169,7 +1169,7 @@ private fun MediaGrid(
 private data class VideoMeta(val aspectRatio: Float?, val posterUrl: String?)
 
 private fun resolveVideoMeta(url: String, imetaMedia: List<ImetaMedia>): VideoMeta {
-    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null }
+    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null && it.height != 0 }
     val aspect = meta?.let { it.width!!.toFloat() / it.height!! }
     val poster = imetaMedia.firstOrNull { it.url == url }?.thumb
     return VideoMeta(aspect, poster)

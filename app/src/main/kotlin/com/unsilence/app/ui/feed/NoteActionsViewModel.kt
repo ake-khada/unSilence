@@ -14,6 +14,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.OgFetcher
+import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
@@ -37,8 +38,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import javax.inject.Inject
@@ -85,7 +84,7 @@ class NoteActionsViewModel @Inject constructor(
     val reactedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
             memoryEventStore.reactedEventIdsFlow(pk)
-                .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
         } ?: MutableStateFlow(emptySet())
 
     /**
@@ -95,7 +94,7 @@ class NoteActionsViewModel @Inject constructor(
     val repostedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
             memoryEventStore.repostedEventIdsFlow(pk)
-                .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
         } ?: MutableStateFlow(emptySet())
 
     /** Optimistic sats: per-event amount to add on top of Room's zapTotalSats. */
@@ -138,7 +137,7 @@ class NoteActionsViewModel @Inject constructor(
     val zappedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
             memoryEventStore.zappedEventIdsFlow(pk)
-                .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
         } ?: MutableStateFlow(emptySet())
 
     // ── Public actions ────────────────────────────────────────────────────────
@@ -293,20 +292,6 @@ class NoteActionsViewModel @Inject constructor(
         ogFetcher.fetch(url)
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
 
     /** Reconstruct the original event's wire JSON from its stored EventEntity. */
     private fun entityToJson(entity: EventEntity): String = buildJsonObject {

@@ -240,6 +240,42 @@ class EventProcessorInvariantsTest {
         assertEquals("Event with no expiration should be stored", 1, noExpiryEvents.size)
     }
 
+    // ── Test 7b: imeta with zero height does not cause crash ─────────────
+
+    @Test
+    fun `imeta with zero height is safely filtered out`() = runTest {
+        val (raw, relay) = rawEvent(
+            seed = 750,
+            kind = 1,
+            content = "check this image https://example.com/zero.jpg",
+            tags = """[["imeta","url https://example.com/zero.jpg","m image/jpeg","dim 100x0"]]""",
+        )
+        processor.process(raw, relay)
+        processor.drainForTest()
+
+        val events = store.eventsByIds(setOf(eventId(750)))
+        assertEquals("Event should still be stored", 1, events.size)
+
+        val dims = store.getImetaImageDims(eventId(750))
+        assertTrue("Zero-height imeta should not produce a cached ratio", dims.isEmpty())
+    }
+
+    @Test
+    fun `imeta with valid dimensions produces correct aspect ratio`() = runTest {
+        val (raw, relay) = rawEvent(
+            seed = 751,
+            kind = 1,
+            content = "check this image https://example.com/photo.jpg",
+            tags = """[["imeta","url https://example.com/photo.jpg","m image/jpeg","dim 800x600"]]""",
+        )
+        processor.process(raw, relay)
+        processor.drainForTest()
+
+        val dims = store.getImetaImageDims(eventId(751))
+        assertEquals("Should have 1 cached dimension", 1, dims.size)
+        assertEquals(800f / 600f, dims["https://example.com/photo.jpg"]!!, 0.01f)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // A.5 Prefetch tests — referenced event pre-fetching from source relay
     // ═══════════════════════════════════════════════════════════════════════
