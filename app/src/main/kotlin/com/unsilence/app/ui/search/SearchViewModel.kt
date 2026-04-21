@@ -180,7 +180,6 @@ class SearchViewModel @Inject constructor(
             "wss://relay.noswhere.com",
             "wss://search.nos.today",
             ANTIPRIMAL_RELAY_URL,
-            "wss://relay.ditto.pub",
         )
     }
 }

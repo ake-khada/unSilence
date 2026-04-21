@@ -59,7 +59,6 @@ private val DEFAULT_SEARCH_URLS = listOf(
     "wss://relay.noswhere.com",
     "wss://search.nos.today",
     ANTIPRIMAL_RELAY_URL,
-    "wss://relay.ditto.pub",
 )
 
 /** Pubkey of the trustedrelays.xyz operator who publishes kind 30385 events. */
