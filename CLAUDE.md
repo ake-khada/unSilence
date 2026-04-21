@@ -69,7 +69,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 ### Key Subsystems (read code for details)
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance
 - **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
-- **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed)
+- **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed), ephemeral one-shot path (`sendOneShotBatch` + `openEphemeral`) for cap-bypassing fetches
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, `synchronized`-based coalescing (200ms window), `PersistentSet<String>` knownIds
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, per-item bitmask ledger, sampled at 16 Hz
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
@@ -144,41 +144,43 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 21. **ProfileResolver call sites MUST pre-filter** — use `userRepository.fetchMissingProfiles` or `profileResolver.filterUnresolved()`. Grep for `Batch.*all fresh, skipping` to verify
 22. **fetchRelayEcosystem sends to write relays, not just indexers** — NIP-51 replaceable events live on write relays
 23. **NIP-51/NIP-65 relay events need direct-path insert** — kinds 10002/10006/10007/10012/30002 not in shouldChannel
+24. **One-shot fetches use `sendOneShotBatch`, NOT `connect()`** — pool-reuse for URLs already in `connections`, ephemeral WebSocket for others. Never `connect()` for one-shot REQs (it counts against the 13-connection cap). Migrated: fetchUserPosts, fetchOlderPosts, fetchProfiles, fetchProfilesFromHints, fetchProfilesFromSourceRelays
+25. **Ephemeral connections never enter `connections` map** — no cap, no reconnect, no idle eviction. Lifecycle: connect → REQ → EVENT* → EOSE → CLOSE → close WebSocket. Per-URL 50ms CAS-guarded rate limit via `ephemeralLastOpenNanos`
 
 ### Feed & Hydration
-24. **Render-then-hydrate architecture** — MES signals drive the reducer immediately; WARM zone catches up after. Don't gate on hydration completion at reducer level
-25. **FeedStateReducer state: immutable only** — `PersistentSet<String>` for knownIds, O(delta) updates. No mutable collections in ReducerState
-26. **Pagination cursor is reducer-owned** — `oldestCreatedAt` in `ReducerState`. No `minOfOrNull` outside the reducer
-27. **Engagement freshness uses tiered thresholds** — route through `freshnessThreshold()`. Don't use raw `ENGAGEMENT_STALE_MS` as sole threshold
-28. **State machines, not booleans** — multi-state properties must be enums. Booleans collapse intermediate states
-29. **Load-aware, not time-based** — triggers use compound readiness conditions, not naive `delay()`. Integrate with HydrationCtrl state machine
+26. **Render-then-hydrate architecture** — MES signals drive the reducer immediately; WARM zone catches up after. Don't gate on hydration completion at reducer level
+27. **FeedStateReducer state: immutable only** — `PersistentSet<String>` for knownIds, O(delta) updates. No mutable collections in ReducerState
+28. **Pagination cursor is reducer-owned** — `oldestCreatedAt` in `ReducerState`. No `minOfOrNull` outside the reducer
+29. **Engagement freshness uses tiered thresholds** — route through `freshnessThreshold()`. Don't use raw `ENGAGEMENT_STALE_MS` as sole threshold
+30. **State machines, not booleans** — multi-state properties must be enums. Booleans collapse intermediate states
+31. **Load-aware, not time-based** — triggers use compound readiness conditions, not naive `delay()`. Integrate with HydrationCtrl state machine
 
 ### Media
-30. **Media aspect ratios are layout-locked after first compose** — three-tier resolution (imeta → MMR → ImageDimensionCache). ONE update from default→resolved permitted, then locked
-31. **ImageDimensionCache clamps ratios to 0.2f..5.0f** — malformed dimensions from servers must not corrupt layout
-32. **Zero-height guard on imeta dims** — `&& it.height != 0` at all parse/resolve sites (EventProcessor, MES snapshot restore, NoteCard, VideoRenderModel)
-33. **MES sidecar caches** — `videoRenderModelsByEventId` and `imetaImageDimsByEventId` cleared in `MES.clear()`, populated in `insertFromSnapshot()`
-34. **WARM_CATCHUP runs media hydration (MMR cap 3)** — first-visible items get pre-resolved before user scrolls
-35. **"Failed to call close" from MMR is framework-owned** — ~24/session, no functional effect. Re-audit if >50/session
+32. **Media aspect ratios are layout-locked after first compose** — three-tier resolution (imeta → MMR → ImageDimensionCache). ONE update from default→resolved permitted, then locked
+33. **ImageDimensionCache clamps ratios to 0.2f..5.0f** — malformed dimensions from servers must not corrupt layout
+34. **Zero-height guard on imeta dims** — `&& it.height != 0` at all parse/resolve sites (EventProcessor, MES snapshot restore, NoteCard, VideoRenderModel)
+35. **MES sidecar caches** — `videoRenderModelsByEventId` and `imetaImageDimsByEventId` cleared in `MES.clear()`, populated in `insertFromSnapshot()`
+36. **WARM_CATCHUP runs media hydration (MMR cap 3)** — first-visible items get pre-resolved before user scrolls
+37. **"Failed to call close" from MMR is framework-owned** — ~24/session, no functional effect. Re-audit if >50/session
 
 ### Shared Utilities
-36. **`toEventJson(event)` lives in `NostrJson.kt`** — single shared function. Never duplicate in ViewModels
-37. **`ANTIPRIMAL_RELAY_URL` in `RelayUrlUtil.kt`** — use the constant, don't hardcode `"wss://antiprimal.net"`
-38. **`normalizeRelayUrl()` in `RelayUrlUtil.kt`** — top-level function, no companion object wrappers
+38. **`toEventJson(event)` lives in `NostrJson.kt`** — single shared function. Never duplicate in ViewModels
+39. **`ANTIPRIMAL_RELAY_URL` in `RelayUrlUtil.kt`** — use the constant, don't hardcode `"wss://antiprimal.net"`
+40. **`normalizeRelayUrl()` in `RelayUrlUtil.kt`** — top-level function, no companion object wrappers
 
 ### Thread Safety
-39. **Thread DFS walk uses `visited` set** — cycle protection prevents stack overflow on circular reply chains
+41. **Thread DFS walk uses `visited` set** — cycle protection prevents stack overflow on circular reply chains
 
 ### Memory Bounds
-40. **VideoThumbnailCache bitmaps MUST be downsampled** — `inSampleSize=2` in `downsample()`. Removing this regresses to ~3.5MB/thumb → 64MB cap hit in 2 minutes
-41. **VideoThumbnailCache `visibleUrls` set** — composables register via `markVisible`/`markNotVisible` in `DisposableEffect`. Eviction skips visible URLs. Missing unregister = memory leak
-42. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
-43. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
-44. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
-45. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index, profile, and content eviction anchors. Must be set before events arrive
-46. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
-47. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
-48. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
+42. **VideoThumbnailCache bitmaps MUST be downsampled** — `inSampleSize=2` in `downsample()`. Removing this regresses to ~3.5MB/thumb → 64MB cap hit in 2 minutes
+43. **VideoThumbnailCache `visibleUrls` set** — composables register via `markVisible`/`markNotVisible` in `DisposableEffect`. Eviction skips visible URLs. Missing unregister = memory leak
+44. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
+45. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
+46. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
+47. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index, profile, and content eviction anchors. Must be set before events arrive
+48. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
+49. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
+50. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
 
 ---
 
