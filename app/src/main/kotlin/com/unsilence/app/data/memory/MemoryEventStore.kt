@@ -1301,6 +1301,15 @@ class MemoryEventStore @Inject constructor() {
     fun writeRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.write ?: emptyList()
 
+    /** Write relays sorted by trust score (descending). Unknown relays get score 50 (middle rank). */
+    fun writeRelaysForRanked(pubkey: String): List<String> {
+        val relays = writeRelaysFor(pubkey)
+        if (relays.size <= 1) return relays
+        return relays.sortedByDescending { url ->
+            trustScoresByUrl[url]?.score ?: 50
+        }
+    }
+
     fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 

@@ -26,6 +26,5 @@ val GLOBAL_RELAY_URLS = listOf(
     "wss://nos.lol",
     "wss://nostr.mom",
     "wss://relay.nostr.net",
-    "wss://relay.ditto.pub",
     "wss://relay.primal.net",
 )

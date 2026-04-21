@@ -249,7 +249,7 @@ class CardHydrator @Inject constructor(
                 // Phase 1: try write relays already cached in MemoryEventStore
                 val cachedWriteRelays = refAuthorPubkeys
                     .flatMap { pk ->
-                        val relays = memoryEventStore.writeRelaysFor(pk)
+                        val relays = memoryEventStore.writeRelaysForRanked(pk)
                         if (relays.isNotEmpty()) Log.d(TAG, "Outbox: cached write relays for ${pk.take(8)}… = $relays")
                         relays
                     }
@@ -277,7 +277,7 @@ class CardHydrator @Inject constructor(
 
                     // Now resolve newly-cached write relays
                     val newWriteRelays = authorsWithoutRelayList
-                        .flatMap { memoryEventStore.writeRelaysFor(it) }
+                        .flatMap { memoryEventStore.writeRelaysForRanked(it) }
                         .distinct()
                         .take(5)
                     if (newWriteRelays.isNotEmpty()) {
