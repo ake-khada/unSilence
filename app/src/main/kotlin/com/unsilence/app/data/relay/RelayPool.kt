@@ -29,6 +29,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.PaginatedFetchResult
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
@@ -125,8 +126,19 @@ class RelayPool @Inject constructor(
     /** Tracks event IDs per engagement subscription for post-EOSE cache invalidation. */
     private val engagementSubEventIds = ConcurrentHashMap<String, List<String>>()
 
-    /** Global event-by-ID dedup — prevents duplicate fetchEventById calls (30s TTL). */
-    private val eventFetchInFlight = ConcurrentHashMap<String, Long>()
+    /** In-flight event fetch dedup — maps event ID to completion signal.
+     *  Callers that arrive while a fetch is in-flight skip the REQ;
+     *  the monitor coroutine completes the Deferred and removes the entry. */
+    private val eventFetchInFlight = ConcurrentHashMap<String, CompletableDeferred<NostrEvent?>>()
+    /** Peak eventFetchInFlight.size since last metrics snapshot — for instrumentation. */
+    private val eventFetchInFlightPeak = AtomicInteger(0)
+
+    /** Negative cache: event IDs that failed to resolve after all outbox phases.
+     *  Values = timestamp (epoch ms). TTL 5 min. Written by CardHydrator, checked
+     *  by every fetchEventById/fetchEventsByIds entry point. */
+    private val missingRefCache = ConcurrentHashMap<String, Long>()
+    private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
+    private val missingRefCacheHits = AtomicLong(0)
 
     /** Relays that have completed NIP-42 auth successfully. */
     private val authenticatedRelays = ConcurrentHashMap.newKeySet<String>()
@@ -160,6 +172,71 @@ class RelayPool @Inject constructor(
 
     /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
     fun activeOneShotCount(): Int = _activeOneShotSubs.size
+
+    // ── Negative cache API ───────────────────────────────────────────
+
+    /** Check if an event ID is in the negative cache (within TTL). Expired entries are evicted lazily. */
+    fun isEventUnresolved(eventId: String): Boolean {
+        val ts = missingRefCache[eventId] ?: return false
+        if (System.currentTimeMillis() - ts < MISSING_REF_TTL_MS) {
+            missingRefCacheHits.incrementAndGet()
+            return true
+        }
+        missingRefCache.remove(eventId)
+        return false
+    }
+
+    /** Mark an event ID as unresolved (negative cache, 5-min TTL). */
+    fun markEventUnresolved(eventId: String) {
+        missingRefCache[eventId] = System.currentTimeMillis()
+    }
+
+    // ── Relay metrics (for MES/size logger) ──────────────────────────
+
+    data class RelayMetrics(
+        val eventFetchInFlightPeak: Int,
+        val missingRefCacheSize: Int,
+        val missingRefCacheHits: Long,
+    )
+
+    fun snapshotRelayMetrics(): RelayMetrics = RelayMetrics(
+        eventFetchInFlightPeak = eventFetchInFlightPeak.getAndSet(0),
+        missingRefCacheSize = missingRefCache.size,
+        missingRefCacheHits = missingRefCacheHits.getAndSet(0),
+    )
+
+    // ── In-flight fetch monitor ──────────────────────────────────────
+
+    /** Launch a coroutine that polls MES for event arrival and completes the Deferred.
+     *  Removes the entry from eventFetchInFlight on completion (success or timeout). */
+    private fun launchFetchMonitor(eventId: String, deferred: CompletableDeferred<NostrEvent?>) {
+        scope.launch {
+            try {
+                val mes = memoryEventStore.get()
+                val result = withTimeoutOrNull(30_000L) {
+                    while (true) {
+                        mes.getNostrEvent(eventId)?.let { return@withTimeoutOrNull it }
+                        delay(500)
+                    }
+                    @Suppress("UNREACHABLE_CODE") null
+                }
+                deferred.complete(result)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                deferred.complete(null)
+                throw e
+            } catch (e: Exception) {
+                deferred.complete(null)
+            } finally {
+                eventFetchInFlight.remove(eventId)
+            }
+        }
+    }
+
+    /** Update the peak-size watermark for instrumentation. */
+    private fun trackInFlightPeak() {
+        val current = eventFetchInFlight.size
+        eventFetchInFlightPeak.updateAndGet { maxOf(it, current) }
+    }
 
     // ── Per-relay REQ queue ───────────────────────────────────────────
     // Relays typically allow 10-20 concurrent subscriptions. When a relay hits
@@ -349,7 +426,8 @@ class RelayPool @Inject constructor(
                 val cutoff = System.currentTimeMillis() - 300_000
                 engagementFetched.entries.removeIf { it.value < cutoff }
                 engagementSubEventIds.entries.removeIf { true } // clear all — subs should be completed by now
-                eventFetchInFlight.entries.removeIf { it.value < cutoff }
+                // eventFetchInFlight: self-cleaning via launchFetchMonitor finally blocks
+                missingRefCache.entries.removeIf { it.value < cutoff } // same 5-min TTL
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
             }
         }
@@ -1626,16 +1704,22 @@ class RelayPool @Inject constructor(
      * [eventJson] must be the raw JSON object string for the event
      * (not the full ["EVENT", ...] array — this method wraps it).
      */
-    /** Batch fetch events by ID. Deduped against in-flight tracker (30s TTL). */
+    /** Batch fetch events by ID. Deduped via in-flight Deferred map + negative cache. */
     fun fetchEventsByIds(eventIds: List<String>) {
         if (eventIds.isEmpty()) return
-        val now = System.currentTimeMillis()
-        val novel = eventIds.filter { id ->
-            val last = eventFetchInFlight[id]
-            last == null || (now - last) > 30_000
+        // Filter: skip IDs in negative cache or already in-flight
+        val novel = mutableListOf<String>()
+        for (id in eventIds) {
+            if (isEventUnresolved(id)) continue
+            if (eventFetchInFlight.containsKey(id)) continue
+            val d = CompletableDeferred<NostrEvent?>()
+            if (eventFetchInFlight.putIfAbsent(id, d) == null) {
+                novel.add(id)
+                launchFetchMonitor(id, d)
+            }
         }
         if (novel.isEmpty()) return
-        novel.forEach { eventFetchInFlight[it] = now }
+        trackInFlightPeak()
         val subId = "batch-events-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
@@ -1665,21 +1749,26 @@ class RelayPool @Inject constructor(
      * Fetch events by ID from a SPECIFIC relay (source-relay targeting).
      * Used by EventProcessor's prefetch: when a reply arrives from relay X,
      * the parent event is almost certainly on relay X too.
-     * Deduped against the same in-flight tracker (30s TTL).
+     * Deduped via in-flight Deferred map + negative cache.
      */
     fun fetchEventsByIdsFromRelay(relayUrl: String, eventIds: List<String>) {
         if (eventIds.isEmpty()) return
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
-        val now = System.currentTimeMillis()
-        val novel = eventIds.filter { id ->
-            val last = eventFetchInFlight[id]
-            last == null || (now - last) > 30_000
+        val conn = connections[normalized]
+            ?: return  // no connection — don't register in-flight entries
+        val novel = mutableListOf<String>()
+        for (id in eventIds) {
+            if (isEventUnresolved(id)) continue
+            if (eventFetchInFlight.containsKey(id)) continue
+            val d = CompletableDeferred<NostrEvent?>()
+            if (eventFetchInFlight.putIfAbsent(id, d) == null) {
+                novel.add(id)
+                launchFetchMonitor(id, d)
+            }
         }
         if (novel.isEmpty()) return
-        val conn = connections[normalized]
-        if (conn == null) return          // no connection — don't pollute eventFetchInFlight
-        novel.forEach { eventFetchInFlight[it] = now }
+        trackInFlightPeak()
         val subId = "prefetch-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
@@ -1698,19 +1787,31 @@ class RelayPool @Inject constructor(
      * Fetch a single event by ID using relay hints. Hints-first strategy:
      * when hints exist, connectAndAwait to ensure the WebSocket is open,
      * then send REQ only to hint relays — no broadcast fallback.
-     * When no hints exist, sends to at most 3 random non-indexer relays.
+     * When no hints exist, sends to at most 6 random relays (non-indexer first).
      *
-     * @param bypassDedup when true, skip the eventFetchInFlight 30s guard.
-     *   Used by outbox fallback: the same event ID was already tried on the
-     *   source relay, but we need to retry on the author's write relays.
+     * @param bypassDedup when true, skip the in-flight Deferred guard (but NOT
+     *   the negative cache). Used by outbox fallback: the same event ID was already
+     *   tried on the source relay, but we need to retry on the author's write relays.
+     *   The negative cache still applies — if a prior completed batch already
+     *   determined this event is unresolvable, retrying won't help.
      */
     suspend fun fetchEventById(eventId: String, relayHints: List<String>, bypassDedup: Boolean = false) {
-        val now = System.currentTimeMillis()
+        // Negative cache: always check, even for outbox retries. Within a single
+        // hydrateRefs cycle the cache isn't populated yet (written after all phases).
+        // Cross-cycle: prevents redundant outbox retries for known-unresolved refs.
+        if (isEventUnresolved(eventId)) return
+
         if (!bypassDedup) {
-            val last = eventFetchInFlight[eventId]
-            if (last != null && (now - last) <= 30_000) return
+            // In-flight dedup: another caller is already fetching this event
+            if (eventFetchInFlight.containsKey(eventId)) return
+            val d = CompletableDeferred<NostrEvent?>()
+            if (eventFetchInFlight.putIfAbsent(eventId, d) != null) return // race lost
+            launchFetchMonitor(eventId, d)
+            trackInFlightPeak()
         }
-        eventFetchInFlight[eventId] = now
+        // bypassDedup callers (outbox phases) send REQs without registering in the map.
+        // If a monitor is already running for this ID (from the initial broadcast),
+        // the event arrival will still complete that Deferred.
 
         val subId = "hint-event-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
@@ -1729,7 +1830,7 @@ class RelayPool @Inject constructor(
         if (relayHints.isNotEmpty()) {
             // Hints-first: connect and wait for WebSocket readiness, then send REQ
             // only to hint relays. No broadcast fallback — if all hints fail, the
-            // event stays unfetched until the next hydration pass retries (30s TTL).
+            // event stays unfetched until the next hydration pass retries.
             val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
                 .filter { it !in indexerUrls && it !in blockedUrls }
             if (hintTargets.isNotEmpty()) {
@@ -1747,8 +1848,6 @@ class RelayPool @Inject constructor(
         }
 
         // No hints (or all hints were indexer/blocked) — broadened fallback.
-        // Non-indexer relays first (shuffled), then indexer relays for coverage.
-        // eventFetchInFlight prevents retry within 30s.
         val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
         val indexer = connections.values.filter { it.url in indexerUrls }
         val fallbackTargets = (nonIndexer + indexer).take(6)
@@ -2305,6 +2404,10 @@ class RelayPool @Inject constructor(
         connections.clear()
         connectionPurposes.clear()
         profileFetchAttempted.clear()
+        // Complete all in-flight monitors so they clean up immediately
+        eventFetchInFlight.values.forEach { it.complete(null) }
+        eventFetchInFlight.clear()
+        missingRefCache.clear()
         authenticatedRelays.clear()
         authInFlight.clear()
         pendingChallenges.clear()

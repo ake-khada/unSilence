@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +28,7 @@ private const val INTERVAL_MS = 60_000L
 @Singleton
 class MesMetricsLogger @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
+    private val relayPool: RelayPool,
     private val videoThumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
 ) : DefaultLifecycleObserver {
@@ -100,6 +102,21 @@ class MesMetricsLogger @Inject constructor(
                 "follows=${s.followsEntries} followerCount=${s.followerCountEntries} " +
                 "relayLists=${s.relayListEntries} trustScores=${s.trustScoreEntries} " +
                 "monitors=${s.relayMonitorEntries} relaySets=${s.relaySetEntries}",
+        )
+
+        // Eviction anchor counters (cumulative since last snapshot, then reset)
+        val (anchoredOwn, anchoredMentioned) = memoryEventStore.snapshotEvictionAnchors()
+        if (anchoredOwn + anchoredMentioned > 0) {
+            Log.d(TAG, "eviction: anchored own=$anchoredOwn mentioned=$anchoredMentioned")
+        }
+
+        // Relay fetch dedup metrics (resets peaks/counters on each snapshot)
+        val rm = relayPool.snapshotRelayMetrics()
+        Log.d(
+            TAG,
+            "relay: inFlightPeak=${rm.eventFetchInFlightPeak} " +
+                "missingRefCache=${rm.missingRefCacheSize} " +
+                "missingRefHits=${rm.missingRefCacheHits}",
         )
     }
 

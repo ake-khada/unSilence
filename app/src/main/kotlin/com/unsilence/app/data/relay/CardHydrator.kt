@@ -61,11 +61,6 @@ class CardHydrator @Inject constructor(
     private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
 ) {
-    /** Event IDs that were fetched from relays but never arrived — stop retrying.
-     *  Values are timestamps (epoch millis) for TTL-based expiry so temporary
-     *  failures don't permanently suppress refs. */
-    private val missingRefCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     /**
      * Phase 1: Profile resolution only — avatar, name, identity.
      * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
@@ -202,13 +197,8 @@ class CardHydrator @Inject constructor(
         // (Room lookups, relay fetches, 1500ms delay, author resolution, thumbnails).
         if (referencedIds.isEmpty()) return
 
-        // Skip refs still within TTL of the missing-ref negative cache
-        val now = System.currentTimeMillis()
-        referencedIds.removeAll { id ->
-            val ts = missingRefCache[id] ?: return@removeAll false
-            if (now - ts < MISSING_REF_TTL_MS) true
-            else { missingRefCache.remove(id); false }  // expired — allow retry
-        }
+        // Skip refs in the negative cache (now in RelayPool, shared across all entry points)
+        referencedIds.removeAll { relayPool.isEventUnresolved(it) }
         if (referencedIds.isEmpty()) return
 
         // Fetch missing referenced events (check MemoryEventStore, not Room)
@@ -241,81 +231,84 @@ class CardHydrator @Inject constructor(
         } else emptyList()
 
         if (afterSourceRelay.isNotEmpty()) {
-            // Extract p-tag pubkeys from referencing events to find ref authors.
-            // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
-            // etc.), use the wrapper's own pubkey as fallback author for outbox routing.
-            val refAuthorPubkeys = mutableSetOf<String>()
-            for (event in events) {
-                val pTags = extractPTagPubkeys(event.tags)
-                if (pTags.isNotEmpty()) {
-                    pTags.forEach { refAuthorPubkeys.add(it) }
-                } else if (event.kind == 6) {
-                    refAuthorPubkeys.add(event.pubkey)
+            try {
+                // Extract p-tag pubkeys from referencing events to find ref authors.
+                // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
+                // etc.), use the wrapper's own pubkey as fallback author for outbox routing.
+                val refAuthorPubkeys = mutableSetOf<String>()
+                for (event in events) {
+                    val pTags = extractPTagPubkeys(event.tags)
+                    if (pTags.isNotEmpty()) {
+                        pTags.forEach { refAuthorPubkeys.add(it) }
+                    } else if (event.kind == 6) {
+                        refAuthorPubkeys.add(event.pubkey)
+                    }
                 }
-            }
-            Log.d(TAG, "Outbox: ${afterSourceRelay.size} still-missing refs, ${refAuthorPubkeys.size} p-tag authors")
+                Log.d(TAG, "Outbox: ${afterSourceRelay.size} still-missing refs, ${refAuthorPubkeys.size} p-tag authors")
 
-            // Phase 1: try write relays already cached in MemoryEventStore
-            val cachedWriteRelays = refAuthorPubkeys
-                .flatMap { pk ->
-                    val relays = memoryEventStore.writeRelaysFor(pk)
-                    if (relays.isNotEmpty()) Log.d(TAG, "Outbox: cached write relays for ${pk.take(8)}… = $relays")
-                    relays
-                }
-                .distinct()
-                .take(5)
-
-            if (cachedWriteRelays.isNotEmpty()) {
-                for (id in afterSourceRelay) {
-                    relayPool.fetchEventById(id, cachedWriteRelays, bypassDedup = true)
-                }
-                Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays")
-            }
-
-            // Phase 2: for authors without cached relay lists, fetch kind-10002
-            val authorsWithoutRelayList = refAuthorPubkeys
-                .filter { memoryEventStore.writeRelaysFor(it).isEmpty() }
-                .take(5)
-            if (authorsWithoutRelayList.isNotEmpty()) {
-                relayPool.fetchRelayLists(authorsWithoutRelayList.toList())
-                delay(2000) // Wait for kind-10002 to arrive via EventProcessor
-
-                // Check phase 1 resolution before phase 2 dispatch
-                afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
-                    .forEach { phaseResolved[it] = "outbox1" }
-
-                // Now resolve newly-cached write relays
-                val newWriteRelays = authorsWithoutRelayList
-                    .flatMap { memoryEventStore.writeRelaysFor(it) }
+                // Phase 1: try write relays already cached in MemoryEventStore
+                val cachedWriteRelays = refAuthorPubkeys
+                    .flatMap { pk ->
+                        val relays = memoryEventStore.writeRelaysFor(pk)
+                        if (relays.isNotEmpty()) Log.d(TAG, "Outbox: cached write relays for ${pk.take(8)}… = $relays")
+                        relays
+                    }
                     .distinct()
                     .take(5)
-                if (newWriteRelays.isNotEmpty()) {
-                    // Re-check which refs are still missing
-                    val stillMissingAfterPhase1 = afterSourceRelay
-                        .filter { memoryEventStore.getEventEntity(it) == null }
-                    for (id in stillMissingAfterPhase1) {
-                        relayPool.fetchEventById(id, newWriteRelays, bypassDedup = true)
+
+                if (cachedWriteRelays.isNotEmpty()) {
+                    for (id in afterSourceRelay) {
+                        relayPool.fetchEventById(id, cachedWriteRelays, bypassDedup = true)
                     }
-                    Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays")
+                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays")
                 }
-            }
 
-            // Final wait for outbox relay responses
-            if (cachedWriteRelays.isNotEmpty() || authorsWithoutRelayList.isNotEmpty()) {
-                delay(2000)
-            }
+                // Phase 2: for authors without cached relay lists, fetch kind-10002
+                val authorsWithoutRelayList = refAuthorPubkeys
+                    .filter { memoryEventStore.writeRelaysFor(it).isEmpty() }
+                    .take(5)
+                if (authorsWithoutRelayList.isNotEmpty()) {
+                    relayPool.fetchRelayLists(authorsWithoutRelayList.toList())
+                    delay(2000) // Wait for kind-10002 to arrive via EventProcessor
 
-            // Check outbox1/outbox2 resolution
-            afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
-                .forEach { phaseResolved[it] = "outbox2" }
+                    // Check phase 1 resolution before phase 2 dispatch
+                    afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
+                        .forEach { phaseResolved[it] = "outbox1" }
 
-            // Negative-cache anything still missing after outbox fallback
-            val finallyMissing = afterSourceRelay.filter { memoryEventStore.getEventEntity(it) == null }
-            val missTime = System.currentTimeMillis()
-            for (id in finallyMissing) { missingRefCache[id] = missTime }
-            val resolvedViaOutbox = afterSourceRelay.size - finallyMissing.size
-            if (resolvedViaOutbox > 0) {
-                Log.d(TAG, "Outbox resolved: $resolvedViaOutbox/${afterSourceRelay.size} refs via author write relays")
+                    // Now resolve newly-cached write relays
+                    val newWriteRelays = authorsWithoutRelayList
+                        .flatMap { memoryEventStore.writeRelaysFor(it) }
+                        .distinct()
+                        .take(5)
+                    if (newWriteRelays.isNotEmpty()) {
+                        // Re-check which refs are still missing
+                        val stillMissingAfterPhase1 = afterSourceRelay
+                            .filter { memoryEventStore.getEventEntity(it) == null }
+                        for (id in stillMissingAfterPhase1) {
+                            relayPool.fetchEventById(id, newWriteRelays, bypassDedup = true)
+                        }
+                        Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays")
+                    }
+                }
+
+                // Final wait for outbox relay responses
+                if (cachedWriteRelays.isNotEmpty() || authorsWithoutRelayList.isNotEmpty()) {
+                    delay(2000)
+                }
+
+                // Check outbox1/outbox2 resolution
+                afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
+                    .forEach { phaseResolved[it] = "outbox2" }
+            } finally {
+                // Write negative cache even if coroutine was canceled during a delay.
+                // Both getEventEntity and markEventUnresolved are non-suspending
+                // ConcurrentHashMap ops — safe in a finally block without NonCancellable.
+                val finallyMissing = afterSourceRelay.filter { memoryEventStore.getEventEntity(it) == null }
+                for (id in finallyMissing) { relayPool.markEventUnresolved(id) }
+                val resolvedViaOutbox = afterSourceRelay.size - finallyMissing.size
+                if (resolvedViaOutbox > 0) {
+                    Log.d(TAG, "Outbox resolved: $resolvedViaOutbox/${afterSourceRelay.size} refs via author write relays")
+                }
             }
         } else if (missingRefs.isNotEmpty()) {
             // Source relay resolved everything
@@ -339,7 +332,7 @@ class CardHydrator @Inject constructor(
                 val entity = memoryEventStore.getEventEntity(refId)
                 val (referencedBy, refByKind) = refToReferencer[refId] ?: ("unknown" to -1)
                 val phase = phaseResolved[refId] ?: "unresolved"
-                Log.w(TAG, "Outbox final: refId=${refId.take(12)} exists=${entity != null} " +
+                Log.d(TAG, "Outbox final: refId=${refId.take(12)} exists=${entity != null} " +
                     "kind=${entity?.kind} author=${entity?.pubkey?.take(12)} " +
                     "relayUrl=${entity?.relayUrl} " +
                     "contentLen=${entity?.content?.length ?: 0} " +

@@ -20,6 +20,7 @@ import java.io.BufferedWriter
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -69,6 +70,10 @@ class MemoryEventStore @Inject constructor() {
 
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
+
+    // Cumulative eviction anchor counters (reset on snapshot via snapshotEvictionAnchors)
+    private val evictionAnchoredOwn = AtomicLong(0)
+    private val evictionAnchoredMentioned = AtomicLong(0)
 
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
@@ -789,8 +794,13 @@ class MemoryEventStore @Inject constructor() {
             30023 to 500,   // articles
         )
 
+        // Anchor: never evict events authored by or mentioning ownPubkey
+        val anchor = ownPubkey
+
         val toEvict = mutableListOf<EventEntry>()
         val countByKind = mutableMapOf<Int, Int>()
+        var anchoredOwn = 0
+        var anchoredMentioned = 0
 
         // Walk newest → oldest (recentByCreatedAt is desc-sorted)
         for (entry in recentByCreatedAt) {
@@ -800,11 +810,28 @@ class MemoryEventStore @Inject constructor() {
             val count = countByKind.getOrPut(kind) { 0 } + 1
             countByKind[kind] = count
             if (count > cap) {
+                // Anchor: skip own events
+                if (anchor != null && event.pubkey == anchor) {
+                    anchoredOwn++
+                    evictionAnchoredOwn.incrementAndGet()
+                    continue
+                }
+                // Anchor: skip events that mention ownPubkey (notifications)
+                if (anchor != null && event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == anchor }) {
+                    anchoredMentioned++
+                    evictionAnchoredMentioned.incrementAndGet()
+                    continue
+                }
                 toEvict.add(entry)
             }
         }
 
-        if (toEvict.isEmpty()) return
+        if (toEvict.isEmpty()) {
+            if (anchoredOwn + anchoredMentioned > 0) {
+                Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned")
+            }
+            return
+        }
 
         for (entry in toEvict) {
             val event = eventsById.remove(entry.id) ?: continue
@@ -835,7 +862,7 @@ class MemoryEventStore @Inject constructor() {
         val breakdown = countByKind.entries
             .filter { (kind, count) -> count > (kindCaps[kind] ?: Int.MAX_VALUE) }
             .joinToString(", ") { (kind, count) -> "k$kind: ${count - (kindCaps[kind] ?: 0)} evicted" }
-        Log.d("MES", "Evicted ${toEvict.size} events ($breakdown)")
+        Log.d("MES", "Evicted ${toEvict.size} events ($breakdown), anchored own=$anchoredOwn mentioned=$anchoredMentioned")
     }
 
     // ─── Query API ──────────────────────────────────────────────────────────
@@ -1239,6 +1266,9 @@ class MemoryEventStore @Inject constructor() {
         val event = eventsById[eventId] ?: return null
         return event.toEventEntity()
     }
+
+    /** Return the raw NostrEvent for an event ID, or null if not stored. */
+    fun getNostrEvent(eventId: String): NostrEvent? = eventsById[eventId]
 
     /** Convert profile NostrEvent to UserEntity. Returns null if no profile stored. */
     fun getUserEntity(pubkey: String): UserEntity? {
@@ -1794,6 +1824,10 @@ class MemoryEventStore @Inject constructor() {
             pendingRelayEntries = pendingRelays.size,
         )
     }
+
+    /** Snapshot + reset cumulative eviction anchor counters (for MesMetricsLogger). */
+    fun snapshotEvictionAnchors(): Pair<Long, Long> =
+        evictionAnchoredOwn.getAndSet(0) to evictionAnchoredMentioned.getAndSet(0)
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
