@@ -71,9 +71,14 @@ class MemoryEventStore @Inject constructor() {
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
 
+    /** Currently viewed profile — single-slot anchor for content eviction.
+     *  Set by UserProfileViewModel on loadProfile(), cleared on onCleared(). */
+    @Volatile var viewedPubkey: String? = null
+
     // Cumulative eviction anchor counters (reset on snapshot via snapshotEvictionAnchors)
     private val evictionAnchoredOwn = AtomicLong(0)
     private val evictionAnchoredMentioned = AtomicLong(0)
+    private val evictionAnchoredViewed = AtomicLong(0)
 
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
@@ -794,13 +799,16 @@ class MemoryEventStore @Inject constructor() {
             30023 to 500,   // articles
         )
 
-        // Anchor: never evict events authored by or mentioning ownPubkey
+        // Anchor: never evict events authored by or mentioning ownPubkey,
+        // or authored by the currently viewed profile
         val anchor = ownPubkey
+        val viewed = viewedPubkey
 
         val toEvict = mutableListOf<EventEntry>()
         val countByKind = mutableMapOf<Int, Int>()
         var anchoredOwn = 0
         var anchoredMentioned = 0
+        var anchoredViewed = 0
 
         // Walk newest → oldest (recentByCreatedAt is desc-sorted)
         for (entry in recentByCreatedAt) {
@@ -822,13 +830,19 @@ class MemoryEventStore @Inject constructor() {
                     evictionAnchoredMentioned.incrementAndGet()
                     continue
                 }
+                // Anchor: skip events authored by viewed profile
+                if (viewed != null && event.pubkey == viewed) {
+                    anchoredViewed++
+                    evictionAnchoredViewed.incrementAndGet()
+                    continue
+                }
                 toEvict.add(entry)
             }
         }
 
         if (toEvict.isEmpty()) {
-            if (anchoredOwn + anchoredMentioned > 0) {
-                Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned")
+            if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
+                Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed")
             }
             return
         }
@@ -1835,8 +1849,8 @@ class MemoryEventStore @Inject constructor() {
     }
 
     /** Snapshot + reset cumulative eviction anchor counters (for MesMetricsLogger). */
-    fun snapshotEvictionAnchors(): Pair<Long, Long> =
-        evictionAnchoredOwn.getAndSet(0) to evictionAnchoredMentioned.getAndSet(0)
+    fun snapshotEvictionAnchors(): Triple<Long, Long, Long> =
+        Triple(evictionAnchoredOwn.getAndSet(0), evictionAnchoredMentioned.getAndSet(0), evictionAnchoredViewed.getAndSet(0))
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
