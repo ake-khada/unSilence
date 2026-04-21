@@ -23,7 +23,8 @@ private const val TAG = "ProfileResolver"
  *
  *  1. **In-flight guard** (30 s TTL) — prevents duplicate REQs for the same pubkey.
  *  2. **Room staleness check** (6 h) — skips fetch for recently-updated profiles.
- *  3. **200 ms batching** — collects pubkeys into a single REQ instead of N individual ones.
+ *  3. **300 ms deadline-anchored batching** — first arrival starts a 300ms window;
+ *     all pubkeys arriving within the window merge into one REQ.
  *
  * Actual relay send is delegated to [RelayPool.fetchProfiles], which keeps its own
  * 5-min TTL dedup as a last-resort safety net.
@@ -47,8 +48,8 @@ class ProfileResolver @Inject constructor(
     companion object {
         private const val IN_FLIGHT_TTL_MS = 15_000L
         private const val STALE_THRESHOLD_SECONDS = 6 * 3600L
-        private const val BATCH_WINDOW_MS = 200L
-        private const val MAX_BATCH_SIZE = 150
+        private const val BATCH_WINDOW_MS = 300L
+        private const val MAX_BATCH_SIZE = 100
         private const val DEFAULT_SCROLL_RELAYS = 3
     }
 
@@ -117,26 +118,29 @@ class ProfileResolver @Inject constructor(
     }
 
     private suspend fun drainLoop() {
-        val batch = mutableSetOf<String>()
         while (true) {
-            // Wait for first item
-            val first = withTimeoutOrNull(BATCH_WINDOW_MS) { requestChannel.receive() }
-            if (first != null) {
-                batch.add(first)
-                // Drain any queued items without blocking
-                while (batch.size < MAX_BATCH_SIZE) {
-                    val next = requestChannel.tryReceive().getOrNull() ?: break
-                    batch.add(next)
-                }
+            // Block until the first pubkey arrives — no busy-wait
+            val first = requestChannel.receive()
+            val batch = mutableSetOf(first)
+            val startNs = System.nanoTime()
+            val deadlineNs = startNs + BATCH_WINDOW_MS * 1_000_000L
+
+            // Accumulate until deadline or max batch size
+            while (batch.size < MAX_BATCH_SIZE) {
+                val remainingNs = deadlineNs - System.nanoTime()
+                if (remainingNs <= 0) break
+                val next = withTimeoutOrNull(remainingNs / 1_000_000L) {
+                    requestChannel.receive()
+                } ?: break
+                batch.add(next)
             }
-            if (batch.isNotEmpty()) {
-                processBatch(batch.toList())
-                batch.clear()
-            }
+
+            val windowMs = (System.nanoTime() - startNs) / 1_000_000L
+            processBatch(batch.toList(), windowMs = windowMs)
         }
     }
 
-    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = DEFAULT_SCROLL_RELAYS) {
+    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = DEFAULT_SCROLL_RELAYS, windowMs: Long = -1) {
         val now = System.currentTimeMillis()
 
         // 1. In-flight guard
@@ -171,7 +175,8 @@ class ProfileResolver @Inject constructor(
         // Mark in-flight
         toFetch.forEach { inFlight[it] = now }
 
-        Log.d(TAG, "Batch ${pubkeys.size} → ${toFetch.size} to fetch (${pubkeys.size - toFetch.size} fresh/in-flight)")
+        val windowStr = if (windowMs >= 0) " collected in ${windowMs}ms" else ""
+        Log.d(TAG, "Batch ${pubkeys.size}$windowStr → ${toFetch.size} to fetch (${pubkeys.size - toFetch.size} fresh/in-flight)")
         relayPool.get().fetchProfiles(toFetch, maxRelays = maxRelays)
     }
 }
