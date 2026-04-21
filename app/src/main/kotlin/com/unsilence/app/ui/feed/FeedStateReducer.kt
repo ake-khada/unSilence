@@ -42,7 +42,16 @@ data class ReducerState(
  * emissions so that APPEND/QUEUE operations are O(delta) not O(n).
  * Rebuilt only on MERGE/RESET/flush.
  */
-class FeedStateReducer(private val feedKey: String) {
+class FeedStateReducer(
+    private val feedKey: String,
+    /** Injectable delayed-post for testing; defaults to main-thread Handler. */
+    private val postDelayed: (Runnable, Long) -> Unit = defaultPostDelayed,
+) {
+    companion object {
+        private val defaultPostDelayed: (Runnable, Long) -> Unit = { runnable, delayMs ->
+            Handler(Looper.getMainLooper()).postDelayed(runnable, delayMs)
+        }
+    }
 
     private val _state = MutableStateFlow(ReducerState())
     val state: StateFlow<ReducerState> = _state.asStateFlow()
@@ -68,14 +77,12 @@ class FeedStateReducer(private val feedKey: String) {
     // First emission opens the window; subsequent emissions update pendingMerge
     // without resetting the timer. Dedup check runs ONCE per window in flushPending.
     // pendingMerge is written from background threads (collectLatest) and read from
-    // the main-thread Handler callback — @Volatile + synchronized guard both paths.
-    @Volatile
+    // the main-thread Handler callback — all access guarded by synchronized(this).
+    // No @Volatile needed: the synchronized block provides both mutual exclusion
+    // and happens-before visibility guarantees.
     private var pendingMerge: ReducerState? = null
-    @Volatile
     private var pendingMergeKnownIds: PersistentSet<String>? = null
-    @Volatile
     private var coalesceWindowOpen = false
-    private val coalesceHandler = Handler(Looper.getMainLooper())
     private val flushPending = Runnable {
         synchronized(this) {
             val pending = pendingMerge ?: run {
@@ -104,7 +111,7 @@ class FeedStateReducer(private val feedKey: String) {
             pendingMergeKnownIds = newKnownIds
             if (!coalesceWindowOpen) {
                 coalesceWindowOpen = true
-                coalesceHandler.postDelayed(flushPending, 200)
+                postDelayed(flushPending, 200)
             }
             // If window already open: just update pendingMerge, don't reset timer
         }
@@ -117,9 +124,8 @@ class FeedStateReducer(private val feedKey: String) {
     //
     // Safety guard: if a MERGE occurred during the window (IDs changed),
     // the pending data is stale and gets discarded.
-    @Volatile
+    // All access guarded by synchronized(this) — no @Volatile needed.
     private var pendingDataMerge: ReducerState? = null
-    @Volatile
     private var dataCoalesceWindowOpen = false
     private val flushPendingData = Runnable {
         synchronized(this) {
@@ -148,7 +154,7 @@ class FeedStateReducer(private val feedKey: String) {
             pendingDataMerge = newState
             if (!dataCoalesceWindowOpen) {
                 dataCoalesceWindowOpen = true
-                coalesceHandler.postDelayed(flushPendingData, 200)
+                postDelayed(flushPendingData, 200)
             }
         }
     }

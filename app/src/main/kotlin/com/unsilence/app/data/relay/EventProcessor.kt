@@ -435,7 +435,7 @@ class EventProcessor @Inject constructor(
                 // Image aspect ratios from imeta dim tags
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
                 val imageDims = imetaMedia
-                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null }
+                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
                     .associate { it.url to (it.width!!.toFloat() / it.height!!) }
                 memoryEventStore.putImetaImageDims(event.id, imageDims)
             }

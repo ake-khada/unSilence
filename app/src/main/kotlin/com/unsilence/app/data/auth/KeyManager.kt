@@ -23,6 +23,9 @@ private const val SIGNER_AMBER    = "AMBER"
 class KeyManager @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
+    /** Cached derived pubkey — avoids secp256k1 math on every getPublicKeyHex() call. */
+    @Volatile private var cachedPubKeyHex: String? = null
+
     private val prefs by lazy {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -49,8 +52,10 @@ class KeyManager @Inject constructor(
     /** Returns the public key hex: derived from privkey for internal mode, or stored directly for Amber. */
     fun getPublicKeyHex(): String? {
         if (isAmberMode) return prefs.getString(KEY_PUB_HEX, null)
+        cachedPubKeyHex?.let { return it }
         val privHex = getPrivateKeyHex() ?: return null
         return KeyPair(privKey = privHex.hexToByteArray()).pubKey.toHexKey()
+            .also { cachedPubKeyHex = it }
     }
 
     /**
@@ -59,6 +64,7 @@ class KeyManager @Inject constructor(
      */
     fun savePrivateKey(hexKey: String) {
         require(hexKey.length == 64) { "Private key must be 64 hex chars" }
+        cachedPubKeyHex = null
         prefs.edit().putString(KEY_PRIV_HEX, hexKey.lowercase()).apply()
     }
 
@@ -68,8 +74,11 @@ class KeyManager @Inject constructor(
      */
     fun generateNewKey(): String {
         val keyPair = KeyPair()  // no args → Nip01.privKeyCreate() + pubKeyCreate()
+        cachedPubKeyHex = null
         prefs.edit().putString(KEY_PRIV_HEX, keyPair.privKey!!.toHexKey()).apply()
-        return keyPair.pubKey.toHexKey()
+        val pubHex = keyPair.pubKey.toHexKey()
+        cachedPubKeyHex = pubHex
+        return pubHex
     }
 
     /**
@@ -115,6 +124,7 @@ class KeyManager @Inject constructor(
     /** Removes all stored credentials (logout). Uses commit() so the write is
      *  guaranteed to flush to disk before exitProcess(0) kills the process. */
     fun clear() {
+        cachedPubKeyHex = null
         prefs.edit()
             .remove(KEY_PRIV_HEX)
             .remove(KEY_PUB_HEX)

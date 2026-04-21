@@ -286,15 +286,15 @@ class FeedHydrationController(
         return lastVisibleItems.all { isHydrated(it.id, PHASE_PROFILE) || it.pubkey in profileHydratedPubkeys }
     }
 
-    private fun transitionTo(newState: ScrollState, isUserGesture: Boolean = false) {
+    private fun transitionTo(newState: ScrollState, isUserGesture: Boolean = false, isTimerDriven: Boolean = false) {
         if (newState == state) return
 
         val now = System.currentTimeMillis()
 
         // Hard dwell lock — BLOCKS all transitions within STATE_DWELL_MS of the last one.
-        // Only user gestures and reset() bypass this. Timer-based transitions (IDLE→REST,
-        // SLOW_SCROLL→IDLE, catchup timeout) are gated just like velocity-based ones.
-        if (!isUserGesture) {
+        // User gestures, timer-driven transitions (IDLE→REST, SLOW_SCROLL→IDLE), and
+        // reset() bypass this. Timer transitions already incorporate their own delay.
+        if (!isUserGesture && !isTimerDriven) {
             val sinceLastTransition = now - lastTransitionTime
             if (sinceLastTransition < STATE_DWELL_MS) return
         }
@@ -344,7 +344,7 @@ class FeedHydrationController(
                 idleToRestJob = scope.launch {
                     delay(IDLE_TO_REST_DWELL_MS)
                     if (state == ScrollState.IDLE) {
-                        transitionTo(ScrollState.REST)
+                        transitionTo(ScrollState.REST, isTimerDriven = true)
                     }
                 }
             }
@@ -356,7 +356,7 @@ class FeedHydrationController(
                 idleTimerJob = scope.launch {
                     delay(IDLE_TIMEOUT_MS)
                     if (state == ScrollState.SLOW_SCROLL) {
-                        transitionTo(ScrollState.IDLE)
+                        transitionTo(ScrollState.IDLE, isTimerDriven = true)
                     }
                 }
             }
@@ -605,7 +605,7 @@ class FeedHydrationController(
             delay(WARM_CATCHUP_TIMEOUT_MS)
             if (state == ScrollState.WARM_CATCHUP) {
                 Log.d(TAG, "WARM_CATCHUP timeout — forcing transition to SLOW_SCROLL")
-                transitionTo(ScrollState.SLOW_SCROLL)
+                transitionTo(ScrollState.SLOW_SCROLL, isTimerDriven = true)
             }
         }
     }

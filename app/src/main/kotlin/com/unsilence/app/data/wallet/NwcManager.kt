@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.toEventJson
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
@@ -277,17 +278,4 @@ class NwcManager @Inject constructor(
         NwcConnection(walletPubkey = pubkey, relayUrl = relay, secret = secret)
     }.getOrNull()
 
-    private fun toEventJson(event: Event) = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags", buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content", event.content)
-        put("sig",     event.sig)
-    }.toString()
 }

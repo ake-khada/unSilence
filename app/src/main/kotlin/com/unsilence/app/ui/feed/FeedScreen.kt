@@ -286,6 +286,7 @@ fun FeedScreen(
                 }
 
                 // Scroll position tracking + pagination (merged observer)
+                @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
                         Triple(
@@ -293,7 +294,7 @@ fun FeedScreen(
                             listState.firstVisibleItemScrollOffset,
                             listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0,
                         )
-                    }.collect { (index, offset, lastVisible) ->
+                    }.sample(100).collect { (index, offset, lastVisible) ->
                         viewModel.onScrollPositionChanged(index, offset)
                         viewModel.saveScrollPosition(index, offset)
                         val total = listState.layoutInfo.totalItemsCount

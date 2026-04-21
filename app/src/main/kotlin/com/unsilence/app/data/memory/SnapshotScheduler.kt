@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -64,7 +65,12 @@ class SnapshotScheduler @Inject constructor(
     override fun onStop(owner: LifecycleOwner) {
         periodicJob?.cancel()
         periodicJob = null
-        scope.launch { save() }
+        scope.launch {
+            val saved = withTimeoutOrNull(3000L) { save() }
+            if (saved == null) {
+                Log.w(TAG, "onStop save timed out after 3s (mutex held by periodic save)")
+            }
+        }
     }
 
     /**

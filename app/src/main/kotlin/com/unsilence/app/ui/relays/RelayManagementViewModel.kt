@@ -11,6 +11,8 @@ import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.toEventJson
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -22,10 +24,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import javax.inject.Inject
 
 @HiltViewModel
@@ -349,23 +347,4 @@ class RelayManagementViewModel @Inject constructor(
 
     private fun nowSeconds() = System.currentTimeMillis() / 1000L
 
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
-
-    companion object {
-        /** @deprecated Use top-level normalizeRelayUrl() from RelayUrlUtil.kt */
-        internal fun normalizeRelayUrl(raw: String): String? =
-            com.unsilence.app.data.relay.normalizeRelayUrl(raw)
-    }
 }

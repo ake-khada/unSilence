@@ -14,9 +14,9 @@ import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import java.util.concurrent.ConcurrentHashMap
-import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -30,10 +30,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import javax.inject.Inject
 
 data class DepthRow(val row: FeedRow, val depth: Int)
@@ -84,12 +80,16 @@ class ThreadViewModel @Inject constructor(
                     val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
                         .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
 
-                    // DFS flatten with depth (cap at 4)
+                    // DFS flatten with depth (cap at 4), visited set prevents
+                    // stack overflow from circular reply chains (malicious or bridged)
                     val flatList = mutableListOf<DepthRow>()
+                    val visited = mutableSetOf<String>()
                     fun walk(parentId: String, depth: Int) {
                         childrenOf[parentId]?.forEach { row ->
-                            flatList.add(DepthRow(row, depth.coerceAtMost(4)))
-                            walk(row.id, depth + 1)
+                            if (visited.add(row.id)) {
+                                flatList.add(DepthRow(row, depth.coerceAtMost(4)))
+                                walk(row.id, depth + 1)
+                            }
                         }
                     }
                     walk(focusedId, 1)
@@ -169,18 +169,4 @@ class ThreadViewModel @Inject constructor(
             published = true
         }
     }
-
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
 }

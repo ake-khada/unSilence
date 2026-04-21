@@ -9,6 +9,8 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.toEventJson
+import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
@@ -155,9 +157,9 @@ class ProfileViewModel @Inject constructor(
 
                 // Ensure antiprimal.net is connected before sending COUNT — it may have been
                 // evicted by the 60s idle timer or not yet connected at this point.
-                relayPool.connectAndAwait(listOf("wss://antiprimal.net"), timeoutMs = 3_000, forceEvict = true)
+                relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
                 val count = relayPool.sendCount(
-                    relayUrl = "wss://antiprimal.net",
+                    relayUrl = ANTIPRIMAL_RELAY_URL,
                     filter = buildJsonObject {
                         put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
                         put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
@@ -269,18 +271,4 @@ class ProfileViewModel @Inject constructor(
 
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
-
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
 }

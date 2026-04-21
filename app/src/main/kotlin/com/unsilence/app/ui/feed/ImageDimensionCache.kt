@@ -12,6 +12,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "ImageDimCache"
+private const val MIN_ASPECT_RATIO = 0.2f  // tallest allowed (1:5)
+private const val MAX_ASPECT_RATIO = 5.0f  // widest allowed  (5:1)
 
 /**
  * In-memory cache of image aspect ratios (width / height).
@@ -43,9 +45,9 @@ class ImageDimensionCache @Inject constructor(
     /** Return cached aspect ratio, or null if not yet resolved. No I/O. */
     fun getCached(url: String): Float? = cache[url]
 
-    /** Store a known aspect ratio (e.g. from Coil's decoded bitmap). */
+    /** Store a known aspect ratio (e.g. from Coil's decoded bitmap). Clamped to [0.2, 5.0]. */
     fun put(url: String, aspectRatio: Float) {
-        if (aspectRatio > 0f) cache[url] = aspectRatio
+        if (aspectRatio > 0f) cache[url] = aspectRatio.coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
     }
 
     /**
@@ -74,7 +76,8 @@ class ImageDimensionCache @Inject constructor(
                         BitmapFactory.decodeStream(stream, null, options)
                     }
                     if (options.outWidth > 0 && options.outHeight > 0) {
-                        val ratio = options.outWidth.toFloat() / options.outHeight
+                        val ratio = (options.outWidth.toFloat() / options.outHeight)
+                            .coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
                         cache[url] = ratio
                         ratio
                     } else {

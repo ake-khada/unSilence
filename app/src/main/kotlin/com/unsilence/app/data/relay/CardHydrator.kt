@@ -61,8 +61,11 @@ class CardHydrator @Inject constructor(
     private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
 ) {
-    /** Event IDs that were fetched from relays but never arrived — stop retrying. */
-    private val missingRefCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    /** Event IDs that were fetched from relays but never arrived — stop retrying.
+     *  Values are timestamps (epoch millis) for TTL-based expiry so temporary
+     *  failures don't permanently suppress refs. */
+    private val missingRefCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     /**
      * Phase 1: Profile resolution only — avatar, name, identity.
      * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
@@ -199,8 +202,13 @@ class CardHydrator @Inject constructor(
         // (Room lookups, relay fetches, 1500ms delay, author resolution, thumbnails).
         if (referencedIds.isEmpty()) return
 
-        // Skip refs already known to be permanently missing (negative cache)
-        referencedIds.removeAll(missingRefCache.keys)
+        // Skip refs still within TTL of the missing-ref negative cache
+        val now = System.currentTimeMillis()
+        referencedIds.removeAll { id ->
+            val ts = missingRefCache[id] ?: return@removeAll false
+            if (now - ts < MISSING_REF_TTL_MS) true
+            else { missingRefCache.remove(id); false }  // expired — allow retry
+        }
         if (referencedIds.isEmpty()) return
 
         // Fetch missing referenced events (check MemoryEventStore, not Room)
@@ -303,7 +311,8 @@ class CardHydrator @Inject constructor(
 
             // Negative-cache anything still missing after outbox fallback
             val finallyMissing = afterSourceRelay.filter { memoryEventStore.getEventEntity(it) == null }
-            for (id in finallyMissing) { missingRefCache[id] = true }
+            val missTime = System.currentTimeMillis()
+            for (id in finallyMissing) { missingRefCache[id] = missTime }
             val resolvedViaOutbox = afterSourceRelay.size - finallyMissing.size
             if (resolvedViaOutbox > 0) {
                 Log.d(TAG, "Outbox resolved: $resolvedViaOutbox/${afterSourceRelay.size} refs via author write relays")

@@ -171,6 +171,18 @@ fun ComposeScreen(
                     },
                 )
             }
+
+            // ── Error banner ─────────────────────────────────────────────────
+            viewModel.publishError?.let { error ->
+                Text(
+                    text     = error,
+                    color    = Color(0xFFFF5252),
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                )
+            }
         }
     }
 }

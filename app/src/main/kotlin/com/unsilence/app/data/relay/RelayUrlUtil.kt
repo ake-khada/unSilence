@@ -17,6 +17,9 @@ fun normalizeRelayUrl(raw: String): String? {
     return url
 }
 
+/** NIP-45 COUNT + WoT relay (antiprimal.net). */
+const val ANTIPRIMAL_RELAY_URL = "wss://antiprimal.net"
+
 /** Hardcoded global relay defaults — single source of truth for fallbacks. */
 val GLOBAL_RELAY_URLS = listOf(
     "wss://relay.damus.io",

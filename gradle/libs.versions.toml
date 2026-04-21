@@ -16,7 +16,6 @@ navigation-compose = "2.8.5"
 lifecycle         = "2.8.7"
 hilt              = "2.58"
 hilt-navigation   = "1.2.0"
-room              = "2.7.1"
 quartz            = "1.05.1"
 identikon         = "1.0.0"
 jetbrains-markdown = "0.7.3"
@@ -46,11 +45,6 @@ kotlinx-coroutines-android  = { group = "org.jetbrains.kotlinx",      name = "ko
 hilt-android                = { group = "com.google.dagger",           name = "hilt-android",                    version.ref = "hilt" }
 hilt-compiler               = { group = "com.google.dagger",           name = "hilt-android-compiler",           version.ref = "hilt" }
 hilt-navigation-compose     = { group = "androidx.hilt",               name = "hilt-navigation-compose",         version.ref = "hilt-navigation" }
-
-# Room (local cache)
-room-runtime                = { group = "androidx.room",               name = "room-runtime",                    version.ref = "room" }
-room-ktx                    = { group = "androidx.room",               name = "room-ktx",                        version.ref = "room" }
-room-compiler               = { group = "androidx.room",               name = "room-compiler",                   version.ref = "room" }
 
 # Coil (image loading)
 coil-compose                = { group = "io.coil-kt.coil3",            name = "coil-compose",                    version.ref = "coil" }

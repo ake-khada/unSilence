@@ -11,6 +11,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -18,15 +19,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
 import java.util.concurrent.ConcurrentHashMap
-import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import javax.inject.Inject
 
 @HiltViewModel
@@ -45,17 +41,25 @@ class ComposeViewModel @Inject constructor(
     val userAvatarUrl: StateFlow<String?> = pubkeyHex?.let { pk ->
         userRepository.userFlow(pk)
             .map { it?.picture }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
     /** True once the note has been signed, published, and inserted into MES. */
     var published by mutableStateOf(false)
         private set
 
+    /** Non-null when signing or publishing failed — shown to the user. */
+    var publishError by mutableStateOf<String?>(null)
+        private set
+
     fun publishNote(content: String) {
+        publishError = null
         viewModelScope.launch(Dispatchers.IO) {
             val template = TextNoteEvent.build(note = content)
-            val signed   = signingManager.sign(template) ?: return@launch
+            val signed   = signingManager.sign(template) ?: run {
+                publishError = "Signing failed — check your key or Amber connection"
+                return@launch
+            }
 
             // Publish wire command to all connected relays
             relayPool.publish(toEventJson(signed))
@@ -86,21 +90,4 @@ class ComposeViewModel @Inject constructor(
             published = true
         }
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Serialise a signed event to the Nostr wire JSON object string. */
-    private fun toEventJson(event: Event): String = buildJsonObject {
-        put("id",         event.id)
-        put("pubkey",     event.pubKey)
-        put("created_at", event.createdAt)
-        put("kind",       event.kind)
-        put("tags",       buildJsonArray {
-            event.tags.forEach { row ->
-                add(buildJsonArray { row.forEach { cell -> add(JsonPrimitive(cell)) } })
-            }
-        })
-        put("content",    event.content)
-        put("sig",        event.sig)
-    }.toString()
 }
