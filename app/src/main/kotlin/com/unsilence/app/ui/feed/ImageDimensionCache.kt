@@ -59,6 +59,7 @@ class ImageDimensionCache @Inject constructor(
      * Result is cached for future reads.
      */
     suspend fun resolve(url: String): Float? {
+        if (!isResolvableUrl(url)) return null
         cache[url]?.let { return it }
         if (inFlight.putIfAbsent(url, true) != null) return null
 
@@ -112,5 +113,23 @@ class ImageDimensionCache @Inject constructor(
         if (missing.isNotEmpty()) {
             Log.d(TAG, "Batch resolved: ${missing.size} URLs, ${missing.count { cache[it] != null }} success")
         }
+    }
+
+    /** Reject non-HTTP URLs and NIP-19 tokens that leaked through content regex matching. */
+    private fun isResolvableUrl(url: String): Boolean {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            Log.d(TAG, "Rejected non-http: ${url.take(40)}")
+            return false
+        }
+        // NIP-19 bech32 tokens embedded in malformed URLs (e.g. "https://npub1...")
+        val host = url.substring(url.indexOf("://") + 3).substringBefore('/')
+        if (host.startsWith("npub") || host.startsWith("nevent") ||
+            host.startsWith("note") || host.startsWith("naddr") ||
+            host.startsWith("nprofile")
+        ) {
+            Log.d(TAG, "Rejected NIP-19 host: ${url.take(40)}")
+            return false
+        }
+        return true
     }
 }
