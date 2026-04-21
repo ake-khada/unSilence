@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * Derived from imeta tags and content URL detection at hydration time,
  * so composables never need to parse tags or compute aspect ratios.
  */
+@androidx.compose.runtime.Immutable
 data class VideoRenderModel(
     val videoUrl: String,
     val aspectRatio: Float,       // width / height, e.g. 1.778 for 16:9

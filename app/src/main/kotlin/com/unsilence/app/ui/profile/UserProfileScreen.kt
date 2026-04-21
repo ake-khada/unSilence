@@ -155,28 +155,32 @@ fun UserProfileScreen(
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
-    val engagement = EngagementSnapshot(
-        reactedIds = reactedIds,
-        repostedIds = repostedIds,
-        zappedIds = zappedIds,
-        isNwcConfigured = isNwcConfigured,
-        zapLoadingIds = zapLoadingIds,
-        optimisticZapSats = optimisticSats,
-        zapFlash = zapFlash,
-    )
-    val callbacks = EventActionCallbacks(
-        onNoteClick = onNoteClick,
-        onAuthorClick = interceptedAuthorClick,
-        onArticleClick = { articleRow = it },
-        react = { id, pk -> actionsViewModel.react(id, pk) },
-        repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
-        zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
-        saveNwcUri = { actionsViewModel.saveNwcUri(it) },
-        lookupProfile = actionsViewModel::lookupProfile,
-        lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-        profileFlow = viewModel::profileFlow,
-    )
+    val engagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
+        EngagementSnapshot(
+            reactedIds = reactedIds,
+            repostedIds = repostedIds,
+            zappedIds = zappedIds,
+            isNwcConfigured = isNwcConfigured,
+            zapLoadingIds = zapLoadingIds,
+            optimisticZapSats = optimisticSats,
+            zapFlash = zapFlash,
+        )
+    }
+    val callbacks = remember(viewModel, actionsViewModel, pubkey) {
+        EventActionCallbacks(
+            onNoteClick = onNoteClick,
+            onAuthorClick = interceptedAuthorClick,
+            onArticleClick = { articleRow = it },
+            react = { id, pk -> actionsViewModel.react(id, pk) },
+            repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
+            zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
+            saveNwcUri = { actionsViewModel.saveNwcUri(it) },
+            lookupProfile = actionsViewModel::lookupProfile,
+            lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+            fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+            profileFlow = viewModel::profileFlow,
+        )
+    }
 
     // Trigger loadMore() when scrolled near bottom
     val shouldLoadMore = remember {

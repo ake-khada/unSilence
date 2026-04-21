@@ -111,6 +111,7 @@ data class FeedFilter(
  * Event data class. Formerly a Room @Entity; now a plain data class
  * used throughout the app as the canonical event representation.
  */
+@androidx.compose.runtime.Immutable
 data class EventEntity(
     val id: String,
     val pubkey: String,
@@ -133,6 +134,7 @@ data class EventEntity(
 /**
  * User profile data class. Formerly a Room @Entity; now a plain data class.
  */
+@androidx.compose.runtime.Immutable
 data class UserEntity(
     val pubkey: String,
     val name: String? = null,

@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+@androidx.compose.runtime.Immutable
 data class OgMetadata(
     val title: String?,
     val description: String?,

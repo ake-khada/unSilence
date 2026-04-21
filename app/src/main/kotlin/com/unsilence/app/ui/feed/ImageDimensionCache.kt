@@ -30,6 +30,7 @@ private const val MAX_ASPECT_RATIO = 5.0f  // widest allowed  (5:1)
  * subsequent renders (scroll-away-and-back) are instant.
  */
 @Singleton
+@androidx.compose.runtime.Stable
 class ImageDimensionCache @Inject constructor(
     baseClient: OkHttpClient,
 ) {

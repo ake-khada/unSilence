@@ -2015,42 +2015,44 @@ internal fun NostrRichText(
         }
     }
 
-    val annotatedText = buildAnnotatedString {
-        var lastIndex = 0
-        for ((range, raw, pubkeyHex) in mentions) {
-            // Text before this mention
-            if (range.first > lastIndex) {
-                append(content.substring(lastIndex, range.first))
-            }
+    val annotatedText = remember(content, mentions, profileMap, onAuthorClick) {
+        buildAnnotatedString {
+            var lastIndex = 0
+            for ((range, raw, pubkeyHex) in mentions) {
+                // Text before this mention
+                if (range.first > lastIndex) {
+                    append(content.substring(lastIndex, range.first))
+                }
 
-            val profile = profileMap[pubkeyHex]
-            val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
-                .getOrDefault("${pubkeyHex.take(8)}…")
-            val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
-                ?: profile?.name?.takeIf { it.isNotBlank() }
-                ?: npubFallback
+                val profile = profileMap[pubkeyHex]
+                val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
+                    .getOrDefault("${pubkeyHex.take(8)}…")
+                val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
+                    ?: profile?.name?.takeIf { it.isNotBlank() }
+                    ?: npubFallback
 
-            withLink(
-                LinkAnnotation.Clickable(
-                    tag = pubkeyHex,
-                    styles = TextLinkStyles(
-                        style = SpanStyle(
-                            color          = Cyan,
-                            fontWeight     = FontWeight.Medium,
-                            textDecoration = TextDecoration.None,
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = pubkeyHex,
+                        styles = TextLinkStyles(
+                            style = SpanStyle(
+                                color          = Cyan,
+                                fontWeight     = FontWeight.Medium,
+                                textDecoration = TextDecoration.None,
+                            ),
                         ),
+                        linkInteractionListener = { onAuthorClick(pubkeyHex) },
                     ),
-                    linkInteractionListener = { onAuthorClick(pubkeyHex) },
-                ),
-            ) {
-                append("@$displayName")
-            }
+                ) {
+                    append("@$displayName")
+                }
 
-            lastIndex = range.last + 1
-        }
-        // Remaining text after last mention
-        if (lastIndex < content.length) {
-            append(content.substring(lastIndex))
+                lastIndex = range.last + 1
+            }
+            // Remaining text after last mention
+            if (lastIndex < content.length) {
+                append(content.substring(lastIndex))
+            }
         }
     }
 

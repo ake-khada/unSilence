@@ -40,6 +40,7 @@ data class VideoThumbnail(
  * Bitmaps are downsampled via [BitmapFactory.Options.inSampleSize] = [DOWNSAMPLE].
  */
 @Singleton
+@androidx.compose.runtime.Stable
 class VideoThumbnailCache @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {

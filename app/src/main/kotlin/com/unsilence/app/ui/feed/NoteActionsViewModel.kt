@@ -113,6 +113,7 @@ class NoteActionsViewModel @Inject constructor(
      * Cards key their flash effect on this value instead of each collecting the SharedFlow.
      * The [tick] field ensures distinct emissions even if the same note is zapped twice.
      */
+    @androidx.compose.runtime.Immutable
     data class ZapFlashState(val noteId: String, val success: Boolean, val message: String? = null, val tick: Long = System.nanoTime())
 
     private val _zapFlashState = MutableStateFlow<ZapFlashState?>(null)
