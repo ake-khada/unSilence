@@ -42,6 +42,9 @@ class ImageDimensionCache @Inject constructor(
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
+    /** Number of cached aspect ratios. */
+    val entryCount: Int get() = cache.size
+
     /** Return cached aspect ratio, or null if not yet resolved. No I/O. */
     fun getCached(url: String): Float? = cache[url]
 

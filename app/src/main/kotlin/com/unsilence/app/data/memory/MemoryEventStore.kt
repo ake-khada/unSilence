@@ -1613,6 +1613,69 @@ class MemoryEventStore @Inject constructor() {
         return row
     }
 
+    // ─── Metrics ────────────────────────────────────────────────────────────
+
+    /**
+     * Produce a point-in-time size snapshot. No extra locking — relies on
+     * ConcurrentHashMap's weakly-consistent iteration. Safe to call from any thread.
+     */
+    fun snapshotSize(): MesSizeSnapshot {
+        // Per-kind breakdown of eventsById
+        val kindCounts = mutableMapOf<Int, Int>()
+        var eventBytes = 0L
+        for ((_, event) in eventsById) {
+            kindCounts[event.kind] = (kindCounts[event.kind] ?: 0) + 1
+            // Estimate: content + tagsJson + id(64) + pubkey(64) + sig(128) + relayUrl + overhead
+            eventBytes += event.content.length + event.tagsJson.length +
+                (event.relayUrl.length) + (event.replyToId?.length ?: 0) +
+                (event.rootId?.length ?: 0) + (event.contentWarningReason?.length ?: 0) +
+                event.relaysSeen.sumOf { it.length } + 320L // fixed overhead
+        }
+
+        // Profile byte estimate
+        var profileBytes = 0L
+        for ((_, event) in profilesByPubkey) {
+            profileBytes += event.content.length + 320L
+        }
+
+        // Actor index totals
+        var reactedTotal = 0
+        for ((_, set) in reactedTargetsByActor) reactedTotal += set.size
+        var repostedTotal = 0
+        for ((_, set) in repostedTargetsByActor) repostedTotal += set.size
+        var zappedTotal = 0
+        for ((_, set) in zappedTargetsByActor) zappedTotal += set.size
+
+        return MesSizeSnapshot(
+            eventCount = eventsById.size,
+            eventBytes = eventBytes,
+            eventsByKind = kindCounts.toMap(),
+            profileCount = profilesByPubkey.size,
+            profileBytes = profileBytes,
+            followsEntries = followsByPubkey.size,
+            followerCountEntries = followerCountCache.size,
+            replyCountEntries = replyCounts.size,
+            repostCountEntries = repostCounts.size,
+            reactionCountEntries = reactionCounts.size,
+            zapStatsEntries = zapStatsByEventId.size,
+            statsUpdatedAtEntries = statsUpdatedAt.size,
+            reactedActors = reactedTargetsByActor.size,
+            reactedTargetsTotal = reactedTotal,
+            repostedActors = repostedTargetsByActor.size,
+            repostedTargetsTotal = repostedTotal,
+            zappedActors = zappedTargetsByActor.size,
+            zappedTargetsTotal = zappedTotal,
+            videoRenderModelEntries = videoRenderModelsByEventId.size,
+            imetaImageDimEntries = imetaImageDimsByEventId.size,
+            feedRowCacheEntries = feedRowCache.size,
+            relayListEntries = relayListsByPubkey.size,
+            trustScoreEntries = trustScoresByUrl.size,
+            relayMonitorEntries = relayMonitorsByUrl.size,
+            relaySetEntries = relaySetsByCoordinate.size,
+            pendingRelayEntries = pendingRelays.size,
+        )
+    }
+
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
     suspend fun saveSnapshotTo(writer: BufferedWriter) {

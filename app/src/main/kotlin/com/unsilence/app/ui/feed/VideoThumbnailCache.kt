@@ -40,6 +40,18 @@ class VideoThumbnailCache @Inject constructor(
      */
     val resolvedAspectRatios = ConcurrentHashMap<String, Float>()
 
+    /** Number of cached entries (including null/failure markers). */
+    val entryCount: Int get() = cache.size
+
+    /** Total bytes consumed by cached Bitmaps. Safe from any thread. */
+    val bitmapBytes: Long get() {
+        var total = 0L
+        for ((_, thumb) in cache) {
+            if (thumb != null) total += thumb.bitmap.allocationByteCount
+        }
+        return total
+    }
+
     /** Return a cached thumbnail immediately, or null if not yet fetched. No I/O. */
     fun getCached(videoUrl: String): VideoThumbnail? = cache[videoUrl]
 
