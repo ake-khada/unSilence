@@ -229,8 +229,9 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
 
-    /** Event IDs we already attempted to fetch from relays (prevents redundant requests). */
-    private val fetchedQuoteIds = mutableSetOf<String>()
+    /** Event IDs currently being looked up (prevents concurrent relay requests).
+     *  Cleared after each lookup completes so evicted events can be re-fetched. */
+    private val fetchingQuoteIds = mutableSetOf<String>()
 
     /**
      * Look up a profile by pubkey. Returns immediately if cached; otherwise
@@ -265,26 +266,34 @@ class NoteActionsViewModel @Inject constructor(
         // Fast path: already in MemoryEventStore
         memoryEventStore.getEventEntity(eventId)?.let { return it }
 
+        // Fast-fail: known unresolved (negative cache, 5-min TTL).
+        // Avoids 5s MES-flow wait for events that already failed all outbox phases.
+        if (relayPool.isEventUnresolved(eventId)) return null
+
         // Build relay hints: caller hints + outbox write relays for the author
         val outboxHints = authorPubkey?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList()
         val allHints = (relayHints + outboxHints).distinct()
 
-        // Trigger relay fetch only once per event ID.
-        // withContext(IO): produceState runs on Main; relay dispatch must not block UI.
-        val shouldFetch = synchronized(fetchedQuoteIds) { fetchedQuoteIds.add(eventId) }
-        if (shouldFetch) {
-            withContext(Dispatchers.IO) {
-                if (allHints.isNotEmpty()) {
-                    relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
-                } else {
-                    relayPool.fetchEventById(eventId)
+        // Guard concurrent lookups for the same event — cleared after completion
+        // so evicted events can be re-fetched on next recomposition.
+        val shouldFetch = synchronized(fetchingQuoteIds) { fetchingQuoteIds.add(eventId) }
+        try {
+            if (shouldFetch) {
+                withContext(Dispatchers.IO) {
+                    if (allHints.isNotEmpty()) {
+                        relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
+                    } else {
+                        relayPool.fetchEventById(eventId)
+                    }
                 }
             }
-        }
 
-        // Wait for the event to appear in MemoryEventStore (via EventProcessor)
-        return withTimeoutOrNull(5_000L) {
-            memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
+            // Wait for the event to appear in MemoryEventStore (via EventProcessor)
+            return withTimeoutOrNull(5_000L) {
+                memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
+            }
+        } finally {
+            synchronized(fetchingQuoteIds) { fetchingQuoteIds.remove(eventId) }
         }
     }
 

@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 21, 2026 (MES bounded caches: VideoThumbnailCache LRU+downsample, feedRowCache cap, actor index cap, profile LRU. Instrumentation logger.)
+**Last updated:** April 21, 2026 (MES content eviction anchors: own-pubkey + p-tag mentioned events protected. Relay fetch dedup upgraded to Deferred-based. Notification blue dot stale-capture fix.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -73,8 +73,8 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, `synchronized`-based coalescing (200ms window), `PersistentSet<String>` knownIds
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, per-item bitmask ledger, sampled at 16 Hz
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
-- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.), feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets
-- **MesMetricsLogger** — ProcessLifecycleOwner-driven 60s foreground logger (`MES/size` tag). Reports per-collection counts, per-kind breakdown, actor indexes, external cache sizes. `MesMetrics.kt` data class + `MES.snapshotSize()`
+- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.) with own-pubkey + p-tag-mentioned anchors, feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets
+- **MesMetricsLogger** — ProcessLifecycleOwner-driven 60s foreground logger (`MES/size` tag). Reports per-collection counts, per-kind breakdown, actor indexes, external cache sizes, eviction anchor counts, relay dedup metrics. `MesMetrics.kt` data class + `MES.snapshotSize()`
 - **ImageDimensionCache** — singleton ConcurrentHashMap of image aspect ratios (url → width/height), clamped to 0.2..5.0
 - **VideoThumbnailCache** — first-frame thumbnails via MMR, downsampled (inSampleSize=2, ~1MB/thumb), LRU eviction at 100 entries OR 64MB bitmap total, `visibleUrls` set protects on-screen thumbnails from eviction
 - **SearchViewModel** — NIP-50 search, `AtomicLong` token tracking, debounce + collectLatest, CLOSE frames on supersede
@@ -175,7 +175,10 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 42. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
 43. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
 44. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
-45. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index and profile eviction anchors. Must be set before events arrive
+45. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index, profile, and content eviction anchors. Must be set before events arrive
+46. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
+47. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
+48. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
 
 ---
 

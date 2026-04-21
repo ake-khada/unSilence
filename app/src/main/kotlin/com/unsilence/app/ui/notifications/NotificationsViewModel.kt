@@ -77,12 +77,14 @@ class NotificationsViewModel @Inject constructor(
         collectJob?.cancel()
         collectJob = viewModelScope.launch {
             val followedOnly = _filter.value == NotifFilter.Following
-            val lastSeen = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
 
             memoryEventStore.notificationsFlow(pubkey, limit = 100, followedOnly = followedOnly)
                 .collect { items ->
                     _uiState.update { it.copy(items = items, loading = false) }
                     if (items.isNotEmpty()) {
+                        // Re-read lastSeen on each emission so markSeen() writes
+                        // are reflected immediately (stale capture caused dot reappearing).
+                        val lastSeen = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
                         _hasNew.value = items.first().createdAt > lastSeen
                     }
 
