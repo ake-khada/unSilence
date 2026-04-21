@@ -227,6 +227,7 @@ class UserProfileViewModel @Inject constructor(
     fun loadProfile(pubkey: String) {
         if (_pubkeyHex.value == pubkey) return
         _pubkeyHex.value = pubkey
+        memoryEventStore.viewedPubkey = pubkey
         // Reset pagination + deduplication state for new profile
         selectedTab.value = ProfileTab.NOTES
         _displayLimit.value = 200
@@ -327,5 +328,10 @@ class UserProfileViewModel @Inject constructor(
 
         Log.d(TAG, "Resolved ${writeUrls.size} outbox relays for $pubkey")
         return writeUrls.take(5)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        memoryEventStore.viewedPubkey = null
     }
 }
