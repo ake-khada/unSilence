@@ -240,7 +240,8 @@ class UserProfileViewModel @Inject constructor(
         viewModelScope.launch {
             userRepository.fetchProfilesWithFanout(listOf(pubkey))
             outboxRelayUrls = resolveOutboxRelays(pubkey)
-            relayPool.connect(outboxRelayUrls)
+            // No connect() needed — fetchUserPosts uses sendOneShotBatch
+            // which opens ephemeral WebSockets for URLs not in the pool.
             relayPool.fetchUserPosts(pubkey, outboxRelayUrls)
         }
 

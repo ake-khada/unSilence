@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -139,6 +141,11 @@ class RelayPool @Inject constructor(
     private val missingRefCache = ConcurrentHashMap<String, Long>()
     private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     private val missingRefCacheHits = AtomicLong(0)
+
+    // ── Ephemeral WebSocket rate limiting ─────────────────────────────────
+    /** Per-URL last-open timestamp (nanos) for ephemeral connections — min 50ms gap. */
+    private val ephemeralLastOpenNanos = ConcurrentHashMap<String, AtomicLong>()
+    private val MIN_EPHEMERAL_GAP_NS = 50_000_000L // 50ms
 
     /** Relays that have completed NIP-42 auth successfully. */
     private val authenticatedRelays = ConcurrentHashMap.newKeySet<String>()
@@ -589,6 +596,140 @@ class RelayPool @Inject constructor(
         val ready = newConns.count { it.isConnected }
         Log.w(TAG, "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready")
         return ready
+    }
+
+    // ── Ephemeral one-shot batch ────────────────────────────────────────
+
+    /**
+     * Send one-shot REQs to specified URLs with warm-pool reuse.
+     *
+     * For URLs already in [connections]: reuses via [sendOneShotToRelay].
+     * For URLs NOT in pool: opens ephemeral WebSocket (no cap, no reconnect),
+     * sends REQs, collects events until EOSE, then closes.
+     *
+     * Ephemeral connections never enter [connections] map and don't count against the cap.
+     */
+    suspend fun sendOneShotBatch(
+        urls: List<String>,
+        reqs: List<String>,
+        subIds: List<String>,
+        timeoutMs: Long = 8_000,
+    ) {
+        val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+            .filter { it !in blockedUrls }
+        if (normalized.isEmpty() || reqs.isEmpty()) return
+
+        val reused = mutableListOf<String>()
+        val ephemeral = mutableListOf<String>()
+
+        for (url in normalized) {
+            if (connections.containsKey(url)) {
+                reused.add(url)
+            } else {
+                ephemeral.add(url)
+            }
+        }
+
+        Log.d(TAG, "sendOneShotBatch: ${normalized.size} urls → ${reused.size} reused, ${ephemeral.size} ephemeral")
+
+        // Pool-reused path: wait for mid-handshake connections, then send via existing infra
+        for (url in reused) {
+            val conn = connections[url] ?: continue
+            if (!conn.isConnected) {
+                // Mid-handshake — wait up to 1s for ready, skip if it fails
+                val state = withTimeoutOrNull(1_000) {
+                    conn.state.first {
+                        it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+                    }
+                }
+                if (state != RelayState.CONNECTED) continue
+            }
+            subIds.forEach { _activeOneShotSubs.add(it) }
+            reqs.forEach { sendOneShotToRelay(conn, it) }
+        }
+
+        // Ephemeral path: open temporary connections (parallel, bounded by timeout)
+        if (ephemeral.isEmpty()) return
+
+        coroutineScope {
+            ephemeral.map { url ->
+                async { openEphemeral(url, reqs, subIds.toSet(), timeoutMs) }
+            }.awaitAll()
+        }
+    }
+
+    /**
+     * Open an ephemeral WebSocket, send REQs, collect events until all sub-IDs
+     * receive EOSE or timeout, then close. Never touches [connections],
+     * [connectionPurposes], or reconnect logic.
+     */
+    private suspend fun openEphemeral(
+        url: String,
+        reqs: List<String>,
+        subIds: Set<String>,
+        timeoutMs: Long,
+    ) {
+        // Rate limit: min 50ms gap per URL
+        val lastOpen = ephemeralLastOpenNanos.computeIfAbsent(url) { AtomicLong(0) }
+        val now = System.nanoTime()
+        val prev = lastOpen.get()
+        if (now - prev < MIN_EPHEMERAL_GAP_NS) {
+            Log.d(TAG, "Ephemeral rate-limited: $url")
+            return
+        }
+        if (!lastOpen.compareAndSet(prev, now)) return // CAS race — another caller won
+
+        val conn = RelayConnection(url, okHttpClient)
+        try {
+            conn.connect()
+            // Wait for WebSocket ready (max 2s)
+            val state = withTimeoutOrNull(2_000) {
+                conn.state.first {
+                    it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+                }
+            }
+            if (state != RelayState.CONNECTED) {
+                Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
+                return
+            }
+
+            // Send all REQs
+            reqs.forEach { conn.send(it) }
+
+            // Collect events until all sub-IDs EOSE'd or timeout
+            val pendingSubs = subIds.toMutableSet()
+            withTimeoutOrNull(timeoutMs) {
+                conn.messages.consumeEach { raw ->
+                    when {
+                        raw.startsWith("[\"EVENT\"") -> {
+                            processor.process(raw, url)
+                        }
+                        raw.startsWith("[\"EOSE\"") -> {
+                            val eoseSubId = extractEoseSubId(raw)
+                            if (eoseSubId != null && eoseSubId in pendingSubs) {
+                                conn.send("""["CLOSE","$eoseSubId"]""")
+                                pendingSubs.remove(eoseSubId)
+                                if (pendingSubs.isEmpty()) return@withTimeoutOrNull
+                            }
+                        }
+                        raw.startsWith("[\"AUTH\"") -> {
+                            val challenge = raw.substringAfter("[\"AUTH\",\"", "")
+                                .substringBefore("\"")
+                            if (challenge.isNotEmpty()) {
+                                handleAuthChallenge(conn, challenge)
+                            }
+                        }
+                        raw.startsWith("[\"OK\"") -> {
+                            handleOk(conn, raw)
+                        }
+                    }
+                }
+            }
+            val eosed = subIds.size - pendingSubs.size
+            Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
+        } finally {
+            conn.close()
+        }
     }
 
     /**
@@ -1478,7 +1619,6 @@ class RelayPool @Inject constructor(
         if (novel.isEmpty()) return
         novel.forEach { profileFetchAttempted[it] = now }
         val subId = "profiles-${System.nanoTime()}"
-        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -1488,17 +1628,16 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-        val indexerConns = indexerUrls.mapNotNull { connections[it] }.take(maxRelays)
-        // Supplement with general relays if needed (at least 1 target)
         val minTargets = minOf(maxRelays, 3)
-        val targets = if (indexerConns.size >= minTargets) {
-            indexerConns
-        } else {
-            val extras = connections.values.filter { it !in indexerConns }.take(minTargets - indexerConns.size)
-            indexerConns + extras
-        }.ifEmpty { connections.values.take(minTargets) }
-        targets.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "Fetching ${novel.size} profiles from ${targets.size} relay(s) (${pubkeys.size - novel.size} deduped)")
+        val targetUrls = indexerUrls.take(maxRelays).let { indexers ->
+            if (indexers.size >= minTargets) indexers
+            else {
+                val extras = connections.keys.filter { it !in indexers }.take(minTargets - indexers.size)
+                indexers + extras
+            }
+        }.ifEmpty { connections.keys.take(minTargets).toList() }
+        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+        Log.d(TAG, "Fetching ${novel.size} profiles → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }
 
     /**
@@ -1515,15 +1654,10 @@ class RelayPool @Inject constructor(
         }
         if (novel.isEmpty()) return
 
-        // Connect to all hinted relays
         val allHintUrls = novel.values.flatten().distinct()
-        if (allHintUrls.isNotEmpty()) connect(allHintUrls)
-
-        // Send one batched REQ to hinted relays
         val pubkeys = novel.keys.toList()
         pubkeys.forEach { profileFetchAttempted[it] = now }
         val subId = "hint-profiles-${System.nanoTime()}"
-        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -1532,9 +1666,9 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val hintConns = allHintUrls.mapNotNull { normalizeRelayUrl(it)?.let { url -> connections[url] } }
-        hintConns.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${hintConns.size} hinted relay(s)")
+        val targetUrls = allHintUrls.mapNotNull { normalizeRelayUrl(it) }
+        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+        Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${targetUrls.size} hinted relay(s)")
     }
 
     /**
@@ -1555,7 +1689,6 @@ class RelayPool @Inject constructor(
         novel.forEach { sourceProfileAttempted[it] = now }
 
         val subId = "src-profiles-${System.nanoTime()}"
-        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -1564,9 +1697,9 @@ class RelayPool @Inject constructor(
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        val conns = relayUrls.mapNotNull { normalizeRelayUrl(it)?.let { url -> connections[url] } }
-        conns.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${conns.size} source relay(s)")
+        val targetUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
+        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+        Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${targetUrls.size} source relay(s)")
     }
 
     /**
@@ -1995,9 +2128,7 @@ class RelayPool @Inject constructor(
      */
     fun fetchUserPosts(pubkey: String, relayUrls: List<String> = emptyList()) {
         val ts = System.currentTimeMillis()
-        _activeOneShotSubs.add("user-posts-$ts")
-        _activeOneShotSubs.add("user-longform-$ts")
-        _activeOneShotSubs.add("user-engagement-$ts")
+        val subIds = listOf("user-posts-$ts", "user-longform-$ts", "user-engagement-$ts")
 
         // Posts by this author
         val postsReq = buildJsonArray {
@@ -2038,18 +2169,14 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        val targets = if (relayUrls.isNotEmpty()) {
-            relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
-                .ifEmpty { connections.values.take(5) }
+        val reqs = listOf(postsReq, longformReq, engagementReq)
+        val targetUrls = if (relayUrls.isNotEmpty()) {
+            relayUrls.mapNotNull { normalizeRelayUrl(it) }
         } else {
-            connections.values.toList()
+            connections.keys.toList()
         }
-        targets.forEach {
-            sendOneShotToRelay(it, postsReq)
-            sendOneShotToRelay(it, longformReq)
-            sendOneShotToRelay(it, engagementReq)
-        }
-        Log.d(TAG, "Fetching user posts + engagement for $pubkey from ${targets.size} relay(s)")
+        scope.launch { sendOneShotBatch(targetUrls, reqs, subIds) }
+        Log.d(TAG, "Fetching user posts + engagement for $pubkey → ${targetUrls.size} relay(s)")
     }
 
     /**
@@ -2134,9 +2261,10 @@ class RelayPool @Inject constructor(
      * One-shot subscription — closes on EOSE (prefix "older-" matches isOneShotSubscription).
      */
     fun fetchOlderPosts(pubkey: String, untilTimestamp: Long, relayUrls: List<String> = emptyList()) {
+        val subId = "older-user-${System.currentTimeMillis()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("older-user-${System.currentTimeMillis()}"))
+            add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
@@ -2150,14 +2278,13 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(200))
             })
         }.toString()
-        val targets = if (relayUrls.isNotEmpty()) {
-            relayUrls.mapNotNull { connections[normalizeRelayUrl(it)] }
-                .ifEmpty { connections.values.take(5) }
+        val targetUrls = if (relayUrls.isNotEmpty()) {
+            relayUrls.mapNotNull { normalizeRelayUrl(it) }
         } else {
-            connections.values.toList()
+            connections.keys.toList()
         }
-        targets.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp from ${targets.size} relay(s)")
+        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+        Log.d(TAG, "Fetching older posts for $pubkey until $untilTimestamp → ${targetUrls.size} relay(s)")
     }
 
     /**
