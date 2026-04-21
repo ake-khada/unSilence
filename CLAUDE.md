@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 21, 2026 (Comprehensive audit: 20 fixes across C/H/M/L tiers. Shared utilities extracted.)
+**Last updated:** April 21, 2026 (MES bounded caches: VideoThumbnailCache LRU+downsample, feedRowCache cap, actor index cap, profile LRU. Instrumentation logger.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -73,8 +73,10 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, `synchronized`-based coalescing (200ms window), `PersistentSet<String>` knownIds
 - **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, per-item bitmask ledger, sampled at 16 Hz
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
-- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`
+- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.), feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets
+- **MesMetricsLogger** — ProcessLifecycleOwner-driven 60s foreground logger (`MES/size` tag). Reports per-collection counts, per-kind breakdown, actor indexes, external cache sizes. `MesMetrics.kt` data class + `MES.snapshotSize()`
 - **ImageDimensionCache** — singleton ConcurrentHashMap of image aspect ratios (url → width/height), clamped to 0.2..5.0
+- **VideoThumbnailCache** — first-frame thumbnails via MMR, downsampled (inSampleSize=2, ~1MB/thumb), LRU eviction at 100 entries OR 64MB bitmap total, `visibleUrls` set protects on-screen thumbnails from eviction
 - **SearchViewModel** — NIP-50 search, `AtomicLong` token tracking, debounce + collectLatest, CLOSE frames on supersede
 - **RelayPreferencesStore** — DataStore-backed, `Mutex`-guarded read-modify-write for indexer URLs
 - **SnapshotScheduler** — periodic + onStop save (3s timeout), AtomicFile for crash safety
@@ -167,6 +169,14 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 ### Thread Safety
 39. **Thread DFS walk uses `visited` set** — cycle protection prevents stack overflow on circular reply chains
 
+### Memory Bounds
+40. **VideoThumbnailCache bitmaps MUST be downsampled** — `inSampleSize=2` in `downsample()`. Removing this regresses to ~3.5MB/thumb → 64MB cap hit in 2 minutes
+41. **VideoThumbnailCache `visibleUrls` set** — composables register via `markVisible`/`markNotVisible` in `DisposableEffect`. Eviction skips visible URLs. Missing unregister = memory leak
+42. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
+43. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
+44. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
+45. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index and profile eviction anchors. Must be set before events arrive
+
 ---
 
 ## Performance Audit Methodology
@@ -177,6 +187,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 **Subscription leaks:** grep for `Search EVENT received` after last `closeSearch` timestamp
 **Controller rate:** `grep -c HydrationCtrl` per minute — above 50 means throttle is broken
 **Validation discipline:** failed criteria = revert first, investigate second. "Pre-existing" requires evidence from a comparable baseline
+**MES memory:** `adb logcat -s "MES/size"` — 4-line emission every 60s while foreground. Tracks events (per-kind), profiles, actor indexes, feedRowCache, VideoThumbnailCache bitmap bytes, ImageDimensionCache entries. Trim events logged under `MES` tag
 
 ---
 
@@ -201,7 +212,7 @@ app/src/main/kotlin/com/unsilence/app/
 ├── data/
 │   ├── auth/        KeyManager (cached pubkey), SigningManager
 │   ├── cache/       CoverageTracker, SyncTracker
-│   ├── memory/      MemoryEventStore, Models, SnapshotScheduler
+│   ├── memory/      MemoryEventStore, Models, SnapshotScheduler, MesMetrics, MesMetricsLogger
 │   ├── relay/       RelayPool, EventProcessor, ProfileResolver, CardHydrator,
 │   │                OgFetcher, RelayPreferencesStore, NostrJson (toEventJson),
 │   │                RelayUrlUtil (ANTIPRIMAL_RELAY_URL, GLOBAL_RELAY_URLS, normalizeRelayUrl)

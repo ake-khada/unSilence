@@ -27,6 +27,11 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private const val MAX_CONTENT_EVENTS = 10_000
+private const val FEED_ROW_CACHE_CAP = 500
+private const val ACTOR_INDEX_CAP = 1_000
+private const val ACTOR_TARGETS_CAP = 500
+private const val PROFILE_CAP = 2_000
+private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
@@ -60,6 +65,10 @@ class MemoryEventStore @Inject constructor() {
     private val reactedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
     private val repostedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
     private val zappedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
+    private val actorAccessedAt = ConcurrentHashMap<String, Long>()
+
+    /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
+    @Volatile var ownPubkey: String? = null
 
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
@@ -68,6 +77,7 @@ class MemoryEventStore @Inject constructor() {
     private val profileUpdatedAt = ConcurrentHashMap<String, Long>()
     // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
     private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
+    private val profileAccessedAt = ConcurrentHashMap<String, Long>()
     // ─── FeedRow cache (R2: version-stamped, invalidated on profile/stats change) ──
     private data class CachedFeedRow(
         val row: FeedRow,
@@ -75,14 +85,17 @@ class MemoryEventStore @Inject constructor() {
         val statsVersion: Long,
     )
     private val feedRowCache = ConcurrentHashMap<String, CachedFeedRow>()
+    private val feedRowAccessedAt = ConcurrentHashMap<String, Long>()
 
     /** Get cached profile fields for a pubkey. Returns empty map if no profile stored. */
-    private fun cachedProfileFields(pubkey: String): Map<String, String?> =
-        profileFieldsCache[pubkey]
+    private fun cachedProfileFields(pubkey: String): Map<String, String?> {
+        profileAccessedAt[pubkey] = System.nanoTime()
+        return profileFieldsCache[pubkey]
             ?: profilesByPubkey[pubkey]?.content?.let { content ->
                 parseProfileJson(content).also { profileFieldsCache[pubkey] = it }
             }
             ?: emptyMap()
+    }
 
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
@@ -262,10 +275,54 @@ class MemoryEventStore @Inject constructor() {
             if (existing == null || event.createdAt >= existing.createdAt) {
                 profileUpdatedAt[event.pubkey] = System.currentTimeMillis()
                 profileFieldsCache[event.pubkey] = parseProfileJson(event.content)
+                profileAccessedAt[event.pubkey] = System.nanoTime()
                 event
             } else {
                 existing
             }
+        }
+        trimProfilesIfNeeded()
+    }
+
+    /**
+     * Evict oldest-accessed profiles when over [PROFILE_CAP].
+     * Anchors (never evicted): own pubkey, followed pubkeys, authors of recent events.
+     * Cascades to profileUpdatedAt, profileFieldsCache, relayListsByPubkey.
+     */
+    private fun trimProfilesIfNeeded() {
+        if (profilesByPubkey.size <= PROFILE_CAP) return
+
+        // Build anchor set: own + followed + recent event authors
+        val anchor = ownPubkey
+        val anchors = buildSet {
+            anchor?.let { add(it) }
+            anchor?.let { followsByPubkey[it]?.let { follows -> addAll(follows) } }
+            // Pubkeys from the most recent N content events
+            var count = 0
+            for (entry in recentByCreatedAt) {
+                if (count >= PROFILE_ANCHOR_RECENT_EVENTS) break
+                eventsById[entry.id]?.let { add(it.pubkey) }
+                count++
+            }
+        }
+
+        val candidates = profileAccessedAt.entries
+            .filter { it.key !in anchors }
+            .sortedBy { it.value }
+
+        var removed = 0
+        for (entry in candidates) {
+            if (profilesByPubkey.size <= PROFILE_CAP * 4 / 5) break
+            val pubkey = entry.key
+            profilesByPubkey.remove(pubkey)
+            profileUpdatedAt.remove(pubkey)
+            profileFieldsCache.remove(pubkey)
+            profileAccessedAt.remove(pubkey)
+            relayListsByPubkey.remove(pubkey)
+            removed++
+        }
+        if (removed > 0) {
+            Log.d("MES", "Profiles trimmed $removed entries, remaining=${profilesByPubkey.size}")
         }
     }
 
@@ -295,9 +352,7 @@ class MemoryEventStore @Inject constructor() {
         repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reposted
-        repostedTargetsByActor
-            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
-            .add(targetId)
+        addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
     }
 
     private fun handleReaction(event: NostrEvent) {
@@ -308,17 +363,61 @@ class MemoryEventStore @Inject constructor() {
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reacted to
-        reactedTargetsByActor
-            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
-            .add(targetId)
+        addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
     }
 
     private fun handleZapRequest(event: NostrEvent) {
         val targetId = event.rootId ?: return
         // Actor-side index: track what this pubkey has zapped (kind 9734, NOT 9735)
-        zappedTargetsByActor
-            .getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }
-            .add(targetId)
+        addToActorIndex(zappedTargetsByActor, event.pubkey, targetId)
+    }
+
+    private fun addToActorIndex(
+        index: ConcurrentHashMap<String, MutableSet<String>>,
+        actorPubkey: String,
+        targetId: String,
+    ) {
+        val targets = index.getOrPut(actorPubkey) { ConcurrentHashMap.newKeySet() }
+        // Inner cap: skip add if this actor already has too many targets
+        if (targets.size < ACTOR_TARGETS_CAP) {
+            targets.add(targetId)
+        }
+        actorAccessedAt[actorPubkey] = System.nanoTime()
+        trimActorIndexesIfNeeded()
+    }
+
+    private fun trimActorIndexesIfNeeded() {
+        // Use max of the three as the trigger — they share the same actor keyspace
+        val totalActors = maxOf(
+            reactedTargetsByActor.size,
+            repostedTargetsByActor.size,
+            zappedTargetsByActor.size,
+        )
+        if (totalActors <= ACTOR_INDEX_CAP) return
+
+        val anchor = ownPubkey
+        val candidates = actorAccessedAt.entries
+            .filter { it.key != anchor }
+            .sortedBy { it.value }
+
+        var removed = 0
+        for (entry in candidates) {
+            if (maxOf(
+                    reactedTargetsByActor.size,
+                    repostedTargetsByActor.size,
+                    zappedTargetsByActor.size,
+                ) <= ACTOR_INDEX_CAP * 4 / 5
+            ) break
+            val pubkey = entry.key
+            reactedTargetsByActor.remove(pubkey)
+            repostedTargetsByActor.remove(pubkey)
+            zappedTargetsByActor.remove(pubkey)
+            actorAccessedAt.remove(pubkey)
+            removed++
+        }
+        if (removed > 0) {
+            Log.d("MES", "Actor indexes trimmed $removed actors")
+        }
     }
 
     private fun handleZapReceipt(event: NostrEvent) {
@@ -720,6 +819,7 @@ class MemoryEventStore @Inject constructor() {
             }
             // Clean up caches and sidecar data
             feedRowCache.remove(entry.id)
+            feedRowAccessedAt.remove(entry.id)
             videoRenderModelsByEventId.remove(entry.id)
             imetaImageDimsByEventId.remove(entry.id)
         }
@@ -1000,6 +1100,7 @@ class MemoryEventStore @Inject constructor() {
         if (eventIds.isEmpty()) return
         for (id in eventIds) {
             feedRowCache.remove(id)
+            feedRowAccessedAt.remove(id)
         }
         _statsSignal.value = System.nanoTime()
     }
@@ -1578,6 +1679,7 @@ class MemoryEventStore @Inject constructor() {
             && cached.profileVersion == currentProfileVersion
             && cached.statsVersion == currentStatsVersion
         ) {
+            feedRowAccessedAt[event.id] = System.nanoTime()
             return cached.row
         }
 
@@ -1610,7 +1712,24 @@ class MemoryEventStore @Inject constructor() {
         )
 
         feedRowCache[event.id] = CachedFeedRow(row, currentProfileVersion, currentStatsVersion)
+        feedRowAccessedAt[event.id] = System.nanoTime()
+        trimFeedRowCacheIfNeeded()
         return row
+    }
+
+    private fun trimFeedRowCacheIfNeeded() {
+        if (feedRowCache.size <= FEED_ROW_CACHE_CAP) return
+        val candidates = feedRowAccessedAt.entries.sortedBy { it.value }
+        var removed = 0
+        for (entry in candidates) {
+            if (feedRowCache.size <= FEED_ROW_CACHE_CAP * 4 / 5) break
+            feedRowCache.remove(entry.key)
+            feedRowAccessedAt.remove(entry.key)
+            removed++
+        }
+        if (removed > 0) {
+            Log.d("MES", "FeedRowCache trimmed $removed entries, remaining=${feedRowCache.size}")
+        }
     }
 
     // ─── Metrics ────────────────────────────────────────────────────────────
@@ -2006,6 +2125,7 @@ class MemoryEventStore @Inject constructor() {
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
+        actorAccessedAt.clear()
         _followsSignal.value++
         _actionSignal.value++
         _relayConfigSignal.value++
@@ -2029,7 +2149,9 @@ class MemoryEventStore @Inject constructor() {
         profilesByPubkey.clear()
         profileUpdatedAt.clear()
         profileFieldsCache.clear()
+        profileAccessedAt.clear()
         feedRowCache.clear()
+        feedRowAccessedAt.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
         followerCountCache.clear()
@@ -2044,6 +2166,7 @@ class MemoryEventStore @Inject constructor() {
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
+        actorAccessedAt.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L

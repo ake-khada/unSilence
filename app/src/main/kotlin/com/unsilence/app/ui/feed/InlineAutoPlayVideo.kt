@@ -76,6 +76,11 @@ internal fun VideoThumbnailImage(
             },
         )
     } else if (thumbnailCache != null) {
+        // Track visibility for LRU eviction protection
+        DisposableEffect(model.videoUrl) {
+            thumbnailCache.markVisible(model.videoUrl)
+            onDispose { thumbnailCache.markNotVisible(model.videoUrl) }
+        }
         // Seed from cache synchronously — no blank frame on recomposition
         var thumbnail by remember(model.videoUrl) {
             mutableStateOf(thumbnailCache.getCached(model.videoUrl))

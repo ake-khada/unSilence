@@ -113,6 +113,7 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
+        memoryEventStore.ownPubkey = pubkeyHex
         eventProcessor.start()
         outboxRouter.start()
 
