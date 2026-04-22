@@ -86,6 +86,7 @@ class FeedViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
+    private val feedWindowLoader: FeedWindowLoader,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -172,11 +173,6 @@ class FeedViewModel @Inject constructor(
     // created_at of the last item when loadMore() last fired; guards duplicate page fetches.
     private var lastOldestTimestamp = 0L
     private var lastLoadMoreTime = 0L
-
-    // Pagination cursor — advances backward only, never forward.
-    // Tracks the oldest timestamp we've paginated to, independent of
-    // the reducer's mutable visibleEvents list.
-    private var paginationCursor: Long = Long.MAX_VALUE
 
     // Log dedup: only log feed emissions when size or boundary IDs change
     private var lastLoggedEmissionSig: Triple<Int, String?, String?> = Triple(0, null, null)
@@ -319,23 +315,30 @@ class FeedViewModel @Inject constructor(
         if (_isLoadingMore.value) return  // coalesce redundant calls during fling
 
         // Pagination cursor is reducer-owned. Read it directly — no list walk.
-        val reducerOldest = _activeReducer.value.state.value.oldestCreatedAt
-        if (reducerOldest == Long.MAX_VALUE) return  // no events yet
-        val oldest = minOf(reducerOldest, paginationCursor)
+        val oldest = _activeReducer.value.state.value.oldestCreatedAt
+        if (oldest == Long.MAX_VALUE) return  // no events yet
 
         if (oldest == lastOldestTimestamp) return
         lastOldestTimestamp = oldest
-        paginationCursor = oldest  // advance the cursor backward
         lastLoadMoreTime = now
         _isLoadingMore.value = true  // For spinner UI
-        _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
 
-        // Dispatch relay work off Main — fetchOlderEvents sends to 14+ relays synchronously.
-        val urls = currentRelayUrls
-        val limit = _displayLimit.value
-        viewModelScope.launch(Dispatchers.IO) {
-            Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=$limit, relays=${urls.size}")
-            relayPool.fetchOlderEvents(urls, oldest)
+        if (FeedWindowFlag.USE_WINDOW_LOADER) {
+            val type = _feedType.value
+            _displayLimit.value = (_displayLimit.value + FeedWindowConfig.WINDOW_SIZE).coerceAtMost(3000)
+            viewModelScope.launch(Dispatchers.IO) {
+                Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
+                val result = feedWindowLoader.loadMore(type, oldest)
+                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+            }
+        } else {
+            _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
+            val urls = currentRelayUrls
+            val limit = _displayLimit.value
+            viewModelScope.launch(Dispatchers.IO) {
+                Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=$limit, relays=${urls.size}")
+                relayPool.fetchOlderEvents(urls, oldest)
+            }
         }
     }
 
@@ -429,14 +432,25 @@ class FeedViewModel @Inject constructor(
                         lastOldestTimestamp = 0L
                         _displayLimit.value = 50
                     }
-                    paginationCursor = Long.MAX_VALUE
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
                     // Only reset controller on actual feed switch, not on every Room re-emission
                     if (newKey != lastResetFeedKey) {
                         lastResetFeedKey = newKey
-                        hydrationController.feedRelayUrl = (type as? FeedType.SingleRelay)?.url
-                        hydrationController.reset()
+                        if (FeedWindowFlag.USE_WINDOW_LOADER) {
+                            // Window loader path: disable scroll-driven hydration,
+                            // load initial window, start engagement refresh
+                            hydrationController.reset()
+                            feedWindowLoader.stopEngagementRefresh()
+                            viewModelScope.launch(Dispatchers.IO) {
+                                val result = feedWindowLoader.loadWindow(type, cursor = null)
+                                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+                            }
+                        } else {
+                            // Legacy path: scroll-driven hydration
+                            hydrationController.feedRelayUrl = (type as? FeedType.SingleRelay)?.url
+                            hydrationController.reset()
+                        }
                     }
 
                     val isBrowse = type is FeedType.SingleRelay || type is FeedType.RelaySet
