@@ -73,8 +73,14 @@ class FeedWindowLoader @Inject constructor(
         // ── Phase A: Event discovery ──────────────────────────────────────
         val discoveredIds = discoverEvents(feedType, cursor, ownPubkey)
 
-        // Read discovered events from MES to extract metadata
-        val events = memoryEventStore.eventsByIds(discoveredIds)
+        // Read warm MES window — union with discovered IDs so hydration
+        // runs even when MES already has the events (warm-start path).
+        val mesWindow = readMesWindow(feedType, cursor, ownPubkey)
+        val windowIds = (discoveredIds + mesWindow.map { it.id })
+            .take(FeedWindowConfig.WINDOW_SIZE).toSet()
+
+        // Read all window events from MES to extract metadata
+        val events = memoryEventStore.eventsByIds(windowIds)
         val authors = events.map { it.pubkey }.toSet()
         val eventIds = events.map { it.id }.toSet()
         val oldest = events.minOfOrNull { it.createdAt } ?: Long.MAX_VALUE
@@ -86,10 +92,11 @@ class FeedWindowLoader @Inject constructor(
             lastTopRelays = topRelays
 
             val durationMs = System.currentTimeMillis() - startMs
+            val topRelaySet = topRelays.toSet()
             val coverage = if (authors.isNotEmpty()) {
                 val covered = authors.count { pk ->
                     val writeRelays = memoryEventStore.writeRelaysFor(pk)
-                    writeRelays.any { it in topRelays }
+                    writeRelays.any { normalizeRelayUrl(it) in topRelaySet }
                 }
                 covered * 100 / authors.size
             } else 0
@@ -239,6 +246,27 @@ class FeedWindowLoader @Inject constructor(
         }
     }
 
+    /**
+     * Read the current MES window for this feed type, optionally filtered
+     * to events older than [cursor]. Reuses the same FeedFilter as feedFlow().
+     */
+    private fun readMesWindow(
+        feedType: FeedType,
+        cursor: Long?,
+        ownPubkey: String,
+    ): List<com.unsilence.app.data.memory.NostrEvent> {
+        val filter = buildMemoryFilter(feedType, ownPubkey)
+        // Over-read then trim: feedEvents scans descending by createdAt,
+        // so cursor filtering just drops newer-than-cursor events from the head.
+        val limit = if (cursor != null) FeedWindowConfig.WINDOW_SIZE * 2 else FeedWindowConfig.WINDOW_SIZE
+        val events = memoryEventStore.feedEvents(filter, limit)
+        return if (cursor != null) {
+            events.filter { it.createdAt < cursor }.take(FeedWindowConfig.WINDOW_SIZE)
+        } else {
+            events.take(FeedWindowConfig.WINDOW_SIZE)
+        }
+    }
+
     // ── Phase B: Parallel Hydration ───────────────────────────────────────
 
     /**
@@ -320,13 +348,13 @@ class FeedWindowLoader @Inject constructor(
             Log.d(TAG, "B.1: fetched relay lists for ${stale.size}/${authors.size} stale authors")
         }
 
-        // B.2: Aggregate write-relay frequency across window authors
-        val relayFrequency = mutableMapOf<String, Int>()
+        // B.2: Aggregate write-relay → author coverage map
+        val relayCoverage = mutableMapOf<String, MutableSet<String>>()
         for (pk in authors) {
             val writeRelays = memoryEventStore.writeRelaysFor(pk)
             for (url in writeRelays) {
                 val normalized = normalizeRelayUrl(url) ?: continue
-                relayFrequency[normalized] = (relayFrequency[normalized] ?: 0) + 1
+                relayCoverage.getOrPut(normalized) { mutableSetOf() }.add(pk)
             }
         }
 
@@ -336,19 +364,31 @@ class FeedWindowLoader @Inject constructor(
             memoryEventStore.getBlockedRelayUrls(it).toSet()
         } ?: emptySet()
 
-        val ranked = relayFrequency.entries
+        val candidates = relayCoverage.entries
             .filter { (url, _) -> url !in blockedUrls }
             .filter { (url, _) ->
                 val trust = trustScores[url]?.score
-                // Accept if no trust data (don't fail on absent data) or score >= 30
                 trust == null || trust >= 30
             }
-            .sortedByDescending { it.value }
-            .take(FeedWindowConfig.ENGAGEMENT_RELAY_FANOUT)
-            .map { it.key }
+            .sortedByDescending { it.value.size }
 
-        Log.d(TAG, "B.2: top-${ranked.size} relays from ${relayFrequency.size} unique write relays")
-        return ranked
+        // Coverage-aware selection: grow from base N until target coverage or cap
+        val authorCount = authors.size
+        val coveredAuthors = mutableSetOf<String>()
+        val selected = mutableListOf<String>()
+        for ((relay, authorsAtRelay) in candidates) {
+            if (selected.size >= FeedWindowConfig.ENGAGEMENT_RELAY_FANOUT_MAX) break
+            selected.add(relay)
+            coveredAuthors.addAll(authorsAtRelay)
+            if (selected.size >= FeedWindowConfig.ENGAGEMENT_RELAY_FANOUT && authorCount > 0) {
+                val coverage = coveredAuthors.size.toDouble() / authorCount
+                if (coverage >= FeedWindowConfig.ENGAGEMENT_COVERAGE_TARGET) break
+            }
+        }
+
+        val coveragePct = if (authorCount > 0) coveredAuthors.size * 100 / authorCount else 0
+        Log.d(TAG, "B.2: top-${selected.size} relays from ${relayCoverage.size} unique write relays [coverage=$coveragePct%]")
+        return selected
     }
 
     // ── B.3: Engagement fetch ────────────────────────────────────────────
