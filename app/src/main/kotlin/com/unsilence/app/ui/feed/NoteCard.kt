@@ -114,6 +114,8 @@ import com.unsilence.app.data.relay.extractRepostTargetId
 import com.unsilence.app.data.relay.extractRepostTargetRelay
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -549,6 +551,8 @@ fun NoteCard(
                 event = parentEvent,
                 author = parentAuthor,
                 onNoteClick = onNoteClick,
+                lookupProfile = lookupProfile,
+                onAuthorClick = onAuthorClick,
                 fetchOgMetadata = fetchOgMetadata,
                 imageDimensionCache = imageDimensionCache,
                 modifier = Modifier.padding(bottom = Spacing.small),
@@ -590,6 +594,7 @@ fun NoteCard(
             EmbeddedQuoteCard(
                 eventId         = ref.eventId,
                 onNoteClick     = onNoteClick,
+                onAuthorClick   = onAuthorClick,
                 lookupEvent     = lookupEvent,
                 lookupProfile   = lookupProfile,
                 fetchOgMetadata = fetchOgMetadata,
@@ -1669,6 +1674,7 @@ private fun FullScreenImageDialog(
 private fun EmbeddedQuoteCard(
     eventId: String,
     onNoteClick: (String) -> Unit,
+    onAuthorClick: (String) -> Unit = {},
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
@@ -1765,11 +1771,13 @@ private fun EmbeddedQuoteCard(
                     LINK_URL_REGEX.replace(cleanContent, "").trim()
                 }
                 if (displayText.isNotBlank()) {
-                    Text(
-                        text     = displayText,
-                        color    = Color.White.copy(alpha = 0.85f),
-                        fontSize = AppType.body,
-                        lineHeight = 20.sp,
+                    NostrRichText(
+                        content       = displayText,
+                        lookupProfile = lookupProfile,
+                        onAuthorClick = onAuthorClick,
+                        onTextClick   = { onNoteClick(eventId) },
+                        maxLines      = 6,
+                        overflow      = TextOverflow.Ellipsis,
                     )
                 }
 
@@ -1868,6 +1876,7 @@ private fun EmbeddedQuoteCard(
                         EmbeddedQuoteCard(
                             eventId         = ref.eventId,
                             onNoteClick     = onNoteClick,
+                            onAuthorClick   = onAuthorClick,
                             lookupEvent     = lookupEvent,
                             lookupProfile   = lookupProfile,
                             fetchOgMetadata = fetchOgMetadata,
@@ -2011,7 +2020,11 @@ internal fun NostrRichText(
     }
     LaunchedEffect(mentions) {
         if (lookupProfile != null) {
-            profileMap = mentions.associate { (_, _, hex) -> hex to lookupProfile(hex) }
+            profileMap = coroutineScope {
+                mentions.map { (_, _, hex) ->
+                    async { hex to lookupProfile(hex) }
+                }.awaitAll().toMap()
+            }
         }
     }
 
