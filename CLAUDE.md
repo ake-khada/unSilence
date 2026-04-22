@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 21, 2026 (MES content eviction anchors: own-pubkey + p-tag mentioned events protected. Relay fetch dedup upgraded to Deferred-based. Notification blue dot stale-capture fix.)
+**Last updated:** April 22, 2026 (Deterministic cold-start: ColdStartState enum replaces boolean splash, 10s+5s timeouts match bootstrapper, no Global flash.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -85,7 +85,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 
 ## Features — Shipped
 
-Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, infinite scroll, blue dot) · Content (kind 1/6/30023, @mentions, quotes, OG previews, YouTube, media grids) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, reactive splash)
+Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, infinite scroll, blue dot, deterministic cold-start) · Content (kind 1/6/30023, @mentions, quotes, OG previews, YouTube, media grids) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, deterministic cold-start splash)
 
 ---
 
@@ -181,6 +181,7 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 48. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
 49. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
 50. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
+51. **ColdStartState, not boolean splash** — `_coldStartState` replaces `_splashDone`. VM waits 10s for kind-3 + 5s for kind-10002 (matching bootstrapper budgets). Never regress to a boolean or shorter timeout — that reintroduces the Global→Following flash. `splashDone` is a derived backward-compat alias only
 
 ---
 
@@ -200,7 +201,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 
 **MES feed query:** `feedFlow()` scans `idsByKind` + `eventEntitiesByNoteId`, filters by FeedFilter, joins profiles + stats → FeedRow list
 
-**Splash/feed-type determination:** `withTimeoutOrNull(2000L)` on follows detection. No delay-based timers — purely reactive
+**Cold-start / splash:** `ColdStartState` enum (`LOADING`, `READY_FOLLOWING`, `READY_GLOBAL`) in FeedViewModel. Waits up to 10s for kind-3 (follows), then 5s for kind-10002 (relay lists). Warm resume resolves instantly from snapshot (<300ms). No Global→Following flash. `splashDone` backward-compat alias gates AppNavigation bars
 
 **Logout:** `isLoggedIn=false` → `bootstrapper.teardown()` → `key(sessionKey)` forces fresh VM creation
 
