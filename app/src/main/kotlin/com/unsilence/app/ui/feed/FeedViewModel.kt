@@ -325,6 +325,11 @@ class FeedViewModel @Inject constructor(
 
         if (FeedWindowFlag.USE_WINDOW_LOADER) {
             val type = _feedType.value
+            // Widen both the MES scan window AND trigger a window fetch.
+            // _displayLimit still gates the MES feedFlow() query in both paths;
+            // the window loader adds fresh events to MES but doesn't consume _displayLimit itself.
+            // When the old pipeline is deleted in Phase 3, _displayLimit gating goes away
+            // and the window size becomes the sole limit.
             _displayLimit.value = (_displayLimit.value + FeedWindowConfig.WINDOW_SIZE).coerceAtMost(3000)
             viewModelScope.launch(Dispatchers.IO) {
                 Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")

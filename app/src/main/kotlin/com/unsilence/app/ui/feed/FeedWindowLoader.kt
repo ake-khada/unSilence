@@ -50,8 +50,8 @@ class FeedWindowLoader @Inject constructor(
 
     // Engagement refresh lifecycle
     private var engagementRefreshJob: Job? = null
-    private var lastTopRelays: List<String> = emptyList()
-    private var lastRefreshTimestamp: Long = 0L
+    @Volatile private var lastTopRelays: List<String> = emptyList()
+    @Volatile private var lastRefreshTimestamp: Long = 0L
 
     /**
      * Load a window of events for the given feed type.
@@ -251,23 +251,41 @@ class FeedWindowLoader @Inject constructor(
     ): List<String> = coroutineScope {
         // B.4 Media worker (pure local — parse imeta, populate sidecar caches)
         // Runs first since it's instant and improves first-render layout
-        launch { hydrateMedia(eventIds) }
+        launch {
+            try { hydrateMedia(eventIds) }
+            catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+            catch (e: Throwable) { Log.e(TAG, "media worker failed", e) }
+        }
 
         // B.4 Profiles worker (parallel with relay list fetch)
-        val profilesJob = async { hydrateProfiles(authors) }
+        val profilesJob = async {
+            try { hydrateProfiles(authors) }
+            catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+            catch (e: Throwable) { Log.e(TAG, "profiles worker failed", e) }
+        }
 
         // B.1 + B.2: Relay list fetch → top-N ranking
-        val topRelaysJob = async { fetchRelayListsAndRank(authors, ownPubkey) }
+        val topRelaysJob = async {
+            try { fetchRelayListsAndRank(authors, ownPubkey) }
+            catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+            catch (e: Throwable) { Log.e(TAG, "relay list worker failed", e); emptyList() }
+        }
 
         // B.4 Refs worker (parallel)
-        val refsJob = async { hydrateRefs(eventIds) }
+        val refsJob = async {
+            try { hydrateRefs(eventIds) }
+            catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+            catch (e: Throwable) { Log.e(TAG, "refs worker failed", e) }
+        }
 
         // Wait for top relays before engagement
         val topRelays = topRelaysJob.await()
 
         // B.3 Engagement batch (needs top-N relays)
         if (topRelays.isNotEmpty() && eventIds.isNotEmpty()) {
-            fetchEngagementFromRelays(topRelays, eventIds.toList(), sinceTimestamp = null)
+            try { fetchEngagementFromRelays(topRelays, eventIds.toList(), sinceTimestamp = null) }
+            catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+            catch (e: Throwable) { Log.e(TAG, "engagement worker failed", e) }
         }
 
         // Wait for remaining workers
