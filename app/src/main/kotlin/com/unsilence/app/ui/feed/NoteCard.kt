@@ -254,6 +254,12 @@ private data class RepostDerived(
     val navigateId: String,
 )
 
+/** Single-phase embedded quote resolution — one render instead of two. */
+private data class QuoteData(
+    val event: EventEntity? = null,
+    val author: UserEntity? = null,
+)
+
 private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".mp4", ignoreCase = true) ||
     url.contains(".mov", ignoreCase = true) ||
@@ -534,7 +540,7 @@ fun NoteCard(
                     Text(
                         text       = if (repostParse?.boostedJson != null || fetchedRepostEvent != null) {
                             repostProfile?.displayName?.takeIf { it.isNotBlank() }
-                                ?: repostProfile?.name?.takeIf { it.isNotBlank() }
+                                ?: repostProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                                 ?: "${derived.effectivePubkey.take(6)}…${derived.effectivePubkey.takeLast(4)}"
                         } else {
                             row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
@@ -548,7 +554,7 @@ fun NoteCard(
                     )
                     val nip05 = if (repostParse?.boostedJson == null && fetchedRepostEvent == null) row.authorNip05
                                else repostProfile?.nip05
-                    if (!nip05.isNullOrBlank()) {
+                    if (!nip05.isNullOrBlank() && parseNip05(nip05) != null) {
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             imageVector        = Icons.Filled.Verified,
@@ -1713,13 +1719,12 @@ private fun EmbeddedQuoteCard(
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
-    // Try to load the quoted event (Room first, then relay fetch via lookupEvent)
-    val event by produceState<EventEntity?>(null, eventId) {
-        if (lookupEvent != null) value = lookupEvent(eventId, relayHints)
-    }
-    val author by produceState<UserEntity?>(null, event?.pubkey) {
-        val pk = event?.pubkey
-        if (pk != null && lookupProfile != null) value = lookupProfile(pk)
+    // Single-phase lookup: resolve event then author in one coroutine.
+    // One state transition (shimmer → fully resolved) instead of two.
+    val quoteData by produceState(QuoteData(), eventId, relayHints) {
+        val ev = lookupEvent?.invoke(eventId, relayHints) ?: return@produceState
+        val auth = lookupProfile?.invoke(ev.pubkey)
+        value = QuoteData(ev, auth)
     }
 
     Box(
@@ -1730,7 +1735,8 @@ private fun EmbeddedQuoteCard(
             .clickable { onNoteClick(eventId) }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
-        val loadedEvent = event
+        val loadedEvent = quoteData.event
+        val author = quoteData.author
         if (loadedEvent != null) {
             // Rich quote: show author + truncated content
             Column {
@@ -1744,7 +1750,7 @@ private fun EmbeddedQuoteCard(
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text     = author?.displayName?.takeIf { it.isNotBlank() }
-                            ?: author?.name?.takeIf { it.isNotBlank() }
+                            ?: author?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                             ?: "${loadedEvent.pubkey.take(6)}…${loadedEvent.pubkey.takeLast(4)}",
                         color    = Color.White.copy(alpha = 0.7f),
                         fontWeight = FontWeight.SemiBold,
@@ -1976,7 +1982,7 @@ private fun EmbeddedAddressCard(
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text     = author?.displayName?.takeIf { it.isNotBlank() }
-                        ?: author?.name?.takeIf { it.isNotBlank() }
+                        ?: author?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                         ?: "${addrRef.author.take(6)}…${addrRef.author.takeLast(4)}",
                     color    = Color.White.copy(alpha = 0.7f),
                     fontWeight = FontWeight.SemiBold,
@@ -2072,7 +2078,7 @@ internal fun NostrRichText(
                 val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
                     .getOrDefault("${pubkeyHex.take(8)}…")
                 val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
-                    ?: profile?.name?.takeIf { it.isNotBlank() }
+                    ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                     ?: npubFallback
 
                 withLink(
@@ -2130,7 +2136,7 @@ private fun MentionChip(
         if (npub != null) "@${npub.take(16)}…" else "@${pubkeyHex.take(8)}…"
     }
     val displayText = profile?.displayName?.takeIf { it.isNotBlank() }
-        ?: profile?.name?.takeIf { it.isNotBlank() }
+        ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
         ?: npubFallback
 
     Box(
@@ -2293,7 +2299,7 @@ private fun LinkChip(url: String) {
 
 internal val FeedRow.displayName: String?
     get() = authorDisplayName?.takeIf { it.isNotBlank() }
-         ?: authorName?.takeIf { it.isNotBlank() }
+         ?: authorName?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
 
 internal val FeedRow.engagementId: String
     get() = if (kind == 6 && rootId != null) rootId!! else id
@@ -2315,6 +2321,11 @@ internal fun parseNip05(nip05: String): Pair<String, String>? {
 
 /** "user@domain.com" → "domain.com"; "_@domain.com" → "domain.com"; "domain.com" → "domain.com". */
 internal fun nip05Domain(nip05: String): String = parseNip05(nip05)?.second ?: nip05
+
+private val HEX_PUBKEY_REGEX = Regex("^[0-9a-fA-F]{64}$")
+
+/** True if [s] is a 64-char hex string (i.e. a raw pubkey, not a human name). */
+internal fun looksLikeHexPubkey(s: String): Boolean = HEX_PUBKEY_REGEX.matches(s)
 
 internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
