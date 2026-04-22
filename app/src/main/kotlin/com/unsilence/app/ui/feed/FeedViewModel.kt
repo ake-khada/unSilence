@@ -95,9 +95,15 @@ class FeedViewModel @Inject constructor(
     private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
-    /** False until feed type is determined (follows loaded or 2s timeout). Hides bars during splash. */
-    private val _splashDone = MutableStateFlow(false)
-    val splashDone: StateFlow<Boolean> = _splashDone.asStateFlow()
+    enum class ColdStartState { LOADING, READY_FOLLOWING, READY_GLOBAL }
+
+    private val _coldStartState = MutableStateFlow(ColdStartState.LOADING)
+    val coldStartState: StateFlow<ColdStartState> = _coldStartState.asStateFlow()
+
+    /** Backward-compat alias — AppNavigation consumes this to gate bar visibility. */
+    val splashDone: StateFlow<Boolean> = _coldStartState
+        .map { it != ColdStartState.LOADING }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** All relay sets (NIP-51 kind 30002) for the dropdown. */
     val userSetsFlow: StateFlow<List<RelaySet>> =
@@ -248,7 +254,14 @@ class FeedViewModel @Inject constructor(
         _feedVisible.value = visible
     }
 
-    fun setFeedType(type: FeedType) { _feedType.value = type }
+    fun setFeedType(type: FeedType) {
+        _feedType.value = type
+        // Dismiss splash on manual feed switch (e.g. user taps Global during loading)
+        if (_coldStartState.value == ColdStartState.LOADING) {
+            _coldStartState.value = if (type is FeedType.Following)
+                ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
+        }
+    }
 
     /** Ordered list of available feeds for cycling. */
     private fun buildFeedList(): List<FeedType> {
@@ -357,37 +370,50 @@ class FeedViewModel @Inject constructor(
     }
 
     init {
-        // Determine initial feed type: wait for follows (snapshot restore) or 2s timeout.
-        // Splash stays visible until this resolves — no Global→Following flicker.
+        // Deterministic cold-start: wait for kind-3 (follows) up to 10s, then
+        // kind-10002 (relay lists) up to 5s. Warm resume resolves instantly from
+        // snapshot — followsFlow emits in <300ms when MES already has data.
         val ownPubkey = keyManager.getPublicKeyHex()
         Log.d("FeedVM", "init: ownPubkey=${ownPubkey?.take(8)}…")
         if (ownPubkey != null) {
             viewModelScope.launch {
-                val hasFollows = withTimeoutOrNull(2000L) {
+                val follows = withTimeoutOrNull(10_000L) {
                     memoryEventStore.followsFlow(ownPubkey)
                         .filter { it.isNotEmpty() }
                         .first()
-                } != null
-                if (hasFollows) {
-                    _feedType.value = FeedType.Following
-                    _hasFollows.value = true
                 }
-                _splashDone.value = true
-                Log.d("FeedVM", "Splash done: feedType=${_feedType.value} hasFollows=$hasFollows")
+
+                if (follows == null) {
+                    _feedType.value = FeedType.Global
+                    _coldStartState.value = ColdStartState.READY_GLOBAL
+                    Log.d("FeedVM", "Cold-start: no follows after 10s → Global")
+                    return@launch
+                }
+
+                _hasFollows.value = true
+
+                // Follows arrived — wait for own relay list (kind-10002) up to 5s.
+                // Even on timeout, proceed with Following (partial state is fine).
+                withTimeoutOrNull(5_000L) {
+                    memoryEventStore.readWriteRelayConfigsFlow(ownPubkey)
+                        .filter { it.isNotEmpty() }
+                        .first()
+                }
+
+                _feedType.value = FeedType.Following
+                _coldStartState.value = ColdStartState.READY_FOLLOWING
+                Log.d("FeedVM", "Cold-start: ${follows.size} follows → Following")
             }
-            // Continue tracking follows reactively (for later changes)
+
+            // Track follows reactively for _hasFollows (feed list building).
+            // No auto-switch — cold-start is deterministic.
             viewModelScope.launch {
                 memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
-                    val had = _hasFollows.value
                     _hasFollows.value = count > 0
-                    if (!had && count > 0 && _feedType.value is FeedType.Global && _splashDone.value) {
-                        Log.d("FeedVM", "Auto-switch → Following")
-                        _feedType.value = FeedType.Following
-                    }
                 }
             }
         } else {
-            _splashDone.value = true
+            _coldStartState.value = ColdStartState.READY_GLOBAL
         }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
