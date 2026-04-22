@@ -45,6 +45,7 @@ import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.LINK_URL_REGEX
 import com.unsilence.app.ui.feed.LinkPreviewCard
 import com.unsilence.app.ui.feed.NoteCard
+import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.feedImageAspectRatio
@@ -228,6 +229,8 @@ internal fun ThreadParentCard(
     event: EventEntity,
     author: UserEntity?,
     onNoteClick: (String) -> Unit,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    onAuthorClick: (String) -> Unit = {},
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
     modifier: Modifier = Modifier,
@@ -287,12 +290,13 @@ internal fun ThreadParentCard(
         }
         if (textContent.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
-            Text(
-                text = textContent,
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = AppType.body,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
+            NostrRichText(
+                content       = textContent,
+                lookupProfile = lookupProfile,
+                onAuthorClick = onAuthorClick,
+                onTextClick   = { onNoteClick(event.id) },
+                maxLines      = 3,
+                overflow      = TextOverflow.Ellipsis,
             )
         }
         // Render images extracted from content — collapse on error (no gap)
