@@ -125,6 +125,7 @@ import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
 import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -236,6 +237,23 @@ private data class MediaExtraction(
     val textContent: String,
 )
 
+/** Memoized kind-6 JSON parse + tag extraction (row-field-only inputs). */
+private data class RepostParse(
+    val boostedJson: JsonObject?,
+    val targetId: String?,
+    val relayHint: String?,
+)
+
+/** Memoized derived values for NoteCard — recomputes at most twice per card lifetime. */
+private data class RepostDerived(
+    val effectivePubkey: String,
+    val effectiveCreatedAt: Long,
+    val effectiveContent: String,
+    val effectiveTags: String,
+    val contentNoNostr: String,
+    val navigateId: String,
+)
+
 private fun isDirectVideoUrl(url: String): Boolean =
     url.contains(".mp4", ignoreCase = true) ||
     url.contains(".mov", ignoreCase = true) ||
@@ -309,51 +327,75 @@ fun NoteCard(
         }
     }
 
-    // ── Kind 6 repost: parse embedded original event JSON ─────────────────────
-    val boostedJson = if (row.kind == 6 && row.content.isNotBlank()) {
-        runCatching { NostrJson.parseToJsonElement(row.content).jsonObject }.getOrNull()
-    } else null
+    // ── Kind 6 repost: memoize JSON parse + tag extraction ─────────────────
+    // Phase 1: stable from row fields alone — runs once per row.id, never on
+    // engagement-driven recompositions.
+    val repostParse = remember(row.id, row.kind, row.content, row.tags) {
+        if (row.kind != 6) null
+        else RepostParse(
+            boostedJson = if (row.content.isNotBlank())
+                runCatching { NostrJson.parseToJsonElement(row.content).jsonObject }.getOrNull()
+            else null,
+            targetId = extractRepostTargetId(row.tags),
+            relayHint = extractRepostTargetRelay(row.tags),
+        )
+    }
 
     // For kind 6 with no embedded JSON (bridges like mostr.pub), fetch the
     // referenced event via the e-tag so the card renders actual content.
-    val repostTargetId = if (row.kind == 6) extractRepostTargetId(row.tags) else null
-    val repostRelayHint = if (row.kind == 6) extractRepostTargetRelay(row.tags) else null
     val fetchedRepostEvent by produceState<EventEntity?>(null, row.id) {
-        if (row.kind == 6 && boostedJson == null && repostTargetId != null && lookupEvent != null) {
-            value = lookupEvent.invoke(repostTargetId, listOfNotNull(repostRelayHint))
+        val parse = repostParse ?: return@produceState
+        if (parse.boostedJson == null && parse.targetId != null && lookupEvent != null) {
+            value = lookupEvent.invoke(parse.targetId, listOfNotNull(parse.relayHint))
         }
     }
 
-    val effectivePubkey = boostedJson?.get("pubkey")?.jsonPrimitive?.content
-        ?: fetchedRepostEvent?.pubkey
-        ?: if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) ?: row.pubkey
-        else row.pubkey
-    val effectiveCreatedAt = boostedJson?.get("created_at")?.jsonPrimitive?.longOrNull
-        ?: fetchedRepostEvent?.createdAt
-        ?: row.createdAt
-    val effectiveContent = boostedJson?.get("content")?.jsonPrimitive?.content
-        ?: fetchedRepostEvent?.content
-        ?: row.content
+    // Phase 2: derived values — recomputes at most twice (initial null,
+    // then fetchedRepostEvent resolves). Stable identity keys first,
+    // content-dependent keys next, mutable state last.
+    val derived = remember(row.id, row.kind, row.content, row.tags, row.pubkey, row.createdAt, fetchedRepostEvent) {
+        val boosted = repostParse?.boostedJson
+        val effectiveContent = boosted?.get("content")?.jsonPrimitive?.content
+            ?: fetchedRepostEvent?.content
+            ?: row.content
+        RepostDerived(
+            effectivePubkey = boosted?.get("pubkey")?.jsonPrimitive?.content
+                ?: fetchedRepostEvent?.pubkey
+                ?: if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) ?: row.pubkey
+                else row.pubkey,
+            effectiveCreatedAt = boosted?.get("created_at")?.jsonPrimitive?.longOrNull
+                ?: fetchedRepostEvent?.createdAt
+                ?: row.createdAt,
+            effectiveContent = effectiveContent,
+            effectiveTags = if (row.kind == 6) {
+                boosted?.get("tags")?.toString()
+                    ?: fetchedRepostEvent?.tags
+                    ?: row.tags
+            } else row.tags,
+            contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim(),
+            navigateId = if (row.kind == 6) repostParse?.targetId ?: row.id else row.id,
+        )
+    }
 
     // For bridge reposts without p-tag, resolve the original author from the fetched event
-    val resolvedRepostAuthor by produceState<UserEntity?>(originalAuthorProfile, effectivePubkey, fetchedRepostEvent) {
+    val resolvedRepostAuthor by produceState<UserEntity?>(originalAuthorProfile, derived.effectivePubkey, fetchedRepostEvent) {
         if (originalAuthorProfile != null || lookupProfile == null) { value = originalAuthorProfile; return@produceState }
-        if (row.kind == 6 && (boostedJson != null || fetchedRepostEvent != null)) {
-            value = lookupProfile.invoke(effectivePubkey)
+        if (row.kind == 6 && (repostParse?.boostedJson != null || fetchedRepostEvent != null)) {
+            value = lookupProfile.invoke(derived.effectivePubkey)
         }
     }
     val repostProfile = originalAuthorProfile ?: resolvedRepostAuthor
 
     // ── DIAGNOSTIC: log when kind-6 repost target doesn't resolve ──────────
-    LaunchedEffect(row.id, boostedJson, fetchedRepostEvent) {
-        if (row.kind == 6 && boostedJson == null && fetchedRepostEvent == null && repostTargetId != null) {
+    LaunchedEffect(row.id, repostParse?.boostedJson, fetchedRepostEvent) {
+        if (row.kind == 6 && repostParse?.boostedJson == null && fetchedRepostEvent == null && repostParse?.targetId != null) {
             delay(6000) // Wait past lookupEvent's 5s timeout
-            Log.w("CardHydrator", "Outbox final: refId=${repostTargetId.take(12)} exists=false " +
+            Log.w("CardHydrator", "Outbox final: refId=${repostParse!!.targetId!!.take(12)} exists=false " +
                 "kind=null author=null relayUrl=null contentLen=0 " +
                 "referencedBy=${row.id.take(12)} referencedByKind=6 phase=unresolved")
-        } else if (row.kind == 6 && boostedJson == null && fetchedRepostEvent != null) {
+        } else if (row.kind == 6 && repostParse?.boostedJson == null && fetchedRepostEvent != null) {
             if (fetchedRepostEvent!!.content.isBlank()) {
-                Log.w("CardHydrator", "Outbox final: refId=${repostTargetId?.take(12)} exists=true " +
+                Log.w("CardHydrator", "Outbox final: refId=${repostParse?.targetId?.take(12)} exists=true " +
                     "kind=${fetchedRepostEvent!!.kind} author=${fetchedRepostEvent!!.pubkey.take(12)} " +
                     "relayUrl=${fetchedRepostEvent!!.relayUrl} contentLen=0 " +
                     "referencedBy=${row.id.take(12)} referencedByKind=6 phase=fetched-empty")
@@ -361,14 +403,11 @@ fun NoteCard(
         }
     }
 
-    // For kind-6 reposts, navigate to the referenced event, not the wrapper
-    val navigateId = if (row.kind == 6) repostTargetId ?: row.id else row.id
-
     // ── NIP-19 nostr: URI extraction (strip before other URL processing) ──────
     // Merge relay hints from q-tags into nevent-derived EventRefs
     val qTagHints = remember(row.tags) { extractQTagHints(row.tags) }
-    val nostrRefs = remember(effectiveContent, qTagHints) {
-        NOSTR_URI_REGEX.findAll(effectiveContent)
+    val nostrRefs = remember(derived.effectiveContent, qTagHints) {
+        NOSTR_URI_REGEX.findAll(derived.effectiveContent)
             .mapNotNull { decodeNostrRef(it.value) }
             .map { ref ->
                 if (ref is NostrRef.EventRef) {
@@ -379,23 +418,15 @@ fun NoteCard(
             }
             .toList()
     }
-    val contentNoNostr = NOSTR_EVENT_URI_REGEX.replace(effectiveContent, "").trim()
 
     // ── Media extraction: regex from content + imeta from tags ────────────────
-    // For kind-6 reposts, use the ORIGINAL event's tags (from embedded JSON or
-    // fetched event) since the repost wrapper tags rarely carry imeta.
-    val effectiveTags = if (row.kind == 6) {
-        boostedJson?.get("tags")?.toString()
-            ?: fetchedRepostEvent?.tags
-            ?: row.tags
-    } else row.tags
-    val imetaMedia = remember(effectiveTags) { ImetaParser.parse(effectiveTags) }
-    val mediaExtraction = remember(row.id, contentNoNostr) {
+    val imetaMedia = remember(derived.effectiveTags) { ImetaParser.parse(derived.effectiveTags) }
+    val mediaExtraction = remember(row.id, derived.contentNoNostr) {
         // 1. Extract YouTube URLs first (web pages, not playable files).
-        val youtubeEmbeds = YOUTUBE_URL_REGEX.findAll(contentNoNostr).map { match ->
+        val youtubeEmbeds = YOUTUBE_URL_REGEX.findAll(derived.contentNoNostr).map { match ->
             YouTubeEmbed(url = match.value, videoId = match.groupValues[1])
         }.toList()
-        val afterYoutube = YOUTUBE_URL_REGEX.replace(contentNoNostr, "")
+        val afterYoutube = YOUTUBE_URL_REGEX.replace(derived.contentNoNostr, "")
 
         // 2. Extract direct video file URLs (e.g. .mp4) — only inline-playable files.
         val regexVideoUrls = VIDEO_URL_REGEX.findAll(afterYoutube).map { it.value }.toList()
@@ -438,7 +469,7 @@ fun NoteCard(
         modifier = modifier
             .fillMaxWidth()
             .background(Color.White.copy(alpha = flashAlpha.value * 0.05f))
-            .clickable { onNoteClick(navigateId) },
+            .clickable { onNoteClick(derived.navigateId) },
     ) {
 
         // ── Boost header (kind 6 only) ─────────────────────────────────────────
@@ -447,7 +478,7 @@ fun NoteCard(
             Row(
                 modifier          = Modifier
                     .fillMaxWidth()
-                    .clickable { onNoteClick(navigateId) }
+                    .clickable { onNoteClick(derived.navigateId) }
                     .padding(horizontal = Spacing.medium)
                     .padding(top = Spacing.micro),
                 verticalAlignment = Alignment.CenterVertically,
@@ -486,12 +517,12 @@ fun NoteCard(
             Row(
                 modifier          = Modifier
                     .weight(1f)
-                    .clickable { onAuthorClick(effectivePubkey) },
+                    .clickable { onAuthorClick(derived.effectivePubkey) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AvatarImage(
-                    pubkey   = effectivePubkey,
-                    picture  = if (boostedJson == null && fetchedRepostEvent == null) row.authorPicture
+                    pubkey   = derived.effectivePubkey,
+                    picture  = if (repostParse?.boostedJson == null && fetchedRepostEvent == null) row.authorPicture
                                else repostProfile?.picture,
                     modifier = Modifier.size(Sizing.avatar),
                 )
@@ -501,10 +532,10 @@ fun NoteCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text       = if (boostedJson != null || fetchedRepostEvent != null) {
+                        text       = if (repostParse?.boostedJson != null || fetchedRepostEvent != null) {
                             repostProfile?.displayName?.takeIf { it.isNotBlank() }
                                 ?: repostProfile?.name?.takeIf { it.isNotBlank() }
-                                ?: "${effectivePubkey.take(6)}…${effectivePubkey.takeLast(4)}"
+                                ?: "${derived.effectivePubkey.take(6)}…${derived.effectivePubkey.takeLast(4)}"
                         } else {
                             row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
                         },
@@ -515,7 +546,7 @@ fun NoteCard(
                         overflow   = TextOverflow.Ellipsis,
                         modifier   = Modifier.weight(1f, fill = false),
                     )
-                    val nip05 = if (boostedJson == null && fetchedRepostEvent == null) row.authorNip05
+                    val nip05 = if (repostParse?.boostedJson == null && fetchedRepostEvent == null) row.authorNip05
                                else repostProfile?.nip05
                     if (!nip05.isNullOrBlank()) {
                         Spacer(Modifier.width(4.dp))
@@ -538,10 +569,10 @@ fun NoteCard(
             }
             Spacer(Modifier.width(Spacing.micro))
             Text(
-                text     = relativeTime(effectiveCreatedAt),
+                text     = relativeTime(derived.effectiveCreatedAt),
                 color    = TextSecondary,
                 fontSize = AppType.footnote,
-                modifier = Modifier.clickable { onNoteClick(navigateId) },
+                modifier = Modifier.clickable { onNoteClick(derived.navigateId) },
             )
         }
 
@@ -568,7 +599,7 @@ fun NoteCard(
                 content       = textContent,
                 lookupProfile = lookupProfile,
                 onAuthorClick = onAuthorClick,
-                onTextClick   = { onNoteClick(navigateId) },
+                onTextClick   = { onNoteClick(derived.navigateId) },
                 maxLines      = if (isLong && !expanded) 8 else Int.MAX_VALUE,
                 overflow      = if (isLong && !expanded) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier      = Modifier
@@ -679,7 +710,7 @@ fun NoteCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onNoteClick(navigateId) }
+                .clickable { onNoteClick(derived.navigateId) }
                 .padding(bottom = Spacing.small),
             verticalAlignment = Alignment.CenterVertically,
         ) {
