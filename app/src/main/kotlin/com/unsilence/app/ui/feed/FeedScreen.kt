@@ -302,53 +302,65 @@ fun FeedScreen(
                         viewModel.onScrollPositionChanged(index, offset)
                         viewModel.saveScrollPosition(index, offset)
                         val total = listState.layoutInfo.totalItemsCount
-                        if (total > 0 && lastVisible >= total / 2) {
+                        val threshold = if (FeedWindowFlag.USE_WINDOW_LOADER) {
+                            // Window loader: fire at N cards from bottom
+                            total - FeedWindowConfig.AUTO_LOAD_MORE_THRESHOLD
+                        } else {
+                            // Legacy: fire when past halfway
+                            total / 2
+                        }
+                        if (total > 0 && lastVisible >= threshold) {
                             viewModel.loadMore()
                         }
                     }
                 }
 
-                // Queue gate: pause discretionary hydration when items are pending
-                val controller = viewModel.hydrationController
-                LaunchedEffect(reducerState.unreadCount) {
-                    controller.onPendingCountChanged(reducerState.unreadCount)
-                }
-
-                // Hydration controller: sampled at 16 Hz (60ms) to avoid
-                // running the state machine at display refresh rate (120 Hz).
-                // Scroll start/stop edges fire immediately via a separate flow.
-                LaunchedEffect(listState) {
-                    // Immediate edge detection — fires only on actual changes
-                    launch {
-                        snapshotFlow { listState.isScrollInProgress }
-                            .distinctUntilChanged()
-                            .collect { isScrolling ->
-                                if (isScrolling) controller.onScrollStarted()
-                                else controller.onScrollStopped()
-                            }
+                // Scroll-driven hydration: disabled when window loader is active.
+                // When flag is on, FeedWindowLoader handles all hydration on
+                // feed switch — scroll triggers NOTHING.
+                if (!FeedWindowFlag.USE_WINDOW_LOADER) {
+                    val controller = viewModel.hydrationController
+                    // Queue gate: pause discretionary hydration when items are pending
+                    LaunchedEffect(reducerState.unreadCount) {
+                        controller.onPendingCountChanged(reducerState.unreadCount)
                     }
 
-                    // Sampled layout snapshot — 16 Hz max
-                    @OptIn(kotlinx.coroutines.FlowPreview::class)
-                    snapshotFlow {
-                        Triple(
-                            listState.firstVisibleItemScrollOffset,
-                            listState.isScrollInProgress,
-                            listState.layoutInfo.visibleItemsInfo
-                                .mapNotNull { it.key as? String }
-                                .toSet()
-                        )
-                    }
-                    .sample(60)
-                    .collect { (scrollOffset, isScrolling, visibleIds) ->
-                        val latestEvents = currentEvents
-                        val visibleEvents = latestEvents.filter { it.id in visibleIds }
-                        controller.onScrollFrame(
-                            visibleItems = visibleEvents,
-                            allEvents = latestEvents,
-                            scrollPixelOffset = scrollOffset,
-                            isScrollInProgress = isScrolling,
-                        )
+                    // Hydration controller: sampled at 16 Hz (60ms) to avoid
+                    // running the state machine at display refresh rate (120 Hz).
+                    // Scroll start/stop edges fire immediately via a separate flow.
+                    LaunchedEffect(listState) {
+                        // Immediate edge detection — fires only on actual changes
+                        launch {
+                            snapshotFlow { listState.isScrollInProgress }
+                                .distinctUntilChanged()
+                                .collect { isScrolling ->
+                                    if (isScrolling) controller.onScrollStarted()
+                                    else controller.onScrollStopped()
+                                }
+                        }
+
+                        // Sampled layout snapshot — 16 Hz max
+                        @OptIn(kotlinx.coroutines.FlowPreview::class)
+                        snapshotFlow {
+                            Triple(
+                                listState.firstVisibleItemScrollOffset,
+                                listState.isScrollInProgress,
+                                listState.layoutInfo.visibleItemsInfo
+                                    .mapNotNull { it.key as? String }
+                                    .toSet()
+                            )
+                        }
+                        .sample(60)
+                        .collect { (scrollOffset, isScrolling, visibleIds) ->
+                            val latestEvents = currentEvents
+                            val visibleEvents = latestEvents.filter { it.id in visibleIds }
+                            controller.onScrollFrame(
+                                visibleItems = visibleEvents,
+                                allEvents = latestEvents,
+                                scrollPixelOffset = scrollOffset,
+                                isScrollInProgress = isScrolling,
+                            )
+                        }
                     }
                 }
 
