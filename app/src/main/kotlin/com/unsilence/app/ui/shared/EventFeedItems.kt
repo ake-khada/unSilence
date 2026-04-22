@@ -51,6 +51,7 @@ import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.feedImageAspectRatio
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
@@ -272,7 +273,7 @@ internal fun ThreadParentCard(
             Spacer(Modifier.width(6.dp))
             Text(
                 text = author?.displayName?.takeIf { it.isNotBlank() }
-                    ?: author?.name?.takeIf { it.isNotBlank() }
+                    ?: author?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                     ?: "${event.pubkey.take(6)}…${event.pubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
