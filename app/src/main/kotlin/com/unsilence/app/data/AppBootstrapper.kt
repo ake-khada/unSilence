@@ -129,6 +129,12 @@ class AppBootstrapper @Inject constructor(
 
         // Step 1: Connect to indexer relays
         val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
+        // Register indexer relays as PERSISTENT so sendOneShotBatch always reuses
+        // them instead of opening ephemeral WebSockets. Indexers carry no feed
+        // subscriptions — idle cost is just WebSocket keep-alive pings.
+        for (rawUrl in indexerUrls) {
+            normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+        }
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
