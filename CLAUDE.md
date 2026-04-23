@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 22, 2026 (Deterministic cold-start: ColdStartState enum replaces boolean splash, 10s+5s timeouts match bootstrapper, no Global flash.)
+**Last updated:** April 23, 2026 (Feed pipeline: FeedWindowLoader is sole hydration path; scroll-driven FeedHydrationController deleted; explicit Load More button replaces auto-threshold pagination.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -71,7 +71,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
 - **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed), ephemeral one-shot path (`sendOneShotBatch` + `openEphemeral`) for cap-bypassing fetches
 - **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, `synchronized`-based coalescing (200ms window), `PersistentSet<String>` knownIds
-- **FeedHydrationController** — 5-state scroll machine (WARM_CATCHUP/SLOW_SCROLL/IDLE/FAST_SCROLL/REST), CardHydrator as stateless worker, velocity hysteresis, per-item bitmask ledger, sampled at 16 Hz
+- **FeedWindowLoader** — bounded-window feed hydration: Phase A (event discovery via ephemeral REQs) + Phase B (parallel hydration: relay lists, engagement, profiles, refs, media). Explicit Load More button triggers `loadMore()` for next page. `FeedWindowConfig` holds all constants (WINDOW_SIZE=300, relay fanout, freshness TTLs)
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
 - **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.) with own-pubkey + p-tag-mentioned anchors, feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets
 - **MesMetricsLogger** — ProcessLifecycleOwner-driven 60s foreground logger (`MES/size` tag). Reports per-collection counts, per-kind breakdown, actor indexes, external cache sizes, eviction anchor counts, relay dedup metrics. `MesMetrics.kt` data class + `MES.snapshotSize()`
@@ -85,7 +85,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 
 ## Features — Shipped
 
-Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, infinite scroll, blue dot, deterministic cold-start) · Content (kind 1/6/30023, @mentions, quotes, OG previews, YouTube, media grids) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, deterministic cold-start splash)
+Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, Load More pagination, blue dot, deterministic cold-start) · Content (kind 1/6/30023, @mentions, quotes, OG previews, YouTube, media grids) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, deterministic cold-start splash)
 
 ---
 
@@ -148,19 +148,19 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 25. **Ephemeral connections never enter `connections` map** — no cap, no reconnect, no idle eviction. Lifecycle: connect → REQ → EVENT* → EOSE → CLOSE → close WebSocket. Per-URL 50ms CAS-guarded rate limit via `ephemeralLastOpenNanos`
 
 ### Feed & Hydration
-26. **Render-then-hydrate architecture** — MES signals drive the reducer immediately; WARM zone catches up after. Don't gate on hydration completion at reducer level
+26. **Render-then-hydrate architecture** — MES signals drive the reducer immediately; FeedWindowLoader hydrates in parallel. Don't gate on hydration completion at reducer level
 27. **FeedStateReducer state: immutable only** — `PersistentSet<String>` for knownIds, O(delta) updates. No mutable collections in ReducerState
 28. **Pagination cursor is reducer-owned** — `oldestCreatedAt` in `ReducerState`. No `minOfOrNull` outside the reducer
 29. **Engagement freshness uses tiered thresholds** — route through `freshnessThreshold()`. Don't use raw `ENGAGEMENT_STALE_MS` as sole threshold
 30. **State machines, not booleans** — multi-state properties must be enums. Booleans collapse intermediate states
-31. **Load-aware, not time-based** — triggers use compound readiness conditions, not naive `delay()`. Integrate with HydrationCtrl state machine
+31. **Pagination guard: don't advance on empty** — `lastOldestTimestamp` only advances on non-empty loadMore results. Empty results leave the guard alone, allowing retry when new content arrives via live-tail
 
 ### Media
 32. **Media aspect ratios are layout-locked after first compose** — three-tier resolution (imeta → MMR → ImageDimensionCache). ONE update from default→resolved permitted, then locked
 33. **ImageDimensionCache clamps ratios to 0.2f..5.0f** — malformed dimensions from servers must not corrupt layout
 34. **Zero-height guard on imeta dims** — `&& it.height != 0` at all parse/resolve sites (EventProcessor, MES snapshot restore, NoteCard, VideoRenderModel)
 35. **MES sidecar caches** — `videoRenderModelsByEventId` and `imetaImageDimsByEventId` cleared in `MES.clear()`, populated in `insertFromSnapshot()`
-36. **WARM_CATCHUP runs media hydration (MMR cap 3)** — first-visible items get pre-resolved before user scrolls
+36. **FeedWindowLoader B.4 media hydration** — parses imeta dims at window load time, populating sidecar caches for layout-locked first render
 37. **"Failed to call close" from MMR is framework-owned** — ~24/session, no functional effect. Re-audit if >50/session
 
 ### Shared Utilities
@@ -191,7 +191,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 
 **Rate-limit exhaustion:** `grep "token exhausted" | grep -oE "wss://[^ ]+" | sort | uniq -c | sort -rn`
 **Subscription leaks:** grep for `Search EVENT received` after last `closeSearch` timestamp
-**Controller rate:** `grep -c HydrationCtrl` per minute — above 50 means throttle is broken
+**Window loader:** `grep "FeedWindow:" | grep "events="` — verify window sizes and coverage percentages
 **Validation discipline:** failed criteria = revert first, investigate second. "Pre-existing" requires evidence from a comparable baseline
 **MES memory:** `adb logcat -s "MES/size"` — 4-line emission every 60s while foreground. Tracks events (per-kind), profiles, actor indexes, feedRowCache, VideoThumbnailCache bitmap bytes, ImageDimensionCache entries. Trim events logged under `MES` tag
 
@@ -228,8 +228,8 @@ app/src/main/kotlin/com/unsilence/app/
 ├── di/              Hilt modules
 ├── ui/
 │   ├── common/      LogoMark, LoadingScreen, EmptyState, ShimmerNoteCard, IdentIcon
-│   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, FeedHydrationController,
-│   │                NoteCard, ArticleCard, ImageDimensionCache, VideoThumbnailCache
+│   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, FeedWindowLoader,
+│   │                FeedWindowConfig, NoteCard, ArticleCard, ImageDimensionCache, VideoThumbnailCache
 │   ├── navigation/  AppNavigation
 │   ├── compose/     ComposeScreen, ComposeViewModel
 │   ├── notifications/ NotificationsScreen, NotificationsViewModel
