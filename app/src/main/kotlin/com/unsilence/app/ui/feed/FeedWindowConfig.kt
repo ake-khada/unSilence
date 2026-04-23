@@ -2,7 +2,7 @@ package com.unsilence.app.ui.feed
 
 /**
  * Centralized constants for bounded-window feed hydration.
- * Used by [FeedWindowLoader] when [FeedWindowFlag.USE_WINDOW_LOADER] is true.
+ * Used by [FeedWindowLoader] for bounded-window feed loading.
  */
 object FeedWindowConfig {
     const val WINDOW_SIZE = 300
