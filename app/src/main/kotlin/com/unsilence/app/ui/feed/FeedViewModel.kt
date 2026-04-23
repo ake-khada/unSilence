@@ -147,7 +147,7 @@ class FeedViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
-    private val _displayLimit = MutableStateFlow(200)
+    private val _displayLimit = MutableStateFlow(FeedWindowConfig.WINDOW_SIZE)
 
     fun updateFilter(filter: FeedFilter) { _filter.value = filter }
 
@@ -330,15 +330,20 @@ class FeedViewModel @Inject constructor(
         // we know how many events arrived. Prevents 350→650 jolt on empty results
         // and allows retry when loadMore returns 0.
         viewModelScope.launch(Dispatchers.IO) {
-            Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
-            val result = feedWindowLoader.loadMore(type, oldest)
-            if (result.eventIds.isNotEmpty()) {
-                lastOldestTimestamp = oldest
-                _displayLimit.value = (_displayLimit.value + result.eventIds.size).coerceAtMost(3000)
-                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
-                Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
-            } else {
-                Log.d("FeedViewModel", "loadMore (window): 0 events, cursor not advanced")
+            try {
+                Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
+                val result = feedWindowLoader.loadMore(type, oldest)
+                if (result.eventIds.isNotEmpty()) {
+                    lastOldestTimestamp = oldest
+                    _displayLimit.value = (_displayLimit.value + FeedWindowConfig.WINDOW_SIZE).coerceAtMost(3000)
+                    feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+                    Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
+                } else {
+                    lastOldestTimestamp = oldest  // prevent retry with same cursor
+                    Log.d("FeedViewModel", "loadMore (window): 0 events, end of history")
+                }
+            } finally {
+                _isLoadingMore.value = false
             }
         }
     }
@@ -444,7 +449,7 @@ class FeedViewModel @Inject constructor(
                         _restoreGeneration.value++
                     } else {
                         lastOldestTimestamp = 0L
-                        _displayLimit.value = 50
+                        _displayLimit.value = FeedWindowConfig.WINDOW_SIZE
                     }
                     lastLoadMoreTime = 0L
                     _isLoadingMore.value = false
