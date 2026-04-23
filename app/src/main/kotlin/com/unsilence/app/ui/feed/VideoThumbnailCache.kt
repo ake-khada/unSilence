@@ -14,7 +14,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "VideoThumbCache"
-private const val MAX_ENTRIES = 100
+private const val MAX_ENTRIES = 30
 private const val MAX_BITMAP_BYTES = 64L * 1024 * 1024 // 64MB
 private const val DOWNSAMPLE = 2 // inSampleSize — halves each dimension → ~4x smaller bitmaps
 
@@ -140,7 +140,10 @@ class VideoThumbnailCache @Inject constructor(
         source.recycle()
 
         val bytes = baos.toByteArray()
-        val opts = BitmapFactory.Options().apply { inSampleSize = DOWNSAMPLE }
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = DOWNSAMPLE
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
             ?: BitmapFactory.decodeByteArray(bytes, 0, bytes.size) // fallback without downsample
     }

@@ -76,6 +76,13 @@ class VideoPlaybackScope(
     fun toggleMute() { isMuted = !isMuted }
 
     fun openFullscreen(noteId: String) {
+        val wasActive = activeVideoNoteId
+        if (noteId != wasActive) {
+            // Different video — clear decoder output so the dialog doesn't
+            // flash the old video's last frame while LaunchedEffect swaps media.
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+        }
         activeVideoNoteId = noteId
         preFullscreenMuted = isMuted
         isMuted = false
