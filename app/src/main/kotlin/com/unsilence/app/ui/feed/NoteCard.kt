@@ -1835,7 +1835,7 @@ private fun EmbeddedQuoteCard(
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(4f / 3f)
+                                .aspectRatio(16f / 9f)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(MediaPlaceholder),
                         )
@@ -2190,7 +2190,7 @@ internal fun LinkPreviewCard(
                 val density = LocalDensity.current
                 val config = LocalConfiguration.current
                 val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
-                val heightPx = (widthPx * 3) / 4
+                val heightPx = (widthPx * 9) / 16
                 SubcomposeAsyncImage(
                     model              = rememberSizedImageRequest(loadedOg.imageUrl, widthPx, heightPx),
                     contentDescription = null,
@@ -2199,14 +2199,14 @@ internal fun LinkPreviewCard(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(4f / 3f)
+                                .aspectRatio(16f / 9f)
                                 .background(MediaPlaceholder),
                         )
                     },
                     error              = { imageLoadFailed = true },
                     modifier           = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(4f / 3f)
+                        .aspectRatio(16f / 9f)
                         .clip(RoundedCornerShape(
                             topStart = Sizing.mediaCornerRadius,
                             topEnd = Sizing.mediaCornerRadius,
@@ -2258,7 +2258,7 @@ internal fun LinkPreviewCard(
                 .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
-            Box(Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(MediaPlaceholder))
+            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MediaPlaceholder))
             Column(modifier = Modifier.padding(Spacing.small)) {
                 Box(Modifier.fillMaxWidth(0.8f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
                 Spacer(Modifier.height(4.dp))
