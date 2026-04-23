@@ -60,7 +60,8 @@ import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
@@ -269,41 +270,52 @@ fun FeedScreen(
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                     )
 
-                    if (isLoadingMore) {
-                        item(key = "loading-more") {
+                    // "Load more" button at the end of the current batch.
+                    // Transitions to a spinner while loading.
+                    if (events.isNotEmpty()) {
+                        item(key = "load-more") {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(64.dp),
+                                    .padding(vertical = Spacing.large),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(24.dp),
-                                    color = Cyan,
-                                    strokeWidth = 2.dp,
-                                )
+                                if (isLoadingMore) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = TextSecondary,
+                                        strokeWidth = 1.5.dp,
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Load more",
+                                        fontSize = AppType.bodySmall,
+                                        color = TextSecondary,
+                                        modifier = Modifier
+                                            .clickable(
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null,
+                                            ) { viewModel.loadMore() }
+                                            .background(
+                                                color = Surface1,
+                                                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                                            )
+                                            .padding(horizontal = Spacing.large, vertical = Spacing.small),
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                // Scroll position tracking + pagination (merged observer)
+                // Scroll position tracking
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
-                        Triple(
-                            listState.firstVisibleItemIndex,
-                            listState.firstVisibleItemScrollOffset,
-                            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0,
-                        )
-                    }.sample(100).collect { (index, offset, lastVisible) ->
+                        listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+                    }.sample(100).collect { (index, offset) ->
                         viewModel.onScrollPositionChanged(index, offset)
                         viewModel.saveScrollPosition(index, offset)
-                        val total = listState.layoutInfo.totalItemsCount
-                        val threshold = total - FeedWindowConfig.AUTO_LOAD_MORE_THRESHOLD
-                        if (total > 0 && lastVisible >= threshold) {
-                            viewModel.loadMore()
-                        }
                     }
                 }
 
