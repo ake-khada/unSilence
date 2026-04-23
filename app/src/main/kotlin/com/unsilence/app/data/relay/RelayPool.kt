@@ -251,9 +251,10 @@ class RelayPool @Inject constructor(
     companion object {
         const val MAX_CONCURRENT_REQS_PER_RELAY = 10
         const val IDLE_EVICTION_THRESHOLD_MS = 60_000L
-        const val OUTBOX_IDLE_EVICTION_MS = 30_000L
-        const val STEADY_STATE_DELAY_MS = 30_000L
-        const val STEADY_STATE_CAP = 10
+        // Safety rail against runaway bugs. Not a resource policy.
+        // OutboxRouter self-limits to top-N. BROWSE is session-scoped.
+        // If this fires, something is misbehaving — investigate.
+        const val POOL_SAFETY_CAP = 50
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
@@ -263,8 +264,6 @@ class RelayPool @Inject constructor(
             "9bbbb845e5b6c831c29789900769843ab43bb5047abe697870cb50b6fc9bf923"
     }
 
-    /** After bootstrap settles (30s), tighten cap to [STEADY_STATE_CAP] for non-PERSISTENT. */
-    @Volatile private var steadyStateActive = false
     /** Active one-shot sub count per relay URL. */
     private val relayOneShotCount = ConcurrentHashMap<String, AtomicInteger>()
     /** Queued REQs per relay — sent when slots free up. */
@@ -347,24 +346,49 @@ class RelayPool @Inject constructor(
         }
     }
 
+    /** Safety rail: reject new connections if pool is at capacity. */
+    private fun canOpenNewConnection(): Boolean {
+        val size = connections.size
+        if (size >= POOL_SAFETY_CAP) {
+            Log.w(TAG, "Pool safety cap reached ($size/$POOL_SAFETY_CAP) — this shouldn't happen, investigate")
+            return false
+        }
+        return true
+    }
+
+    private fun logPoolState() {
+        val purposeCounts = mutableMapOf<String, Int>()
+        for ((url, _) in connections) {
+            val purposes = connectionPurposes[url]
+            if (purposes.isNullOrEmpty()) {
+                purposeCounts["NONE"] = (purposeCounts["NONE"] ?: 0) + 1
+            } else {
+                for (p in purposes) {
+                    val key = p.name
+                    purposeCounts[key] = (purposeCounts[key] ?: 0) + 1
+                }
+            }
+        }
+        Log.d(TAG, "Pool: total=${connections.size} $purposeCounts")
+    }
+
     /**
-     * Try to evict one idle BROWSE or OUTBOX connection to make room for a new one.
+     * Try to evict one idle BROWSE connection to make room for a new one.
      * Returns true if a connection was evicted.
      */
     private fun evictIdleConnection(): Boolean {
         val now = System.currentTimeMillis()
-        // Find BROWSE/OUTBOX-only connections that exceed their idle threshold.
-        // OUTBOX uses 30s (radios idle sooner), BROWSE uses 60s.
+        // Only BROWSE-only connections are evictable. OUTBOX connections are
+        // intentional long-lived connections (outbox routing). PERSISTENT is exempt.
         val candidate = connections.entries
             .filter { (url, _) ->
                 !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                (hasPurpose(url, ConnectionPurpose.BROWSE) || hasPurpose(url, ConnectionPurpose.OUTBOX))
+                !hasPurpose(url, ConnectionPurpose.OUTBOX) &&
+                hasPurpose(url, ConnectionPurpose.BROWSE)
             }
             .filter { (url, _) ->
                 val lastActive = connectionLastActivity[url] ?: 0L
-                val threshold = if (hasPurpose(url, ConnectionPurpose.OUTBOX) && !hasPurpose(url, ConnectionPurpose.BROWSE))
-                    OUTBOX_IDLE_EVICTION_MS else IDLE_EVICTION_THRESHOLD_MS
-                (now - lastActive) >= threshold
+                (now - lastActive) >= IDLE_EVICTION_THRESHOLD_MS
             }
             .maxByOrNull { (url, _) ->
                 // Evict the most idle connection first
@@ -386,22 +410,26 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Force-evict the most idle OUTBOX connection regardless of idle threshold.
-     * Falls back to the most idle non-home-feed connection if no OUTBOX candidates exist.
+     * Force-evict the most idle BROWSE connection regardless of idle threshold.
+     * Falls back to the most idle non-PERSISTENT/non-OUTBOX connection.
      * Used by [connectAndAwait] with forceEvict=true for critical one-shot queries
      * (e.g., NIP-45 COUNT) when the pool is at cap and normal eviction fails.
      */
     private fun forceEvictMostIdle(): Boolean {
         val now = System.currentTimeMillis()
-        // Prefer OUTBOX-only connections (expendable profile-specific connections)
+        // Prefer BROWSE-only connections (transient, expendable)
         val candidate = connections.entries
             .filter { (url, _) ->
-                hasPurpose(url, ConnectionPurpose.OUTBOX) &&
-                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
+                hasPurpose(url, ConnectionPurpose.BROWSE) &&
+                !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
+                !hasPurpose(url, ConnectionPurpose.OUTBOX)
             }
             .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
             ?: connections.entries
-                .filter { (url, _) -> !hasPurpose(url, ConnectionPurpose.PERSISTENT) }
+                .filter { (url, _) ->
+                    !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
+                    !hasPurpose(url, ConnectionPurpose.OUTBOX)
+                }
                 .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
         if (candidate != null) {
             val (url, conn) = candidate
@@ -438,20 +466,12 @@ class RelayPool @Inject constructor(
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
             }
         }
-        // Steady-state cap: 30s after startup, tighten to 10 non-PERSISTENT connections
+        // Periodic pool state logging — piggybacks on MesMetricsLogger cadence
+        // but also provides standalone fallback every 60s.
         scope.launch {
-            delay(STEADY_STATE_DELAY_MS)
-            steadyStateActive = true
-            Log.d(TAG, "Steady-state cap active: evicting idle non-PERSISTENT connections above $STEADY_STATE_CAP")
-            // Proactive sweep: evict OUTBOX/BROWSE connections above the steady-state cap
-            val nonPersistent = connections.entries.filter { (url, _) ->
-                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
-            }
-            if (nonPersistent.size > STEADY_STATE_CAP) {
-                val toEvict = nonPersistent.size - STEADY_STATE_CAP
-                var evicted = 0
-                repeat(toEvict) { if (evictIdleConnection()) evicted++ }
-                Log.d(TAG, "Steady-state sweep: evicted $evicted/${toEvict} idle connections (pool has ${connections.size})")
+            while (true) {
+                delay(60_000)
+                logPoolState()
             }
         }
     }
@@ -564,17 +584,7 @@ class RelayPool @Inject constructor(
                 continue
             }
             if (connections.containsKey(url)) continue
-            if (connections.size >= 13) {
-                // Try evicting an idle connection before giving up
-                if (!evictIdleConnection() && !(forceEvict && forceEvictMostIdle())) {
-                    val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-                    val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
-                    if (!isBrowse || browseCount >= 3) {
-                        Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                        continue
-                    }
-                }
-            }
+            if (!canOpenNewConnection()) continue
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
             connectionLastActivity[url] = System.currentTimeMillis()
@@ -787,17 +797,7 @@ class RelayPool @Inject constructor(
                 continue
             }
             if (connections.containsKey(url)) continue
-            if (connections.size + newUrls.size >= 13) {
-                // Try evicting an idle connection before giving up
-                if (!evictIdleConnection()) {
-                    val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-                    val isBrowse = hasPurpose(url, ConnectionPurpose.BROWSE)
-                    if (!isBrowse || browseCount >= 3) {
-                        Log.d(TAG, "Connection cap (13) reached — skipping $url")
-                        continue
-                    }
-                }
-            }
+            if (!canOpenNewConnection()) continue
             newUrls.add(url)
         }
 
@@ -1567,17 +1567,7 @@ class RelayPool @Inject constructor(
             Log.d(TAG, "Added authors subscription on existing $relayUrl (${authorPubkeys.size} authors)")
             return
         }
-        if (connections.size >= 13) {
-            // Try evicting an idle connection before giving up
-            if (!evictIdleConnection()) {
-                val browseCount = connections.keys.count { hasPurpose(it, ConnectionPurpose.BROWSE) && !hasPurpose(it, ConnectionPurpose.PERSISTENT) }
-                val isBrowse = hasPurpose(relayUrl, ConnectionPurpose.BROWSE)
-                if (!isBrowse || browseCount >= 3) {
-                    Log.d(TAG, "Connection cap (13) reached — skipping $relayUrl")
-                    return
-                }
-            }
-        }
+        if (!canOpenNewConnection()) return
         val conn = RelayConnection(relayUrl, okHttpClient)
         connections[relayUrl] = conn
         connectionLastActivity[relayUrl] = System.currentTimeMillis()

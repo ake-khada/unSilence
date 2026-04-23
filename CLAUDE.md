@@ -144,7 +144,7 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 21. **ProfileResolver call sites MUST pre-filter** — use `userRepository.fetchMissingProfiles` or `profileResolver.filterUnresolved()`. Grep for `Batch.*all fresh, skipping` to verify
 22. **fetchRelayEcosystem sends to write relays, not just indexers** — NIP-51 replaceable events live on write relays
 23. **NIP-51/NIP-65 relay events need direct-path insert** — kinds 10002/10006/10007/10012/30002 not in shouldChannel
-24. **One-shot fetches use `sendOneShotBatch`, NOT `connect()`** — pool-reuse for URLs already in `connections`, ephemeral WebSocket for others. Never `connect()` for one-shot REQs (it counts against the 13-connection cap). Migrated: fetchUserPosts, fetchOlderPosts, fetchProfiles, fetchProfilesFromHints, fetchProfilesFromSourceRelays
+24. **One-shot fetches use `sendOneShotBatch`, NOT `connect()`** — pool-reuse for URLs already in `connections`, ephemeral WebSocket for others. Never `connect()` for one-shot REQs (it counts against the pool safety cap). Migrated: fetchUserPosts, fetchOlderPosts, fetchProfiles, fetchProfilesFromHints, fetchProfilesFromSourceRelays
 25. **Ephemeral connections never enter `connections` map** — no cap, no reconnect, no idle eviction. Lifecycle: connect → REQ → EVENT* → EOSE → CLOSE → close WebSocket. Per-URL 50ms CAS-guarded rate limit via `ephemeralLastOpenNanos`
 
 ### Feed & Hydration
@@ -205,7 +205,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 
 **Logout:** `isLoggedIn=false` → `bootstrapper.teardown()` → `key(sessionKey)` forces fresh VM creation
 
-**Relay config:** 5 indexers (DataStore), 5 search (MES), 6 global defaults (RelayUrlUtil), cap 13+3 browse
+**Relay config:** 5 indexers (DataStore), 5 search (MES), 6 global defaults (RelayUrlUtil), safety cap 50 (POOL_SAFETY_CAP)
 
 **Notifications:** MES scan-based `getNotifications()` driven by `combine(_feedSignal, _statsSignal)`. Blue dot via DataStore per-user key
 
