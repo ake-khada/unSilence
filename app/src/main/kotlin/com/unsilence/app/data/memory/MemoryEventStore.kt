@@ -1394,6 +1394,8 @@ class MemoryEventStore @Inject constructor() {
     fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
         HashMap(relayMonitorsByUrl)
 
+    fun relayMonitorCount(): Int = relayMonitorsByUrl.size
+
     fun relayMonitorsFlow(): Flow<Map<String, RelayMonitorEntity>> =
         _relayMonitorSignal
             .map { getRelayMonitors() }

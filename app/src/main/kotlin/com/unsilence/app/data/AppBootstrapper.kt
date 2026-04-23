@@ -218,9 +218,21 @@ class AppBootstrapper @Inject constructor(
         // Fetch trust scores + relay monitors concurrently, targeted to user's relays only.
         // Snapshot-persisted so data is available immediately on next restart.
         val trustJob = scope.launch { relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls) }
-        val monitorJob = scope.launch { relayPool.fetchRelayMonitors() }
+        val monitorStalenessMs = 12L * 60 * 60 * 1000 // 12 hours
+        val monitorAge = System.currentTimeMillis() - relayPreferencesStore.lastMonitorFetchAt()
+        val hasMonitors = memoryEventStore.relayMonitorCount() > 0
+        val monitorJob = if (hasMonitors && monitorAge < monitorStalenessMs) {
+            Log.d(TAG, "Phase3: relay monitors fresh (age=${monitorAge / 60_000}min, count=${memoryEventStore.relayMonitorCount()}), skipping fetch")
+            null
+        } else {
+            Log.d(TAG, "Phase3: fetching relay monitors (age=${monitorAge / 60_000}min, hasMonitors=$hasMonitors)")
+            scope.launch {
+                relayPool.fetchRelayMonitors()
+                relayPreferencesStore.setLastMonitorFetchAt(System.currentTimeMillis())
+            }
+        }
         trustJob.join()
-        monitorJob.join()
+        monitorJob?.join()
 
         // Media preconnect is fire-and-forget — never block the bootstrap mutex.
         // supervisorScope inside warmUp waits for all HEAD requests; if one hangs

@@ -30,6 +30,7 @@ private val Context.relayPrefs: DataStore<Preferences> by preferencesDataStore(n
 private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
 private const val LAST_SEEN_PREFIX = "notif_last_seen_"
+private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
 
 @Singleton
 class RelayPreferencesStore @Inject constructor(
@@ -75,6 +76,16 @@ class RelayPreferencesStore @Inject constructor(
             val current = prefs[KEY_INDEXER_URLS] ?: emptySet()
             prefs[KEY_INDEXER_URLS] = current - url
         }
+    }
+
+    // ─── Relay Monitor Staleness ───────────────────────────────────────────
+
+    /** Returns 0L if never fetched. */
+    suspend fun lastMonitorFetchAt(): Long =
+        dataStore.data.first()[KEY_LAST_MONITOR_FETCH] ?: 0L
+
+    suspend fun setLastMonitorFetchAt(timestamp: Long) {
+        dataStore.edit { prefs -> prefs[KEY_LAST_MONITOR_FETCH] = timestamp }
     }
 
     // ─── Pinned Relays ──────────────────────────────────────────────────────
