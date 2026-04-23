@@ -332,24 +332,28 @@ class FeedViewModel @Inject constructor(
         if (oldest == Long.MAX_VALUE) return  // no events yet
 
         if (oldest == lastOldestTimestamp) return
-        lastOldestTimestamp = oldest
         lastLoadMoreTime = now
         _isLoadingMore.value = true  // For spinner UI
 
         if (FeedWindowFlag.USE_WINDOW_LOADER) {
             val type = _feedType.value
-            // Widen both the MES scan window AND trigger a window fetch.
-            // _displayLimit still gates the MES feedFlow() query in both paths;
-            // the window loader adds fresh events to MES but doesn't consume _displayLimit itself.
-            // When the old pipeline is deleted in Phase 3, _displayLimit gating goes away
-            // and the window size becomes the sole limit.
-            _displayLimit.value = (_displayLimit.value + FeedWindowConfig.WINDOW_SIZE).coerceAtMost(3000)
+            // Don't advance lastOldestTimestamp or grow _displayLimit until
+            // we know how many events arrived. Prevents 350→650 jolt on empty results
+            // and allows retry when loadMore returns 0.
             viewModelScope.launch(Dispatchers.IO) {
                 Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
                 val result = feedWindowLoader.loadMore(type, oldest)
-                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+                if (result.eventIds.isNotEmpty()) {
+                    lastOldestTimestamp = oldest
+                    _displayLimit.value = (_displayLimit.value + result.eventIds.size).coerceAtMost(3000)
+                    feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+                    Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
+                } else {
+                    Log.d("FeedViewModel", "loadMore (window): 0 events, cursor not advanced")
+                }
             }
         } else {
+            lastOldestTimestamp = oldest
             _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
             val urls = currentRelayUrls
             val limit = _displayLimit.value
