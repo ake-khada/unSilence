@@ -335,11 +335,10 @@ class FeedViewModel @Inject constructor(
                 val result = feedWindowLoader.loadMore(type, oldest)
                 if (result.eventIds.isNotEmpty()) {
                     lastOldestTimestamp = oldest
-                    _displayLimit.value = (_displayLimit.value + FeedWindowConfig.WINDOW_SIZE).coerceAtMost(3000)
+                    _displayLimit.value = (_displayLimit.value + result.eventIds.size).coerceAtMost(3000)
                     feedWindowLoader.startEngagementRefresh(type, result.eventIds)
                     Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
                 } else {
-                    lastOldestTimestamp = oldest  // prevent retry with same cursor
                     Log.d("FeedViewModel", "loadMore (window): 0 events, end of history")
                 }
             } finally {
