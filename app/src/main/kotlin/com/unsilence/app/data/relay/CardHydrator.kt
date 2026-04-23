@@ -62,13 +62,10 @@ class CardHydrator @Inject constructor(
     private val profileResolver: ProfileResolver,
 ) {
     /**
-     * Phase 1: Profile resolution only — avatar, name, identity.
-     * Fires immediately with no delay. Called from WARM_CATCHUP and SLOW_SCROLL
-     * BEFORE any ref/engagement work.
+     * Profile resolution — avatar, name, identity.
      *
      * @param fanOut When false, only fetches from indexer relays (fastest path).
-     *   Source relay and hint relay fetches are skipped — use [fanOutProfiles]
-     *   later in IDLE to catch up.
+     *   Source relay and hint relay fetches are skipped.
      */
     suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
@@ -115,47 +112,6 @@ class CardHydrator @Inject constructor(
         }
 
         Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
-    }
-
-    /**
-     * Deferred fan-out: source relay + hint relay profile fetches for items
-     * that were previously hydrated with fanOut=false during scroll.
-     * Called from IDLE to catch up on profiles that only exist on non-indexer relays.
-     */
-    suspend fun fanOutProfiles(events: List<FeedRow>, excludeSourceRelay: String? = null) {
-        if (events.isEmpty()) return
-
-        val pubkeys = mutableSetOf<String>()
-        val profileHints = mutableMapOf<String, MutableList<String>>()
-
-        for (event in events) {
-            pubkeys.add(event.pubkey)
-            if (event.kind == 6) {
-                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
-            }
-            extractProfileHints(event.content).forEach { (pk, relays) ->
-                pubkeys.add(pk)
-                profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
-            }
-        }
-
-        // Pre-filter: skip source/hint relay fan-out for already-fresh profiles
-        val unresolved = profileResolver.filterUnresolved(pubkeys)
-        if (unresolved.isEmpty()) return
-
-        val sourceRelays = events.map { it.relayUrl }.distinct()
-            .filter { it != excludeSourceRelay }
-        if (sourceRelays.isNotEmpty()) {
-            relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
-        }
-        if (profileHints.isNotEmpty()) {
-            val unresolvedHints = profileHints.filterKeys { it in unresolved }
-            if (unresolvedHints.isNotEmpty()) {
-                relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
-            }
-        }
-
-        Log.d(TAG, "Fan-out profiles: ${events.size} cards → ${unresolved.size}/${pubkeys.size} unresolved, ${events.map { it.relayUrl }.distinct().size} source relays")
     }
 
     /**

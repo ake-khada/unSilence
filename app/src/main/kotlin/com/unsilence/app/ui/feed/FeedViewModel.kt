@@ -15,7 +15,6 @@ import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayBrowseSession
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.cache.CoverageTracker
-import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -82,7 +81,6 @@ class FeedViewModel @Inject constructor(
     private val outboxRouter: OutboxRouter,
     private val browseSession: RelayBrowseSession,
     private val coverageTracker: CoverageTracker,
-    private val cardHydrator: CardHydrator,
     private val keyManager: KeyManager,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
@@ -222,14 +220,6 @@ class FeedViewModel @Inject constructor(
      * Used by LazyColumn items to resolve original author info on kind-6 reposts.
      * WhileSubscribed(5000) keeps the flow alive briefly when items scroll off-screen.
      */
-    // ── Hydration controller (replaces engagement channel + CardHydrator wrappers) ──
-    val hydrationController = FeedHydrationController(
-        scope = viewModelScope,
-        cardHydrator = cardHydrator,
-        relayPool = relayPool,
-        memoryEventStore = memoryEventStore,
-    )
-
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
         profileCache.getOrPut(pubkey) {
             userRepository.userFlow(pubkey)
@@ -335,31 +325,20 @@ class FeedViewModel @Inject constructor(
         lastLoadMoreTime = now
         _isLoadingMore.value = true  // For spinner UI
 
-        if (FeedWindowFlag.USE_WINDOW_LOADER) {
-            val type = _feedType.value
-            // Don't advance lastOldestTimestamp or grow _displayLimit until
-            // we know how many events arrived. Prevents 350→650 jolt on empty results
-            // and allows retry when loadMore returns 0.
-            viewModelScope.launch(Dispatchers.IO) {
-                Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
-                val result = feedWindowLoader.loadMore(type, oldest)
-                if (result.eventIds.isNotEmpty()) {
-                    lastOldestTimestamp = oldest
-                    _displayLimit.value = (_displayLimit.value + result.eventIds.size).coerceAtMost(3000)
-                    feedWindowLoader.startEngagementRefresh(type, result.eventIds)
-                    Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
-                } else {
-                    Log.d("FeedViewModel", "loadMore (window): 0 events, cursor not advanced")
-                }
-            }
-        } else {
-            lastOldestTimestamp = oldest
-            _displayLimit.value = (_displayLimit.value + 50).coerceAtMost(1000)
-            val urls = currentRelayUrls
-            val limit = _displayLimit.value
-            viewModelScope.launch(Dispatchers.IO) {
-                Log.d("FeedViewModel", "loadMore: cursor=$oldest, limit=$limit, relays=${urls.size}")
-                relayPool.fetchOlderEvents(urls, oldest)
+        val type = _feedType.value
+        // Don't advance lastOldestTimestamp or grow _displayLimit until
+        // we know how many events arrived. Prevents 350→650 jolt on empty results
+        // and allows retry when loadMore returns 0.
+        viewModelScope.launch(Dispatchers.IO) {
+            Log.d("FeedViewModel", "loadMore (window): cursor=$oldest feedType=$type")
+            val result = feedWindowLoader.loadMore(type, oldest)
+            if (result.eventIds.isNotEmpty()) {
+                lastOldestTimestamp = oldest
+                _displayLimit.value = (_displayLimit.value + result.eventIds.size).coerceAtMost(3000)
+                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
+                Log.d("FeedViewModel", "loadMore (window): +${result.eventIds.size} events, displayLimit=${_displayLimit.value}")
+            } else {
+                Log.d("FeedViewModel", "loadMore (window): 0 events, cursor not advanced")
             }
         }
     }
@@ -472,19 +451,10 @@ class FeedViewModel @Inject constructor(
                     // Only reset controller on actual feed switch, not on every Room re-emission
                     if (newKey != lastResetFeedKey) {
                         lastResetFeedKey = newKey
-                        if (FeedWindowFlag.USE_WINDOW_LOADER) {
-                            // Window loader path: disable scroll-driven hydration,
-                            // load initial window, start engagement refresh
-                            hydrationController.reset()
-                            feedWindowLoader.stopEngagementRefresh()
-                            viewModelScope.launch(Dispatchers.IO) {
-                                val result = feedWindowLoader.loadWindow(type, cursor = null)
-                                feedWindowLoader.startEngagementRefresh(type, result.eventIds)
-                            }
-                        } else {
-                            // Legacy path: scroll-driven hydration
-                            hydrationController.feedRelayUrl = (type as? FeedType.SingleRelay)?.url
-                            hydrationController.reset()
+                        feedWindowLoader.stopEngagementRefresh()
+                        viewModelScope.launch(Dispatchers.IO) {
+                            val result = feedWindowLoader.loadWindow(type, cursor = null)
+                            feedWindowLoader.startEngagementRefresh(type, result.eventIds)
                         }
                     }
 
