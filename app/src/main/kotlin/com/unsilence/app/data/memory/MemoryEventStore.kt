@@ -1870,6 +1870,7 @@ class MemoryEventStore @Inject constructor() {
         val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
 
         for (event in nonContentEvents) {
+            if (event.kind == 3) continue // Follows persisted in ---FOLLOWS--- section
             writer.write(serializeEvent(event))
             writer.newLine()
         }
@@ -1907,10 +1908,19 @@ class MemoryEventStore @Inject constructor() {
             writer.write("monitor|$url|${m.rttOpen ?: ""}|${m.rttRead ?: ""}|${m.rttWrite ?: ""}|${m.monitorPubkey}|${m.createdAt}|${m.network ?: ""}|${m.geohash ?: ""}|${m.iconUrl ?: ""}|${m.supportedNips.joinToString(",")}")
             writer.newLine()
         }
+        // Write follows section — compact direct persistence
+        // instead of serializing full kind-3 events with 600+ tags each.
+        writer.write("---FOLLOWS---")
+        writer.newLine()
+        for ((pubkey, follows) in followsByPubkey) {
+            val createdAt = followsCreatedAt[pubkey] ?: continue
+            writer.write("follows|$pubkey|$createdAt|${follows.joinToString(",")}")
+            writer.newLine()
+        }
     }
 
     suspend fun restoreSnapshotFrom(reader: BufferedReader) {
-        var section = 0  // 0=events, 1=aggregates, 2=relay_health
+        var section = 0  // 0=events, 1=aggregates, 2=relay_health, 3=follows
         var versionChecked = false
 
         reader.useLines { lines ->
@@ -1925,10 +1935,12 @@ class MemoryEventStore @Inject constructor() {
                 }
                 if (line == "---AGGREGATES---") { section = 1; continue }
                 if (line == "---RELAY_HEALTH---") { section = 2; continue }
+                if (line == "---FOLLOWS---") { section = 3; continue }
                 when (section) {
                     0 -> { val event = deserializeEvent(line) ?: continue; insertFromSnapshot(event) }
                     1 -> restoreAggregate(line)
                     2 -> restoreRelayHealth(line)
+                    3 -> restoreFollows(line)
                 }
             }
         }
@@ -2044,6 +2056,17 @@ class MemoryEventStore @Inject constructor() {
                 )
             }
         }
+    }
+
+    private fun restoreFollows(line: String) {
+        val parts = line.split("|", limit = 4)
+        if (parts.size < 4 || parts[0] != "follows") return
+        val pubkey = parts[1]
+        val createdAt = parts[2].toLongOrNull() ?: return
+        val pks = parts[3].split(",").filterTo(mutableSetOf()) { it.isNotBlank() }
+        if (pks.isEmpty()) return
+        followsByPubkey[pubkey] = pks
+        followsCreatedAt[pubkey] = createdAt
     }
 
     // ─── Serialization (NDJSON) ─────────────────────────────────────────────

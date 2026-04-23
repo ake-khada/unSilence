@@ -342,11 +342,9 @@ class EventProcessor @Inject constructor(
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
-        // Kind 3 is included so it reaches flushBatch → insert → eventsById,
-        // which makes it available for snapshot persistence. The direct-path
-        // updateFollows above provides immediate MES update; the cold channel
-        // provides the eventsById entry for snapshot serialization.
-        val shouldChannel = kind in setOf(0, 1, 3, 6, 7, 9734, 9735, 20, 21, 30023)
+        // Kind-3 is NOT channeled — updateFollows (above) provides the MES
+        // update, and the snapshot persists followsByPubkey directly.
+        val shouldChannel = kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023)
         if (shouldChannel) {
             val isHot = kind == 1 || kind == 6 || kind == 20 || kind == 21 || kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
