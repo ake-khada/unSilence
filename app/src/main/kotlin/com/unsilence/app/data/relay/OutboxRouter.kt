@@ -10,13 +10,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -49,6 +51,15 @@ class OutboxRouter @Inject constructor(
     /** URLs currently tagged OUTBOX — tracked so we can remove stale purposes on set change. */
     private var currentOutboxUrls: Set<String> = emptySet()
 
+    /** Fingerprint: normalized URL → sorted author pubkeys. Detects author-set expansion. */
+    private var lastRoutingFingerprint: Map<String?, List<String>>? = null
+
+    /** Follows whose kind-10002 has already been requested. Prevents redundant fetches. */
+    private val previouslyFetchedFollows: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Current follow set, kept up-to-date for scoping allRelayListsSnapshot. */
+    @Volatile private var currentFollows: Set<String> = emptySet()
+
     /**
      * Idempotent entry point. Called when the user switches to the Following feed.
      * Registers handlers and kicks off the relay fetch pipeline.
@@ -72,14 +83,20 @@ class OutboxRouter @Inject constructor(
         // ── Step 1: request the user's kind 3 from connected relays ──────────
         relayPool.fetchFollowList(userPubkeyHex)
 
-        // ── Step 2: when follows appear in MES, request their kind 10002 ─────
+        // ── Step 2: observe follows continuously, fetch kind-10002 for new ones ─
         routingScope.launch {
             memoryEventStore.followsFlow(userPubkeyHex)
-                .filter { it.isNotEmpty() }
-                .first()          // one-shot: take the first non-empty emission
-                .let { follows ->
-                    Log.d(TAG, "Follow list loaded: ${follows.size} follows — fetching relay lists")
-                    relayPool.fetchRelayLists(follows.toList())
+                .map { it.toSet() }
+                .distinctUntilChanged()
+                .collectLatest { follows ->
+                    if (follows.isEmpty()) return@collectLatest
+                    currentFollows = follows
+                    val newFollows = follows - previouslyFetchedFollows
+                    if (newFollows.isNotEmpty()) {
+                        Log.d(TAG, "Follow list: ${follows.size} total, ${newFollows.size} new — fetching relay lists")
+                        previouslyFetchedFollows.addAll(newFollows)
+                        relayPool.fetchRelayLists(newFollows.toList())
+                    }
                 }
         }
 
@@ -89,8 +106,17 @@ class OutboxRouter @Inject constructor(
             memoryEventStore.allRelayListsFlow()
                 .filter { it.isNotEmpty() }
                 .debounce(2000)
-                .collectLatest { relayLists ->
-                    routeToWriteRelays(relayLists)
+                .collectLatest { allRelayLists ->
+                    // Fix C: scope to follows only — exclude stray non-follow kind-10002
+                    val follows = currentFollows
+                    val scopedRelayLists = if (follows.isNotEmpty()) {
+                        allRelayLists.filterKeys { it in follows }
+                    } else {
+                        allRelayLists
+                    }
+                    if (scopedRelayLists.isNotEmpty()) {
+                        routeToWriteRelays(scopedRelayLists)
+                    }
                 }
         }
     }
@@ -106,6 +132,9 @@ class OutboxRouter @Inject constructor(
             relayPool.removePurpose(url, ConnectionPurpose.OUTBOX)
         }
         currentOutboxUrls = emptySet()
+        lastRoutingFingerprint = null
+        previouslyFetchedFollows.clear()
+        currentFollows = emptySet()
         Log.d(TAG, "Stopped")
     }
 
@@ -222,14 +251,21 @@ class OutboxRouter @Inject constructor(
             relayPool.removePurpose(url, ConnectionPurpose.OUTBOX)
         }
 
-        // Skip redundant routing if the URL set hasn't changed
-        if (newOutboxUrls == currentOutboxUrls && removed.isEmpty()) {
-            Log.d(TAG, "Routing unchanged (${newOutboxUrls.size} write relays, ${relayLists.size} relay lists) — skipping")
+        // Fix A: fingerprint includes author mapping, not just URL set.
+        // Detects author-set expansion (same relay, more follows mapped to it).
+        val newFingerprint = top.associate { (url, authors) ->
+            normalizeRelayUrl(url) to authors.sorted()
+        }
+        if (newFingerprint == lastRoutingFingerprint && removed.isEmpty()) {
+            Log.d(TAG, "Routing truly unchanged (${newOutboxUrls.size} relays, ${relayLists.size} lists) — skipping")
             return
         }
+        lastRoutingFingerprint = newFingerprint
         currentOutboxUrls = newOutboxUrls
 
-        Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} relay lists, ${removed.size} removed)")
+        val coveredAuthors = top.flatMap { it.value }.toSet().size
+        val totalFollows = currentFollows.size
+        Log.d(TAG, "Routing to ${top.size} write relays (${relayLists.size} lists, ${removed.size} removed, coverage=$coveredAuthors/$totalFollows)")
         for ((url, authors) in top) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.OUTBOX) }
             relayPool.connectForAuthors(url, authors)
