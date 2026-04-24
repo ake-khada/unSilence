@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 23, 2026 (Heat reduction: persistent indexer connections, relay monitor 12h staleness gate, direct follows snapshot persistence, OG preview 16:9.)
+**Last updated:** April 24, 2026 (Snapshot follows-first: cold-start race eliminated, early _followsSignal mid-restore. Indexer connectAndAwait before snapshot restore.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -79,7 +79,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → C
 - **VideoThumbnailCache** — first-frame thumbnails via MMR, downsampled (inSampleSize=2, ~1MB/thumb), LRU eviction at 100 entries OR 64MB bitmap total, `visibleUrls` set protects on-screen thumbnails from eviction
 - **SearchViewModel** — NIP-50 search, `AtomicLong` token tracking, debounce + collectLatest, CLOSE frames on supersede
 - **RelayPreferencesStore** — DataStore-backed, `Mutex`-guarded read-modify-write for indexer URLs, relay monitor staleness timestamp (`lastMonitorFetchAt`)
-- **SnapshotScheduler** — periodic + onStop save (3s timeout), AtomicFile for crash safety. Snapshot sections: events, `---AGGREGATES---`, `---RELAY_HEALTH---`, `---FOLLOWS---` (direct follows persistence, no kind-3 tag parsing)
+- **SnapshotScheduler** — periodic + onStop save (3s timeout), AtomicFile for crash safety. Snapshot section order: `---FOLLOWS---`, `---EVENTS---`, `---AGGREGATES---`, `---RELAY_HEALTH---`. Follows-first enables early `_followsSignal` mid-restore (before 25s event parse), eliminating cold-start Global→Following flash. Old snapshots (follows at end) still parse via implicit section 0 default
 
 ---
 
@@ -189,6 +189,8 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 ### Snapshot Persistence
 55. **Kind-3 is NOT channeled through EventProcessor** — `updateFollows` direct-path provides MES update; snapshot persists `followsByPubkey` directly in `---FOLLOWS---` section. Never re-add kind 3 to `shouldChannel`
 56. **Snapshot follows format** — `follows|pubkey|createdAt|hex1,hex2,...` — compact pipe-delimited, no tag parsing on restore. Backward-compatible: old snapshots with kind-3 events still restore via `insertFromSnapshot → handleFollows`
+57. **Follows-first snapshot order** — `saveSnapshotTo` writes `---FOLLOWS---` before `---EVENTS---`. On restore, `_followsSignal` fires at the `---EVENTS---` marker (mid-restore), enabling FeedVM cold-start to resolve in ~1.4s instead of waiting for 25s event parse. Old snapshots (no `---EVENTS---` marker) use implicit section 0 default — backward compatible
+58. **connectAndAwait BEFORE snapshot restore** — `AppBootstrapper` opens indexer connections before `restoreIfPresent()`. `sendOneShotBatch` checks `connections` map (not PERSISTENT purpose) — connections must be in the map for reuse during the 25s snapshot parse window
 
 ---
 
