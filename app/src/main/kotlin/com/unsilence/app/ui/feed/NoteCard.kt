@@ -655,7 +655,10 @@ fun NoteCard(
         }
 
         // ── BUG #4 FIX: Media grid for multiple images ──────────────────────
-        if (imageUrls.isNotEmpty()) {
+        // Suppress inline images when the note has link URLs — the OG preview
+        // card renders the article's hero image, making content images redundant.
+        // Videos always render (author-intentional, no OG equivalent).
+        if (imageUrls.isNotEmpty() && linkUrls.isEmpty()) {
             MediaGrid(
                 imageUrls  = imageUrls,
                 imetaMedia = imetaMedia,
@@ -707,7 +710,6 @@ fun NoteCard(
                 LinkPreviewCard(
                     url            = linkUrls.first(),
                     fetchOgMetadata = fetchOgMetadata,
-                    suppressImage  = imageUrls.isNotEmpty(),
                 )
                 linkUrls.drop(1).forEach { url -> LinkChip(url = url) }
             }
@@ -1820,7 +1822,9 @@ private fun EmbeddedQuoteCard(
                 }
 
                 // All images (grid for 2+, single full-width for 1)
-                if (quotedImages.isNotEmpty()) {
+                // Suppress inline images when quoted post has link URLs —
+                // OG preview card renders the article hero image instead.
+                if (quotedImages.isNotEmpty() && linkUrls.isEmpty()) {
                     val quoteDensity = LocalDensity.current
                     val quoteConfig = LocalConfiguration.current
                     val quoteWidthPx = with(quoteDensity) { quoteConfig.screenWidthDp.dp.roundToPx() }
@@ -1898,7 +1902,6 @@ private fun EmbeddedQuoteCard(
                     LinkPreviewCard(
                         url             = linkUrls.first(),
                         fetchOgMetadata = fetchOgMetadata,
-                        suppressImage   = quotedImages.isNotEmpty(),
                     )
                 }
 
@@ -2162,7 +2165,6 @@ private fun MentionChip(
 internal fun LinkPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
-    suppressImage: Boolean = false,
 ) {
     val uriHandler = LocalUriHandler.current
     val domain = remember(url) {
@@ -2189,7 +2191,7 @@ internal fun LinkPreviewCard(
                 .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
-            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed && !suppressImage) {
+            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
                 val density = LocalDensity.current
                 val config = LocalConfiguration.current
                 val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
