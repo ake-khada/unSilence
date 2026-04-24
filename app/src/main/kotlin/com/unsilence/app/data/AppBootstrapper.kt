@@ -123,20 +123,26 @@ class AppBootstrapper @Inject constructor(
             relayPreferencesStore.setIndexerUrls(DEFAULT_INDEXER_URLS)
         }
 
-        // Phase 1.5: Restore MemoryEventStore snapshot BEFORE relay connections
-        snapshotScheduler.restoreIfPresent()
-        Log.d(TAG, "Phase1.5: snapshot restore complete")
-
-        // Step 1: Connect to indexer relays
-        val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
         // Register indexer relays as PERSISTENT so sendOneShotBatch always reuses
         // them instead of opening ephemeral WebSockets. Indexers carry no feed
         // subscriptions — idle cost is just WebSocket keep-alive pings.
+        // Must happen BEFORE snapshot restore — other components (OutboxRouter,
+        // EventProcessor) fire batches during the 21s snapshot parse.
+        val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
         for (rawUrl in indexerUrls) {
             normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
+
+        // Step 1: Connect to indexer relays BEFORE snapshot restore.
+        // connectAndAwait adds to connections map immediately, enabling
+        // sendOneShotBatch reuse during the 21s snapshot parse window.
+        // No MES dependency — pure WebSocket establishment.
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
+
+        // Phase 1.5: Restore MemoryEventStore snapshot
+        snapshotScheduler.restoreIfPresent()
+        Log.d(TAG, "Phase1.5: snapshot restore complete")
 
         // Step 2: Fetch kind-3, wait for follows in MES
         relayPool.fetchFollowList(pubkeyHex)
