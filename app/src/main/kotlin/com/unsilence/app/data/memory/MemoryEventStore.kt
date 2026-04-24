@@ -1859,7 +1859,20 @@ class MemoryEventStore @Inject constructor() {
     suspend fun saveSnapshotTo(writer: BufferedWriter) {
         writer.write(SNAPSHOT_VERSION)
         writer.newLine()
-        // Write all non-content events + most recent content events (capped)
+        // Write follows FIRST — ~1KB, parsed in <30ms on restore.
+        // FeedVM's 10s cold-start timeout needs follows before the 25s
+        // event parse completes; placing follows first eliminates the race.
+        writer.write("---FOLLOWS---")
+        writer.newLine()
+        for ((pubkey, follows) in followsByPubkey) {
+            val createdAt = followsCreatedAt[pubkey] ?: continue
+            writer.write("follows|$pubkey|$createdAt|${follows.joinToString(",")}")
+            writer.newLine()
+        }
+        // Events section — explicit marker so reader can switch from follows.
+        // Old snapshots (pre-marker) start events implicitly at section 0.
+        writer.write("---EVENTS---")
+        writer.newLine()
         val contentEvents = mutableListOf<NostrEvent>()
         val nonContentEvents = mutableListOf<NostrEvent>()
         for (event in eventsById.values) {
@@ -1908,20 +1921,12 @@ class MemoryEventStore @Inject constructor() {
             writer.write("monitor|$url|${m.rttOpen ?: ""}|${m.rttRead ?: ""}|${m.rttWrite ?: ""}|${m.monitorPubkey}|${m.createdAt}|${m.network ?: ""}|${m.geohash ?: ""}|${m.iconUrl ?: ""}|${m.supportedNips.joinToString(",")}")
             writer.newLine()
         }
-        // Write follows section — compact direct persistence
-        // instead of serializing full kind-3 events with 600+ tags each.
-        writer.write("---FOLLOWS---")
-        writer.newLine()
-        for ((pubkey, follows) in followsByPubkey) {
-            val createdAt = followsCreatedAt[pubkey] ?: continue
-            writer.write("follows|$pubkey|$createdAt|${follows.joinToString(",")}")
-            writer.newLine()
-        }
     }
 
     suspend fun restoreSnapshotFrom(reader: BufferedReader) {
         var section = 0  // 0=events, 1=aggregates, 2=relay_health, 3=follows
         var versionChecked = false
+        var followsFiredEarly = false
 
         reader.useLines { lines ->
             for (line in lines) {
@@ -1932,6 +1937,16 @@ class MemoryEventStore @Inject constructor() {
                         return
                     }
                     continue
+                }
+                if (line == "---EVENTS---") {
+                    // Follows section complete (new-format snapshots write follows first).
+                    // Fire signal immediately so FeedVM cold-start resolves before
+                    // the 25s event parse. All 7 consumers are safe with early-fire.
+                    if (followsByPubkey.isNotEmpty() && !followsFiredEarly) {
+                        _followsSignal.value = System.nanoTime()
+                        followsFiredEarly = true
+                    }
+                    section = 0; continue
                 }
                 if (line == "---AGGREGATES---") { section = 1; continue }
                 if (line == "---RELAY_HEALTH---") { section = 2; continue }
@@ -1945,7 +1960,8 @@ class MemoryEventStore @Inject constructor() {
             }
         }
 
-        // Bump all signals once
+        // Bump all signals once (follows signal fires again — idempotent,
+        // consumers use distinctUntilChanged or one-shot .first())
         val now = System.nanoTime()
         _feedSignal.value = now
         _profileSignal.value = now
