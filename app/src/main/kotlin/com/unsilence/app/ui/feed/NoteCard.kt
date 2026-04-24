@@ -707,6 +707,7 @@ fun NoteCard(
                 LinkPreviewCard(
                     url            = linkUrls.first(),
                     fetchOgMetadata = fetchOgMetadata,
+                    suppressImage  = imageUrls.isNotEmpty(),
                 )
                 linkUrls.drop(1).forEach { url -> LinkChip(url = url) }
             }
@@ -1897,6 +1898,7 @@ private fun EmbeddedQuoteCard(
                     LinkPreviewCard(
                         url             = linkUrls.first(),
                         fetchOgMetadata = fetchOgMetadata,
+                        suppressImage   = quotedImages.isNotEmpty(),
                     )
                 }
 
@@ -2160,6 +2162,7 @@ private fun MentionChip(
 internal fun LinkPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    suppressImage: Boolean = false,
 ) {
     val uriHandler = LocalUriHandler.current
     val domain = remember(url) {
@@ -2186,7 +2189,7 @@ internal fun LinkPreviewCard(
                 .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
-            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
+            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed && !suppressImage) {
                 val density = LocalDensity.current
                 val config = LocalConfiguration.current
                 val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
