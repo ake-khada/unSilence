@@ -1,0 +1,398 @@
+package com.unsilence.app.data.model
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Unit tests for [ContentParser] — the single-pass tokenizer that produces
+ * [EventModel] from raw event fields.
+ *
+ * ContentParser is a pure function (no Android dependencies). Tests run
+ * directly on JVM.
+ */
+class ContentParserTest {
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private fun parse(
+        content: String,
+        kind: Int = 1,
+        tagsJson: String = "[]",
+        id: String = "test-id",
+        pubkey: String = "a".repeat(64),
+        createdAt: Long = 1000L,
+        relayUrl: String = "wss://relay.test",
+        replyToId: String? = null,
+        rootId: String? = null,
+        hasContentWarning: Boolean = false,
+        contentWarningReason: String? = null,
+    ): EventModel = ContentParser.parse(
+        id = id,
+        pubkey = pubkey,
+        kind = kind,
+        content = content,
+        tagsJson = tagsJson,
+        createdAt = createdAt,
+        relayUrl = relayUrl,
+        replyToId = replyToId,
+        rootId = rootId,
+        hasContentWarning = hasContentWarning,
+        contentWarningReason = contentWarningReason,
+    )
+
+    // ── Plain text ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `plain text produces single Text segment`() {
+        val model = parse("Hello, world!")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+        assertEquals("Hello, world!", (model.segments[0] as Segment.Text).text)
+    }
+
+    @Test
+    fun `blank content produces empty segments`() {
+        val model = parse("")
+        assertTrue(model.segments.isEmpty())
+    }
+
+    @Test
+    fun `whitespace-only content produces empty segments`() {
+        val model = parse("   ")
+        assertTrue(model.segments.isEmpty())
+    }
+
+    // ── Image URLs ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `image URL is parsed as Image segment`() {
+        val model = parse("check this https://example.com/photo.jpg neat!")
+        assertEquals(3, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+        assertTrue(model.segments[1] is Segment.Image)
+        assertTrue(model.segments[2] is Segment.Text)
+        assertEquals("https://example.com/photo.jpg", (model.segments[1] as Segment.Image).url)
+    }
+
+    @Test
+    fun `multiple images grouped in manifest`() {
+        val content = "https://a.com/1.jpg https://b.com/2.png"
+        val model = parse(content)
+        assertEquals(2, model.media.images.size)
+        assertEquals("https://a.com/1.jpg", model.media.images[0].url)
+        assertEquals("https://b.com/2.png", model.media.images[1].url)
+    }
+
+    @Test
+    fun `nostr build CDN URL is treated as image`() {
+        val model = parse("https://image.nostr.build/abc123")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Image)
+    }
+
+    @Test
+    fun `image with query params is parsed`() {
+        val model = parse("https://cdn.example.com/photo.webp?w=800&h=600")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Image)
+    }
+
+    // ── Video URLs ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `mp4 URL is parsed as Video segment`() {
+        val model = parse("https://video.host/clip.mp4")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Video)
+        assertEquals("https://video.host/clip.mp4", (model.segments[0] as Segment.Video).model.videoUrl)
+    }
+
+    @Test
+    fun `HLS m3u8 URL is parsed as Video with isHls flag`() {
+        val model = parse("https://live.host/stream.m3u8")
+        assertEquals(1, model.segments.size)
+        val video = model.segments[0] as Segment.Video
+        assertTrue(video.model.isHls)
+    }
+
+    @Test
+    fun `video URL default aspect ratio is 16 by 9`() {
+        val model = parse("https://video.host/clip.mp4")
+        val video = model.segments[0] as Segment.Video
+        assertEquals(16f / 9f, video.model.aspectRatio, 0.01f)
+    }
+
+    // ── YouTube URLs ────────────────────────────────────────────────────────
+
+    @Test
+    fun `youtube watch URL is parsed as YouTube segment`() {
+        val model = parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.YouTube)
+        assertEquals("dQw4w9WgXcQ", (model.segments[0] as Segment.YouTube).videoId)
+    }
+
+    @Test
+    fun `youtube shorts URL is parsed as YouTube segment`() {
+        val model = parse("https://youtube.com/shorts/dQw4w9WgXcQ")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.YouTube)
+        assertEquals("dQw4w9WgXcQ", (model.segments[0] as Segment.YouTube).videoId)
+    }
+
+    @Test
+    fun `youtu be short URL is parsed as YouTube segment`() {
+        val model = parse("https://youtu.be/dQw4w9WgXcQ")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.YouTube)
+    }
+
+    @Test
+    fun `youtube URLs appear in manifest youtubes list`() {
+        val model = parse("https://youtu.be/dQw4w9WgXcQ")
+        assertEquals(1, model.media.youtubes.size)
+    }
+
+    // ── Generic link URLs ───────────────────────────────────────────────────
+
+    @Test
+    fun `generic https URL becomes Link segment`() {
+        val model = parse("Check out https://example.com/article for details")
+        assertEquals(3, model.segments.size)
+        assertTrue(model.segments[1] is Segment.Link)
+        assertEquals("https://example.com/article", (model.segments[1] as Segment.Link).url)
+    }
+
+    @Test
+    fun `first link URL becomes ogCandidate in manifest`() {
+        val model = parse("See https://example.com/page here")
+        assertNotNull(model.media.ogCandidate)
+        assertEquals("https://example.com/page", model.media.ogCandidate!!.url)
+    }
+
+    @Test
+    fun `image URL does not become ogCandidate`() {
+        val model = parse("https://example.com/photo.jpg")
+        assertNull(model.media.ogCandidate)
+    }
+
+    // ── Token precedence ────────────────────────────────────────────────────
+
+    @Test
+    fun `youtube takes precedence over generic URL`() {
+        val model = parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.YouTube)
+    }
+
+    @Test
+    fun `image takes precedence over generic URL`() {
+        val model = parse("https://example.com/pic.png")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Image)
+    }
+
+    @Test
+    fun `video takes precedence over generic URL`() {
+        val model = parse("https://example.com/clip.mp4")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Video)
+    }
+
+    // ── Mixed content ───────────────────────────────────────────────────────
+
+    @Test
+    fun `mixed text image and link preserves order`() {
+        val content = "Hello https://img.host/a.jpg world https://example.com done"
+        val model = parse(content)
+        assertEquals(5, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+        assertTrue(model.segments[1] is Segment.Image)
+        assertTrue(model.segments[2] is Segment.Text)
+        assertTrue(model.segments[3] is Segment.Link)
+        assertTrue(model.segments[4] is Segment.Text)
+    }
+
+    // ── EventModel field mapping ────────────────────────────────────────────
+
+    @Test
+    fun `kind 1 sets effective fields same as source`() {
+        val pk = "a".repeat(64)
+        val model = parse("hello", kind = 1, pubkey = pk, createdAt = 12345L)
+        assertEquals(pk, model.pubkey)
+        assertEquals(pk, model.sourcePubkey)
+        assertEquals(12345L, model.createdAt)
+        assertEquals(12345L, model.sourceCreatedAt)
+    }
+
+    @Test
+    fun `engagementId is rootId for kind 6 when rootId present`() {
+        val model = parse("", kind = 6, rootId = "root-abc", id = "repost-id")
+        assertEquals("root-abc", model.engagementId)
+    }
+
+    @Test
+    fun `engagementId is id for kind 6 when rootId null`() {
+        val model = parse("", kind = 6, rootId = null, id = "repost-id")
+        assertEquals("repost-id", model.engagementId)
+    }
+
+    @Test
+    fun `engagementId is id for kind 1`() {
+        val model = parse("hello", kind = 1, id = "note-id")
+        assertEquals("note-id", model.engagementId)
+    }
+
+    @Test
+    fun `thread refs carry replyToId and rootId`() {
+        val model = parse("reply", replyToId = "parent", rootId = "root")
+        assertEquals("parent", model.thread.replyToId)
+        assertEquals("root", model.thread.rootId)
+    }
+
+    @Test
+    fun `content warning flags pass through`() {
+        val model = parse("nsfw", hasContentWarning = true, contentWarningReason = "nudity")
+        assertTrue(model.warnings.hasContentWarning)
+        assertEquals("nudity", model.warnings.reason)
+    }
+
+    // ── Kind 6 repost ───────────────────────────────────────────────────────
+
+    @Test
+    fun `kind 6 with embedded JSON extracts inner pubkey and content`() {
+        val innerPk = "b".repeat(64)
+        val embeddedJson = """{"id":"inner","pubkey":"$innerPk","content":"reposted text","created_at":999,"tags":[]}"""
+        val model = parse(
+            content = embeddedJson,
+            kind = 6,
+            tagsJson = """[["e","target-id","wss://hint.relay"]]""",
+        )
+        assertNotNull(model.repost)
+        assertEquals(innerPk, model.pubkey)
+        assertEquals(999L, model.createdAt)
+        assertTrue(model.segments.any { it is Segment.Text && it.text == "reposted text" })
+    }
+
+    @Test
+    fun `kind 6 with empty content produces repost from e-tag`() {
+        val model = parse(
+            content = "",
+            kind = 6,
+            tagsJson = """[["e","target-abc","wss://relay.hint"]]""",
+        )
+        assertNotNull(model.repost)
+        assertEquals("target-abc", model.repost!!.targetId)
+        assertEquals("wss://relay.hint", model.repost!!.relayHint)
+    }
+
+    @Test
+    fun `kind 1 has null repost`() {
+        val model = parse("hello", kind = 1)
+        assertNull(model.repost)
+    }
+
+    // ── Kind 30023 article ──────────────────────────────────────────────────
+
+    @Test
+    fun `kind 30023 extracts article info from tags`() {
+        val tags = """[["title","My Post"],["summary","A summary"],["image","https://img.com/banner.jpg"],["published_at","1700000000"],["d","my-post"]]"""
+        val model = parse("Full article text here", kind = 30023, tagsJson = tags)
+        assertNotNull(model.article)
+        assertEquals("My Post", model.article!!.title)
+        assertEquals("A summary", model.article!!.summary)
+        assertEquals("https://img.com/banner.jpg", model.article!!.image)
+        assertEquals(1700000000L, model.article!!.publishedAt)
+        assertEquals("my-post", model.article!!.dTag)
+    }
+
+    @Test
+    fun `kind 1 has null article info`() {
+        val model = parse("hello", kind = 1)
+        assertNull(model.article)
+    }
+
+    // ── Imeta integration ───────────────────────────────────────────────────
+
+    @Test
+    fun `imeta provides aspect ratio for image`() {
+        val tags = """[["imeta","url https://img.host/a.jpg","dim 1200x800"]]"""
+        val model = parse("https://img.host/a.jpg", tagsJson = tags)
+        assertEquals(1, model.media.images.size)
+        val img = model.media.images[0]
+        assertEquals(1200f / 800f, img.imetaAspect!!, 0.01f)
+    }
+
+    @Test
+    fun `imeta provides aspect ratio for video`() {
+        val tags = """[["imeta","url https://vid.host/clip.mp4","dim 1920x1080"]]"""
+        val model = parse("https://vid.host/clip.mp4", tagsJson = tags)
+        assertEquals(1, model.media.videos.size)
+        val vid = model.media.videos[0]
+        assertEquals(1920f / 1080f, vid.model.aspectRatio, 0.01f)
+    }
+
+    // ── NIP-68 (kind 20/21) ─────────────────────────────────────────────────
+
+    @Test
+    fun `kind 20 prepends imeta images even with blank content`() {
+        val tags = """[["imeta","url https://img.host/photo.jpg","dim 800x600"]]"""
+        val model = parse("", kind = 20, tagsJson = tags)
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Image)
+        assertEquals("https://img.host/photo.jpg", (model.segments[0] as Segment.Image).url)
+    }
+
+    @Test
+    fun `kind 21 prepends imeta videos even with blank content`() {
+        val tags = """[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1920x1080"]]"""
+        val model = parse("", kind = 21, tagsJson = tags)
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Video)
+    }
+
+    // ── Q-tag relay hints ───────────────────────────────────────────────────
+
+    @Test
+    fun `q-tag relay hints are not extracted when no q tags`() {
+        val model = parse("hello", tagsJson = """[["p","abc"]]""")
+        // No quotes, just text
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+    }
+
+    // ── Edge cases ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `malformed tags json does not crash`() {
+        val model = parse("hello", tagsJson = "not valid json")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+    }
+
+    @Test
+    fun `empty tags json array works`() {
+        val model = parse("hello", tagsJson = "[]")
+        assertEquals(1, model.segments.size)
+    }
+
+    @Test
+    fun `navigateId is targetId for kind 6`() {
+        val model = parse(
+            content = "",
+            kind = 6,
+            id = "repost-wrapper",
+            tagsJson = """[["e","original-id"]]""",
+        )
+        assertEquals("original-id", model.navigateId)
+    }
+
+    @Test
+    fun `navigateId is id for non-repost`() {
+        val model = parse("hello", kind = 1, id = "my-note")
+        assertEquals("my-note", model.navigateId)
+    }
+}

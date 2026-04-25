@@ -76,6 +76,7 @@ class MesMetricsLogger @Inject constructor(
             "events=${s.eventCount} (~${mb(s.eventBytes)}) " +
                 "profiles=${s.profileCount} (~${mb(s.profileBytes)}) " +
                 "videoRM=${s.videoRenderModelEntries} imetaDims=${s.imetaImageDimEntries} " +
+                "eventModels=${s.eventModelEntries} " +
                 "feedRowCache=${s.feedRowCacheEntries} " +
                 "total~${String.format("%.1f", totalMb)}mb",
         )

@@ -55,7 +55,7 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
-import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
@@ -261,13 +261,13 @@ fun FeedScreen(
                         engagement = engagement,
                         callbacks = callbacks,
                         videoScope = videoScope,
-                        context = RenderContext.Feed,
+                        role = CardRole.Feed,
                         newEventIds = newEventIds.keys,
                         onNewPostAnimated = { newEventIds.remove(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
-                        imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
+                        eventModelProvider = actionsViewModel::getEventModel,
                     )
 
                     // "Load more" button at the end of the current batch.

@@ -437,6 +437,23 @@ class EventProcessor @Inject constructor(
                     .associate { it.url to (it.width!!.toFloat() / it.height!!) }
                 memoryEventStore.putImetaImageDims(event.id, imageDims)
             }
+            // Pre-parse EventModel for direct UI consumption (ContentParser is a pure function)
+            if (event.kind in setOf(1, 6, 20, 21, 30023)) {
+                val model = com.unsilence.app.data.model.ContentParser.parse(
+                    id = event.id,
+                    pubkey = event.pubkey,
+                    kind = event.kind,
+                    content = event.content,
+                    tagsJson = event.tagsJson,
+                    createdAt = event.createdAt,
+                    relayUrl = event.relayUrl,
+                    replyToId = event.replyToId,
+                    rootId = event.rootId,
+                    hasContentWarning = event.hasContentWarning,
+                    contentWarningReason = event.contentWarningReason,
+                )
+                memoryEventStore.putEventModel(event.id, model)
+            }
         }
     }
 

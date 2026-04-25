@@ -576,9 +576,9 @@ class MemoryEventStoreInvariantsTest {
             val restored = MemoryEventStore()
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
-            // Verify events
-            assertEquals(6, restored.eventsByIds(
-                setOf("snap-parent", "snap-reply", "snap-repost", "snap-reaction", "snap-profile", "snap-follows"),
+            // Verify events (kind-3 is persisted in ---FOLLOWS--- section, not eventsById)
+            assertEquals(5, restored.eventsByIds(
+                setOf("snap-parent", "snap-reply", "snap-repost", "snap-reaction", "snap-profile"),
             ).size)
 
             // Verify aggregates
