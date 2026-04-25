@@ -17,40 +17,36 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.Image
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.relay.OgMetadata
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
-import com.unsilence.app.ui.feed.ArticleCard
+import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
+import com.unsilence.app.ui.feed.EventCard
 import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.LINK_URL_REGEX
 import com.unsilence.app.ui.feed.LinkPreviewCard
-import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.feedImageAspectRatio
 import com.unsilence.app.ui.feed.VideoThumbnailCache
-import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
@@ -59,10 +55,6 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
-
-// Stable empty-collection singletons — Compose sees the same reference across recompositions
-private val EMPTY_IMETA_DIMS: Map<String, Float> = emptyMap()
-private val EMPTY_VIDEO_MODELS: List<com.unsilence.app.data.model.VideoRenderModel> = emptyList()
 
 /**
  * Parameters bundle for engagement actions — avoids 15-parameter lambda pollution.
@@ -99,24 +91,24 @@ data class EngagementSnapshot(
 
 /**
  * Shared LazyListScope extension that renders a list of FeedRow items
- * using the unified NoteCard / ArticleCard pipeline.
+ * using the unified EventCard pipeline.
  *
  * [showThreadParents] — when true (Conversations tab), replies are grouped
  * with a compact parent note card above them, connected by a vertical line.
- * Parent notes are fetched via [EventActionCallbacks.lookupEvent] (Room + relay).
+ * Parent notes are fetched via [EventActionCallbacks.lookupEvent] (MES + relay).
  */
 fun LazyListScope.eventFeedItems(
     events: List<FeedRow>,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
     videoScope: VideoPlaybackScope? = null,
-    context: RenderContext = RenderContext.Feed,
+    role: CardRole = CardRole.Feed,
     newEventIds: Set<String> = emptySet(),
     onNewPostAnimated: (String) -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
-    imetaImageDimsProvider: ((String) -> Map<String, Float>)? = null,
     showThreadParents: Boolean = false,
+    eventModelProvider: ((String) -> EventModel?)? = null,
 ) {
     items(
         items = events,
@@ -133,12 +125,12 @@ fun LazyListScope.eventFeedItems(
                 engagement = engagement,
                 callbacks = callbacks,
                 videoScope = videoScope,
-                context = context,
+                role = role,
                 isNewPost = row.id in newEventIds,
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
-                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: EMPTY_IMETA_DIMS,
+                eventModelProvider = eventModelProvider,
             )
         } else {
             EventFeedItem(
@@ -146,12 +138,12 @@ fun LazyListScope.eventFeedItems(
                 engagement = engagement,
                 callbacks = callbacks,
                 videoScope = videoScope,
-                context = context,
+                role = role,
                 isNewPost = row.id in newEventIds,
                 onNewPostAnimated = { onNewPostAnimated(row.id) },
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
-                imetaImageDims = imetaImageDimsProvider?.invoke(row.id) ?: EMPTY_IMETA_DIMS,
+                eventModelProvider = eventModelProvider,
             )
         }
     }
@@ -168,12 +160,12 @@ private fun ThreadedReplyItem(
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
     videoScope: VideoPlaybackScope?,
-    context: RenderContext,
+    role: CardRole,
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
-    imetaImageDims: Map<String, Float> = EMPTY_IMETA_DIMS,
+    eventModelProvider: ((String) -> EventModel?)? = null,
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -202,20 +194,20 @@ private fun ThreadedReplyItem(
         }
     }
 
-    // Single card — parent is embedded inside the reply NoteCard
+    // Single card — parent is embedded inside the reply EventCard
     EventFeedItem(
         row = replyRow,
         engagement = engagement,
         callbacks = callbacks,
         videoScope = videoScope,
-        context = context,
+        role = role,
         isNewPost = isNewPost,
         onNewPostAnimated = onNewPostAnimated,
         thumbnailCache = thumbnailCache,
         imageDimensionCache = imageDimensionCache,
-        imetaImageDims = imetaImageDims,
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
+        eventModelProvider = eventModelProvider,
     )
 }
 
@@ -341,15 +333,22 @@ private fun EventFeedItem(
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
     videoScope: VideoPlaybackScope?,
-    context: RenderContext,
+    role: CardRole,
     isNewPost: Boolean,
     onNewPostAnimated: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
-    imetaImageDims: Map<String, Float> = EMPTY_IMETA_DIMS,
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
+    eventModelProvider: ((String) -> EventModel?)? = null,
 ) {
+    val model = eventModelProvider?.invoke(row.id)
+    if (model == null) {
+        // EventModel not yet available (rare transient state). Show shimmer placeholder.
+        ShimmerNoteCard(showMedia = false)
+        return
+    }
+
     // ── Remembered lambdas — stable across recompositions ─────────────────
     val onReact = remember(row.id, row.pubkey) {
         { callbacks.react(row.id, row.pubkey) }
@@ -366,83 +365,38 @@ private fun EventFeedItem(
     val onOpenFullscreen = remember(videoScope, row.id) {
         { videoScope?.openFullscreen(row.id); Unit }
     }
-    val onArticleClick = remember(row) {
-        { callbacks.onArticleClick(row) }
-    }
     val onNewPostAnimatedCb = remember(row.id) {
         { onNewPostAnimated() }
     }
 
-    if (row.kind == 30023) {
-        ArticleCard(
-            row = row,
-            onClick = onArticleClick,
-            onNoteClick = callbacks.onNoteClick,
-            onReact = onReact,
-            onRepost = onRepost,
-            onQuote = callbacks.onQuote,
-            onZap = onZap,
-            onSaveNwcUri = callbacks.saveNwcUri,
-            hasReacted = row.engagementId in engagement.reactedIds,
-            hasReposted = row.engagementId in engagement.repostedIds,
-            hasZapped = row.engagementId in engagement.zappedIds,
-            isNwcConfigured = engagement.isNwcConfigured,
-            isZapLoading = row.id in engagement.zapLoadingIds,
-            extraZapSats = engagement.optimisticZapSats[row.id] ?: 0L,
-            zapFlash = engagement.zapFlash,
-        )
-    } else {
-        // Resolve original author profile for kind-6 reposts
-        val repostAuthorPubkey = if (row.kind == 6) extractRepostAuthorPubkey(row.content, row.tags) else null
-        val originalAuthorProfile = if (repostAuthorPubkey != null && callbacks.profileFlow != null) {
-            callbacks.profileFlow.invoke(repostAuthorPubkey).collectAsState().value
-        } else null
-
-        // Fallback: if profile flow returned null, kick off a one-shot relay fetch
-        if (repostAuthorPubkey != null && originalAuthorProfile == null && callbacks.lookupProfile != null) {
-            LaunchedEffect(repostAuthorPubkey) {
-                delay(1500)
-                callbacks.lookupProfile.invoke(repostAuthorPubkey)
-            }
-        }
-
-        val showVideo = videoScope != null &&
-            context in setOf(RenderContext.Feed, RenderContext.Profile)
-
-        NoteCard(
-            row = row,
-            onNoteClick = callbacks.onNoteClick,
-            onAuthorClick = callbacks.onAuthorClick,
-            hasReacted = row.engagementId in engagement.reactedIds,
-            hasReposted = row.engagementId in engagement.repostedIds,
-            hasZapped = row.engagementId in engagement.zappedIds,
-            isNwcConfigured = engagement.isNwcConfigured,
-            originalAuthorProfile = originalAuthorProfile,
-            onReact = onReact,
-            onRepost = onRepost,
-            onQuote = callbacks.onQuote,
-            onZap = onZap,
-            onSaveNwcUri = callbacks.saveNwcUri,
-            exoPlayer = if (showVideo) videoScope.exoPlayer else null,
-            isMuted = videoScope?.isMuted ?: true,
-            onToggleMute = onToggleMute,
-            isActiveVideo = showVideo && videoScope.isActiveVideo(row.id),
-            isFullscreen = videoScope?.showFullscreenVideo ?: false,
-            onOpenFullscreen = onOpenFullscreen,
-            videoRenderModels = if (showVideo) videoScope.videoRenderModels[row.id] ?: EMPTY_VIDEO_MODELS else EMPTY_VIDEO_MODELS,
-            thumbnailCache = thumbnailCache,
-            imageDimensionCache = imageDimensionCache,
-            imetaImageDims = imetaImageDims,
-            lookupProfile = callbacks.lookupProfile,
-            lookupEvent = callbacks.lookupEvent,
-            fetchOgMetadata = callbacks.fetchOgMetadata,
-            isNewPost = isNewPost,
-            onNewPostAnimated = onNewPostAnimatedCb,
-            parentEvent = parentEvent,
-            parentAuthor = parentAuthor,
-            isZapLoading = row.id in engagement.zapLoadingIds,
-            extraZapSats = engagement.optimisticZapSats[row.id] ?: 0L,
-            zapFlash = engagement.zapFlash,
-        )
-    }
+    EventCard(
+        model               = model,
+        row                 = row,
+        role                = role,
+        engagement          = engagement,
+        onNoteClick         = callbacks.onNoteClick,
+        onAuthorClick       = callbacks.onAuthorClick,
+        onQuote             = callbacks.onQuote,
+        onArticleClick      = callbacks.onArticleClick,
+        onReact             = onReact,
+        onRepost            = onRepost,
+        onZap               = onZap,
+        onSaveNwcUri        = callbacks.saveNwcUri,
+        lookupProfile       = callbacks.lookupProfile,
+        lookupEvent         = callbacks.lookupEvent,
+        fetchOgMetadata     = callbacks.fetchOgMetadata,
+        profileFlow         = callbacks.profileFlow,
+        imageDimensionCache = imageDimensionCache,
+        thumbnailCache      = thumbnailCache,
+        exoPlayer           = videoScope?.exoPlayer,
+        isMuted             = videoScope?.isMuted ?: true,
+        onToggleMute        = onToggleMute,
+        isActiveVideo       = videoScope?.isActiveVideo(row.id) ?: false,
+        isFullscreen        = videoScope?.showFullscreenVideo ?: false,
+        onOpenFullscreen    = onOpenFullscreen,
+        isNewPost           = isNewPost,
+        onNewPostAnimated   = onNewPostAnimatedCb,
+        parentEvent         = parentEvent,
+        parentAuthor        = parentAuthor,
+    )
 }

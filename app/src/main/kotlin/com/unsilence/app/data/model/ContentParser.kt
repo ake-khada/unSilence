@@ -1,0 +1,437 @@
+package com.unsilence.app.data.model
+
+import com.unsilence.app.data.relay.ImetaMedia
+import com.unsilence.app.data.relay.ImetaParser
+import com.unsilence.app.data.relay.Nip19FailureCache
+import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.extractRepostAuthorPubkey
+import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
+import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
+import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+
+private const val TAG = "ContentParser"
+
+/**
+ * Single-pass content parser. Produces an [EventModel] from raw event fields.
+ *
+ * Called by EventProcessor.flushBatch (insert time) and MES.insertFromSnapshot
+ * (warm-start). Result is cached in MES.eventModelsByEventId — composables
+ * read from cache, never invoke this directly during render.
+ *
+ * Performance contract:
+ *   - O(n) in content length for tokenization (single pass)
+ *   - One JSON parse for kind-6 inner event (when content is non-empty)
+ *   - One imeta tag parse via ImetaParser
+ *   - Bech32 decoding only for nostr: URIs that aren't in Nip19FailureCache
+ *
+ * Thread safety: pure function. Callers may invoke from any thread.
+ */
+object ContentParser {
+
+    /** Regex matching nostr:bech32 URIs. */
+    private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
+
+    /** YouTube URL recognizer (watch/shorts/youtu.be). */
+    private val YOUTUBE_URL_REGEX = Regex(
+        """https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})\S*""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Direct video file URLs only — same recognizer as VideoRenderModel. */
+    private val VIDEO_EXT_REGEX = Regex(
+        """https?://\S+\.(?:mp4|mov|webm|m3u8|m4v|avi)(?:\?\S*)?""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Image URL recognizer. Includes nostr.build CDNs. */
+    private val IMAGE_URL_REGEX = Regex(
+        """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Generic http(s) URL recognizer. */
+    private val URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+
+    fun parse(
+        id: String,
+        pubkey: String,
+        kind: Int,
+        content: String,
+        tagsJson: String,
+        createdAt: Long,
+        relayUrl: String,
+        replyToId: String?,
+        rootId: String?,
+        hasContentWarning: Boolean,
+        contentWarningReason: String?,
+    ): EventModel {
+        // ── Step 1: Repost unwrap ─────────────────────────────────────────
+        val repost = if (kind == 6) parseRepostInfo(content, tagsJson) else null
+
+        val effectiveContent = if (repost != null) extractEffectiveContent(repost, content) else content
+        val effectiveTagsJson = if (repost != null) extractEffectiveTags(repost, tagsJson) else tagsJson
+        val effectivePubkey = if (repost != null) effectivePubkey(repost, pubkey, content, tagsJson) else pubkey
+        val effectiveCreatedAt = if (repost != null) effectiveCreatedAt(repost, createdAt) else createdAt
+
+        // ── Step 2: Imeta + q-tag relay hints ────────────────────────────
+        val imeta = ImetaParser.parse(effectiveTagsJson)
+        val qHints = extractQTagHints(effectiveTagsJson)
+
+        // ── Step 3: Single-pass tokenization ──────────────────────────────
+        val segments = tokenize(effectiveContent, imeta, qHints, kind)
+
+        // ── Step 4: Group media for grid rendering ────────────────────────
+        val manifest = buildManifest(segments)
+
+        // ── Step 5: kind-30023 article info from tags ─────────────────────
+        val article = if (kind == 30023) parseArticleInfo(effectiveTagsJson) else null
+
+        return EventModel(
+            id = id,
+            pubkey = effectivePubkey,
+            sourcePubkey = pubkey,
+            kind = kind,
+            createdAt = effectiveCreatedAt,
+            sourceCreatedAt = createdAt,
+            relayUrl = relayUrl,
+            engagementId = if (kind == 6) (rootId ?: id) else id,
+            navigateId = if (kind == 6) (repost?.targetId ?: id) else id,
+            segments = segments,
+            media = manifest,
+            thread = ThreadRefs(replyToId, rootId),
+            repost = repost,
+            article = article,
+            warnings = ContentWarnings(hasContentWarning, contentWarningReason),
+        )
+    }
+
+    // ── Repost parsing ───────────────────────────────────────────────────
+
+    /**
+     * Parse repost info. Bridge events (mostr.pub) have empty content but
+     * an e-tag — we still produce a RepostInfo so the renderer can show a
+     * stub until lookupModel resolves the target.
+     */
+    private fun parseRepostInfo(content: String, tagsJson: String): RepostInfo? {
+        val embeddedJson = if (content.isNotBlank()) {
+            runCatching { NostrJson.parseToJsonElement(content).jsonObject.toString() }
+                .getOrNull()
+        } else null
+
+        val targetId = extractFirstETagId(tagsJson)
+        val relayHint = extractFirstETagRelay(tagsJson)
+
+        if (embeddedJson == null && targetId == null) return null
+
+        return RepostInfo(
+            targetId = targetId,
+            relayHint = relayHint,
+            embeddedJson = embeddedJson,
+            resolvedFromInner = embeddedJson != null,
+        )
+    }
+
+    private fun effectivePubkey(repost: RepostInfo, wrapperPk: String, content: String, tagsJson: String): String {
+        if (repost.embeddedJson != null) {
+            runCatching {
+                NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["pubkey"]
+                    ?.jsonPrimitive?.content
+            }.getOrNull()?.let { return it }
+        }
+        return extractRepostAuthorPubkey(content, tagsJson) ?: wrapperPk
+    }
+
+    private fun effectiveCreatedAt(repost: RepostInfo, wrapperTs: Long): Long {
+        if (repost.embeddedJson != null) {
+            runCatching {
+                NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["created_at"]
+                    ?.jsonPrimitive?.longOrNull
+            }.getOrNull()?.let { return it }
+        }
+        return wrapperTs
+    }
+
+    private fun extractEffectiveContent(repost: RepostInfo, wrapperContent: String): String {
+        if (repost.embeddedJson == null) return wrapperContent
+        return runCatching {
+            NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["content"]
+                ?.jsonPrimitive?.content
+        }.getOrNull() ?: wrapperContent
+    }
+
+    private fun extractEffectiveTags(repost: RepostInfo, wrapperTagsJson: String): String {
+        if (repost.embeddedJson == null) return wrapperTagsJson
+        return runCatching {
+            NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["tags"]?.toString()
+        }.getOrNull() ?: wrapperTagsJson
+    }
+
+    // ── Tokenization ─────────────────────────────────────────────────────
+
+    /**
+     * Walk content once, classifying each text run. Order is preserved.
+     *
+     * Token precedence at each cursor position:
+     *   1. nostr: URIs   (highest — they may contain other URLs as text)
+     *   2. YouTube       (matched before generic URL)
+     *   3. video files   (.mp4 etc — distinct from generic Link)
+     *   4. image files   (matched before generic URL)
+     *   5. http(s) URLs  (generic Link)
+     *   6. plain text    (everything else)
+     *
+     * For kinds 20/21 (NIP-68 picture/video), we ALSO surface imeta entries
+     * as Image/Video segments at the head — these kinds put media in tags,
+     * not content.
+     */
+    private fun tokenize(
+        content: String,
+        imeta: List<ImetaMedia>,
+        qHints: Map<String, List<String>>,
+        kind: Int,
+    ): List<Segment> {
+        val out = mutableListOf<Segment>()
+
+        // For NIP-68 picture/video kinds, prepend imeta-only media.
+        if (kind == 20 || kind == 21) {
+            for (m in imeta) {
+                val mime = m.mimeType?.lowercase() ?: ""
+                when {
+                    kind == 20 || mime.startsWith("image/") -> {
+                        if (out.none { it is Segment.Image && it.url == m.url }) {
+                            out.add(Segment.Image(
+                                url = m.url,
+                                imetaAspect = if (m.width != null && m.height != null && m.height > 0)
+                                    m.width.toFloat() / m.height else null,
+                            ))
+                        }
+                    }
+                    kind == 21 || mime.startsWith("video/") -> {
+                        val model = buildVideoRenderModelForUrl(m.url, imeta)
+                        if (model != null && out.none { it is Segment.Video && it.model.videoUrl == m.url }) {
+                            out.add(Segment.Video(model))
+                        }
+                    }
+                }
+            }
+        }
+
+        if (content.isBlank()) return out
+
+        // Build a sorted list of all token matches, then walk left-to-right.
+        data class Match(val start: Int, val end: Int, val precedence: Int, val build: () -> Segment?)
+
+        val matches = mutableListOf<Match>()
+
+        // Precedence 1: nostr: URIs
+        for (m in NOSTR_URI_REGEX.findAll(content)) {
+            matches.add(Match(m.range.first, m.range.last + 1, 1) {
+                buildNostrSegment(m.value, qHints)
+            })
+        }
+        // Precedence 2: YouTube
+        for (m in YOUTUBE_URL_REGEX.findAll(content)) {
+            matches.add(Match(m.range.first, m.range.last + 1, 2) {
+                Segment.YouTube(m.value, m.groupValues[1])
+            })
+        }
+        // Precedence 3: video files
+        for (m in VIDEO_EXT_REGEX.findAll(content)) {
+            matches.add(Match(m.range.first, m.range.last + 1, 3) {
+                val model = buildVideoRenderModelForUrl(m.value, imeta) ?: return@Match null
+                Segment.Video(model)
+            })
+        }
+        // Precedence 4: images
+        for (m in IMAGE_URL_REGEX.findAll(content)) {
+            matches.add(Match(m.range.first, m.range.last + 1, 4) {
+                val imetaAspect = imeta.firstOrNull { it.url == m.value }
+                    ?.let { im ->
+                        if (im.width != null && im.height != null && im.height > 0)
+                            im.width.toFloat() / im.height else null
+                    }
+                Segment.Image(m.value, imetaAspect)
+            })
+        }
+        // Precedence 5: generic URLs
+        for (m in URL_REGEX.findAll(content)) {
+            matches.add(Match(m.range.first, m.range.last + 1, 5) {
+                Segment.Link(m.value)
+            })
+        }
+
+        // Resolve overlaps: sort by start ASC, length DESC, precedence ASC.
+        matches.sortWith(
+            compareBy<Match> { it.start }
+                .thenByDescending { it.end - it.start }
+                .thenBy { it.precedence }
+        )
+
+        var cursor = 0
+        for (m in matches) {
+            if (m.start < cursor) continue
+            if (m.start > cursor) {
+                val text = content.substring(cursor, m.start)
+                if (text.isNotEmpty()) out.add(Segment.Text(text))
+            }
+            val seg = m.build()
+            if (seg != null) {
+                out.add(seg)
+                cursor = m.end
+            } else {
+                // build() returned null — emit as text so it stays visible
+                out.add(Segment.Text(content.substring(m.start, m.end)))
+                cursor = m.end
+            }
+        }
+        if (cursor < content.length) {
+            val tail = content.substring(cursor)
+            if (tail.isNotEmpty()) out.add(Segment.Text(tail))
+        }
+
+        return out
+    }
+
+    /** Decode a nostr:bech32 URI into the appropriate Segment. */
+    private fun buildNostrSegment(uri: String, qHints: Map<String, List<String>>): Segment? {
+        if (Nip19FailureCache.isKnownBad(uri)) return null
+        val entity = runCatching { Nip19Parser.uriToRoute(uri)?.entity }
+            .onFailure { Nip19FailureCache.markBad(uri) }
+            .getOrNull()
+        return when (entity) {
+            is NPub -> Segment.MentionPubkey(entity.hex, emptyList())
+            is NProfile -> Segment.MentionPubkey(entity.hex, entity.relay.map { it.url })
+            is NEvent -> {
+                val extraHints = qHints[entity.hex].orEmpty()
+                Segment.QuoteEvent(
+                    eventId = entity.hex,
+                    hints = (entity.relay.map { it.url } + extraHints).distinct(),
+                )
+            }
+            is NNote -> {
+                val extraHints = qHints[entity.hex].orEmpty()
+                Segment.QuoteEvent(
+                    eventId = entity.hex,
+                    hints = extraHints,
+                )
+            }
+            is NAddress -> Segment.QuoteAddress(
+                kind = entity.kind,
+                author = entity.author,
+                dTag = entity.dTag,
+                hints = entity.relay.map { it.url },
+            )
+            else -> {
+                Nip19FailureCache.markBad(uri)
+                null
+            }
+        }
+    }
+
+    /**
+     * Build a VideoRenderModel for [url] using [imeta]. Returns null if not a
+     * direct video URL.
+     */
+    private fun buildVideoRenderModelForUrl(url: String, imeta: List<ImetaMedia>): VideoRenderModel? {
+        if (!isDirectVideoUrl(url)) return null
+        val meta = imeta.firstOrNull { it.url == url }
+        val aspect = if (meta?.width != null && meta.height != null && meta.height > 0)
+            meta.width.toFloat() / meta.height
+        else 16f / 9f
+        val isHls = url.contains(".m3u8", ignoreCase = true) ||
+            meta?.mimeType?.equals("application/x-mpegURL", ignoreCase = true) == true
+        return VideoRenderModel(
+            videoUrl = url,
+            aspectRatio = aspect,
+            posterUrl = meta?.thumb,
+            contentType = meta?.mimeType,
+            isHls = isHls,
+            widthPx = meta?.width,
+            heightPx = meta?.height,
+        )
+    }
+
+    private fun isDirectVideoUrl(url: String): Boolean =
+        url.contains(".mp4", ignoreCase = true) ||
+            url.contains(".mov", ignoreCase = true) ||
+            url.contains(".webm", ignoreCase = true) ||
+            url.contains(".m3u8", ignoreCase = true) ||
+            url.contains(".m4v", ignoreCase = true) ||
+            url.contains(".avi", ignoreCase = true)
+
+    // ── Manifest grouping ────────────────────────────────────────────────
+
+    private fun buildManifest(segments: List<Segment>): MediaManifest {
+        val images = segments.filterIsInstance<Segment.Image>()
+        val videos = segments.filterIsInstance<Segment.Video>()
+        val youtubes = segments.filterIsInstance<Segment.YouTube>()
+        val ogCandidate = segments.filterIsInstance<Segment.Link>().firstOrNull()
+        return MediaManifest(images, videos, ogCandidate, youtubes)
+    }
+
+    // ── Article info ─────────────────────────────────────────────────────
+
+    private fun parseArticleInfo(tagsJson: String): ArticleInfo {
+        var title: String? = null
+        var summary: String? = null
+        var image: String? = null
+        var publishedAt: Long? = null
+        var dTag: String? = null
+        runCatching {
+            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+            for (tag in parsed) {
+                val arr = tag.jsonArray
+                val key = arr.getOrNull(0)?.jsonPrimitive?.content ?: continue
+                val value = arr.getOrNull(1)?.jsonPrimitive?.content ?: continue
+                when (key) {
+                    "title" -> title = value
+                    "summary" -> summary = value
+                    "image" -> image = value
+                    "published_at" -> publishedAt = value.toLongOrNull()
+                    "d" -> dTag = value
+                }
+            }
+        }
+        return ArticleInfo(title, summary, image, publishedAt, dTag)
+    }
+
+    // ── Tag helpers ──────────────────────────────────────────────────────
+
+    private fun extractFirstETagId(tagsJson: String): String? = runCatching {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
+        eTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
+    }.getOrNull()
+
+    private fun extractFirstETagRelay(tagsJson: String): String? = runCatching {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
+        eTag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun extractQTagHints(tagsJson: String): Map<String, List<String>> {
+        if (!tagsJson.contains("\"q\"")) return emptyMap()
+        return try {
+            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+            val result = mutableMapOf<String, MutableList<String>>()
+            for (tag in parsed) {
+                val arr = tag.jsonArray
+                if (arr.getOrNull(0)?.jsonPrimitive?.content == "q") {
+                    val id = arr.getOrNull(1)?.jsonPrimitive?.content ?: continue
+                    val relay = arr.getOrNull(2)?.jsonPrimitive?.content
+                        ?.takeIf { it.isNotBlank() } ?: continue
+                    result.getOrPut(id) { mutableListOf() }.add(relay)
+                }
+            }
+            result
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+}

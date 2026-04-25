@@ -110,9 +110,9 @@ class SnapshotSchedulerInvariantsTest {
         )
         restoredScheduler.restoreIfPresent()
 
-        // Verify events
-        assertEquals(5, restoredStore.eventsByIds(
-            setOf("sched-1", "sched-2", "sched-profile", "sched-follows", "sched-reaction"),
+        // Verify events (kind-3 is persisted in ---FOLLOWS--- section, not eventsById)
+        assertEquals(4, restoredStore.eventsByIds(
+            setOf("sched-1", "sched-2", "sched-profile", "sched-reaction"),
         ).size)
 
         // Verify aggregates

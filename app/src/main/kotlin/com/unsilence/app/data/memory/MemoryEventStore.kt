@@ -164,6 +164,25 @@ class MemoryEventStore @Inject constructor() {
         if (dims.isNotEmpty()) imetaImageDimsByEventId[eventId] = dims
     }
 
+    // ─── EventModel sidecar cache (populated at insert time by ContentParser) ─
+    // Key: event ID → pre-parsed EventModel for direct UI consumption.
+    // Read-only after insert — zero parsing cost during render.
+    // NOT serialized to snapshot — reparsed on restore.
+    private val eventModelsByEventId = ConcurrentHashMap<String, com.unsilence.app.data.model.EventModel>()
+
+    fun getEventModel(eventId: String): com.unsilence.app.data.model.EventModel? = eventModelsByEventId[eventId]
+
+    fun putEventModel(eventId: String, model: com.unsilence.app.data.model.EventModel) {
+        eventModelsByEventId[eventId] = model
+    }
+
+    /** Reactive flow for a single EventModel — used by lookupModel for late-arriving quotes. */
+    fun eventModelFlow(eventId: String): Flow<com.unsilence.app.data.model.EventModel?> =
+        _feedSignal
+            .map { eventModelsByEventId[eventId] }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── Reactive signals ───────────────────────────────────────────────────
     private val _feedSignal = MutableStateFlow(0L)
     private val _profileSignal = MutableStateFlow(0L)
@@ -863,6 +882,7 @@ class MemoryEventStore @Inject constructor() {
             feedRowAccessedAt.remove(entry.id)
             videoRenderModelsByEventId.remove(entry.id)
             imetaImageDimsByEventId.remove(entry.id)
+            eventModelsByEventId.remove(entry.id)
         }
 
         // Clean up aggregates that only reference removed events
@@ -1841,6 +1861,7 @@ class MemoryEventStore @Inject constructor() {
             zappedTargetsTotal = zappedTotal,
             videoRenderModelEntries = videoRenderModelsByEventId.size,
             imetaImageDimEntries = imetaImageDimsByEventId.size,
+            eventModelEntries = eventModelsByEventId.size,
             feedRowCacheEntries = feedRowCache.size,
             relayListEntries = relayListsByPubkey.size,
             trustScoreEntries = trustScoresByUrl.size,
@@ -1972,6 +1993,8 @@ class MemoryEventStore @Inject constructor() {
 
         // Evict old content events from snapshot (may contain stale data)
         evictOldContentEvents()
+
+        Log.d("MES", "EventModel restore: ${eventModelsByEventId.size} models parsed")
     }
 
     private fun insertFromSnapshot(event: NostrEvent) {
@@ -1999,6 +2022,24 @@ class MemoryEventStore @Inject constructor() {
                 .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
                 .associate { it.url to (it.width!!.toFloat() / it.height!!) }
             if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
+        }
+
+        // Pre-parse EventModel for direct UI consumption
+        if (event.kind in setOf(1, 6, 20, 21, 30023)) {
+            val model = com.unsilence.app.data.model.ContentParser.parse(
+                id = event.id,
+                pubkey = event.pubkey,
+                kind = event.kind,
+                content = event.content,
+                tagsJson = event.tagsJson,
+                createdAt = event.createdAt,
+                relayUrl = event.relayUrl,
+                replyToId = event.replyToId,
+                rootId = event.rootId,
+                hasContentWarning = event.hasContentWarning,
+                contentWarningReason = event.contentWarningReason,
+            )
+            eventModelsByEventId[event.id] = model
         }
 
         // Restore kind-derived state (profiles, follows, relay lists)
@@ -2275,6 +2316,7 @@ class MemoryEventStore @Inject constructor() {
         deletedRelaySetTombstones.clear()
         videoRenderModelsByEventId.clear()
         imetaImageDimsByEventId.clear()
+        eventModelsByEventId.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L

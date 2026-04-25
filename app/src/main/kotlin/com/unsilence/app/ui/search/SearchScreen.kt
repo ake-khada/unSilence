@@ -71,7 +71,7 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
-import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
@@ -303,10 +303,10 @@ fun SearchScreen(
                                 engagement = engagement,
                                 callbacks = callbacks,
                                 videoScope = null,
-                                context = RenderContext.Search,
+                                role = CardRole.Search,
                                 thumbnailCache = actionsViewModel.videoThumbnailCache,
                                 imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
+                                eventModelProvider = actionsViewModel::getEventModel,
                             )
                         }
                     }

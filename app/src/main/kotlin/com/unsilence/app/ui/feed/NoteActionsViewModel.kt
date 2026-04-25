@@ -77,6 +77,9 @@ class NoteActionsViewModel @Inject constructor(
     /** MES sidecar cache lookup — image aspect ratios from imeta dims at insert time. */
     fun getImetaImageDims(eventId: String) = memoryEventStore.getImetaImageDims(eventId)
 
+    /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
+    fun getEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
+
     /**
      * Set of event IDs the current user has reacted to.
      * MES re-emits via _actionSignal on every kind-7 insert.

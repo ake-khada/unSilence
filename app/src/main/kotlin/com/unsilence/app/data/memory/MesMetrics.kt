@@ -36,6 +36,7 @@ data class MesSizeSnapshot(
     // ── Media sidecars ──────────────────────────────────────────────────
     val videoRenderModelEntries: Int,
     val imetaImageDimEntries: Int,
+    val eventModelEntries: Int,
     val feedRowCacheEntries: Int,
 
     // ── Relay config & health ───────────────────────────────────────────
@@ -54,8 +55,9 @@ data class MesSizeSnapshot(
             (reactedTargetsTotal + repostedTargetsTotal + zappedTargetsTotal) * 128L +
             // Engagement: ~40 bytes per entry (64-char key + int/long value)
             (replyCountEntries + repostCountEntries + reactionCountEntries + zapStatsEntries + statsUpdatedAtEntries) * 40L +
-            // Sidecars: ~200 bytes avg per entry
+            // Sidecars: ~200 bytes avg per entry (EventModel ~600 bytes avg)
             (videoRenderModelEntries + imetaImageDimEntries) * 200L +
+            eventModelEntries * 600L +
             feedRowCacheEntries * 400L +
             // Follows: ~128 bytes per entry (key + Set ref)
             followsEntries * 128L +

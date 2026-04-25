@@ -133,9 +133,12 @@ class EventProcessorInvariantsTest {
             size in 9000..10000,
         )
 
-        // All 11000 events should be in MemoryEventStore regardless of trim
+        // MES eviction caps kind-1 at 5000, so only the newest 5000 survive
         val allEvents = store.eventsByIds((1..11000).map { eventId(it) }.toSet())
-        assertEquals("Expected all 11000 events in store", 11000, allEvents.size)
+        assertTrue(
+            "Expected ~5000 events after eviction, got ${allEvents.size}",
+            allEvents.size in 4500..6000,
+        )
     }
 
     // ── Test 4: Spam filter for kind 1 starting with "{" ────────────────────
@@ -169,10 +172,10 @@ class EventProcessorInvariantsTest {
         assertEquals("Kind-0 profile with JSON content should be stored", 1, profileEvents.size)
     }
 
-    // ── Test 5: Kind 3 updates follows via direct path AND is channeled ─────
+    // ── Test 5: Kind 3 updates follows via direct path (NOT channeled) ─────
 
     @Test
-    fun `kind 3 updates MemoryEventStore follows and is stored for snapshots`() = runTest {
+    fun `kind 3 updates MemoryEventStore follows via direct path`() = runTest {
         // Kind 3 contact list with two followed pubkeys
         val followedPk1 = "d".repeat(64)
         val followedPk2 = "e".repeat(64)
@@ -193,11 +196,10 @@ class EventProcessorInvariantsTest {
         assertTrue("Should contain followedPk1", followedPk1 in follows)
         assertTrue("Should contain followedPk2", followedPk2 in follows)
 
-        // Kind 3 IS channeled into eventsById for snapshot persistence.
-        // The direct-path updateFollows() provides immediate MES update;
-        // the cold channel provides the eventsById entry for serialization.
+        // Kind-3 is NOT channeled — follows are persisted in ---FOLLOWS---
+        // section, not as raw events in eventsById (see CLAUDE.md rule 55)
         val storedEvents = store.eventsByIds(setOf(eventId(30)))
-        assertTrue("Kind-3 event should be in main store for snapshot persistence", storedEvents.isNotEmpty())
+        assertTrue("Kind-3 should NOT be in eventsById", storedEvents.isEmpty())
     }
 
     // ── Test 6: NIP-40 expiry filter ────────────────────────────────────────

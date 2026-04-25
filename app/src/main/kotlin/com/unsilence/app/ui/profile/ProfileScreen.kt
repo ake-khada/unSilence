@@ -72,7 +72,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
-import com.unsilence.app.ui.shared.RenderContext
+import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import androidx.compose.material.icons.automirrored.outlined.Reply
@@ -405,11 +405,11 @@ fun ProfileScreen(
                     engagement = engagement,
                     callbacks = callbacks,
                     videoScope = videoScope,
-                    context = RenderContext.Profile,
+                    role = CardRole.Profile,
                     thumbnailCache = actionsViewModel.videoThumbnailCache,
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
-                    imetaImageDimsProvider = actionsViewModel::getImetaImageDims,
                     showThreadParents = selectedTab == ProfileTab.REPLIES,
+                    eventModelProvider = actionsViewModel::getEventModel,
                 )
             }
 

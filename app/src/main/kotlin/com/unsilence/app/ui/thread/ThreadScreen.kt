@@ -56,12 +56,11 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
-import com.unsilence.app.ui.feed.ArticleCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
+import com.unsilence.app.ui.feed.EventCard
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import com.unsilence.app.ui.feed.ImageDimensionCache
-import com.unsilence.app.ui.feed.NoteCard
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.AppType
@@ -151,47 +150,41 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
-                                Box {
-                                if (note.kind == 30023) {
-                                    ArticleCard(
-                                        row             = note,
-                                        onClick         = { articleRow = note },
-                                        onQuote         = onQuote,
-                                        onReact         = { actionsViewModel.react(note.id, note.pubkey) },
-                                        onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                        onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
-                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        hasReacted      = note.engagementId in reactedIds,
-                                        hasReposted     = note.engagementId in repostedIds,
-                                        hasZapped       = note.engagementId in zappedIds,
+                                val focusedEngagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
+                                    EngagementSnapshot(
+                                        reactedIds      = reactedIds,
+                                        repostedIds     = repostedIds,
+                                        zappedIds       = zappedIds,
                                         isNwcConfigured = isNwcConfigured,
-                                        isZapLoading    = note.id in zapLoadingIds,
-                                        extraZapSats    = optimisticSats[note.id] ?: 0L,
-                                        zapFlash        = zapFlash,
-                                    )
-                                } else {
-                                    NoteCard(
-                                        row             = note,
-                                        onAuthorClick   = onAuthorClick,
-                                        hasReacted      = note.engagementId in reactedIds,
-                                        hasReposted     = note.engagementId in repostedIds,
-                                        hasZapped       = note.engagementId in zappedIds,
-                                        isNwcConfigured = isNwcConfigured,
-                                        onReact         = { actionsViewModel.react(note.id, note.pubkey) },
-                                        onRepost        = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                        onQuote         = onQuote,
-                                        onZap           = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
-                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        thumbnailCache  = actionsViewModel.videoThumbnailCache,
-                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                        lookupProfile   = actionsViewModel::lookupProfile,
-                                        lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                        isZapLoading    = note.id in zapLoadingIds,
-                                        extraZapSats    = optimisticSats[note.id] ?: 0L,
+                                        zapLoadingIds   = zapLoadingIds,
+                                        optimisticZapSats = optimisticSats,
                                         zapFlash        = zapFlash,
                                     )
                                 }
+                                val focusedModel = actionsViewModel.getEventModel(note.id)
+                                if (focusedModel != null) {
+                                    EventCard(
+                                        model               = focusedModel,
+                                        row                 = note,
+                                        role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
+                                        engagement          = focusedEngagement,
+                                        onNoteClick         = { /* already on thread */ },
+                                        onAuthorClick       = onAuthorClick,
+                                        onQuote             = onQuote,
+                                        onArticleClick      = { articleRow = it },
+                                        onReact             = { actionsViewModel.react(note.id, note.pubkey) },
+                                        onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                        onZap               = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                        onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        lookupProfile       = actionsViewModel::lookupProfile,
+                                        lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                        fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                        profileFlow         = null,
+                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                        thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                    )
+                                } else {
+                                    ShimmerNoteCard(showMedia = true)
                                 }
                             }
                         }
@@ -230,27 +223,42 @@ fun ThreadScreen(
                                         }
                                         .padding(start = indent),
                                 ) {
-                                    NoteCard(
-                                        row             = reply,
-                                        onAuthorClick   = onAuthorClick,
-                                        hasReacted      = reply.engagementId in reactedIds,
-                                        hasReposted     = reply.engagementId in repostedIds,
-                                        hasZapped       = reply.engagementId in zappedIds,
-                                        isNwcConfigured = isNwcConfigured,
-                                        onReact         = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                        onRepost        = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                        onQuote         = onQuote,
-                                        onZap           = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
-                                        onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        thumbnailCache  = actionsViewModel.videoThumbnailCache,
-                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                        lookupProfile   = actionsViewModel::lookupProfile,
-                                        lookupEvent     = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-                                        isZapLoading    = reply.id in zapLoadingIds,
-                                        extraZapSats    = optimisticSats[reply.id] ?: 0L,
-                                        zapFlash        = zapFlash,
-                                    )
+                                    val replyEngagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
+                                        EngagementSnapshot(
+                                            reactedIds      = reactedIds,
+                                            repostedIds     = repostedIds,
+                                            zappedIds       = zappedIds,
+                                            isNwcConfigured = isNwcConfigured,
+                                            zapLoadingIds   = zapLoadingIds,
+                                            optimisticZapSats = optimisticSats,
+                                            zapFlash        = zapFlash,
+                                        )
+                                    }
+                                    val replyModel = actionsViewModel.getEventModel(reply.id)
+                                    if (replyModel != null) {
+                                        EventCard(
+                                            model               = replyModel,
+                                            row                 = reply,
+                                            role                = CardRole.Reply,
+                                            engagement          = replyEngagement,
+                                            onNoteClick         = { /* already viewing thread */ },
+                                            onAuthorClick       = onAuthorClick,
+                                            onQuote             = onQuote,
+                                            onArticleClick      = { articleRow = it },
+                                            onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                            onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                            onZap               = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+                                            onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                            lookupProfile       = actionsViewModel::lookupProfile,
+                                            lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                            fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                            profileFlow         = null,
+                                            imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                            thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                        )
+                                    } else {
+                                        ShimmerNoteCard(showMedia = false)
+                                    }
                                 }
                             }
                         }
