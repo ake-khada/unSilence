@@ -384,6 +384,7 @@ private fun EventFeedItem(
         onSaveNwcUri        = callbacks.saveNwcUri,
         lookupProfile       = callbacks.lookupProfile,
         lookupEvent         = callbacks.lookupEvent,
+        lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         profileFlow         = callbacks.profileFlow,
         imageDimensionCache = imageDimensionCache,
