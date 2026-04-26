@@ -71,6 +71,7 @@ object ContentParser {
         rootId: String?,
         hasContentWarning: Boolean,
         contentWarningReason: String?,
+        preparsedImeta: List<ImetaMedia>? = null,
     ): EventModel {
         // ── Step 1: Repost unwrap ─────────────────────────────────────────
         val repost = if (kind == 6) parseRepostInfo(content, tagsJson) else null
@@ -81,7 +82,13 @@ object ContentParser {
         val effectiveCreatedAt = if (repost != null) effectiveCreatedAt(repost, createdAt) else createdAt
 
         // ── Step 2: Imeta + q-tag relay hints ────────────────────────────
-        val imeta = ImetaParser.parse(effectiveTagsJson)
+        // Reuse preparsed imeta when available — but for kind-6 reposts,
+        // always reparse from inner tags (preparsed was the wrapper's tags).
+        val imeta = when {
+            repost != null -> ImetaParser.parse(effectiveTagsJson)
+            preparsedImeta != null -> preparsedImeta
+            else -> ImetaParser.parse(effectiveTagsJson)
+        }
         val qHints = extractQTagHints(effectiveTagsJson)
 
         // ── Step 3: Single-pass tokenization ──────────────────────────────

@@ -28,7 +28,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private const val MAX_CONTENT_EVENTS = 10_000
-private const val FEED_ROW_CACHE_CAP = 500
+private const val FEED_ROW_CACHE_CAP = 2000
 private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
 private const val PROFILE_CAP = 2_000
@@ -175,13 +175,6 @@ class MemoryEventStore @Inject constructor() {
     fun putEventModel(eventId: String, model: com.unsilence.app.data.model.EventModel) {
         eventModelsByEventId[eventId] = model
     }
-
-    /** Reactive flow for a single EventModel — used by lookupModel for late-arriving quotes. */
-    fun eventModelFlow(eventId: String): Flow<com.unsilence.app.data.model.EventModel?> =
-        _feedSignal
-            .map { eventModelsByEventId[eventId] }
-            .distinctUntilChanged()
-            .flowOn(Dispatchers.Default)
 
     // ─── Reactive signals ───────────────────────────────────────────────────
     private val _feedSignal = MutableStateFlow(0L)
@@ -2010,22 +2003,21 @@ class MemoryEventStore @Inject constructor() {
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
-        // Pre-compute media metadata for feed content kinds
-        if (event.kind in setOf(1, 6, 20, 21)) {
-            val models = com.unsilence.app.data.model.buildVideoRenderModels(
-                event.kind, event.content, event.tags,
-            )
-            if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
-            // Image aspect ratios from imeta dim tags
-            val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
-            val imageDims = imetaMedia
-                .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
-                .associate { it.url to (it.width!!.toFloat() / it.height!!) }
-            if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
-        }
-
-        // Pre-parse EventModel for direct UI consumption
+        // Pre-compute media metadata + EventModel. Parse imeta once for all consumers.
         if (event.kind in setOf(1, 6, 20, 21, 30023)) {
+            val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
+
+            if (event.kind in setOf(1, 6, 20, 21)) {
+                val models = com.unsilence.app.data.model.buildVideoRenderModels(
+                    event.kind, event.content, event.tags,
+                )
+                if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
+                val imageDims = imetaMedia
+                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
+                    .associate { it.url to (it.width!!.toFloat() / it.height!!) }
+                if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
+            }
+
             val model = com.unsilence.app.data.model.ContentParser.parse(
                 id = event.id,
                 pubkey = event.pubkey,
@@ -2038,6 +2030,7 @@ class MemoryEventStore @Inject constructor() {
                 rootId = event.rootId,
                 hasContentWarning = event.hasContentWarning,
                 contentWarningReason = event.contentWarningReason,
+                preparsedImeta = imetaMedia,
             )
             eventModelsByEventId[event.id] = model
         }
