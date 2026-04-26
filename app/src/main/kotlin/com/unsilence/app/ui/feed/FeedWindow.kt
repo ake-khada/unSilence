@@ -6,6 +6,9 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.OgFetcher
+import com.unsilence.app.data.relay.ProfileResolver
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
@@ -17,10 +20,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "FeedWindow"
 private const val WINDOW_BATCH = 300
@@ -44,6 +49,7 @@ private sealed class WindowEvent {
     data object FlushPending : WindowEvent()
     data object IsAtTop : WindowEvent()
     data object NotAtTop : WindowEvent()
+    data class ViewportChanged(val first: Int, val last: Int) : WindowEvent()
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -53,6 +59,10 @@ class FeedWindow(
     private val loader: FeedWindowLoader,
     private val keyManager: KeyManager,
     parentScope: CoroutineScope,
+    private val profileResolver: ProfileResolver,
+    private val relayPool: RelayPool,
+    private val ogFetcher: OgFetcher,
+    private val videoThumbnailCache: VideoThumbnailCache,
 ) {
     // Single-threaded dispatcher serializes all state mutations — no races
     private val scope = CoroutineScope(
@@ -76,6 +86,23 @@ class FeedWindow(
     private var resolvedContentFilter: Int = 0
     private var resolvedAuthorPubkey: String? = null
     private var resolvedFeedFilter: FeedFilter? = null  // post-query filters (sinceHours, engagement, media)
+
+    // Viewport tracking
+    private var viewportFirst: Int = 0
+    private var viewportLast: Int = 0
+    private var lastHydratedFirst: Int = -1
+    private var lastHydratedLast: Int = -1
+
+    // Per-event hydration status (idempotency)
+    private data class HydrationStatus(
+        var profileFetched: Boolean = false,
+        var refsFetched: Boolean = false,
+        var ogFetched: Boolean = false,
+        var videoFrameFetched: Boolean = false,
+        var engagementFreshAt: Long = 0L,
+    )
+    private val hydrationStatus = ConcurrentHashMap<String, HydrationStatus>()
+    private var hydrationJob: Job? = null
 
     private val _snapshot = MutableStateFlow(WindowSnapshot())
     val snapshot: StateFlow<WindowSnapshot> = _snapshot.asStateFlow()
@@ -140,17 +167,25 @@ class FeedWindow(
         events.trySend(WindowEvent.FlushPending)
     }
 
-    fun onScrollChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
-        val atTop = firstVisibleIndex == 0 && firstVisibleOffset == 0
+    fun onViewportChanged(first: Int, last: Int) {
+        Log.d(TAG, "onViewportChanged first=$first last=$last key=$key")
+        val atTop = first == 0
         if (atTop != isAtTop) {
             events.trySend(if (atTop) WindowEvent.IsAtTop else WindowEvent.NotAtTop)
         }
+        events.trySend(WindowEvent.ViewportChanged(first, last))
+    }
+
+    // Backward compat for screens that haven't migrated yet
+    fun onScrollChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
+        onViewportChanged(firstVisibleIndex, firstVisibleIndex + 7)
     }
 
     fun release() {
         Log.d(TAG, "release key=$key")
         deactivate()
-        loader.stopEngagementRefreshFor(key)
+        hydrationJob?.cancel()
+        hydrationStatus.clear()
         scope.cancel()
         events.close()
     }
@@ -259,15 +294,22 @@ class FeedWindow(
                 if (row.id in renderedIds || row.id in pendingTopIds) return
                 if (!passesPostQueryFilters(row)) return
 
-                // Only treat as live-tail if strictly newer than the current head.
-                // Older events arriving via background fetch (e.g. profile warm refresh)
-                // are NOT live-tail; ignore them — the initial batch was authoritative
-                // for the window's range. The user reaches older content via loadMore.
-                val headTime = rendered.firstOrNull()?.createdAt ?: Long.MIN_VALUE
-                if (rendered.isNotEmpty() && row.createdAt <= headTime) return
+                // Cold fill: while initial load is in progress or rendered is sparse,
+                // accept events with sorted insert (feeds are still filling from relays).
+                // Steady state: strict live-tail rule — only accept events strictly newer
+                // than the current head. Older events from background fetches are dropped.
+                val coldFill = isLoadingInitial || rendered.size < 50
+                if (!coldFill) {
+                    val headTime = rendered.firstOrNull()?.createdAt ?: Long.MIN_VALUE
+                    if (rendered.isNotEmpty() && row.createdAt <= headTime) return
+                }
 
-                if (rendered.isEmpty() || isAtTop) {
-                    rendered.add(0, row)
+                if (rendered.isEmpty() || isAtTop || coldFill) {
+                    // Sorted insert by createdAt DESC — correct for both cold fill
+                    // (older events insert further down) and steady-state live-tail
+                    // (strictly newer events land at index 0)
+                    val idx = rendered.indexOfFirst { it.createdAt < row.createdAt }
+                    if (idx == -1) rendered.add(row) else rendered.add(idx, row)
                     renderedIds.add(row.id)
                     trimRendered()
                 } else {
@@ -313,6 +355,12 @@ class FeedWindow(
             WindowEvent.NotAtTop -> {
                 isAtTop = false
             }
+            is WindowEvent.ViewportChanged -> {
+                viewportFirst = ev.first
+                viewportLast = ev.last
+                Log.d(TAG, "ViewportChanged processed: $viewportFirst..$viewportLast rendered=${rendered.size}")
+                scheduleHydration()
+            }
         }
     }
 
@@ -330,7 +378,6 @@ class FeedWindow(
             renderedIds = HashSet<String>(batch.size).apply { for (r in batch) add(r.id) }
             isLoadingInitial = false
             if (batch.isEmpty()) hasMore = false
-            loader.startEngagementRefreshFor(key, renderedIds)
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -353,6 +400,118 @@ class FeedWindow(
         )
     }
 
+    // ── Zone-aware hydration driver ─────────────────────────────────────
+
+    private fun scheduleHydration() {
+        // Cancel-and-reschedule: rapid scrolls extend the debounce.
+        // When the user stops scrolling for 300ms, the latest viewport gets hydrated.
+        hydrationJob?.cancel()
+        hydrationJob = scope.launch {
+            delay(VIEWPORT_DEBOUNCE_MS)
+            if (viewportFirst == lastHydratedFirst && viewportLast == lastHydratedLast) return@launch
+            lastHydratedFirst = viewportFirst
+            lastHydratedLast = viewportLast
+            runHydrationPass()
+        }
+    }
+
+    private suspend fun runHydrationPass() {
+        val rows = rendered.toList()
+        if (rows.isEmpty()) return
+
+        val warmStart = (viewportFirst - WARM_ABOVE).coerceAtLeast(0)
+        val warmEnd = (viewportLast + WARM_BELOW).coerceAtMost(rows.size - 1)
+        if (warmEnd < warmStart) return
+
+        Log.d(TAG, "hydration pass: viewport=$viewportFirst..$viewportLast warm=$warmStart..$warmEnd rows=${rows.size}")
+
+        val warmRows = rows.subList(warmStart, warmEnd + 1)
+        val warmEvents = mes.eventsByIds(warmRows.map { it.id }.toSet())
+
+        val now = System.currentTimeMillis()
+
+        // 1. Profiles — collect stale authors in warm zone
+        val staleAuthors = mutableSetOf<String>()
+        for (row in warmRows) {
+            val s = hydrationStatus.getOrPut(row.id) { HydrationStatus() }
+            if (s.profileFetched) continue
+            val lastUpdated = mes.getProfileLastUpdated(row.pubkey)
+            if (lastUpdated < now - PROFILE_TTL_MS) {
+                staleAuthors += row.pubkey
+            }
+            s.profileFetched = true
+        }
+        if (staleAuthors.isNotEmpty()) {
+            Log.d(TAG, "hydration: ${staleAuthors.size} stale profiles")
+            profileResolver.request(staleAuthors.toList())
+        }
+
+        // 2. Refs — referenced events not in MES
+        val missingRefs = mutableSetOf<String>()
+        for (event in warmEvents) {
+            val s = hydrationStatus.getOrPut(event.id) { HydrationStatus() }
+            if (s.refsFetched) continue
+            for (tag in event.tags) {
+                if (tag.size >= 2 && tag[0] == "e") {
+                    val refId = tag[1]
+                    if (refId.length == 64 && mes.getEventEntity(refId) == null) {
+                        missingRefs += refId
+                    }
+                }
+            }
+            s.refsFetched = true
+        }
+        if (missingRefs.isNotEmpty()) {
+            relayPool.fetchEventsByIds(missingRefs.toList())
+        }
+
+        // 3. OG metadata — non-media URLs, warm zone
+        for (row in warmRows) {
+            val s = hydrationStatus.getOrPut(row.id) { HydrationStatus() }
+            if (s.ogFetched) continue
+            val urls = LINK_URL_REGEX.findAll(row.content).map { it.value }
+                .filter { url -> !IMAGE_REGEX.containsMatchIn(url) && !VIDEO_REGEX.containsMatchIn(url) }
+                .toList()
+            for (url in urls) {
+                scope.launch(Dispatchers.IO) {
+                    try { ogFetcher.fetch(url) } catch (_: Throwable) {}
+                }
+            }
+            s.ogFetched = true
+        }
+
+        // 4. Video first-frame — warm zone
+        for (event in warmEvents) {
+            val s = hydrationStatus.getOrPut(event.id) { HydrationStatus() }
+            if (s.videoFrameFetched) continue
+            val hasImetaDim = mes.getImetaImageDims(event.id).isNotEmpty()
+            if (hasImetaDim) {
+                s.videoFrameFetched = true
+                continue
+            }
+            val videoUrl = VIDEO_REGEX.find(event.content)?.value
+            if (videoUrl != null) {
+                scope.launch(Dispatchers.IO) {
+                    try { videoThumbnailCache.warmThumbnail(videoUrl) }
+                    catch (_: Throwable) {}
+                }
+            }
+            s.videoFrameFetched = true
+        }
+
+        // 5. Engagement freshness — warm zone, stale > 60s
+        val staleEngagementIds = mutableListOf<String>()
+        for (row in warmRows) {
+            val s = hydrationStatus.getOrPut(row.id) { HydrationStatus() }
+            if (now - s.engagementFreshAt < ENGAGEMENT_STALE_MS) continue
+            s.engagementFreshAt = now
+            staleEngagementIds += row.id
+        }
+        if (staleEngagementIds.isNotEmpty()) {
+            loader.refreshEngagementForIds(staleEngagementIds.toSet())
+        }
+    }
+
     private fun resolveGlobalUrls(pubkey: String): List<String> {
         if (pubkey.isEmpty()) return GLOBAL_RELAY_URLS
         val readRelays = mes.getReadWriteRelayConfigs(pubkey)
@@ -362,6 +521,16 @@ class FeedWindow(
     }
 
     companion object {
+        private const val WARM_ABOVE = 10
+        private const val WARM_BELOW = 30
+        private const val VIEWPORT_DEBOUNCE_MS = 300L
+        private const val PROFILE_TTL_MS = 6 * 60 * 60 * 1000L
+        private const val ENGAGEMENT_STALE_MS = 60_000L
+
+        private val LINK_URL_REGEX = Regex(
+            """https?://\S+""",
+            RegexOption.IGNORE_CASE,
+        )
         private val IMAGE_REGEX = Regex(
             """https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?|https?://(?:image\.nostr\.build|i\.nostr\.build|nostr\.build|blossom\.primal\.net)/\S+""",
             RegexOption.IGNORE_CASE,

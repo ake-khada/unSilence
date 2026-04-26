@@ -38,7 +38,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -432,6 +434,19 @@ fun ProfileScreen(
                         viewModel.loadMore(posts.last().createdAt)
                     }
                 }
+        }
+
+        // Viewport tracking for zone-aware hydration
+        @OptIn(FlowPreview::class)
+        LaunchedEffect(Unit) {
+            snapshotFlow {
+                val info = listState.layoutInfo
+                val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                first to last
+            }.sample(100).collect { (first, last) ->
+                viewModel.onViewportChanged(first, last)
+            }
         }
 
         // ── Own top bar overlay ───────────────────────────────────────────────

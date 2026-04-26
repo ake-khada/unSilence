@@ -13,6 +13,8 @@ import com.unsilence.app.data.relay.CoverageIntent
 import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.RelayBrowseSession
+import com.unsilence.app.data.relay.OgFetcher
+import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.cache.CoverageTracker
 import com.unsilence.app.data.repository.UserRepository
@@ -81,6 +83,9 @@ class FeedViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
     private val feedWindowLoader: FeedWindowLoader,
+    private val profileResolver: ProfileResolver,
+    private val ogFetcher: OgFetcher,
+    private val videoThumbnailCache: VideoThumbnailCache,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -175,12 +180,14 @@ class FeedViewModel @Inject constructor(
         .map { it.isLoadingMore }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    fun onViewportChanged(first: Int, last: Int) {
+        activeWindow?.onViewportChanged(first, last)
+    }
+
+    /** Backward-compat forwarder for any callers still using the old API. */
     fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
         activeWindow?.onScrollChanged(firstVisibleIndex, firstVisibleOffset)
     }
-
-    /** No-op forwarder — screen calls both; delegates to onScrollPositionChanged. */
-    fun saveScrollPosition(index: Int, offset: Int) = onScrollPositionChanged(index, offset)
 
     fun onDotTapped() { activeWindow?.flushPending() }
 
@@ -310,6 +317,10 @@ class FeedViewModel @Inject constructor(
             loader = feedWindowLoader,
             keyManager = keyManager,
             parentScope = viewModelScope,
+            profileResolver = profileResolver,
+            relayPool = relayPool,
+            ogFetcher = ogFetcher,
+            videoThumbnailCache = videoThumbnailCache,
         )
         activeWindow = window
         window.activate()

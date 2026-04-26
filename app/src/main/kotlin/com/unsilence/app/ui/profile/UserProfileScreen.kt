@@ -89,7 +89,9 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
@@ -200,6 +202,19 @@ fun UserProfileScreen(
                     viewModel.loadMore(oldest)
                 }
             }
+    }
+
+    // Viewport tracking for zone-aware hydration
+    @OptIn(FlowPreview::class)
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            first to last
+        }.sample(100).collect { (first, last) ->
+            viewModel.onViewportChanged(first, last)
+        }
     }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
