@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 26, 2026 (Post-PR-1: ContentFlow source-order walk, QuoteCard unified pipeline, cache cap, parser dedup.)
+**Last updated:** April 26, 2026 (Batch-first FeedWindow architecture replacing reactive FeedStateReducer.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -60,21 +60,22 @@ Any runtime behavior change MUST use human-in-the-loop validation. See `VALIDATI
 ## Architecture
 
 ```
-Relay WebSocket → EventProcessor → MemoryEventStore → Flow/StateFlow → Compose UI
+Relay WebSocket → EventProcessor → MemoryEventStore → FeedListener → FeedWindow → Compose UI
                                   └→ SnapshotScheduler (disk persistence)
 ```
 
 **Core principle:** MES-only (in-memory ConcurrentHashMap), 0ms screen render, snapshot persistence to disk. No Room, no SQLite. All data classes in `data/memory/Models.kt`.
+**Feed architecture:** Batch-first — feed is a frozen list of 300 events loaded by FeedWindowLoader, NOT a reactive stream. Live-tail events arrive via MES FeedListener callbacks and are merged into the window by sorted insertion. No `feedFlow.collect`, no continuous re-scan.
 
 ### Key Subsystems (read code for details)
 - **ContentParser** — single-pass tokenizer producing `EventModel` from raw event fields. Called at insert time (EventProcessor.flushBatch) and snapshot restore (MES.insertFromSnapshot). Pure function, O(n) in content length. Cached in `MES.eventModelsByEventId` sidecar
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance, ContentParser.parse hook in flushBatch
 - **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
 - **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed), ephemeral one-shot path (`sendOneShotBatch` + `openEphemeral`) for cap-bypassing fetches
-- **FeedStateReducer** — MERGE at top / QUEUE when scrolled / APPEND pagination, blue dot, `synchronized`-based coalescing (200ms window), `PersistentSet<String>` knownIds
-- **FeedWindowLoader** — bounded-window feed hydration: Phase A (event discovery via ephemeral REQs) + Phase B (parallel hydration: relay lists, engagement, profiles, refs, media). Explicit Load More button triggers `loadMore()` for next page. `FeedWindowConfig` holds all constants (WINDOW_SIZE=300, relay fanout, freshness TTLs)
+- **FeedWindow** — per-feed-key window primitive. `Channel<WindowEvent>(UNLIMITED)` drain loop serialized via `Dispatchers.Default.limitedParallelism(1)`. WindowEvents: ContentInsert (sorted by createdAt), EngagementUpdate, ProfileUpdate, FlushPending, IsAtTop/NotAtTop. Pending buffer when scrolled down; auto-flush when at top. `WindowSnapshot` (@Immutable data class) exposed via StateFlow. RENDERED_CAP=1500, WINDOW_BATCH=300
+- **FeedWindowLoader** — bounded-window feed hydration: `loadBatchFor(key, cursor, limit)` queries MES, applies post-query filters, hydrates top-30 blocking (3s budget) + remaining in background. Home branch polls MES with 5s timeout when empty (waits for relay events). Profile branch warm-start: returns immediately if MES has events, background-refreshes. `FeedWindowConfig` holds all constants (WINDOW_SIZE=300, relay fanout, freshness TTLs)
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
-- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.) with own-pubkey + p-tag-mentioned anchors, feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets. Sidecar caches: `eventModelsByEventId` (EventModel), `videoRenderModelsByEventId`, `imetaImageDimsByEventId`
+- **MemoryEventStore** — ConcurrentHashMap store, signal-driven reactive Flows (`_feedSignal`, `_profileSignal`, `_statsSignal`, `_actionSignal`, `_trustScoreSignal`, `_relayMonitorSignal`). Pattern: `_signal.map { scan() }.distinctUntilChanged().flowOn(Dispatchers.Default)`. **FeedListener** — targeted callbacks (`onContentInsert`, `onEngagementUpdate`, `onProfileUpdate`) fired from MES insert thread, registered via `CopyOnWriteArrayList`. Used by FeedWindow for live-tail. Bounded: per-kind content eviction (k1=5000, k6=1000, etc.) with own-pubkey + p-tag-mentioned anchors, feedRowCache LRU cap 500, profilesByPubkey LRU cap 2000 (anchored: own+followed+recent), actor indexes cap 1000 actors/500 targets. Sidecar caches: `eventModelsByEventId` (EventModel), `videoRenderModelsByEventId`, `imetaImageDimsByEventId`
 - **MesMetricsLogger** — ProcessLifecycleOwner-driven 60s foreground logger (`MES/size` tag). Reports per-collection counts, per-kind breakdown, actor indexes, external cache sizes, eviction anchor counts, relay dedup metrics. `MesMetrics.kt` data class + `MES.snapshotSize()`
 - **ImageDimensionCache** — singleton ConcurrentHashMap of image aspect ratios (url → width/height), clamped to 0.2..5.0
 - **VideoThumbnailCache** — first-frame thumbnails via MMR, downsampled (inSampleSize=2, ~1MB/thumb), LRU eviction at 100 entries OR 64MB bitmap total, `visibleUrls` set protects on-screen thumbnails from eviction
@@ -162,48 +163,53 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 34. **Indexer relays are PERSISTENT** — registered with `ConnectionPurpose.PERSISTENT` in bootstrap before `connectAndAwait`. Prevents idle eviction, ensures `sendOneShotBatch` always reuses them
 35. **Relay monitor fetch is staleness-gated** — 12h threshold via `RelayPreferencesStore.lastMonitorFetchAt()`. Skips `fetchRelayMonitors()` when snapshot data exists and is fresh. Timestamp stored after successful fetch
 
-### Feed & Hydration
-36. **Render-then-hydrate architecture** — MES signals drive the reducer immediately; FeedWindowLoader hydrates in parallel. Don't gate on hydration completion at reducer level
-37. **FeedStateReducer state: immutable only** — `PersistentSet<String>` for knownIds, O(delta) updates. No mutable collections in ReducerState
-38. **Pagination cursor is reducer-owned** — `oldestCreatedAt` in `ReducerState`. No `minOfOrNull` outside the reducer
-39. **Engagement freshness uses tiered thresholds** — route through `freshnessThreshold()`. Don't use raw `ENGAGEMENT_STALE_MS` as sole threshold
-40. **State machines, not booleans** — multi-state properties must be enums. Booleans collapse intermediate states
-41. **Pagination guard: don't advance on empty** — `lastOldestTimestamp` only advances on non-empty loadMore results. Empty results leave the guard alone, allowing retry when new content arrives via live-tail
+### Feed & Hydration (FeedWindow)
+36. **Batch-first, not reactive-stream** — Feed is a frozen list of WINDOW_BATCH events from FeedWindowLoader. No `feedFlow.collect`, no continuous MES re-scan. Live-tail via MES FeedListener callbacks merged into the window
+37. **FeedWindow is the sole feed primitive** — FeedStateReducer is deleted. FeedViewModel, ProfileViewModel, and UserProfileViewModel all use FeedWindow instances. Each window has its own Channel drain loop serialized on `Dispatchers.Default.limitedParallelism(1)`
+38. **Sorted insertion by createdAt descending** — ContentInsert finds correct position via `indexOfFirst { it.createdAt < row.createdAt }`. FlushPending sorts pending before merge. Never `add(0, row)` — events from different relays arrive out of order
+39. **`passesAllFilters` shared companion** — both `loadBatchFor` (initial batch) and live-tail `ContentInsert` use the same `FeedWindow.passesAllFilters(row, filter)`. No divergence between batch and live-tail filtering
+40. **Profile tab kinds** — NOTES: `setOf(1, 6)`, REPLIES: `setOf(1, 6)`, LONGFORM: `setOf(30023)`. Kind 30023 is LONGFORM only. Both FeedWindow.resolveFilter and FeedWindowLoader.loadBatchFor must agree
+41. **Tab-keyed window cache** — `mutableMapOf<ProfileTab, FeedWindow>()` in both profile VMs. Cache cleared on pubkey change (UserProfileVM). Hot windows reactivated without reload. `onCleared` releases all cached windows
+42. **MES polling for cold Home feeds** — `loadBatchFor(Home)` polls MES every 300ms with 5s timeout when initial query returns empty (waiting for relay events to arrive)
+43. **Profile warm-start** — `loadBatchFor(Profile)` checks MES first. If events exist, returns immediately and refreshes in background. If empty, fetches and polls with 5s timeout
+44. **Background hydration** — After blocking top-30 hydration (3s budget), fire-and-forget job hydrates all remaining events (profiles, media dims, refs). Prevents missing avatars beyond first screen
+45. **Engagement freshness uses tiered thresholds** — route through `freshnessThreshold()`. Don't use raw `ENGAGEMENT_STALE_MS` as sole threshold
+46. **`_activeKey` StateFlow pattern** — `MutableStateFlow<WindowKey?>` set AFTER `activeWindow` is assigned in `swapToWindow`. `flatMapLatest` on this flow reads the correct window's snapshot. Prevents stale window observation
 
 ### Media
-42. **Media aspect ratios are layout-locked after first compose** — three-tier resolution (imeta → MMR → ImageDimensionCache). ONE update from default→resolved permitted, then locked
-43. **ImageDimensionCache clamps ratios to 0.2f..5.0f** — malformed dimensions from servers must not corrupt layout
-44. **Zero-height guard on imeta dims** — `&& it.height != 0` at all parse/resolve sites (EventProcessor, MES snapshot restore, ContentParser, VideoRenderModel)
-45. **MES sidecar caches** — `eventModelsByEventId`, `videoRenderModelsByEventId` and `imetaImageDimsByEventId` cleared in `MES.clear()`, populated in `insertFromSnapshot()`
-46. **FeedWindowLoader B.4 media hydration** — parses imeta dims at window load time, populating sidecar caches for layout-locked first render
-47. **"Failed to call close" from MMR is framework-owned** — ~24/session, no functional effect. Re-audit if >50/session
-48. **OG preview aspect ratio is 16:9** — image request, loading placeholder, loaded image, and error fallback all use `aspectRatio(16f / 9f)`
+47. **Media aspect ratios are layout-locked after first compose** — three-tier resolution (imeta → MMR → ImageDimensionCache). ONE update from default→resolved permitted, then locked
+48. **ImageDimensionCache clamps ratios to 0.2f..5.0f** — malformed dimensions from servers must not corrupt layout
+49. **Zero-height guard on imeta dims** — `&& it.height != 0` at all parse/resolve sites (EventProcessor, MES snapshot restore, ContentParser, VideoRenderModel)
+50. **MES sidecar caches** — `eventModelsByEventId`, `videoRenderModelsByEventId` and `imetaImageDimsByEventId` cleared in `MES.clear()`, populated in `insertFromSnapshot()`
+51. **FeedWindowLoader media hydration** — parses imeta dims at window load time, populating sidecar caches for layout-locked first render
+52. **"Failed to call close" from MMR is framework-owned** — ~24/session, no functional effect. Re-audit if >50/session
+53. **OG preview aspect ratio is 16:9** — image request, loading placeholder, loaded image, and error fallback all use `aspectRatio(16f / 9f)`
 
 ### Shared Utilities
-49. **`toEventJson(event)` lives in `NostrJson.kt`** — single shared function. Never duplicate in ViewModels
-50. **`ANTIPRIMAL_RELAY_URL` in `RelayUrlUtil.kt`** — use the constant, don't hardcode `"wss://antiprimal.net"`
-51. **`normalizeRelayUrl()` in `RelayUrlUtil.kt`** — top-level function, no companion object wrappers
+54. **`toEventJson(event)` lives in `NostrJson.kt`** — single shared function. Never duplicate in ViewModels
+55. **`ANTIPRIMAL_RELAY_URL` in `RelayUrlUtil.kt`** — use the constant, don't hardcode `"wss://antiprimal.net"`
+56. **`normalizeRelayUrl()` in `RelayUrlUtil.kt`** — top-level function, no companion object wrappers
 
 ### Thread Safety
-52. **Thread DFS walk uses `visited` set** — cycle protection prevents stack overflow on circular reply chains
+57. **Thread DFS walk uses `visited` set** — cycle protection prevents stack overflow on circular reply chains
 
 ### Memory Bounds
-53. **VideoThumbnailCache bitmaps MUST be downsampled** — `inSampleSize=2` in `downsample()`. Removing this regresses to ~3.5MB/thumb → 64MB cap hit in 2 minutes
-54. **VideoThumbnailCache `visibleUrls` set** — composables register via `markVisible`/`markNotVisible` in `DisposableEffect`. Eviction skips visible URLs. Missing unregister = memory leak
-55. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
-56. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
-57. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
-58. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index, profile, and content eviction anchors. Must be set before events arrive
-59. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
-60. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
-61. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
-62. **ColdStartState, not boolean splash** — `_coldStartState` replaces `_splashDone`. VM waits 10s for kind-3 + 5s for kind-10002 (matching bootstrapper budgets). Never regress to a boolean or shorter timeout — that reintroduces the Global→Following flash. `splashDone` is a derived backward-compat alias only
+58. **VideoThumbnailCache bitmaps MUST be downsampled** — `inSampleSize=2` in `downsample()`. Removing this regresses to ~3.5MB/thumb → 64MB cap hit in 2 minutes
+59. **VideoThumbnailCache `visibleUrls` set** — composables register via `markVisible`/`markNotVisible` in `DisposableEffect`. Eviction skips visible URLs. Missing unregister = memory leak
+60. **feedRowCache + feedRowAccessedAt paired** — every `feedRowCache.remove()` site MUST also remove from `feedRowAccessedAt`. Check: `evictOldContentEvents`, `invalidateFeedRowCache`, `trimFeedRowCacheIfNeeded`, `clear`
+61. **Actor index caps** — outer map 1000 actors LRU, inner 500 targets/actor. `ownPubkey` anchored (never evicted). All three indexes (reacted/reposted/zapped) share `actorAccessedAt` and trim together
+62. **Profile eviction anchors** — own pubkey + followed + top 500 recent event authors. Cascades to `profileUpdatedAt`, `profileFieldsCache`, `relayListsByPubkey`. Missing cascade = orphaned entries
+63. **MES.ownPubkey** — set by AppBootstrapper at bootstrap start. Used by actor index, profile, and content eviction anchors. Must be set before events arrive
+64. **Content eviction anchors** — `evictOldContentEvents()` skips events where `pubkey == ownPubkey` OR any p-tag points to ownPubkey. Mirrors profile/actor anchor patterns. Without this, own notes and notifications vanish after relay backfill triggers eviction
+65. **lookupEvent `fetchingQuoteIds` is transient** — guards concurrent lookups only, cleared after completion. Permanent guards cause evicted quoted events to never re-fetch
+66. **Notification `lastSeen` must be re-read per emission** — stale capture at collect start causes blue dot to reappear on tab switch when MES re-emits
+67. **ColdStartState, not boolean splash** — `_coldStartState` replaces `_splashDone`. VM waits 10s for kind-3 + 5s for kind-10002 (matching bootstrapper budgets). Never regress to a boolean or shorter timeout — that reintroduces the Global→Following flash. `splashDone` is a derived backward-compat alias only
 
 ### Snapshot Persistence
-63. **Kind-3 is NOT channeled through EventProcessor** — `updateFollows` direct-path provides MES update; snapshot persists `followsByPubkey` directly in `---FOLLOWS---` section. Never re-add kind 3 to `shouldChannel`
-64. **Snapshot follows format** — `follows|pubkey|createdAt|hex1,hex2,...` — compact pipe-delimited, no tag parsing on restore. Backward-compatible: old snapshots with kind-3 events still restore via `insertFromSnapshot → handleFollows`
-65. **Follows-first snapshot order** — `saveSnapshotTo` writes `---FOLLOWS---` before `---EVENTS---`. On restore, `_followsSignal` fires at the `---EVENTS---` marker (mid-restore), enabling FeedVM cold-start to resolve in ~1.4s instead of waiting for 25s event parse. Old snapshots (no `---EVENTS---` marker) use implicit section 0 default — backward compatible
-66. **connectAndAwait BEFORE snapshot restore** — `AppBootstrapper` opens indexer connections before `restoreIfPresent()`. `sendOneShotBatch` checks `connections` map (not PERSISTENT purpose) — connections must be in the map for reuse during the 25s snapshot parse window
+68. **Kind-3 is NOT channeled through EventProcessor** — `updateFollows` direct-path provides MES update; snapshot persists `followsByPubkey` directly in `---FOLLOWS---` section. Never re-add kind 3 to `shouldChannel`
+69. **Snapshot follows format** — `follows|pubkey|createdAt|hex1,hex2,...` — compact pipe-delimited, no tag parsing on restore. Backward-compatible: old snapshots with kind-3 events still restore via `insertFromSnapshot → handleFollows`
+70. **Follows-first snapshot order** — `saveSnapshotTo` writes `---FOLLOWS---` before `---EVENTS---`. On restore, `_followsSignal` fires at the `---EVENTS---` marker (mid-restore), enabling FeedVM cold-start to resolve in ~1.4s instead of waiting for 25s event parse. Old snapshots (no `---EVENTS---` marker) use implicit section 0 default — backward compatible
+71. **connectAndAwait BEFORE snapshot restore** — `AppBootstrapper` opens indexer connections before `restoreIfPresent()`. `sendOneShotBatch` checks `connections` map (not PERSISTENT purpose) — connections must be in the map for reuse during the 25s snapshot parse window
 
 ---
 
@@ -221,7 +227,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 
 ## Key Patterns
 
-**MES feed query:** `feedFlow()` scans `idsByKind` + `eventEntitiesByNoteId`, filters by FeedFilter, joins profiles + stats → FeedRow list
+**MES feed query:** `feedEvents()` / `userEvents()` scan `idsByKind` + `eventEntitiesByNoteId`, filter by kind/pubkey/relay/content-type, join profiles + stats → FeedRow list. Called by `FeedWindowLoader.loadBatchFor()` at load time, not continuously
 
 **Cold-start / splash:** `ColdStartState` enum (`LOADING`, `READY_FOLLOWING`, `READY_GLOBAL`) in FeedViewModel. Waits up to 10s for kind-3 (follows), then 5s for kind-10002 (relay lists). Warm resume resolves instantly from snapshot (<300ms). No Global→Following flash. `splashDone` backward-compat alias gates AppNavigation bars
 
@@ -251,9 +257,9 @@ app/src/main/kotlin/com/unsilence/app/
 ├── di/              Hilt modules
 ├── ui/
 │   ├── common/      LogoMark, LoadingScreen, EmptyState, ShimmerNoteCard, IdentIcon
-│   ├── feed/        FeedScreen, FeedViewModel, FeedStateReducer, FeedWindowLoader,
-│   │                FeedWindowConfig, EventCard, ContentFlow, NoteCardHelpers,
-│   │                ImageDimensionCache, VideoThumbnailCache
+│   ├── feed/        FeedScreen, FeedViewModel, FeedWindow, FeedWindowLoader,
+│   │                WindowKey, FeedWindowConfig, EventCard, ContentFlow,
+│   │                NoteCardHelpers, ImageDimensionCache, VideoThumbnailCache
 │   ├── navigation/  AppNavigation
 │   ├── compose/     ComposeScreen, ComposeViewModel
 │   ├── notifications/ NotificationsScreen, NotificationsViewModel

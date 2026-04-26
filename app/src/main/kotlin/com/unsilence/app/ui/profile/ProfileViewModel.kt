@@ -8,12 +8,14 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.feed.FeedWindow
+import com.unsilence.app.ui.feed.FeedWindowLoader
+import com.unsilence.app.ui.feed.WindowKey
+import com.unsilence.app.ui.feed.WindowSnapshot
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -29,11 +31,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -48,7 +49,7 @@ class ProfileViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
-    private val cardHydrator: CardHydrator,
+    private val feedWindowLoader: FeedWindowLoader,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
 ) : ViewModel() {
 
@@ -62,38 +63,27 @@ class ProfileViewModel @Inject constructor(
     val userFlow: Flow<UserEntity?> =
         if (pubkeyHex != null) memoryEventStore.userEntityFlow(pubkeyHex) else emptyFlow()
 
-    /** Live top-level posts by this user, newest-first. */
-    val postsFlow: Flow<List<FeedRow>> =
-        if (pubkeyHex != null) memoryEventStore.userFeedFlow(pubkeyHex) else emptyFlow()
-
-    // ── Pagination ────────────────────────────────────────────────────
-    private val _displayLimit = MutableStateFlow(200)
-    private var oldestTimestamp = Long.MAX_VALUE
-    private var fetching = false
-    private var outboxRelayUrls: List<String> = emptyList()
+    // ── FeedWindow management ────────────────────────────────────────────
+    @Volatile private var activeWindow: FeedWindow? = null
+    private val windowCache = mutableMapOf<ProfileTab, FeedWindow>()
+    private val _activeProfileKey = MutableStateFlow<WindowKey.Profile?>(null)
 
     // ── Profile tabs ──────────────────────────────────────────────────
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
 
     fun selectTab(tab: ProfileTab) {
         selectedTab.value = tab
-        _displayLimit.value = 200
-        oldestTimestamp = Long.MAX_VALUE
+        // Window swap happens via the collector in init
     }
 
+    /** Live posts from the active window, newest-first. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val tabPostsFlow: Flow<List<FeedRow>> =
-        if (pubkeyHex != null) {
-            selectedTab.flatMapLatest { tab ->
-                _displayLimit.flatMapLatest { limit ->
-                    when (tab) {
-                        ProfileTab.NOTES    -> memoryEventStore.userFeedFlow(pubkeyHex, contentFilter = 1, limit = limit)
-                        ProfileTab.REPLIES  -> memoryEventStore.userFeedFlow(pubkeyHex, contentFilter = 2, limit = limit)
-                        ProfileTab.LONGFORM -> memoryEventStore.userFeedFlow(pubkeyHex, kinds = setOf(30023), limit = limit)
-                    }
-                }
-            }
-        } else emptyFlow()
+    val tabPostsFlow: StateFlow<List<FeedRow>> = _activeProfileKey
+        .flatMapLatest { key ->
+            if (key != null) activeWindow?.snapshot?.map { it.rows } ?: flowOf(emptyList())
+            else flowOf(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // ── Profile lookup for repost original authors ──────────────────────
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
@@ -110,42 +100,28 @@ class ProfileViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
     } ?: MutableStateFlow(0)
 
-    /** Approximate follower count from NIP-45 COUNT, cached in Room. */
+    /** Approximate follower count from NIP-45 COUNT, cached in MES. */
     val followerCount = MutableStateFlow<Long?>(null)
 
-    val isLoadingPosts = MutableStateFlow(true)
-
-    private val engagementFetchedIds = mutableSetOf<String>()
-    private var lastHydratedBatchIds = emptySet<String>()
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val isLoadingPosts: StateFlow<Boolean> = _activeProfileKey
+        .flatMapLatest { key ->
+            if (key != null) activeWindow?.snapshot?.map { it.isLoadingInitial } ?: flowOf(true)
+            else flowOf(true)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     init {
         if (pubkeyHex != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                userRepository.fetchProfilesWithFanout(listOf(pubkeyHex))
-
-                // Resolve outbox relays: check Room cache first, fetch kind 10002 if missing
-                var writeUrls = getWriteRelayUrls(pubkeyHex).take(5)
-                if (writeUrls.isEmpty()) {
-                    relayPool.fetchRelayLists(listOf(pubkeyHex))
-                    withTimeoutOrNull(5_000) {
-                        while (true) {
-                            delay(500)
-                            val resolved = getWriteRelayUrls(pubkeyHex).take(5)
-                            if (resolved.isNotEmpty()) {
-                                writeUrls = resolved
-                                break
-                            }
-                        }
-                    }
+            // Tab-driven window lifecycle
+            viewModelScope.launch {
+                selectedTab.collectLatest { tab ->
+                    val key = WindowKey.Profile(pubkeyHex, tab)
+                    swapToWindow(key)
                 }
-                outboxRelayUrls = writeUrls.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
-                Log.d("ProfileVM", "Longform: pubkey=$pubkeyHex outboxRelays=${outboxRelayUrls.size} urls=$outboxRelayUrls")
-                relayPool.connect(outboxRelayUrls)
-                relayPool.fetchUserPosts(pubkeyHex, outboxRelayUrls)
             }
-        }
-        // Fetch follower count via NIP-45 (cache in MES, not Room)
-        if (pubkeyHex != null) {
+
+            // Fetch follower count via NIP-45 (cache in MES)
             viewModelScope.launch(Dispatchers.IO) {
                 val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkeyHex)
                 val oneDayAgo = System.currentTimeMillis() / 1000 - MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS
@@ -155,8 +131,6 @@ class ProfileViewModel @Inject constructor(
                     return@launch
                 }
 
-                // Ensure antiprimal.net is connected before sending COUNT — it may have been
-                // evicted by the 60s idle timer or not yet connected at this point.
                 relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
                 val count = relayPool.sendCount(
                     relayUrl = ANTIPRIMAL_RELAY_URL,
@@ -171,50 +145,38 @@ class ProfileViewModel @Inject constructor(
                 }
             }
         }
-        // Unified card hydration + engagement fetch as posts arrive
-        viewModelScope.launch {
-            tabPostsFlow.collectLatest { rows ->
-                isLoadingPosts.value = false
-
-                // Only re-hydrate when the top-20 event IDs actually change (new events
-                // entering the result set). Room re-emits on ANY write to the joined tables
-                // (users, event_stats, events) even for data-only changes — without this
-                // guard, every hydration write triggers a re-emission that re-runs hydration.
-                val batch = rows.take(20)
-                val batchIds = batch.map { it.id }.toSet()
-                if (batchIds != lastHydratedBatchIds) {
-                    lastHydratedBatchIds = batchIds
-                    withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        cardHydrator.hydrateVisibleCards(batch)
-                    }
-                }
-
-                // Capped engagement fetch — one batch of 20 max, debounced
-                val newEventIds = rows
-                    .filter { it.kind != 6 }
-                    .map { it.id }
-                    .filter { it !in engagementFetchedIds }
-                    .take(20)
-                if (newEventIds.isNotEmpty()) {
-                    engagementFetchedIds.addAll(newEventIds)
-                    delay(500)
-                    relayPool.fetchEngagementBatch(newEventIds)
-                }
-            }
-        }
     }
 
+    /** Keep signature — ignore param, delegate to window. */
     fun loadMore(currentOldest: Long) {
-        val pk = pubkeyHex ?: return
-        if (fetching || currentOldest >= oldestTimestamp) return
-        fetching = true
-        oldestTimestamp = currentOldest
-        _displayLimit.value += 200
-        relayPool.fetchOlderPosts(pk, currentOldest, outboxRelayUrls)
-        viewModelScope.launch {
-            delay(2_000)
-            fetching = false
+        activeWindow?.loadMore()
+    }
+
+    private fun swapToWindow(key: WindowKey.Profile) {
+        activeWindow?.deactivate()
+
+        // Check cache for a loaded window matching this tab
+        val cached = windowCache[key.tab]
+        if (cached != null && cached.key == key && cached.hasLoaded) {
+            activeWindow = cached
+            cached.activate()
+            _activeProfileKey.value = key
+            return
         }
+
+        // Cold: create fresh, cache by tab
+        val window = FeedWindow(
+            key = key,
+            mes = memoryEventStore,
+            loader = feedWindowLoader,
+            keyManager = keyManager,
+            parentScope = viewModelScope,
+        )
+        windowCache[key.tab]?.release()
+        windowCache[key.tab] = window
+        activeWindow = window
+        window.activate()
+        _activeProfileKey.value = key
     }
 
     /**
@@ -255,14 +217,11 @@ class ProfileViewModel @Inject constructor(
             val signed = signingManager.sign(template) ?: return@launch
             relayPool.publish(toEventJson(signed))
 
-            // Also publish to indexer relays for discoverability
             val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             val targetUrls = (writeUrls + indexerUrls).distinct()
             relayPool.publishToRelays(toEventJson(signed), targetUrls)
 
-            // EventProcessor will update Room when the relay echoes the event back.
-            // Switch to main for the callback.
             launch(Dispatchers.Main) { onDone() }
         }
     }
@@ -271,4 +230,9 @@ class ProfileViewModel @Inject constructor(
 
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
+
+    override fun onCleared() {
+        super.onCleared()
+        windowCache.values.forEach { it.release() }
+    }
 }
