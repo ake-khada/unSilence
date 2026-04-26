@@ -258,14 +258,23 @@ class FeedWindow(
                 val row = mes.feedRowsByIds(setOf(ev.event.id)).firstOrNull() ?: return
                 if (row.id in renderedIds || row.id in pendingTopIds) return
                 if (!passesPostQueryFilters(row)) return
+
+                // Only treat as live-tail if strictly newer than the current head.
+                // Older events arriving via background fetch (e.g. profile warm refresh)
+                // are NOT live-tail; ignore them — the initial batch was authoritative
+                // for the window's range. The user reaches older content via loadMore.
+                val headTime = rendered.firstOrNull()?.createdAt ?: Long.MIN_VALUE
+                if (rendered.isNotEmpty() && row.createdAt <= headTime) return
+
                 if (rendered.isEmpty() || isAtTop) {
-                    // Insert at sorted position (descending by createdAt)
-                    val idx = rendered.indexOfFirst { it.createdAt < row.createdAt }
-                    if (idx == -1) rendered.add(row) else rendered.add(idx, row)
+                    rendered.add(0, row)
                     renderedIds.add(row.id)
                     trimRendered()
                 } else {
-                    pendingTop.add(0, row)
+                    // Sorted insert into pendingTop (DESC by createdAt) so flush
+                    // prepends in correct chronological order
+                    val idx = pendingTop.indexOfFirst { it.createdAt < row.createdAt }
+                    if (idx == -1) pendingTop.add(row) else pendingTop.add(idx, row)
                     pendingTopIds.add(row.id)
                 }
             }
