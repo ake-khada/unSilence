@@ -187,6 +187,37 @@ class MemoryEventStore @Inject constructor() {
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
 
+    // ─── Targeted listener registry (for FeedWindow) ────────────────────────
+
+    interface FeedListener {
+        fun onContentInsert(event: NostrEvent)
+        fun onEngagementUpdate(targetId: String)
+        fun onProfileUpdate(pubkey: String)
+    }
+
+    private val feedListeners = java.util.concurrent.CopyOnWriteArrayList<FeedListener>()
+
+    fun registerFeedListener(listener: FeedListener) { feedListeners.add(listener) }
+    fun unregisterFeedListener(listener: FeedListener) { feedListeners.remove(listener) }
+
+    private fun fireContentInsert(event: NostrEvent) {
+        for (l in feedListeners) {
+            try { l.onContentInsert(event) } catch (_: Throwable) {}
+        }
+    }
+
+    private fun fireEngagementUpdate(targetId: String) {
+        for (l in feedListeners) {
+            try { l.onEngagementUpdate(targetId) } catch (_: Throwable) {}
+        }
+    }
+
+    private fun fireProfileUpdate(pubkey: String) {
+        for (l in feedListeners) {
+            try { l.onProfileUpdate(pubkey) } catch (_: Throwable) {}
+        }
+    }
+
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
 
@@ -279,6 +310,14 @@ class MemoryEventStore @Inject constructor() {
         // Actor-side signal: bumped for kinds that populate the action indexes
         if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
             _actionSignal.value = System.nanoTime()
+        }
+
+        // Targeted listener callbacks (FeedWindow consumers)
+        if (feedListeners.isNotEmpty()) {
+            when (event.kind) {
+                1, 6, 20, 21, 30023 -> fireContentInsert(event)
+                0 -> fireProfileUpdate(event.pubkey)
+            }
         }
 
         // Periodic eviction check (every 500 inserts)
@@ -375,6 +414,7 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reposted
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
+        fireEngagementUpdate(targetId)
     }
 
     private fun handleReaction(event: NostrEvent) {
@@ -386,6 +426,7 @@ class MemoryEventStore @Inject constructor() {
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reacted to
         addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+        fireEngagementUpdate(targetId)
     }
 
     private fun handleZapRequest(event: NostrEvent) {
@@ -453,6 +494,7 @@ class MemoryEventStore @Inject constructor() {
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        fireEngagementUpdate(targetId)
     }
 
     /**

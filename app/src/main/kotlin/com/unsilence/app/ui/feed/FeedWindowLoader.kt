@@ -8,6 +8,10 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.FeedFilter as MemoryFeedFilter
+import com.unsilence.app.domain.model.ShowType
+import com.unsilence.app.ui.profile.ProfileTab
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +25,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -461,9 +466,19 @@ class FeedWindowLoader @Inject constructor(
 
         withTimeoutOrNull(FeedWindowConfig.HYDRATION_WORKER_TIMEOUT_MS) {
             profileResolver.request(stale)
-            // ProfileResolver batches internally (300ms window, 100 pubkey cap).
-            // Wait for some to arrive.
-            delay(3000)
+            // Poll for arrivals. Early-exit: 80% resolved OR 1.5s after first arrival.
+            val staleSet = stale.toSet()
+            val total = staleSet.size
+            val threshold = (total * 0.8).toInt().coerceAtLeast(1)
+            var firstArrivalMs = 0L
+            while (true) {
+                delay(150)
+                val resolved = staleSet.count { memoryEventStore.getProfileLastUpdated(it) >= freshnessCutoff }
+                if (resolved >= total) break
+                if (resolved > 0 && firstArrivalMs == 0L) firstArrivalMs = System.currentTimeMillis()
+                if (resolved >= threshold) break
+                if (firstArrivalMs > 0 && System.currentTimeMillis() - firstArrivalMs >= 1_500) break
+            }
         }
 
         Log.d(TAG, "B.4 profiles: ${stale.size}/${authors.size} stale → fetched")
@@ -502,7 +517,19 @@ class FeedWindowLoader @Inject constructor(
 
         withTimeoutOrNull(FeedWindowConfig.EVENT_DISCOVERY_TIMEOUT_MS) {
             relayPool.fetchEventsByIds(missing)
-            delay(2000) // allow events to arrive
+            // Poll for arrivals. Early-exit: 80% resolved OR 1.5s after first arrival.
+            val missingSet = missing.toSet()
+            val total = missingSet.size
+            val threshold = (total * 0.8).toInt().coerceAtLeast(1)
+            var firstArrivalMs = 0L
+            while (true) {
+                delay(150)
+                val resolved = missingSet.count { memoryEventStore.getEventEntity(it) != null || relayPool.isEventUnresolved(it) }
+                if (resolved >= total) break
+                if (resolved > 0 && firstArrivalMs == 0L) firstArrivalMs = System.currentTimeMillis()
+                if (resolved >= threshold) break
+                if (firstArrivalMs > 0 && System.currentTimeMillis() - firstArrivalMs >= 1_500) break
+            }
         }
 
         Log.d(TAG, "B.4 refs: ${missing.size}/${referencedIds.size} missing → fetched")
@@ -578,5 +605,214 @@ class FeedWindowLoader @Inject constructor(
             .filter { it.marker == null || it.marker == "read" }
             .mapNotNull { normalizeRelayUrl(it.url) }
         return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+    }
+
+    // ── Outbox relay resolution (NIP-65) ──────────────��─────────────────────
+
+    private suspend fun resolveOutboxRelaysForProfile(pubkey: String): List<String> {
+        // Step 1: check MES cache
+        var writeUrls = memoryEventStore.getRelayList(pubkey)?.write
+
+        // Step 2: if not cached, fetch kind-10002 from indexer relays and poll for arrival
+        if (writeUrls == null) {
+            relayPool.fetchRelayLists(listOf(pubkey))
+            writeUrls = withTimeoutOrNull(5_000) {
+                while (true) {
+                    delay(300)
+                    val list = memoryEventStore.getRelayList(pubkey)?.write
+                    if (list != null) return@withTimeoutOrNull list
+                }
+                @Suppress("UNREACHABLE_CODE") null
+            }
+        }
+
+        return writeUrls?.take(5)?.ifEmpty { GLOBAL_RELAY_URLS.take(5) }
+            ?: GLOBAL_RELAY_URLS.take(5)
+    }
+
+    // ── Batch-first API (FeedWindow consumers) ────────────────��─────────────
+
+    private val profileRefreshJobs = ConcurrentHashMap<String, Job>()
+    private val profileTopRelays = ConcurrentHashMap<String, List<String>>()
+
+    suspend fun loadBatchFor(
+        key: WindowKey,
+        cursor: Long?,
+        limit: Int,
+    ): List<FeedRow> = coroutineScope {
+        val pubkey = keyManager.getPublicKeyHex() ?: ""
+
+        val events = when (key) {
+            is WindowKey.Home -> {
+                val filter = buildMemoryFilterForBatch(key, pubkey)
+                var raw = if (cursor == null)
+                    memoryEventStore.feedEvents(filter, limit)
+                else
+                    memoryEventStore.feedEvents(filter, limit * 2)
+                        .asSequence().filter { it.createdAt < cursor }.take(limit).toList()
+
+                // If initial load found nothing, poll MES until relay events arrive
+                if (raw.isEmpty() && cursor == null) {
+                    raw = withTimeoutOrNull(5_000L) {
+                        while (true) {
+                            delay(300)
+                            val attempt = memoryEventStore.feedEvents(filter, limit)
+                            if (attempt.isNotEmpty()) return@withTimeoutOrNull attempt
+                        }
+                        @Suppress("UNREACHABLE_CODE") emptyList()
+                    } ?: emptyList()
+                }
+
+                raw
+            }
+            is WindowKey.Profile -> {
+                val (cf, kinds) = when (key.tab) {
+                    ProfileTab.NOTES -> 1 to setOf(1, 6)
+                    ProfileTab.REPLIES -> 2 to setOf(1, 6)
+                    ProfileTab.LONGFORM -> 0 to setOf(30023)
+                }
+                if (cursor == null) {
+                    val outboxUrls = resolveOutboxRelaysForProfile(key.pubkey)
+                    profileTopRelays[key.pubkey] = outboxUrls
+                    val cached = memoryEventStore.userEvents(key.pubkey, kinds, 1)
+                    if (cached.isEmpty()) {
+                        // Cold: fetch and poll until events arrive
+                        relayPool.fetchUserPosts(key.pubkey, outboxUrls)
+                        withTimeoutOrNull(5_000L) {
+                            while (true) {
+                                delay(300)
+                                if (memoryEventStore.userEvents(key.pubkey, kinds, 1).isNotEmpty()) break
+                            }
+                        }
+                    } else {
+                        // Warm: use cached events, refresh in background
+                        scope.launch {
+                            try { relayPool.fetchUserPosts(key.pubkey, outboxUrls) }
+                            catch (_: Exception) {}
+                        }
+                    }
+                } else {
+                    relayPool.fetchOlderPosts(key.pubkey, cursor, profileTopRelays[key.pubkey] ?: GLOBAL_RELAY_URLS.take(5))
+                    delay(1_500)
+                }
+                val raw = memoryEventStore.userEvents(key.pubkey, kinds, limit * (if (cursor == null) 1 else 2))
+                val filtered = raw.asSequence().filter { evt ->
+                    when (cf) {
+                        1 -> evt.kind == 6 || (evt.replyToId == null && evt.rootId == null)
+                        2 -> evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
+                        else -> true
+                    }
+                }
+                if (cursor == null) filtered.take(limit).toList()
+                else filtered.filter { it.createdAt < cursor }.take(limit).toList()
+            }
+        }
+
+        // Convert to FeedRow (batched)
+        val ids = events.map { it.id }.toSet()
+        var rows = memoryEventStore.feedRowsByIds(ids)
+        // Maintain order from the events list
+        val rowMap = rows.associateBy { it.id }
+        rows = events.mapNotNull { rowMap[it.id] }
+
+        // Apply post-query filters for Home keys (sinceHours, engagement minimums, media type)
+        if (key is WindowKey.Home) {
+            rows = applyPostQueryFilters(rows, key)
+        }
+
+        // Pre-hydrate top 30 (profiles, media dims, refs) within 3s budget
+        val topRows = rows.take(30)
+        if (topRows.isNotEmpty()) {
+            val authors = topRows.map { it.pubkey }.toSet()
+            val eventIds = topRows.map { it.id }.toSet()
+            withTimeoutOrNull(3_000) {
+                coroutineScope {
+                    launch { hydrateMedia(eventIds) }
+                    launch { hydrateProfiles(authors) }
+                    launch { hydrateRefs(eventIds) }
+                }
+            }
+            // Re-read FeedRows after hydration so authorPicture/displayName populate
+            val refreshed = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
+            rows = rows.map { refreshed[it.id] ?: it }
+        }
+
+        // Background-hydrate remaining events (non-blocking) — covers avatars,
+        // media dims, and refs beyond the first screen
+        if (rows.size > 30) {
+            val allAuthors = rows.map { it.pubkey }.toSet()
+            val allEventIds = rows.map { it.id }.toSet()
+            scope.launch {
+                try {
+                    hydrateMedia(allEventIds)
+                    hydrateProfiles(allAuthors)
+                    hydrateRefs(allEventIds)
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
+                catch (e: Throwable) { Log.w(TAG, "background hydration failed", e) }
+            }
+        }
+
+        rows
+    }
+
+    private fun applyPostQueryFilters(rows: List<FeedRow>, key: WindowKey.Home): List<FeedRow> =
+        rows.filter { FeedWindow.passesAllFilters(it, key.filter) }
+
+    private fun buildMemoryFilterForBatch(key: WindowKey.Home, pubkey: String): MemoryFeedFilter {
+        return when (val ft = key.feedType) {
+            is FeedType.Following -> MemoryFeedFilter(
+                kinds = key.filter.enabledKinds.toSet(),
+                followedPubkeys = memoryEventStore.getFollows(pubkey) ?: emptySet(),
+                contentFilter = key.contentFilter.value,
+            )
+            is FeedType.Global -> MemoryFeedFilter(
+                kinds = key.filter.enabledKinds.toSet(),
+                contentFilter = key.contentFilter.value,
+                relayUrls = resolveGlobalUrls(pubkey).toSet(),
+            )
+            is FeedType.RelaySet -> MemoryFeedFilter(
+                kinds = key.filter.enabledKinds.toSet(),
+                contentFilter = key.contentFilter.value,
+                relayUrls = memoryEventStore.getSetMembers(pubkey, ft.dTag)
+                    .mapNotNull { normalizeRelayUrl(it) }.toSet(),
+            )
+            is FeedType.SingleRelay -> MemoryFeedFilter(
+                kinds = key.filter.enabledKinds.toSet(),
+                contentFilter = key.contentFilter.value,
+                relayUrls = setOfNotNull(normalizeRelayUrl(ft.url)),
+            )
+        }
+    }
+
+    fun startEngagementRefreshFor(key: WindowKey, eventIds: Set<String>) {
+        when (key) {
+            is WindowKey.Home -> startEngagementRefresh(key.feedType, eventIds)
+            is WindowKey.Profile -> startEngagementRefreshForProfile(key.pubkey, eventIds)
+        }
+    }
+
+    fun stopEngagementRefreshFor(key: WindowKey) {
+        when (key) {
+            is WindowKey.Home -> stopEngagementRefresh()
+            is WindowKey.Profile -> stopProfileEngagementRefresh(key.pubkey)
+        }
+    }
+
+    private fun startEngagementRefreshForProfile(pubkey: String, eventIds: Set<String>) {
+        profileRefreshJobs[pubkey]?.cancel()
+        val job = scope.launch {
+            while (isActive) {
+                delay(FeedWindowConfig.ENGAGEMENT_REFRESH_INTERVAL_MS)
+                val urls = profileTopRelays[pubkey] ?: break
+                if (eventIds.isNotEmpty() && urls.isNotEmpty()) {
+                    fetchEngagementFromRelays(urls, eventIds.toList(), sinceTimestamp = null)
+                }
+            }
+        }
+        profileRefreshJobs[pubkey] = job
+    }
+
+    private fun stopProfileEngagementRefresh(pubkey: String) {
+        profileRefreshJobs.remove(pubkey)?.cancel()
     }
 }
