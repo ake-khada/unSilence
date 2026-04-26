@@ -53,10 +53,7 @@ class FeedWindowLoader @Inject constructor(
     // Per-feed structured concurrency: cancels prior loadWindow on same feed
     private var activeLoadJob: Job? = null
 
-    // Engagement refresh lifecycle
-    private var engagementRefreshJob: Job? = null
     @Volatile private var lastTopRelays: List<String> = emptyList()
-    @Volatile private var lastRefreshTimestamp: Long = 0L
 
     /**
      * Load a window of events for the given feed type.
@@ -117,7 +114,7 @@ class FeedWindowLoader @Inject constructor(
             oldestCreatedAt = oldest,
             newestCreatedAt = newest,
             authorsInWindow = authors.size,
-            topRelays = emptyList(), // populated async; caller reads via startEngagementRefresh
+            topRelays = emptyList(), // populated async; lastTopRelays used by refreshEngagementForIds
             completedAt = System.currentTimeMillis(),
         )
     }
@@ -127,36 +124,6 @@ class FeedWindowLoader @Inject constructor(
      */
     suspend fun loadMore(feedType: FeedType, currentCursor: Long): WindowResult {
         return loadWindow(feedType, cursor = currentCursor)
-    }
-
-    /**
-     * Start periodic engagement refresh for the current window.
-     * Re-fetches engagement from cached top-N relays every 120s.
-     */
-    fun startEngagementRefresh(feedType: FeedType, windowIds: Set<String>) {
-        stopEngagementRefresh()
-        lastRefreshTimestamp = System.currentTimeMillis()
-
-        engagementRefreshJob = scope.launch {
-            while (isActive) {
-                delay(FeedWindowConfig.ENGAGEMENT_REFRESH_INTERVAL_MS)
-                val topRelays = lastTopRelays
-                if (topRelays.isEmpty() || windowIds.isEmpty()) continue
-
-                val sinceTimestamp = lastRefreshTimestamp / 1000  // seconds
-                lastRefreshTimestamp = System.currentTimeMillis()
-
-                Log.d(TAG, "Engagement refresh: ${windowIds.size} events, " +
-                    "${topRelays.size} relays, since=$sinceTimestamp")
-
-                fetchEngagementFromRelays(topRelays, windowIds.toList(), sinceTimestamp)
-            }
-        }
-    }
-
-    fun stopEngagementRefresh() {
-        engagementRefreshJob?.cancel()
-        engagementRefreshJob = null
     }
 
     // ── Phase A: Event Discovery ──────────────────────────────────────────
@@ -632,8 +599,8 @@ class FeedWindowLoader @Inject constructor(
 
     // ── Batch-first API (FeedWindow consumers) ────────────────��─────────────
 
-    private val profileRefreshJobs = ConcurrentHashMap<String, Job>()
     private val profileTopRelays = ConcurrentHashMap<String, List<String>>()
+    private val lastWarmRefreshMs = ConcurrentHashMap<String, Long>()
 
     suspend fun loadBatchFor(
         key: WindowKey,
@@ -685,10 +652,15 @@ class FeedWindowLoader @Inject constructor(
                             }
                         }
                     } else {
-                        // Warm: use cached events, refresh in background
-                        scope.launch {
-                            try { relayPool.fetchUserPosts(key.pubkey, outboxUrls) }
-                            catch (_: Exception) {}
+                        // Warm: use cached events, refresh in background (throttled 60s)
+                        val now = System.currentTimeMillis()
+                        val last = lastWarmRefreshMs[key.pubkey] ?: 0L
+                        if (now - last > 60_000) {
+                            lastWarmRefreshMs[key.pubkey] = now
+                            scope.launch {
+                                try { relayPool.fetchUserPosts(key.pubkey, outboxUrls) }
+                                catch (_: Exception) {}
+                            }
                         }
                     }
                 } else {
@@ -720,37 +692,9 @@ class FeedWindowLoader @Inject constructor(
             rows = applyPostQueryFilters(rows, key)
         }
 
-        // Pre-hydrate top 30 (profiles, media dims, refs) within 3s budget
-        val topRows = rows.take(30)
-        if (topRows.isNotEmpty()) {
-            val authors = topRows.map { it.pubkey }.toSet()
-            val eventIds = topRows.map { it.id }.toSet()
-            withTimeoutOrNull(3_000) {
-                coroutineScope {
-                    launch { hydrateMedia(eventIds) }
-                    launch { hydrateProfiles(authors) }
-                    launch { hydrateRefs(eventIds) }
-                }
-            }
-            // Re-read FeedRows after hydration so authorPicture/displayName populate
-            val refreshed = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
-            rows = rows.map { refreshed[it.id] ?: it }
-        }
-
-        // Background-hydrate remaining events (non-blocking) — covers avatars,
-        // media dims, and refs beyond the first screen
-        if (rows.size > 30) {
-            val allAuthors = rows.map { it.pubkey }.toSet()
-            val allEventIds = rows.map { it.id }.toSet()
-            scope.launch {
-                try {
-                    hydrateMedia(allEventIds)
-                    hydrateProfiles(allAuthors)
-                    hydrateRefs(allEventIds)
-                } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e }
-                catch (e: Throwable) { Log.w(TAG, "background hydration failed", e) }
-            }
-        }
+        // Imeta-only pass over all rows — pure CPU, ~5ms for 300, fills ImageDimensionCache
+        hydrateMedia(rows.map { it.id }.toSet())
+        // Profile/ref/OG/video-frame hydration moved to FeedWindow's viewport-driven pass.
 
         rows
     }
@@ -784,35 +728,14 @@ class FeedWindowLoader @Inject constructor(
         }
     }
 
-    fun startEngagementRefreshFor(key: WindowKey, eventIds: Set<String>) {
-        when (key) {
-            is WindowKey.Home -> startEngagementRefresh(key.feedType, eventIds)
-            is WindowKey.Profile -> startEngagementRefreshForProfile(key.pubkey, eventIds)
+    /** Zone-aware engagement refresh — replaces the 120s tick for viewport-driven hydration. */
+    fun refreshEngagementForIds(eventIds: Set<String>) {
+        if (eventIds.isEmpty()) return
+        if (lastTopRelays.isEmpty()) return
+        scope.launch {
+            try {
+                fetchEngagementFromRelays(lastTopRelays, eventIds.toList(), sinceTimestamp = null)
+            } catch (_: Throwable) {}
         }
-    }
-
-    fun stopEngagementRefreshFor(key: WindowKey) {
-        when (key) {
-            is WindowKey.Home -> stopEngagementRefresh()
-            is WindowKey.Profile -> stopProfileEngagementRefresh(key.pubkey)
-        }
-    }
-
-    private fun startEngagementRefreshForProfile(pubkey: String, eventIds: Set<String>) {
-        profileRefreshJobs[pubkey]?.cancel()
-        val job = scope.launch {
-            while (isActive) {
-                delay(FeedWindowConfig.ENGAGEMENT_REFRESH_INTERVAL_MS)
-                val urls = profileTopRelays[pubkey] ?: break
-                if (eventIds.isNotEmpty() && urls.isNotEmpty()) {
-                    fetchEngagementFromRelays(urls, eventIds.toList(), sinceTimestamp = null)
-                }
-            }
-        }
-        profileRefreshJobs[pubkey] = job
-    }
-
-    private fun stopProfileEngagementRefresh(pubkey: String) {
-        profileRefreshJobs.remove(pubkey)?.cancel()
     }
 }

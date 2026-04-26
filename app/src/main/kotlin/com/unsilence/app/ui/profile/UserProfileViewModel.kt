@@ -11,10 +11,13 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.OgFetcher
+import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.FeedWindow
 import com.unsilence.app.ui.feed.FeedWindowLoader
+import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.WindowKey
 import com.unsilence.app.ui.feed.WindowSnapshot
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -55,6 +58,9 @@ class UserProfileViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val feedWindowLoader: FeedWindowLoader,
+    private val profileResolver: ProfileResolver,
+    private val ogFetcher: OgFetcher,
+    private val videoThumbnailCache: VideoThumbnailCache,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -184,6 +190,10 @@ class UserProfileViewModel @Inject constructor(
         }
     }
 
+    fun onViewportChanged(first: Int, last: Int) {
+        activeWindow?.onViewportChanged(first, last)
+    }
+
     /** Keep signature — ignore param, delegate to window. */
     fun loadMore(currentOldest: Long) {
         activeWindow?.loadMore()
@@ -264,6 +274,10 @@ class UserProfileViewModel @Inject constructor(
             loader = feedWindowLoader,
             keyManager = keyManager,
             parentScope = viewModelScope,
+            profileResolver = profileResolver,
+            relayPool = relayPool,
+            ogFetcher = ogFetcher,
+            videoThumbnailCache = videoThumbnailCache,
         )
         windowCache[key.tab]?.release()
         windowCache[key.tab] = window

@@ -308,14 +308,16 @@ fun FeedScreen(
                     }
                 }
 
-                // Scroll position tracking
+                // Viewport tracking for zone-aware hydration
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
-                        listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-                    }.sample(100).collect { (index, offset) ->
-                        viewModel.onScrollPositionChanged(index, offset)
-                        viewModel.saveScrollPosition(index, offset)
+                        val info = listState.layoutInfo
+                        val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                        val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                        first to last
+                    }.sample(100).collect { (first, last) ->
+                        viewModel.onViewportChanged(first, last)
                     }
                 }
 
