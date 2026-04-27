@@ -48,7 +48,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.FeedRow
-import com.unsilence.app.data.relay.CoverageStatus
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -81,10 +80,9 @@ fun FeedScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
+    feedVm2: FeedViewModelV2 = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
-    val state         by viewModel.uiState.collectAsStateWithLifecycle()
-    val reducerState  by viewModel.reducerState.collectAsStateWithLifecycle()
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
@@ -94,8 +92,18 @@ fun FeedScreen(
     val zapFlash      by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar    = LocalShowSnackbar.current
-    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
-    val restoreGen    by viewModel.restoreGeneration.collectAsStateWithLifecycle()
+    val isLoadingV2   by feedVm2.isLoading.collectAsStateWithLifecycle()
+    val isLoadingMore by feedVm2.isLoadingMore.collectAsStateWithLifecycle()
+    val v2Events      by feedVm2.feedRows.collectAsStateWithLifecycle()
+    val v2ShowDot     by feedVm2.showDot.collectAsStateWithLifecycle()
+
+    // Bridge feedType + contentFilter from old VM to V2
+    LaunchedEffect(Unit) {
+        viewModel.feedType.collect { feedVm2.setFeedType(it) }
+    }
+    LaunchedEffect(Unit) {
+        viewModel.contentFilter.collect { feedVm2.setContentFilter(it) }
+    }
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -114,7 +122,7 @@ fun FeedScreen(
     }
 
     // ── New-post flash animation tracking ──────────────────────────────────────
-    val events = reducerState.visibleEvents
+    val events = v2Events
     val currentEvents by rememberUpdatedState(events)
     val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
     var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -123,12 +131,9 @@ fun FeedScreen(
         if (previousEventIds.isNotEmpty()) {
             val freshIds = currentIds - previousEventIds
             for (id in freshIds) newEventIds[id] = true
-            // Only scroll to top when new events MERGED at top (not APPENDed at bottom).
-            // Check: fresh IDs are at the start of the list = MERGE, at the end = APPEND.
-            if (freshIds.isNotEmpty() && !reducerState.showDot) {
+            if (freshIds.isNotEmpty() && !v2ShowDot) {
                 val firstFreshIdx = events.indexOfFirst { it.id in freshIds }
                 if (firstFreshIdx == 0) {
-                    // New events at top (MERGE) — scroll to show them
                     listState.scrollToItem(0)
                 }
             }
@@ -199,12 +204,8 @@ fun FeedScreen(
         Crossfade(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
-                state.coverageStatus in listOf(CoverageStatus.NEVER_FETCHED, CoverageStatus.LOADING)
-                    && events.isEmpty() -> "loading"
-                state.coverageStatus == CoverageStatus.FAILED && events.isEmpty() -> "failed"
-                state.coverageStatus in listOf(CoverageStatus.COMPLETE, CoverageStatus.PARTIAL)
-                    && events.isEmpty() -> "empty"
-                !state.loading && events.isEmpty() -> "empty"
+                isLoadingV2 && events.isEmpty() -> "loading"
+                !isLoadingV2 && events.isEmpty() -> "empty"
                 else -> "content"
             },
             label = "feedState",
@@ -296,7 +297,7 @@ fun FeedScreen(
                                             .clickable(
                                                 interactionSource = remember { MutableInteractionSource() },
                                                 indication = null,
-                                            ) { viewModel.loadMore() }
+                                            ) { feedVm2.loadMore() }
                                             .background(
                                                 color = Surface1,
                                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
@@ -309,7 +310,7 @@ fun FeedScreen(
                     }
                 }
 
-                // Viewport tracking for zone-aware hydration
+                // Viewport tracking — V2 uses firstVisibleIndex for at-top detection
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
@@ -319,26 +320,7 @@ fun FeedScreen(
                         first to last
                     }.sample(100).collect { (first, last) ->
                         viewModel.onViewportChanged(first, last)
-                    }
-                }
-
-                // Restore scroll position after feed switch
-                LaunchedEffect(restoreGen) {
-                    if (restoreGen > 0) {
-                        val idx = viewModel.restoreScrollIndex.value
-                        val off = viewModel.restoreScrollOffset.value
-                        if (idx > 0) {
-                            // Wait up to 2s for enough items to populate the list
-                            kotlinx.coroutines.withTimeoutOrNull(2_000) {
-                                snapshotFlow { listState.layoutInfo.totalItemsCount }
-                                    .filter { count: Int -> count > idx }
-                                    .first()
-                            }
-                            val total = listState.layoutInfo.totalItemsCount
-                            if (total > 0) {
-                                listState.scrollToItem(idx.coerceAtMost(total - 1), off)
-                            }
-                        }
+                        feedVm2.onViewportChanged(first)
                     }
                 }
             }

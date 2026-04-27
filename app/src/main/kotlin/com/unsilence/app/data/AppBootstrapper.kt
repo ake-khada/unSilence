@@ -215,6 +215,7 @@ class AppBootstrapper @Inject constructor(
         }
         relayPool.feedSinceEpoch = feedSince
         relayPool.connect(globalUrls, isHomeFeed = true)
+        initGate.signalFeedConnectionsReady()
         Log.d(TAG, "Phase1 complete: feed subs active (${globalUrls.size} relays)${if (feedSince != null) " with since-injection" else ""}")
 
         // ═══════════════════════════════════════════════════════════════════

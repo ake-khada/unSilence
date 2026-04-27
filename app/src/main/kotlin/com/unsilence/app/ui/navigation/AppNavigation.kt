@@ -100,6 +100,7 @@ import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
+import com.unsilence.app.ui.feed.FeedViewModelV2
 import com.unsilence.app.ui.feed.FilterBottomSheet
 import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
@@ -174,6 +175,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
     // captured the old user's pubkey at init and never re-initializes.
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
+    val feedVm2: FeedViewModelV2 = hiltViewModel(key = "feedv2-$userPubkey")
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
@@ -184,6 +186,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
+    val hasNewTopPostV2 by feedVm2.showDot.collectAsStateWithLifecycle()
     val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
     val hasNewNotifications by notifViewModel.hasNewNotifications.collectAsStateWithLifecycle()
 
@@ -282,6 +285,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                         viewModel          = feedViewModel,
+                        feedVm2            = feedVm2,
                     )
                     1    -> Box(Modifier.padding(top = staticTopPadding)) {
                         SearchScreen(
@@ -389,6 +393,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         if (index == 0 && selectedTab == 0) {
                             scrollToTopTrigger++
                             feedViewModel.clearNewTopPost()
+                            feedVm2.onDotTapped()
                         }
                         if (index == 2) notifViewModel.markSeen()
                         selectedTab = index
@@ -419,7 +424,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                                     modifier           = Modifier.size(iconSize),
                                 )
                             }
-                            if (index == 0 && feedViewModel.hasNewTopPost) {
+                            if (index == 0 && hasNewTopPostV2) {
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)
