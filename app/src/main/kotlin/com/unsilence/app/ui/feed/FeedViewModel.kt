@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.FeedFilter
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -19,17 +18,17 @@ import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -74,7 +73,6 @@ enum class FeedContentFilter(val value: Int) {
 class FeedViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
-    private val initGate: InitGate,
     private val timelineService: TimelineService,
     private val outboxResolver: OutboxRelayResolver,
     private val userRepository: UserRepository,
@@ -258,53 +256,71 @@ class FeedViewModel @Inject constructor(
         Log.d(TAG, "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}")
 
         val ownPubkey = keyManager.getPublicKeyHex()
-        if (ownPubkey != null) {
-            viewModelScope.launch {
-                val follows = withTimeoutOrNull(10_000L) {
-                    memoryEventStore.followsFlow(ownPubkey)
-                        .filter { it.isNotEmpty() }
-                        .first()
-                }
-                if (follows == null) {
-                    _feedType.value = FeedType.Global
-                    _coldStartState.value = ColdStartState.READY_GLOBAL
-                    Log.d(TAG, "cold-start: no follows after 10s -> Global")
-                    return@launch
-                }
-                _hasFollows.value = true
-                withTimeoutOrNull(5_000L) {
-                    memoryEventStore.readWriteRelayConfigsFlow(ownPubkey)
-                        .filter { it.isNotEmpty() }
-                        .first()
-                }
-                _feedType.value = FeedType.Following
-                _coldStartState.value = ColdStartState.READY_FOLLOWING
-                Log.d(TAG, "cold-start: ${follows.size} follows -> Following")
-            }
 
+        // Cold-start: figure out initial feed type FIRST (no resubscribe yet),
+        // then the resubscribe collector fires once coldStartState leaves LOADING.
+        viewModelScope.launch {
+            if (ownPubkey != null) {
+                // Fast path: snapshot already has follows — skip relay wait
+                val snapshotFollows = memoryEventStore.getFollows(ownPubkey)
+                if (snapshotFollows?.isNotEmpty() == true) {
+                    _hasFollows.value = true
+                    _feedType.value = FeedType.Following
+                    _coldStartState.value = ColdStartState.READY_FOLLOWING
+                    Log.d(TAG, "cold-start: ${snapshotFollows.size} follows in snapshot -> Following")
+                } else {
+                    // Slow path: wait briefly for relay-fetched follows
+                    val follows = withTimeoutOrNull(10_000L) {
+                        memoryEventStore.followsFlow(ownPubkey)
+                            .filter { it.isNotEmpty() }
+                            .first()
+                    }
+                    if (follows == null || follows.isEmpty()) {
+                        _feedType.value = FeedType.Global
+                        _coldStartState.value = ColdStartState.READY_GLOBAL
+                        Log.d(TAG, "cold-start: no follows -> Global")
+                    } else {
+                        _hasFollows.value = true
+                        // Wait briefly for own kind-10002 (best-effort, optional)
+                        withTimeoutOrNull(5_000L) {
+                            memoryEventStore.readWriteRelayConfigsFlow(ownPubkey)
+                                .filter { it.isNotEmpty() }
+                                .first()
+                        }
+                        _feedType.value = FeedType.Following
+                        _coldStartState.value = ColdStartState.READY_FOLLOWING
+                        Log.d(TAG, "cold-start: ${follows.size} follows from relay -> Following")
+                    }
+                }
+            } else {
+                _coldStartState.value = ColdStartState.READY_GLOBAL
+            }
+        }
+
+        // Track follows count reactively (orthogonal to cold-start)
+        if (ownPubkey != null) {
             viewModelScope.launch {
                 memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
                     _hasFollows.value = count > 0
                 }
             }
-        } else {
-            _coldStartState.value = ColdStartState.READY_GLOBAL
         }
 
+        // Resubscribe collector — only acts after coldStartState transitions away
+        // from LOADING. distinctUntilChanged on the mapped type handles cold-start
+        // setting feedType to a value equal to its current default.
         viewModelScope.launch {
-            _feedType.collectLatest { type ->
-                resubscribe(type)
-            }
+            combine(_coldStartState, _feedType) { state, type -> state to type }
+                .filter { (state, _) -> state != ColdStartState.LOADING }
+                .map { (_, type) -> type }
+                .distinctUntilChanged()
+                .collectLatest { type -> resubscribe(type) }
         }
     }
 
     private suspend fun resubscribe(type: FeedType) {
         val ownPubkey = keyManager.getPublicKeyHex()
-        var cached = loadCachedEvents(type, ownPubkey)
-        if (cached.isEmpty()) {
-            withTimeoutOrNull(120_000L) { initGate.awaitFeedConnections() }
-            cached = loadCachedEvents(type, ownPubkey)
-        }
+        val cached = loadCachedEvents(type, ownPubkey)
         val subRequests = buildSubRequests(type)
         consumer.subscribe(subRequests, cached)
     }
