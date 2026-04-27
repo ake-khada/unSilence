@@ -171,8 +171,11 @@ internal fun OgPreviewCard(
             }
         }
     } else {
-        // OG fetch returned nothing useful — compact chip
-        OgLinkChip(url = url)
+        // OG fetch returned nothing useful — minimal link card with favicon + domain
+        MinimalLinkCard(
+            url = url,
+            onClick = { runCatching { uriHandler.openUri(url) } },
+        )
     }
 }
 

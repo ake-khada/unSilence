@@ -295,6 +295,7 @@ fun SearchScreen(
                             saveNwcUri = { actionsViewModel.saveNwcUri(it) },
                             lookupProfile = actionsViewModel::lookupProfile,
                             lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
                             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
                         )
                         LazyColumn(modifier = Modifier.fillMaxSize()) {

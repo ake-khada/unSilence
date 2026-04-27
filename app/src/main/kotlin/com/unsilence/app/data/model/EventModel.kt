@@ -117,6 +117,7 @@ data class ThreadRefs(
 data class RepostInfo(
     val targetId: String?,
     val relayHint: String?,
+    val targetAuthorPubkey: String?,
     val embeddedJson: String?,
     val resolvedFromInner: Boolean,
 )

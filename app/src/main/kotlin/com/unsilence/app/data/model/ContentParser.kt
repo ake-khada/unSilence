@@ -134,12 +134,14 @@ object ContentParser {
 
         val targetId = extractFirstETagId(tagsJson)
         val relayHint = extractFirstETagRelay(tagsJson)
+        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tagsJson)
 
         if (embeddedJson == null && targetId == null) return null
 
         return RepostInfo(
             targetId = targetId,
             relayHint = relayHint,
+            targetAuthorPubkey = targetAuthorPubkey,
             embeddedJson = embeddedJson,
             resolvedFromInner = embeddedJson != null,
         )
