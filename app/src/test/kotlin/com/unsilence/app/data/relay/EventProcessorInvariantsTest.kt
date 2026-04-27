@@ -1,7 +1,6 @@
 package com.unsilence.app.data.relay
 
 import com.unsilence.app.data.memory.MemoryEventStore
-import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,12 +29,9 @@ class EventProcessorInvariantsTest {
     @Before
     fun setUp() {
         store = MemoryEventStore()
-        val outboxRouter = dagger.Lazy<OutboxRouter> { error("OutboxRouter not needed in this test") }
-        processor = EventProcessor(store, outboxRouter)
+        processor = EventProcessor(store)
         // Stop drainers — tests use drainForTest() for synchronous channel drain.
-        // CoroutineExceptionHandler swallows kindHandler errors from the stub OutboxRouter.
-        val handler = CoroutineExceptionHandler { _, _ -> }
-        processor.setTestScope(CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher() + handler))
+        processor.setTestScope(CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher()))
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

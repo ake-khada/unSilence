@@ -45,23 +45,11 @@ import javax.inject.Singleton
 
 private const val TAG = "RelayPool"
 
-/**
- * Tracks a persistent subscription for replay after reconnection.
- * [lastEventTime] is Unix seconds — updated when events arrive for this sub.
- */
-data class PersistentSub(
-    val subId: String,
-    val reqJson: String,
-    val lastEventTime: Long = 0L,
-    /** When non-null, this sub is only sent to this specific relay URL. */
-    val targetRelayUrl: String? = null,
-)
-
 /** A search result correlated with the token of the search session that produced it. */
 data class SearchResult(val token: Long, val eventId: String)
 
 /** Why a relay connection exists — a relay can hold multiple purposes simultaneously. */
-enum class ConnectionPurpose { PERSISTENT, BROWSE, OUTBOX }
+enum class ConnectionPurpose { PERSISTENT, BROWSE }
 
 /**
  * Manages multiple relay WebSocket connections for the global feed.
@@ -83,14 +71,9 @@ class RelayPool @Inject constructor(
 ) : RelayTransport {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
-    private val persistentSubs = ConcurrentHashMap<String, PersistentSub>()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
-
-    /** When non-null, inject `since` into the feed subscription REQ for newly connected home-feed relays.
-     *  Set by AppBootstrapper before connect() to avoid re-fetching events already restored from snapshot. */
-    @Volatile var feedSinceEpoch: Long? = null
 
     // ── Connection purpose tracking ────────────────────────────────────────
     // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
@@ -115,8 +98,7 @@ class RelayPool @Inject constructor(
 
     fun isBrowseOnly(url: String): Boolean =
         hasPurpose(url, ConnectionPurpose.BROWSE) &&
-        !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-        !hasPurpose(url, ConnectionPurpose.OUTBOX)
+        !hasPurpose(url, ConnectionPurpose.PERSISTENT)
 
     fun hasAnyPurpose(url: String): Boolean =
         connectionPurposes[url]?.isNotEmpty() == true
@@ -256,8 +238,7 @@ class RelayPool @Inject constructor(
         const val MAX_CONCURRENT_REQS_PER_RELAY = 10
         const val IDLE_EVICTION_THRESHOLD_MS = 60_000L
         // Safety rail against runaway bugs. Not a resource policy.
-        // OutboxRouter self-limits to top-N. BROWSE is session-scoped.
-        // If this fires, something is misbehaving — investigate.
+        // BROWSE is session-scoped. If this fires, something is misbehaving — investigate.
         const val POOL_SAFETY_CAP = 50
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
@@ -382,12 +363,10 @@ class RelayPool @Inject constructor(
      */
     private fun evictIdleConnection(): Boolean {
         val now = System.currentTimeMillis()
-        // Only BROWSE-only connections are evictable. OUTBOX connections are
-        // intentional long-lived connections (outbox routing). PERSISTENT is exempt.
+        // Only BROWSE-only connections are evictable. PERSISTENT is exempt.
         val candidate = connections.entries
             .filter { (url, _) ->
                 !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                !hasPurpose(url, ConnectionPurpose.OUTBOX) &&
                 hasPurpose(url, ConnectionPurpose.BROWSE)
             }
             .filter { (url, _) ->
@@ -415,7 +394,7 @@ class RelayPool @Inject constructor(
 
     /**
      * Force-evict the most idle BROWSE connection regardless of idle threshold.
-     * Falls back to the most idle non-PERSISTENT/non-OUTBOX connection.
+     * Falls back to the most idle non-PERSISTENT connection.
      * Used by [connectAndAwait] with forceEvict=true for critical one-shot queries
      * (e.g., NIP-45 COUNT) when the pool is at cap and normal eviction fails.
      */
@@ -425,14 +404,12 @@ class RelayPool @Inject constructor(
         val candidate = connections.entries
             .filter { (url, _) ->
                 hasPurpose(url, ConnectionPurpose.BROWSE) &&
-                !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                !hasPurpose(url, ConnectionPurpose.OUTBOX)
+                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
             }
             .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
             ?: connections.entries
                 .filter { (url, _) ->
-                    !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                    !hasPurpose(url, ConnectionPurpose.OUTBOX)
+                    !hasPurpose(url, ConnectionPurpose.PERSISTENT)
                 }
                 .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
         if (candidate != null) {
@@ -486,11 +463,6 @@ class RelayPool @Inject constructor(
     /** Emits (token, eventId) pairs for events arriving on search-notes-* subscriptions. */
     private val _searchResults = MutableSharedFlow<SearchResult>(extraBufferCapacity = 256)
     val searchResults: SharedFlow<SearchResult> = _searchResults.asSharedFlow()
-
-    /** Register a subscription as persistent so it's replayed after reconnect. */
-    private fun registerPersistentSub(subId: String, reqJson: String, targetRelayUrl: String? = null) {
-        persistentSubs[subId] = PersistentSub(subId = subId, reqJson = reqJson, targetRelayUrl = targetRelayUrl)
-    }
 
     /**
      * Extract the subscription ID from an EVENT message without JSON parsing.
@@ -561,12 +533,8 @@ class RelayPool @Inject constructor(
         _connectionStates.value = connections.mapValues { it.value.state.value }
     }
 
-    /** Cancel all persistent subscriptions and clear tracking. Called on logout. */
-    fun clearPersistentSubs() {
-        for ((subId, _) in persistentSubs) {
-            connections.values.forEach { it.send("""["CLOSE","$subId"]""") }
-        }
-        persistentSubs.clear()
+    /** Clear transient caches. Called on logout. */
+    fun clearCaches() {
         profileFetchAttempted.clear()
     }
 
@@ -770,28 +738,7 @@ class RelayPool @Inject constructor(
         }
     }
 
-    /**
-     * Register a single coverage handle spanning feed subs across [relayUrls].
-     * Called once from connect() when new relay connections will send REQs
-     * via subscribeAfterConnect(). EOSE from each relay resolves lanes.
-     */
-    private fun registerHomeCoverage(relayUrls: List<String>) {
-        val lanes = mutableSetOf<Lane>()
-        for (url in relayUrls) {
-            val hash = url.hashCode()
-            lanes.add(Lane("feed-$hash", url))
-        }
-        if (lanes.isEmpty()) return
-        val handle = CoverageHandle(
-            handleId = "home-${System.nanoTime()}",
-            scopeType = "home", scopeKey = "home", relaySetId = "global",
-            expectedLanes = lanes,
-        )
-        subscriptionRegistry.get().register(handle)
-        Log.d(TAG, "Registered home coverage handle: ${lanes.size} lanes across ${relayUrls.size} relays")
-    }
-
-    fun connect(relayUrls: List<String>, isHomeFeed: Boolean = false) {
+    fun connect(relayUrls: List<String>) {
         val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
         // Collect URLs that will actually be connected
         val newUrls = mutableListOf<String>()
@@ -805,60 +752,16 @@ class RelayPool @Inject constructor(
             newUrls.add(url)
         }
 
-        // Register ONE coverage handle spanning ALL new relays' feed subs —
-        // but ONLY for home feed connections (not outbox/search/profile relays).
-        if (newUrls.isNotEmpty() && isHomeFeed) {
-            registerHomeCoverage(newUrls)
-        }
-
         for (url in newUrls) {
             val conn = RelayConnection(url, okHttpClient)
             connections[url] = conn
             connectionLastActivity[url] = System.currentTimeMillis()
             scope.launch {
                 conn.connect()
-                if (!hasPurpose(url, ConnectionPurpose.PERSISTENT)) {
-                    Log.d(TAG, "Skipping subscribeAfterConnect on non-PERSISTENT $url (purposes=${connectionPurposes[url] ?: "none"})")
-                } else {
-                    subscribeAfterConnect(conn)
-                }
                 listenForEvents(conn)
             }
         }
         Log.d(TAG, "Pool has ${connections.size} connections")
-    }
-
-    private suspend fun subscribeAfterConnect(conn: RelayConnection) {
-        val hash = conn.url.hashCode()
-
-        // Clean up legacy per-type feed subs from prior versions
-        persistentSubs.keys.removeIf {
-            it == "feed-posts-$hash" || it == "feed-media-$hash" || it == "feed-longform-$hash"
-        }
-
-        // Single combined feed subscription: notes, reposts, pictures, videos, longform
-        val feedSubId = "feed-$hash"
-        val feedReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(feedSubId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(20))
-                    add(JsonPrimitive(21))
-                    add(JsonPrimitive(30023))
-                })
-                put("limit", JsonPrimitive(300))
-            })
-        }.toString()
-
-        registerPersistentSub(feedSubId, feedReq, targetRelayUrl = conn.url)
-        // Inject since to avoid re-fetching events already in MES from snapshot
-        val since = feedSinceEpoch
-        val reqToSend = if (since != null) injectSince(feedReq, since) else feedReq
-        conn.send(reqToSend)
-        Log.d(TAG, "Subscribed to ${conn.url} (1 combined feed subscription${if (since != null) ", since=$since" else ""})")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -915,17 +818,7 @@ class RelayPool @Inject constructor(
                             if (challenge != null && conn.url !in authenticatedRelays) {
                                 handleAuthChallenge(conn, challenge)
                             } else if (conn.url in authenticatedRelays) {
-                                // Already authed — replay the specific closed sub
-                                if (hasPurpose(conn.url, ConnectionPurpose.PERSISTENT)) {
-                                    persistentSubs[closedSubId]?.let { sub ->
-                                        val since = if (sub.lastEventTime > 0) maxOf(sub.lastEventTime - 30, 0)
-                                                    else System.currentTimeMillis() / 1000L - 300
-                                        conn.send(injectSince(sub.reqJson, since))
-                                        Log.d(TAG, "Replayed closed sub '$closedSubId' on ${conn.url} (since=$since)")
-                                    }
-                                }
-                                // Browse subs aren't in persistentSubs — notify the
-                                // browse session so it can resend its own REQ.
+                                // Already authed — notify browse session to resend.
                                 if (closedSubId.startsWith("browse-")) {
                                     onRelayReconnected?.invoke(conn.url)
                                     Log.d(TAG, "Notified browse session to resend closed sub '$closedSubId' on ${conn.url}")
@@ -946,7 +839,6 @@ class RelayPool @Inject constructor(
                     }
                     return@consumeEach
                 }
-                // Update lastEventTime for persistent sub tracking
                 val subId = extractEventSubId(raw)
                 if (subId != null) {
                     // One-shot event-tags callback (e.g. following count)
@@ -954,9 +846,6 @@ class RelayPool @Inject constructor(
                         val tagsJson = extractTagsFromRaw(raw)
                         deferred.complete(tagsJson)
                         eventTagsCallbacks.remove(subId)
-                    }
-                    persistentSubs.computeIfPresent(subId) { _, sub ->
-                        sub.copy(lastEventTime = System.currentTimeMillis() / 1000L)
                     }
                     // Emit (token, eventId) for search-notes subscriptions so SearchViewModel
                     // can correlate relay results with the correct query session.
@@ -1190,7 +1079,7 @@ class RelayPool @Inject constructor(
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
-     * The response will flow through EventProcessor → OutboxRouter's registered handler.
+     * The response flows through EventProcessor → MemoryEventStore direct-path insert.
      */
     fun fetchFollowList(pubkeyHex: String) {
         val req = buildJsonArray {
@@ -1208,7 +1097,7 @@ class RelayPool @Inject constructor(
 
     /**
      * Send a one-time REQ for kind 10002 (relay list metadata) for [pubkeys].
-     * Results flow through EventProcessor → OutboxRouter's registered handler.
+     * Results flow through EventProcessor → MemoryEventStore direct-path insert.
      */
     fun fetchRelayLists(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
@@ -1260,9 +1149,9 @@ class RelayPool @Inject constructor(
         // are published to write relays (by Jumble, Keychat, etc.), not indexers.
         // Indexers (purplepag.es etc.) focus on kind 0/3/10002 and may not store
         // kinds 10006/10007/10012/30002.
-        val writeRelayUrls = connections.keys
-            .filter { hasPurpose(it, ConnectionPurpose.OUTBOX) }
-            .filter { it !in indexerRelayUrls }
+        val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in indexerRelayUrls && connections.containsKey(it) }
         val allTargets = indexerRelayUrls + writeRelayUrls
         for (url in allTargets) {
             connections[url]?.let { sendOneShotToRelay(it, req) }
@@ -1556,55 +1445,6 @@ class RelayPool @Inject constructor(
             null
         }
     }
-
-    /**
-     * Open (or reuse) a connection to [relayUrl] and subscribe to kind 1/6/20/21 events
-     * filtered to [authorPubkeys] only — used by the outbox routing for the Following feed.
-     *
-     * If the relay is already connected (e.g. it's also a global relay), we just send
-     * an additional subscription; the existing listenForEvents coroutine picks it up.
-     */
-    fun connectForAuthors(rawRelayUrl: String, authorPubkeys: List<String>) {
-        if (authorPubkeys.isEmpty()) return
-        val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: return
-        val req = buildAuthorsReq(relayUrl, authorPubkeys)
-        val subId = "follows-${relayUrl.hashCode()}"
-        registerPersistentSub(subId, req, targetRelayUrl = relayUrl)
-        val existing = connections[relayUrl]
-        if (existing != null) {
-            existing.send(req)
-            Log.d(TAG, "Added authors subscription on existing $relayUrl (${authorPubkeys.size} authors)")
-            return
-        }
-        if (!canOpenNewConnection()) return
-        val conn = RelayConnection(relayUrl, okHttpClient)
-        connections[relayUrl] = conn
-        connectionLastActivity[relayUrl] = System.currentTimeMillis()
-        conn.connect()
-        scope.launch {
-            conn.send(req)
-            listenForEvents(conn)
-        }
-        Log.d(TAG, "Connected for authors: $relayUrl (${authorPubkeys.size} authors)")
-    }
-
-    private fun buildAuthorsReq(relayUrl: String, authorPubkeys: List<String>): String =
-        buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("follows-${relayUrl.hashCode()}"))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(20))
-                    add(JsonPrimitive(21))
-                })
-                put("authors", buildJsonArray {
-                    authorPubkeys.forEach { add(JsonPrimitive(it)) }
-                })
-                put("limit", JsonPrimitive(200))
-            })
-        }.toString()
 
     /** Send a kind 0 profile request for [pubkeys] to indexer relays only (deduped).
      *  [maxRelays] caps how many relays receive the REQ (1 for scroll, more for profile screen). */
@@ -2094,34 +1934,6 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Request notification events for [userPubkey] from all currently connected relays.
-     * Sends a #p-tagged filter for kinds 1 (replies/mentions), 6 (reposts), 7 (reactions),
-     * and 9735 (zap receipts). Results flow through EventProcessor → Room → NotificationsDao.
-     */
-    fun fetchNotifications(userPubkey: String) {
-        // Remove any previous notifs persistent sub before registering a new one
-        persistentSubs.keys.removeIf { it.startsWith("notifs-") }
-        val subId = "notifs-${System.currentTimeMillis()}"
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(7))
-                    add(JsonPrimitive(9735))
-                })
-                put("#p",    buildJsonArray { add(JsonPrimitive(userPubkey)) })
-                put("limit", JsonPrimitive(100))
-            })
-        }.toString()
-        registerPersistentSub(subId, req)
-        connections.values.forEach { it.send(req) }
-        Log.d(TAG, "Fetching notifications for $userPubkey from ${connections.size} relay(s)")
-    }
-
-    /**
      * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */
@@ -2338,7 +2150,6 @@ class RelayPool @Inject constructor(
                 if (conn.state.value == RelayState.CONNECTED) {
                     guard.set(false)
                     updateConnectionStates()
-                    replayPersistentSubs(conn)
                     onRelayReconnected?.invoke(url)
                     scope.launch { listenForEvents(conn) }
                     Log.d(TAG, "Reconnected $url")
@@ -2361,35 +2172,8 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Replay all persistent subscriptions on a reconnected relay.
-     * Updates the `since` filter to avoid re-fetching old events.
-     */
-    private fun replayPersistentSubs(conn: RelayConnection) {
-        if (!hasPurpose(conn.url, ConnectionPurpose.PERSISTENT)) {
-            Log.d(TAG, "Skipping persistent replay on non-PERSISTENT ${conn.url} (purposes=${connectionPurposes[conn.url] ?: "none"})")
-            return
-        }
-        val nowSeconds = System.currentTimeMillis() / 1000L
-        var replayCount = 0
-        for ((_, sub) in persistentSubs) {
-            // Skip subs targeted at a different relay
-            if (sub.targetRelayUrl != null && sub.targetRelayUrl != conn.url) continue
-            val since = if (sub.lastEventTime > 0) {
-                maxOf(sub.lastEventTime - 30, 0)
-            } else {
-                nowSeconds - 300
-            }
-            val updatedReq = injectSince(sub.reqJson, since)
-            conn.send(updatedReq)
-            replayCount++
-            Log.d(TAG, "Replayed persistent sub '${sub.subId}' on ${conn.url} (since=$since)")
-        }
-        Log.d(TAG, "Replay check for ${conn.url}: purposes=${connectionPurposes[conn.url] ?: "none"}, replayed $replayCount persistent sub(s)")
-    }
-
-    /**
      * NIP-42: Sign and send an AUTH response for the given relay challenge.
-     * After successful auth, replays all persistent subscriptions on this relay.
+     * After successful auth, notifies browse sessions for re-subscription.
      */
     private fun handleAuthChallenge(conn: RelayConnection, challenge: String) {
         val url = conn.url
@@ -2471,38 +2255,14 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Mark relay as authenticated and replay subscriptions.
+     * Mark relay as authenticated and notify browse sessions.
      * Shared by OK handler and timeout fallback.
      */
     private fun completeAuth(conn: RelayConnection, url: String) {
         authenticatedRelays.add(url)
         authInFlight.remove(url)
-        if (hasPurpose(url, ConnectionPurpose.PERSISTENT)) {
-            scope.launch { replayPersistentSubs(conn) }
-        } else {
-            Log.d(TAG, "AUTH: non-PERSISTENT $url — notify browse session")
-            onRelayReconnected?.invoke(url)
-        }
-    }
-
-    /**
-     * Inject a "since" field into a REQ JSON filter object.
-     */
-    private fun injectSince(reqJson: String, since: Long): String {
-        val arr = NostrJson.parseToJsonElement(reqJson).jsonArray
-        return buildJsonArray {
-            add(arr[0]) // "REQ"
-            add(arr[1]) // sub-id
-            for (i in 2 until arr.size) {
-                val filter = arr[i].jsonObject
-                add(buildJsonObject {
-                    for ((key, value) in filter) {
-                        put(key, value)
-                    }
-                    put("since", JsonPrimitive(since))
-                })
-            }
-        }.toString()
+        onRelayReconnected?.invoke(url)
+        Log.d(TAG, "AUTH: completed for $url — notified browse session")
     }
 
     // ── Browse session hooks ────────────────────────────────────────────────

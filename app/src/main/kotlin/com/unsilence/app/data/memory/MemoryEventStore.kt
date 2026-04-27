@@ -1425,7 +1425,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
-    /** Snapshot of all relay lists (pubkey → RelayList). Used by OutboxRouter. */
+    /** Snapshot of all relay lists (pubkey → RelayList). Used by OutboxRelayResolver. */
     fun allRelayListsSnapshot(): Map<String, RelayList> =
         HashMap(relayListsByPubkey)
 
