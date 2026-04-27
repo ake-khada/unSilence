@@ -43,9 +43,8 @@ object SubscriptionRules {
         oneShotPrefixes.any { subId.startsWith(it) }
 
     /**
-     * Only PERSISTENT-purpose relays receive home feed subscriptions
-     * (feed-, follows-, notifs-).
-     * BROWSE and OUTBOX relays must not receive these.
+     * Only PERSISTENT-purpose relays receive home feed subscriptions.
+     * BROWSE relays must not receive these.
      */
     fun shouldReceiveHomeSubs(purpose: ConnectionPurpose): Boolean =
         purpose == ConnectionPurpose.PERSISTENT

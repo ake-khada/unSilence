@@ -17,11 +17,9 @@ private const val TAG = "BrowseSession"
 /**
  * Sealed browsing mode: owns one live subscription per target relay (max 3).
  *
- * These subs never enter [RelayPool.persistentSubs]. The session manages its
- * own lifecycle — start/stop/reconnect — independently of the pool's
- * persistent subscription machinery.
+ * The session manages its own lifecycle — start/stop/reconnect — independently.
  *
- * Events flow through the existing [EventProcessor] → Room path unchanged.
+ * Events flow through the existing [EventProcessor] → MES path unchanged.
  */
 @Singleton
 class RelayBrowseSession @Inject constructor(
@@ -114,7 +112,7 @@ class RelayBrowseSession @Inject constructor(
     /**
      * Called by [RelayPool] when a relay successfully reconnects.
      * If the relay is one of our active browse targets, resend its sub
-     * using the current generation — no persistentSubs involved.
+     * using the current generation.
      */
     fun onRelayReconnected(relayUrl: String) {
         val url = normalizeRelayUrl(relayUrl) ?: return

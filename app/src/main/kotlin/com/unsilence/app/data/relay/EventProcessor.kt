@@ -60,7 +60,6 @@ private const val DEDUP_TRIM = 2_000
 @Singleton
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
-    private val outboxRouter: dagger.Lazy<OutboxRouter>,
 ) : TapRegistration {
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
@@ -162,23 +161,6 @@ class EventProcessor @Inject constructor(
 
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<NostrEvent>(capacity = 500)
-
-    // ── Kind handlers (immutable — populated at construction, no race) ─────────
-
-    /**
-     * Handlers for specific event kinds, dispatched after entity building.
-     * Immutable map: handlers exist from construction, before drainers start.
-     * Uses dagger.Lazy<OutboxRouter> to break the circular DI dependency
-     * (EventProcessor ↔ OutboxRouter).
-     */
-    private val kindHandlers: Map<Int, suspend (JsonObject) -> Unit> = mapOf(
-        3     to { obj -> outboxRouter.get().handleContactList(obj) },
-        10002 to { obj -> outboxRouter.get().handleRelayList(obj) },
-        10006 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10006) },
-        10007 to { obj -> outboxRouter.get().handleRelayKindList(obj, 10007) },
-        10012 to { obj -> outboxRouter.get().handleFavoriteRelays(obj) },
-        30002 to { obj -> outboxRouter.get().handleRelaySet(obj) },
-    )
 
     private var drainerJob: Job? = null
 
@@ -380,10 +362,6 @@ class EventProcessor @Inject constructor(
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)
         }
 
-        // Dispatch to kind handlers (OutboxRouter for kind 3 / 10002).
-        // Launched in a new coroutine so that a slow handler (e.g. OutboxRouter doing
-        // Room writes or opening relay connections) never blocks the relay message loop.
-        kindHandlers[kind]?.let { handler -> scope.launch { handler(obj) } }
     }
 
     // ── Channel drainers ──────────────────────────────────────────────────────

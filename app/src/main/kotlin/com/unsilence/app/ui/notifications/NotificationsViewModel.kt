@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationItem
-import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -29,7 +28,6 @@ enum class NotifFilter { Following, Global }
 class NotificationsViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
-    private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
 ) : ViewModel() {
@@ -61,7 +59,6 @@ class NotificationsViewModel @Inject constructor(
 
     init {
         keyManager.getPublicKeyHex()?.let { pubkey ->
-            relayPool.fetchNotifications(pubkey)
             startCollecting(pubkey)
         }
     }

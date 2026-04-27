@@ -46,11 +46,6 @@ class SubscriptionRulesTest {
     @Test
     fun `persistent prefixes are not one-shot`() {
         val persistentPrefixes = listOf(
-            "feed-posts-",
-            "feed-media-",
-            "feed-longform-",
-            "follows-",
-            "notifs-",
             "browse-",
         )
 
@@ -63,9 +58,8 @@ class SubscriptionRulesTest {
     }
 
     @Test
-    fun `PERSISTENT routes home subs, BROWSE and OUTBOX do not`() {
+    fun `PERSISTENT routes home subs, BROWSE does not`() {
         assertTrue(SubscriptionRules.shouldReceiveHomeSubs(ConnectionPurpose.PERSISTENT))
         assertFalse(SubscriptionRules.shouldReceiveHomeSubs(ConnectionPurpose.BROWSE))
-        assertFalse(SubscriptionRules.shouldReceiveHomeSubs(ConnectionPurpose.OUTBOX))
     }
 }

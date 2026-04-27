@@ -20,7 +20,6 @@ import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
-import com.unsilence.app.data.relay.OutboxRouter
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -74,7 +73,6 @@ class AppBootstrapper @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val eventProcessor: EventProcessor,
-    private val outboxRouter: OutboxRouter,
     private val signingManager: SigningManager,
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
@@ -118,7 +116,6 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         memoryEventStore.ownPubkey = pubkeyHex
         eventProcessor.start()
-        outboxRouter.start()
 
         // Seed kind 99 indexer relays if none exist (DataStore).
         // Suspending read waits for DataStore disk load — snapshot() would race.
@@ -130,8 +127,8 @@ class AppBootstrapper @Inject constructor(
         // Register indexer relays as PERSISTENT so sendOneShotBatch always reuses
         // them instead of opening ephemeral WebSockets. Indexers carry no feed
         // subscriptions — idle cost is just WebSocket keep-alive pings.
-        // Must happen BEFORE snapshot restore — other components (OutboxRouter,
-        // EventProcessor) fire batches during the 21s snapshot parse.
+        // Must happen BEFORE snapshot restore — EventProcessor fires batches
+        // during the 21s snapshot parse.
         val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
         for (rawUrl in indexerUrls) {
             normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
@@ -206,17 +203,9 @@ class AppBootstrapper @Inject constructor(
         for (url in globalUrls) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
-        // Inject `since` so relays only return events newer than what we have in MES.
-        val maxCreatedAt = memoryEventStore.getMaxEventCreatedAt()
-        val feedSince = if (maxCreatedAt > 0) maxOf(maxCreatedAt - 60, 0) else null
-        if (feedSince != null) {
-            val nowSec = System.currentTimeMillis() / 1000L
-            Log.d(TAG, "Phase1 Step5: injecting since=$feedSince (max event $maxCreatedAt, ${nowSec - maxCreatedAt}s ago)")
-        }
-        relayPool.feedSinceEpoch = feedSince
-        relayPool.connect(globalUrls, isHomeFeed = true)
+        relayPool.connect(globalUrls)
         initGate.signalFeedConnectionsReady()
-        Log.d(TAG, "Phase1 complete: feed subs active (${globalUrls.size} relays)${if (feedSince != null) " with since-injection" else ""}")
+        Log.d(TAG, "Phase1 complete: relay connections active (${globalUrls.size} relays)")
 
         // ═══════════════════════════════════════════════════════════════════
         // Phase 2 (1000ms): Profile resolution + relay ecosystem
@@ -309,7 +298,7 @@ class AppBootstrapper @Inject constructor(
      * 2. Disconnect all WebSockets
      * 3. Clear user-specific state — events/profiles/stats are reusable cache
      * 4. Clear KeyManager, SigningManager, NwcManager credentials
-     * 5. Cancel child scopes (OutboxRouter, EventProcessor)
+     * 5. Cancel child scopes (EventProcessor)
      * 6. Reset in-memory state (seenIds, connection map)
      *
      * No exitProcess — singletons survive. bootstrap() restarts subsystems.
@@ -319,8 +308,8 @@ class AppBootstrapper @Inject constructor(
         bootstrapJob?.cancel()
         bootstrapJob = null
 
-        // 1. Cancel persistent subscriptions
-        relayPool.clearPersistentSubs()
+        // 1. Clear relay pool caches
+        relayPool.clearCaches()
 
         // 2. Disconnect all WebSockets
         relayPool.disconnectAll()
@@ -340,7 +329,6 @@ class AppBootstrapper @Inject constructor(
         nwcManager.clear()
 
         // 5. Cancel child scopes (NOT this scope — it must survive for next login)
-        outboxRouter.stop()
         eventProcessor.stop()
 
         // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
