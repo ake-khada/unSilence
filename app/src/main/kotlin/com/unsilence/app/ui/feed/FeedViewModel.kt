@@ -18,13 +18,16 @@ import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -69,6 +72,7 @@ enum class FeedContentFilter(val value: Int) {
  *     removePinnedRelay, nextFeed, previousFeed, updateFilter,
  *     onViewportChanged, onDotTapped, loadMore, refresh
  */
+@OptIn(FlowPreview::class)
 @HiltViewModel
 class FeedViewModel @Inject constructor(
     private val keyManager: KeyManager,
@@ -92,6 +96,39 @@ class FeedViewModel @Inject constructor(
     val pendingCount = consumer.pendingCount
     val isLoading = consumer.isLoading
     val isLoadingMore = consumer.isLoadingMore
+
+    // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
+
+    /**
+     * Coarse milestone signal. Bumps when relay-list coverage crosses 25%, 50%,
+     * 75%, 90% of follows. Avoids the per-relay-list trickle that produced
+     * 6+ resubscribes per cold start.
+     */
+    private val relayMetadataVersion: StateFlow<Int> = run {
+        val ownPubkey = keyManager.getPublicKeyHex()
+        if (ownPubkey == null) {
+            MutableStateFlow(0).asStateFlow()
+        } else {
+            combine(
+                memoryEventStore.allRelayListsFlow().map { it.size },
+                memoryEventStore.followsFlow(ownPubkey).map { it.size },
+            ) { listsCount, followsCount ->
+                if (followsCount == 0) 0
+                else {
+                    val pct = (listsCount * 100) / followsCount
+                    when {
+                        pct >= 90 -> 4
+                        pct >= 75 -> 3
+                        pct >= 50 -> 2
+                        pct >= 25 -> 1
+                        else -> 0
+                    }
+                }
+            }
+                .distinctUntilChanged()
+                .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+        }
+    }
 
     // -- Feed type -------------------------------------------------------------
 
@@ -270,7 +307,7 @@ class FeedViewModel @Inject constructor(
                     Log.d(TAG, "cold-start: ${snapshotFollows.size} follows in snapshot -> Following")
                 } else {
                     // Slow path: wait briefly for relay-fetched follows
-                    val follows = withTimeoutOrNull(10_000L) {
+                    val follows = withTimeoutOrNull(3_000L) {
                         memoryEventStore.followsFlow(ownPubkey)
                             .filter { it.isNotEmpty() }
                             .first()
@@ -282,7 +319,7 @@ class FeedViewModel @Inject constructor(
                     } else {
                         _hasFollows.value = true
                         // Wait briefly for own kind-10002 (best-effort, optional)
-                        withTimeoutOrNull(5_000L) {
+                        withTimeoutOrNull(2_000L) {
                             memoryEventStore.readWriteRelayConfigsFlow(ownPubkey)
                                 .filter { it.isNotEmpty() }
                                 .first()
@@ -306,15 +343,22 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        // Resubscribe collector — only acts after coldStartState transitions away
-        // from LOADING. distinctUntilChanged on the mapped type handles cold-start
-        // setting feedType to a value equal to its current default.
+        // Resubscribe collector — fires when feedType OR relay-metadata-version
+        // changes. Gated on coldStartState != LOADING. 750ms debounce coalesces
+        // the burst of follow kind-10002 inserts during Phase 2.
         viewModelScope.launch {
-            combine(_coldStartState, _feedType) { state, type -> state to type }
-                .filter { (state, _) -> state != ColdStartState.LOADING }
-                .map { (_, type) -> type }
-                .distinctUntilChanged()
-                .collectLatest { type -> resubscribe(type) }
+            combine(
+                _coldStartState,
+                _feedType,
+                relayMetadataVersion,
+            ) { state, type, ver -> Triple(state, type, ver) }
+                .filter { it.first != ColdStartState.LOADING }
+                .debounce(2_000L)
+                .distinctUntilChangedBy { (_, type, ver) -> type to ver }
+                .collectLatest { (_, type, ver) ->
+                    Log.d(TAG, "resubscribe trigger: type=$type metaVer=$ver")
+                    resubscribe(type)
+                }
         }
     }
 
