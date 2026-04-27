@@ -7,6 +7,7 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.work.BackgroundSyncWorker
 import java.util.concurrent.TimeUnit
@@ -82,6 +83,7 @@ class AppBootstrapper @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
+    private val initGate: InitGate,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -163,6 +165,8 @@ class AppBootstrapper @Inject constructor(
             }
             Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded from relay (snapshot ${snapshotAgeSec}s old)")
         }
+        initGate.signalFollowsReady()
+        Log.d(TAG, "InitGate: follows signaled")
 
         // Step 3: Fetch kind-10002 (relay list) — wait for response via MES.
         // Skip if snapshot was saved recently (< 6h) and has relay configs.
@@ -187,6 +191,8 @@ class AppBootstrapper @Inject constructor(
             }
             Log.d(TAG, "Phase1 Step3: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"} (snapshot ${snapshotAgeSec}s old)")
         }
+        initGate.signalRelaysReady()
+        Log.d(TAG, "InitGate: relays signaled")
 
         // Step 4: Pre-load blocked relays before global connections
         relayPool.refreshBlockedRelays()
