@@ -73,6 +73,15 @@ class SnapshotScheduler @Inject constructor(
         }
     }
 
+    /** Age of the snapshot file in seconds, or [Long.MAX_VALUE] if no snapshot exists. */
+    fun getSnapshotAgeSeconds(): Long {
+        val baseFile = snapshotFile.baseFile
+        if (!baseFile.exists()) return Long.MAX_VALUE
+        val lastModified = baseFile.lastModified()
+        if (lastModified == 0L) return Long.MAX_VALUE
+        return (System.currentTimeMillis() - lastModified) / 1000L
+    }
+
     /**
      * Restore snapshot into MemoryEventStore if a valid snapshot file exists.
      * Called during AppBootstrapper Phase 1.5, BEFORE relay connections open.

@@ -1007,6 +1007,13 @@ class MemoryEventStore @Inject constructor() {
     fun hasProfile(pubkey: String): Boolean = profilesByPubkey.containsKey(pubkey)
     fun getFollows(pubkey: String): Set<String>? = followsByPubkey[pubkey]
 
+    /** Maximum createdAt across all events in MES, or 0 if empty.
+     *  Used by AppBootstrapper to inject `since` into the initial feed subscription. */
+    fun getMaxEventCreatedAt(): Long {
+        val first = recentByCreatedAt.firstOrNull() ?: return 0L
+        return first.createdAt
+    }
+
     /** Local cache freshness — when this profile was last updated in MemoryEventStore (epoch ms).
      *  NOT the kind-0 event's original createdAt. Used by ProfileResolver to decide re-fetch. */
     fun getProfileLastUpdated(pubkey: String): Long = profileUpdatedAt[pubkey] ?: 0L

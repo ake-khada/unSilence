@@ -15,6 +15,7 @@ import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.media.MediaPreconnect
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
@@ -43,6 +44,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
+private const val FRESHNESS_WINDOW_SEC = 6 * 3600L  // 6 hours
 
 /** Default indexer relays — only used for first-launch seeding. */
 private val DEFAULT_INDEXER_URLS = listOf(
@@ -144,28 +146,47 @@ class AppBootstrapper @Inject constructor(
         snapshotScheduler.restoreIfPresent()
         Log.d(TAG, "Phase1.5: snapshot restore complete")
 
-        // Step 2: Fetch kind-3, wait for follows in MES
-        relayPool.fetchFollowList(pubkeyHex)
-        val follows = withTimeoutOrNull(10_000L) {
-            memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
-        }
-        Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded")
+        // Step 2: Fetch kind-3, wait for follows in MES.
+        // Skip if snapshot was saved recently (< 6h) and has follows — data already confirmed.
+        val snapshotAgeSec = snapshotScheduler.getSnapshotAgeSeconds()
+        val snapshotFresh = snapshotAgeSec < FRESHNESS_WINDOW_SEC
+        val followsCached = memoryEventStore.getFollows(pubkeyHex)?.isNotEmpty() == true
 
-        // Step 3: Fetch kind-10002 (relay list) — wait for response via MES
-        val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
-        relayPool.fetchRelayLists(listOf(pubkeyHex))
-        val freshRelays = withTimeoutOrNull(5_000L) {
-            if (relaysBefore.isEmpty()) {
-                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                    .filter { it.isNotEmpty() }
-                    .first()
-            } else {
-                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                    .filter { it != relaysBefore }
-                    .first()
+        val follows: Set<String>?
+        if (followsCached && snapshotFresh) {
+            follows = memoryEventStore.getFollows(pubkeyHex)
+            Log.d(TAG, "Phase1 Step2: follows snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${follows?.size} follows) — skipping refetch")
+        } else {
+            relayPool.fetchFollowList(pubkeyHex)
+            follows = withTimeoutOrNull(10_000L) {
+                memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
             }
+            Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded from relay (snapshot ${snapshotAgeSec}s old)")
         }
-        Log.d(TAG, "Phase1 Step3: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"}")
+
+        // Step 3: Fetch kind-10002 (relay list) — wait for response via MES.
+        // Skip if snapshot was saved recently (< 6h) and has relay configs.
+        val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
+
+        val freshRelays: List<RelayConfig>?
+        if (relaysBefore.isNotEmpty() && snapshotFresh) {
+            freshRelays = relaysBefore
+            Log.d(TAG, "Phase1 Step3: kind-10002 snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${freshRelays.size} relays) — skipping refetch")
+        } else {
+            relayPool.fetchRelayLists(listOf(pubkeyHex))
+            freshRelays = withTimeoutOrNull(5_000L) {
+                if (relaysBefore.isEmpty()) {
+                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
+                        .filter { it.isNotEmpty() }
+                        .first()
+                } else {
+                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
+                        .filter { it != relaysBefore }
+                        .first()
+                }
+            }
+            Log.d(TAG, "Phase1 Step3: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"} (snapshot ${snapshotAgeSec}s old)")
+        }
 
         // Step 4: Pre-load blocked relays before global connections
         relayPool.refreshBlockedRelays()
@@ -179,8 +200,16 @@ class AppBootstrapper @Inject constructor(
         for (url in globalUrls) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
+        // Inject `since` so relays only return events newer than what we have in MES.
+        val maxCreatedAt = memoryEventStore.getMaxEventCreatedAt()
+        val feedSince = if (maxCreatedAt > 0) maxOf(maxCreatedAt - 60, 0) else null
+        if (feedSince != null) {
+            val nowSec = System.currentTimeMillis() / 1000L
+            Log.d(TAG, "Phase1 Step5: injecting since=$feedSince (max event $maxCreatedAt, ${nowSec - maxCreatedAt}s ago)")
+        }
+        relayPool.feedSinceEpoch = feedSince
         relayPool.connect(globalUrls, isHomeFeed = true)
-        Log.d(TAG, "Phase1 complete: feed subs active (${globalUrls.size} relays)")
+        Log.d(TAG, "Phase1 complete: feed subs active (${globalUrls.size} relays)${if (feedSince != null) " with since-injection" else ""}")
 
         // ═══════════════════════════════════════════════════════════════════
         // Phase 2 (1000ms): Profile resolution + relay ecosystem

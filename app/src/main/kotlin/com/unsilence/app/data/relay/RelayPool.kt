@@ -88,6 +88,10 @@ class RelayPool @Inject constructor(
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
+    /** When non-null, inject `since` into the feed subscription REQ for newly connected home-feed relays.
+     *  Set by AppBootstrapper before connect() to avoid re-fetching events already restored from snapshot. */
+    @Volatile var feedSinceEpoch: Long? = null
+
     // ── Connection purpose tracking ────────────────────────────────────────
     // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
     // Persistent sub replay is only skipped when a relay is browse-only.
@@ -850,8 +854,11 @@ class RelayPool @Inject constructor(
         }.toString()
 
         registerPersistentSub(feedSubId, feedReq, targetRelayUrl = conn.url)
-        conn.send(feedReq)
-        Log.d(TAG, "Subscribed to ${conn.url} (1 combined feed subscription)")
+        // Inject since to avoid re-fetching events already in MES from snapshot
+        val since = feedSinceEpoch
+        val reqToSend = if (since != null) injectSince(feedReq, since) else feedReq
+        conn.send(reqToSend)
+        Log.d(TAG, "Subscribed to ${conn.url} (1 combined feed subscription${if (since != null) ", since=$since" else ""})")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
