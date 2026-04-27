@@ -48,7 +48,8 @@ class OgFetcher @Inject constructor(
                 doFetch(url)
             } catch (e: CancellationException) {
                 throw e          // let coroutine cancellation propagate
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.d(TAG, "og fetch: exception for $url: ${e.javaClass.simpleName}: ${e.message}")
                 null
             }
         }.also { attempted[url] = true; if (it != null) cache[url] = it }
@@ -75,14 +76,30 @@ class OgFetcher @Inject constructor(
                 Request.Builder()
                     .url(url)
                     .header("User-Agent", UA)
-                    .header("Accept", "text/html,application/xhtml+xml")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("Upgrade-Insecure-Requests", "1")
+                    .header("Sec-Fetch-Dest", "document")
+                    .header("Sec-Fetch-Mode", "navigate")
+                    .header("Sec-Fetch-Site", "none")
+                    .header("Sec-Fetch-User", "?1")
+                    .header("sec-ch-ua", "\"Google Chrome\";v=\"130\", \"Chromium\";v=\"130\", \"Not?A_Brand\";v=\"99\"")
+                    .header("sec-ch-ua-mobile", "?1")
+                    .header("sec-ch-ua-platform", "\"Android\"")
+                    .header("Cache-Control", "max-age=0")
                     .build()
             )
         ).use { response ->
-            if (!response.isSuccessful) return null
+            if (!response.isSuccessful) {
+                Log.d(TAG, "og fetch: HTTP ${response.code} for $url")
+                return null
+            }
             val ct = response.header("Content-Type") ?: ""
             if (ct.isNotBlank() && !ct.contains("text/html", ignoreCase = true)
-                && !ct.contains("application/xhtml", ignoreCase = true)) return null
+                && !ct.contains("application/xhtml", ignoreCase = true)) {
+                Log.d(TAG, "og fetch: bad content-type '$ct' for $url")
+                return null
+            }
             // Read up to MAX_BODY_SIZE bytes. A single source.read() may return
             // less than requested on network sources (first TCP segment only),
             // so loop until we've accumulated MAX_BODY_SIZE or hit EOF.
@@ -101,7 +118,7 @@ class OgFetcher @Inject constructor(
     companion object {
         private const val TAG = "OgFetcher"
         // Realistic browser UA — many sites (yahoo.co.jp, etc.) 403 bot-like UAs.
-        private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
         private const val MAX_BODY_SIZE = 50_000L
 
         // Matches property= or name= with og: prefix, in either order with content=
@@ -190,7 +207,10 @@ class OgFetcher @Inject constructor(
             Log.d(TAG, "og:image=$image for $originalUrl")
 
             // Require at least a title or image to be useful
-            if (title.isNullOrBlank() && image.isNullOrBlank()) return null
+            if (title.isNullOrBlank() && image.isNullOrBlank()) {
+                Log.d(TAG, "og fetch: no title or image in HTML for $originalUrl")
+                return null
+            }
 
             return OgMetadata(
                 title       = title ?: "",

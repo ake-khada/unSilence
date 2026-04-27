@@ -70,6 +70,7 @@ fun EventCard(
     onSaveNwcUri: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
+    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
@@ -204,6 +205,28 @@ fun EventCard(
             onToggleMute        = onToggleMute,
             thumbnailCache      = thumbnailCache,
         )
+
+        // Empty-content repost fallback (mostr.pub bridge style):
+        // kind-6 with empty wrapper content + targetId — render the target inline.
+        // Routes via target author's outbox relays for bridge content.
+        if (model.repost != null &&
+            model.repost.embeddedJson == null &&
+            model.repost.targetId != null &&
+            lookupEventWithAuthor != null
+        ) {
+            EmptyRepostBody(
+                targetId = model.repost.targetId,
+                relayHints = listOfNotNull(model.repost.relayHint),
+                targetAuthorPubkey = model.repost.targetAuthorPubkey,
+                lookupEventWithAuthor = lookupEventWithAuthor,
+                lookupProfile = lookupProfile,
+                lookupModel = lookupModel,
+                fetchOgMetadata = fetchOgMetadata,
+                imageDimensionCache = imageDimensionCache,
+                onNoteClick = onNoteClick,
+                onAuthorClick = onAuthorClick,
+            )
+        }
 
         // Action bar
         EventActionBar(

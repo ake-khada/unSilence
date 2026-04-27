@@ -71,6 +71,7 @@ data class EventActionCallbacks(
     val saveNwcUri: (String) -> Unit = {},
     val lookupProfile: (suspend (String) -> UserEntity?)? = null,
     val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
+    val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 )
@@ -384,6 +385,7 @@ private fun EventFeedItem(
         onSaveNwcUri        = callbacks.saveNwcUri,
         lookupProfile       = callbacks.lookupProfile,
         lookupEvent         = callbacks.lookupEvent,
+        lookupEventWithAuthor = callbacks.lookupEventWithAuthor,
         lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         profileFlow         = callbacks.profileFlow,
