@@ -37,7 +37,7 @@ private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
-class MemoryEventStore @Inject constructor() {
+class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.RelayMetadataSource {
 
     companion object {
         const val FOLLOWER_COUNT_TTL_SECONDS = 86_400L
@@ -1454,7 +1454,7 @@ class MemoryEventStore @Inject constructor() {
 
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
-    fun writeRelaysFor(pubkey: String): List<String> =
+    override fun writeRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.write ?: emptyList()
 
     /** Write relays sorted by trust score (descending). Unknown relays get score 50 (middle rank). */
@@ -1522,7 +1522,7 @@ class MemoryEventStore @Inject constructor() {
 
     // ─── Trust score query APIs ───────────────────────────────────────────
 
-    fun getTrustScores(): Map<String, RelayTrustScoreEntity> =
+    override fun getTrustScores(): Map<String, RelayTrustScoreEntity> =
         HashMap(trustScoresByUrl)
 
     fun trustScoresFlow(): Flow<Map<String, RelayTrustScoreEntity>> =
