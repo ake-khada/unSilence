@@ -54,6 +54,14 @@ class MemoryEventStore @Inject constructor() {
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
     )
 
+    // ─── LRU touch tracking (eviction priority) ──────────────────────────
+    /**
+     * Last-access timestamp per event id (epoch ms).
+     * Updated on insert, snapshot restore, warm-zone hydration, and lookupEvent.
+     * Eviction sorts candidates ascending by this value — least-recently-touched first.
+     */
+    private val lastTouchedAt = ConcurrentHashMap<String, Long>()
+
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
     private val replyCounts = ConcurrentHashMap<String, Int>()
     private val repostCounts = ConcurrentHashMap<String, Int>()
@@ -269,6 +277,7 @@ class MemoryEventStore @Inject constructor() {
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
         recentByCreatedAt.add(EventEntry(event.id, event.createdAt))
+        lastTouchedAt[event.id] = System.currentTimeMillis()
 
         if (event.replyToId != null) {
             idsByReplyTarget.getOrPut(event.replyToId) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -841,6 +850,20 @@ class MemoryEventStore @Inject constructor() {
      * Engagement events (kind 7, 9734, 9735) are reconstructible from relays — lowest cap.
      * Mirrors Amethyst's pruning strategy.
      */
+    /**
+     * Eviction policy — band model:
+     *
+     *   Band A (anchored, never evicted, not counted against cap):
+     *     - Events authored by ownPubkey
+     *     - Events mentioning ownPubkey (notifications)
+     *     - Events authored by currently viewed profile
+     *
+     *   Band C (LRU-managed pool):
+     *     - Everything else; evicted by lastTouchedAt ASC when kind cap exceeded
+     *
+     * Recently-displayed events survive regardless of how old their created_at is.
+     * An ancient quoted post being viewed today outranks a fresh flood-feed reaction.
+     */
     private fun evictOldContentEvents() {
         val kindCaps = mapOf(
             1 to 5000,      // notes (roots + replies combined)
@@ -853,44 +876,53 @@ class MemoryEventStore @Inject constructor() {
             30023 to 500,   // articles
         )
 
-        // Anchor: never evict events authored by or mentioning ownPubkey,
-        // or authored by the currently viewed profile
-        val anchor = ownPubkey
+        val ownPubkeyAnchor = ownPubkey
         val viewed = viewedPubkey
 
+        // Pass 1: bucket events by kind. Anchored events are excluded entirely —
+        // they don't count against the cap and can't be evicted.
         val toEvict = mutableListOf<EventEntry>()
-        val countByKind = mutableMapOf<Int, Int>()
+        val candidatesByKind = mutableMapOf<Int, MutableList<EventEntry>>()
         var anchoredOwn = 0
         var anchoredMentioned = 0
         var anchoredViewed = 0
 
-        // Walk newest → oldest (recentByCreatedAt is desc-sorted)
         for (entry in recentByCreatedAt) {
             val event = eventsById[entry.id] ?: continue
             val kind = event.kind
+            if (kind !in kindCaps) continue
+
+            // Band A: own pubkey — never evicted, never counted
+            if (ownPubkeyAnchor != null && event.pubkey == ownPubkeyAnchor) {
+                anchoredOwn++
+                evictionAnchoredOwn.incrementAndGet()
+                continue
+            }
+            // Band A: events mentioning own pubkey (notifications)
+            if (ownPubkeyAnchor != null && event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == ownPubkeyAnchor }) {
+                anchoredMentioned++
+                evictionAnchoredMentioned.incrementAndGet()
+                continue
+            }
+            // Band A: events authored by currently viewed profile
+            if (viewed != null && event.pubkey == viewed) {
+                anchoredViewed++
+                evictionAnchoredViewed.incrementAndGet()
+                continue
+            }
+
+            candidatesByKind.getOrPut(kind) { mutableListOf() }.add(entry)
+        }
+
+        // Pass 2: for each kind over its cap, sort candidates by lastTouchedAt
+        // ascending and evict the least-recently-touched excess.
+        for ((kind, candidates) in candidatesByKind) {
             val cap = kindCaps[kind] ?: continue
-            val count = countByKind.getOrPut(kind) { 0 } + 1
-            countByKind[kind] = count
-            if (count > cap) {
-                // Anchor: skip own events
-                if (anchor != null && event.pubkey == anchor) {
-                    anchoredOwn++
-                    evictionAnchoredOwn.incrementAndGet()
-                    continue
-                }
-                // Anchor: skip events that mention ownPubkey (notifications)
-                if (anchor != null && event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == anchor }) {
-                    anchoredMentioned++
-                    evictionAnchoredMentioned.incrementAndGet()
-                    continue
-                }
-                // Anchor: skip events authored by viewed profile
-                if (viewed != null && event.pubkey == viewed) {
-                    anchoredViewed++
-                    evictionAnchoredViewed.incrementAndGet()
-                    continue
-                }
-                toEvict.add(entry)
+            if (candidates.size <= cap) continue
+            val excess = candidates.size - cap
+            candidates.sortBy { lastTouchedAt[it.id] ?: 0L }
+            for (i in 0 until excess) {
+                toEvict.add(candidates[i])
             }
         }
 
@@ -906,6 +938,7 @@ class MemoryEventStore @Inject constructor() {
             recentByCreatedAt.remove(entry)
             idsByKind[event.kind]?.remove(entry.id)
             idsByPubkey[event.pubkey]?.remove(entry.id)
+            lastTouchedAt.remove(entry.id)
             if (event.replyToId != null) {
                 idsByReplyTarget[event.replyToId]?.remove(entry.id)
             }
@@ -928,10 +961,15 @@ class MemoryEventStore @Inject constructor() {
         zapStatsByEventId.keys.removeAll(removeIds)
         statsUpdatedAt.keys.removeAll(removeIds)
 
-        val breakdown = countByKind.entries
-            .filter { (kind, count) -> count > (kindCaps[kind] ?: Int.MAX_VALUE) }
-            .joinToString(", ") { (kind, count) -> "k$kind: ${count - (kindCaps[kind] ?: 0)} evicted" }
-        Log.d("MES", "Evicted ${toEvict.size} events ($breakdown), anchored own=$anchoredOwn mentioned=$anchoredMentioned")
+        val summary = candidatesByKind
+            .filter { (kind, candidates) -> candidates.size > (kindCaps[kind] ?: Int.MAX_VALUE) }
+            .toSortedMap()
+            .entries
+            .joinToString(", ") { (kind, candidates) ->
+                val cap = kindCaps[kind] ?: 0
+                "k$kind: ${candidates.size - cap} evicted"
+            }
+        Log.d("MES", "Eviction: ${toEvict.size} removed (LRU-by-touch), anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed [$summary]")
     }
 
     // ─── Query API ──────────────────────────────────────────────────────────
@@ -1012,6 +1050,23 @@ class MemoryEventStore @Inject constructor() {
     fun getMaxEventCreatedAt(): Long {
         val first = recentByCreatedAt.firstOrNull() ?: return 0L
         return first.createdAt
+    }
+
+    /**
+     * Mark event ids as recently accessed. Prevents eviction of events the user
+     * is actively viewing/referencing. Called by FeedWindow warm zone + lookupEvent.
+     */
+    fun markTouched(eventIds: Collection<String>) {
+        if (eventIds.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for (id in eventIds) {
+            lastTouchedAt[id] = now
+        }
+    }
+
+    /** Convenience overload for single id. */
+    fun markTouched(eventId: String) {
+        lastTouchedAt[eventId] = System.currentTimeMillis()
     }
 
     /** Local cache freshness — when this profile was last updated in MemoryEventStore (epoch ms).
@@ -2044,6 +2099,7 @@ class MemoryEventStore @Inject constructor() {
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
         recentByCreatedAt.add(EventEntry(event.id, event.createdAt))
+        lastTouchedAt[event.id] = System.currentTimeMillis()
 
         if (event.replyToId != null) {
             idsByReplyTarget.getOrPut(event.replyToId) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -2322,6 +2378,7 @@ class MemoryEventStore @Inject constructor() {
         idsByPubkey.clear()
         idsByReplyTarget.clear()
         recentByCreatedAt.clear()
+        lastTouchedAt.clear()
         replyCounts.clear()
         repostCounts.clear()
         reactionCounts.clear()
