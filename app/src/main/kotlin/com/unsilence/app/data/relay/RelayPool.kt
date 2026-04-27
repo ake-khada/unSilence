@@ -80,7 +80,7 @@ class RelayPool @Inject constructor(
     private val syncTracker: dagger.Lazy<com.unsilence.app.data.cache.SyncTracker>,
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
-) {
+) : RelayTransport {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val persistentSubs = ConcurrentHashMap<String, PersistentSub>()
@@ -575,10 +575,10 @@ class RelayPool @Inject constructor(
      * one connection is ready OR [timeoutMs] elapses. Does NOT send any subscriptions —
      * the caller sends requests after this returns.
      */
-    suspend fun connectAndAwait(
+    override suspend fun connectAndAwait(
         relayUrls: List<String>,
-        timeoutMs: Long = 5_000,
-        forceEvict: Boolean = false,
+        timeoutMs: Long,
+        forceEvict: Boolean,
     ): Int {
         val newConns = mutableListOf<RelayConnection>()
         for (rawUrl in relayUrls) {
@@ -2512,7 +2512,7 @@ class RelayPool @Inject constructor(
     var onRelayReconnected: ((String) -> Unit)? = null
 
     /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
-    fun sendToRelay(url: String, msg: String): Boolean =
+    override fun sendToRelay(url: String, msg: String): Boolean =
         connections[url]?.send(msg) == true
 
     /**
