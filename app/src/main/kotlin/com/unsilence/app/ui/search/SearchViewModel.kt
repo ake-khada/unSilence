@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
@@ -120,7 +121,9 @@ class SearchViewModel @Inject constructor(
                     val relayResults = _searchResultEventIds
                         .flatMapLatest { ids ->
                             if (ids.isEmpty()) flowOf(emptyList())
-                            else memoryEventStore.feedRowsByIdsFlow(ids)
+                            else memoryEventStore.feedSignalFlow.map {
+                                memoryEventStore.feedRowsByIds(ids)
+                            }.distinctUntilChanged()
                         }
 
                     // Combine local MES results with relay-returned results + people search.

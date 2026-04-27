@@ -23,7 +23,7 @@ import kotlinx.coroutines.launch
  *
  * Takes [SubRequest]s as input, exposes feedRows + blue-dot + pagination
  * controls. Does NOT decide which subRequests to use — that's the caller's
- * job (FeedViewModelV2 for the home/global feeds, ProfileViewModel for
+ * job (FeedViewModel for the home/global feeds, ProfileViewModel for
  * a profile's own posts, etc.).
  *
  * Lifecycle:

@@ -80,7 +80,7 @@ class VideoThumbnailCache @Inject constructor(
 
     /**
      * Pre-warm a thumbnail in the background. No-op if already cached or in-flight.
-     * Called by FeedWindow's zone-aware hydration driver before the card is visible.
+     * Called by TimelineConsumer's warm-zone hydration before the card is visible.
      */
     suspend fun warmThumbnail(url: String) {
         if (cache.containsKey(url) || inFlight.containsKey(url)) return

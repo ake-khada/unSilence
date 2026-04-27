@@ -34,8 +34,7 @@ interface RelayMetadataSource {
  * into a single SubRequest. This handles new follows whose kind-10002 hasn't
  * been fetched yet.
  *
- * Mirrors FeedWindowLoader.B.2 selection but emits grouped SubRequests
- * instead of a flat relay list.
+ * Coverage-greedy outbox relay selection that emits grouped SubRequests.
  */
 @Singleton
 class OutboxRelayResolver @Inject constructor(
