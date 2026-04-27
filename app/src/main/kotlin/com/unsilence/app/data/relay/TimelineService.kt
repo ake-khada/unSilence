@@ -2,7 +2,13 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.memory.NostrEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +50,8 @@ class TimelineService @Inject constructor(
     private val subscription: Subscription,
     private val eventLoader: TimelineEventLoader,
 ) {
+    /** Dispatcher for fire-and-forget subscribe coroutines. Tests override with Unconfined. */
+    internal var subscribeDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO
     private data class Timeline(
         val refs: List<TimelineRef>,
         val filter: NostrFilter,
@@ -67,49 +75,60 @@ class TimelineService @Inject constructor(
         needSort: Boolean = true,
     ): TimelineHandle {
         val multiKey = generateMultiKey(subRequests)
-        val perSubKeys = mutableListOf<String>()
+        val perSubKeys = Collections.synchronizedList(mutableListOf<String>())
         val perSubTimelines = Array<List<NostrEvent>>(subRequests.size) { emptyList() }
         val eosedCount = AtomicInteger(0)
-        val multiHandles = mutableListOf<Subscription.Handle>()
+        val multiHandles = Collections.synchronizedList(mutableListOf<Subscription.Handle>())
 
-        // Jumble: threshold = Math.floor(requestCount / 2)
-        // coerceAtLeast(1) so a single subRequest fires on first EOSE.
-        val threshold = (subRequests.size / 2).coerceAtLeast(1)
+        // floor(N/2) was too aggressive — many small outbox relays accept REQ
+        // without ever sending EOSE. Use ceil(N/4) so threshold trips after
+        // roughly a quarter of subs respond. Single-sub case unchanged.
+        val threshold = if (subRequests.size <= 1) 1 else ((subRequests.size + 3) / 4)
 
         // Cross-sub dedup for onNew (Jumble's newEventIdSet)
         val newEventIdSet = ConcurrentHashMap.newKeySet<String>()
 
+        // Fire-and-forget: launch all subscribeSingle calls concurrently and
+        // return immediately. Jumble doesn't block on the subscribe loop —
+        // the handle is returned right away, callbacks fire as EOSEs arrive.
+        // The subScope is owned by the TimelineHandle; close() cancels it.
+        val subScope = CoroutineScope(SupervisorJob() + subscribeDispatcher)
+
         for ((index, sr) in subRequests.withIndex()) {
-            subscribeSingle(
-                index = index,
-                subRequest = sr,
-                onPerSubEvents = { events, eosed ->
-                    perSubTimelines[index] = events
-                    if (eosed) eosedCount.incrementAndGet()
-                    val totalEosed = eosedCount.get()
-                    if (totalEosed >= threshold) {
-                        val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
-                        val allEosed = totalEosed >= subRequests.size
-                        try { onEvents(merged, allEosed) } catch (t: Throwable) {
-                            Log.w(TAG, "onEvents threw", t)
+            subScope.launch {
+                subscribeSingle(
+                    index = index,
+                    subRequest = sr,
+                    onPerSubEvents = { events, eosed ->
+                        perSubTimelines[index] = events
+                        if (eosed) eosedCount.incrementAndGet()
+                        val totalEosed = eosedCount.get()
+                        if (totalEosed >= threshold) {
+                            val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
+                            val allEosed = totalEosed >= subRequests.size
+                            try { onEvents(merged, allEosed) } catch (t: Throwable) {
+                                Log.w(TAG, "onEvents threw", t)
+                            }
                         }
-                    }
-                },
-                onNew = { evt ->
-                    if (newEventIdSet.add(evt.id)) {
-                        try { onNew(evt) } catch (t: Throwable) {
-                            Log.w(TAG, "onNew threw", t)
+                    },
+                    onNew = { evt ->
+                        if (newEventIdSet.add(evt.id)) {
+                            try { onNew(evt) } catch (t: Throwable) {
+                                Log.w(TAG, "onNew threw", t)
+                            }
                         }
-                    }
-                },
-                onClose = onClose,
-                needSort = needSort,
-                outerKeysCollector = perSubKeys,
-                outerHandleCollector = multiHandles,
-            )
+                    },
+                    onClose = onClose,
+                    needSort = needSort,
+                    outerKeysCollector = perSubKeys,
+                    outerHandleCollector = multiHandles,
+                )
+            }
         }
 
-        multiKeys[multiKey] = perSubKeys.toList()
+        // perSubKeys grows as subs complete — store the live reference.
+        // loadMoreTimeline reads it later when the user scrolls down.
+        multiKeys[multiKey] = perSubKeys
 
         return object : TimelineHandle {
             override val timelineKey = multiKey
@@ -117,6 +136,7 @@ class TimelineService @Inject constructor(
             override fun close() {
                 if (closed) return
                 closed = true
+                subScope.cancel()
                 multiHandles.forEach { runCatching { it.close() } }
                 multiKeys.remove(multiKey)
             }

@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import com.unsilence.app.data.memory.NostrEvent
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -24,6 +25,7 @@ class TimelineServiceTest {
         eventLoader = FakeEventLoader()
         subscription = Subscription(transport, tapRegistry)
         service = TimelineService(subscription, eventLoader)
+        service.subscribeDispatcher = Dispatchers.Unconfined
     }
 
     @Test
