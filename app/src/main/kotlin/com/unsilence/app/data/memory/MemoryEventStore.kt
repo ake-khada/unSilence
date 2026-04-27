@@ -215,6 +215,15 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     private val _statsSignal = MutableStateFlow(0L)
     private val _followsSignal = MutableStateFlow(0L)
     private val _actionSignal = MutableStateFlow(0L)
+
+    /** Bumps when any kind-0 (profile metadata) is inserted. Consumers re-render to pick up new names/avatars. */
+    val profileSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _profileSignal
+
+    /** Bumps when actor-side indexes (own reactions, reposts) change. Consumers re-render reaction state. */
+    val actionSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _actionSignal
+
+    /** Bumps when engagement aggregates (kinds 7/9734/9735) change. Consumers re-render counts. */
+    val statsSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _statsSignal
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
