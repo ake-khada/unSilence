@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 26, 2026 (Zone-aware hydration replacing eager full-300 hydration.)
+**Last updated:** April 27, 2026 (PR-A repost+OG, PR-B-cold incremental cold start.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -71,7 +71,7 @@ Relay WebSocket → EventProcessor → MemoryEventStore → FeedListener → Fee
 - **ContentParser** — single-pass tokenizer producing `EventModel` from raw event fields. Called at insert time (EventProcessor.flushBatch) and snapshot restore (MES.insertFromSnapshot). Pure function, O(n) in content length. Cached in `MES.eventModelsByEventId` sidecar
 - **EventProcessor** — dedup via seenIds, kind handlers, spam filter, relay provenance, ContentParser.parse hook in flushBatch
 - **ProfileResolver** — batched profile fetch, 6h staleness, 15s in-flight guard
-- **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed), ephemeral one-shot path (`sendOneShotBatch` + `openEphemeral`) for cap-bypassing fetches
+- **RelayPool** — WebSocket manager, ConnectionPurpose (PERSISTENT/BROWSE/OUTBOX), per-relay REQ queue (cap 10), token bucket rate limiter, idle eviction, NIP-42 auth (OK-confirmed), ephemeral one-shot path (`sendOneShotBatch` + `openEphemeral`) for cap-bypassing fetches. `feedSinceEpoch` field — set by AppBootstrapper before `connect()`, injected into feed REQ via `injectSince()` in `subscribeAfterConnect`
 - **FeedWindow** — per-feed-key window primitive. `Channel<WindowEvent>(UNLIMITED)` drain loop serialized via `Dispatchers.Default.limitedParallelism(1)`. WindowEvents: ContentInsert (sorted by createdAt), EngagementUpdate, ProfileUpdate, FlushPending, IsAtTop/NotAtTop, ViewportChanged. Pending buffer when scrolled down; auto-flush when at top. Zone-aware hydration: ViewportChanged → cancel-and-reschedule 300ms debounce → `runHydrationPass()` hydrates warm zone (10 above + 30 below viewport). Per-event `HydrationStatus` tracks idempotent fetches (profiles, refs, OG, video first-frame, engagement). OG and video IO dispatched on `Dispatchers.IO` to avoid blocking the state-mutation scope. `WindowSnapshot` (@Immutable data class) exposed via StateFlow. RENDERED_CAP=1500, WINDOW_BATCH=300
 - **FeedWindowLoader** — bounded-window feed loader: `loadBatchFor(key, cursor, limit)` queries MES, applies post-query filters, runs imeta-only media pass (~5ms for 300 events). No eager profile/ref/OG hydration — all moved to FeedWindow's zone-aware hydration. `refreshEngagementForIds(ids)` replaces the deleted 120s engagement tick. Home branch polls MES with 5s timeout when empty. Profile branch warm-start with 60s throttle on background refresh (`lastWarmRefreshMs`). `FeedWindowConfig` holds all constants (WINDOW_SIZE=300, relay fanout, freshness TTLs)
 - **VideoPlaybackScope** — shared ExoPlayer, viewport center activation (60%/35% hysteresis), 3-layer flap protection
@@ -81,13 +81,14 @@ Relay WebSocket → EventProcessor → MemoryEventStore → FeedListener → Fee
 - **VideoThumbnailCache** — first-frame thumbnails via MMR, downsampled (inSampleSize=2, ~1MB/thumb), LRU eviction at 100 entries OR 64MB bitmap total, `visibleUrls` set protects on-screen thumbnails from eviction
 - **SearchViewModel** — NIP-50 search, `AtomicLong` token tracking, debounce + collectLatest, CLOSE frames on supersede
 - **RelayPreferencesStore** — DataStore-backed, `Mutex`-guarded read-modify-write for indexer URLs, relay monitor staleness timestamp (`lastMonitorFetchAt`)
-- **SnapshotScheduler** — periodic + onStop save (3s timeout), AtomicFile for crash safety. Snapshot section order: `---FOLLOWS---`, `---EVENTS---`, `---AGGREGATES---`, `---RELAY_HEALTH---`. Follows-first enables early `_followsSignal` mid-restore (before 25s event parse), eliminating cold-start Global→Following flash. Old snapshots (follows at end) still parse via implicit section 0 default
+- **SnapshotScheduler** — periodic + onStop save (3s timeout), AtomicFile for crash safety. Snapshot section order: `---FOLLOWS---`, `---EVENTS---`, `---AGGREGATES---`, `---RELAY_HEALTH---`. Follows-first enables early `_followsSignal` mid-restore (before 25s event parse), eliminating cold-start Global→Following flash. Old snapshots (follows at end) still parse via implicit section 0 default. `getSnapshotAgeSeconds()` exposes file mtime as the data-was-last-confirmed signal for freshness gating
+- **OgFetcher** — OkHttp-based OpenGraph metadata fetcher. Chrome 130 UA + full Sec-Fetch/sec-ch-ua header set to bypass WAF bot detection. 50KB body limit, regex-based og:/twitter: meta tag parsing with HTML entity decoding and relative URL resolution. In-memory ConcurrentHashMap cache + attempted-set dedup
 
 ---
 
 ## Features — Shipped
 
-Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, Load More pagination, blue dot, deterministic cold-start) · Content (kind 1/6/20/21/30023, @mentions, quotes, OG previews, YouTube, media grids — unified EventCard pipeline with pre-parsed EventModel + ContentParser) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, deterministic cold-start splash)
+Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filter sheet, Load More pagination, blue dot, deterministic cold-start, incremental cold start with since-injection) · Content (kind 1/6/20/21/30023, @mentions, quotes, OG previews with Chrome-like headers, MinimalLinkCard favicon fallback, YouTube, media grids — unified EventCard pipeline with pre-parsed EventModel + ContentParser) · Reposts (kind-6 with embedded JSON AND empty-content kind-6 via outbox-routed lookup) · Video (inline autoplay, shared ExoPlayer, fullscreen, HLS, mute) · Profiles (avatar/banner/bio, edit, tabs, follow/unfollow, NIP-45 followers, NIP-65 outbox) · Engagement (reactions, reposts, zaps NWC NIP-47, action bar) · Relay (NIP-51 ecosystem, relay sets, relay health, blocked relays) · Navigation (bottom nav, thread view with tree nesting, NIP-50 search, notifications with blue dot) · Auth (nsec + Amber NIP-55, logout with session key rotation) · Branding (waveform LogoMark, adaptive icon, deterministic cold-start splash)
 
 ---
 
@@ -211,6 +212,16 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 70. **Snapshot follows format** — `follows|pubkey|createdAt|hex1,hex2,...` pipe-delimited
 71. **Follows-first snapshot order** — `---FOLLOWS---` before `---EVENTS---`. Mid-restore signal enables <1.4s cold-start
 72. **connectAndAwait BEFORE snapshot restore** — connections must be in map for `sendOneShotBatch` reuse during 25s parse
+73. **Snapshot freshness uses file mtime, NOT event createdAt** — `SnapshotScheduler.getSnapshotAgeSeconds()` returns `(now - file.lastModified) / 1000`. Event `createdAt` (e.g. `followsCreatedAt`) stores when user last *edited* follows — could be weeks old for stable lists. File mtime is when data was last *confirmed and persisted*
+74. **`feedSinceEpoch` is set-then-consumed** — AppBootstrapper sets it before `connect()`, `subscribeAfterConnect` reads and injects it. Subsequent reconnects reuse the persistent sub (which stores the original REQ without since), so it's self-clearing
+
+### Repost Rendering
+75. **Empty-content kind-6 reposts** — mostr.pub bridge (and others) send kind-6 with empty content + e-tag + p-tag, not embedded JSON. `RepostInfo.targetAuthorPubkey` extracted from p-tag enables outbox-routed lookup via `lookupEventWithAuthor` (3-arg variant). `EmptyRepostBody.kt` resolves target via `produceState`, renders via ContentFlow on success, renders nothing on failure (matches pre-fix behavior — no skeleton)
+76. **`lookupEventWithAuthor` is the 3-arg variant** — `(id, hints, authorPk?)` vs 2-arg `lookupEvent(id, hints)`. The 3-arg variant routes through `writeRelaysFor(authorPk)` for outbox relay discovery. Wired through `EventActionCallbacks` and all screen call sites
+
+### OG Preview Pipeline
+77. **OgFetcher uses Chrome 130 headers** — full Sec-Fetch/sec-ch-ua/Accept/Accept-Language header set. NEVER set Accept-Encoding (OkHttp handles transparent decompression; explicit header disables it → compressed bytes parsed as UTF-8)
+78. **MinimalLinkCard is the OG fallback** — when OG fetch returns nothing useful (WAF 403, no og: tags), renders favicon + hostname instead of blank space. Favicon resolution chain: Google API (`/s2/favicons?domain=...&sz=128`) → `/apple-touch-icon.png` → `/favicon.ico` → generic link icon. Google API bypasses WAF that blocks direct favicon requests
 
 ---
 
@@ -230,7 +241,7 @@ Always measure before proposing fixes. Grab a real session logcat, filter with `
 
 **MES feed query:** `feedEvents()` / `userEvents()` scan `idsByKind` + `eventEntitiesByNoteId`, filter by kind/pubkey/relay/content-type, join profiles + stats → FeedRow list. Called by `FeedWindowLoader.loadBatchFor()` at load time, not continuously
 
-**Cold-start / splash:** `ColdStartState` enum (`LOADING`, `READY_FOLLOWING`, `READY_GLOBAL`) in FeedViewModel. Waits up to 10s for kind-3 (follows), then 5s for kind-10002 (relay lists). Warm resume resolves instantly from snapshot (<300ms). No Global→Following flash. `splashDone` backward-compat alias gates AppNavigation bars
+**Cold-start / splash:** `ColdStartState` enum (`LOADING`, `READY_FOLLOWING`, `READY_GLOBAL`) in FeedViewModel. Waits up to 10s for kind-3 (follows), then 5s for kind-10002 (relay lists). Warm resume resolves instantly from snapshot (<300ms). No Global→Following flash. `splashDone` backward-compat alias gates AppNavigation bars. **Incremental cold start:** AppBootstrapper skips kind-3/kind-10002 relay fetches if snapshot file is < 6h old (`FRESHNESS_WINDOW_SEC`). Feed REQ injects `since=max(MES.createdAt)-60` so relays only return events newer than snapshot. Uses `SnapshotScheduler.getSnapshotAgeSeconds()` (file mtime), NOT event createdAt — event timestamps reflect when user last edited follows/relays, not when data was confirmed
 
 **Logout:** `isLoggedIn=false` → `bootstrapper.teardown()` → `key(sessionKey)` forces fresh VM creation
 
@@ -260,6 +271,7 @@ app/src/main/kotlin/com/unsilence/app/
 │   ├── common/      LogoMark, LoadingScreen, EmptyState, ShimmerNoteCard, IdentIcon
 │   ├── feed/        FeedScreen, FeedViewModel, FeedWindow, FeedWindowLoader,
 │   │                WindowKey, FeedWindowConfig, EventCard, ContentFlow,
+│   │                EmptyRepostBody, MinimalLinkCard, OgChip (OgSection/OgPreviewCard),
 │   │                NoteCardHelpers, ImageDimensionCache, VideoThumbnailCache
 │   ├── navigation/  AppNavigation
 │   ├── compose/     ComposeScreen, ComposeViewModel

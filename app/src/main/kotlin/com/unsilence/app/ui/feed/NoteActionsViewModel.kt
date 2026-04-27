@@ -268,7 +268,10 @@ class NoteActionsViewModel @Inject constructor(
         authorPubkey: String? = null,
     ): EventEntity? {
         // Fast path: already in MemoryEventStore
-        memoryEventStore.getEventEntity(eventId)?.let { return it }
+        memoryEventStore.getEventEntity(eventId)?.let {
+            memoryEventStore.markTouched(eventId)  // LRU bump — quoted event actively resolved
+            return it
+        }
 
         // Fast-fail: known unresolved (negative cache, 5-min TTL).
         // Avoids 5s MES-flow wait for events that already failed all outbox phases.

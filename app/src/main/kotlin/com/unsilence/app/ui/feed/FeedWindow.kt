@@ -426,7 +426,27 @@ class FeedWindow(
         Log.d(TAG, "hydration pass: viewport=$viewportFirst..$viewportLast warm=$warmStart..$warmEnd rows=${rows.size}")
 
         val warmRows = rows.subList(warmStart, warmEnd + 1)
-        val warmEvents = mes.eventsByIds(warmRows.map { it.id }.toSet())
+        val warmRowIds = warmRows.map { it.id }
+        val warmEvents = mes.eventsByIds(warmRowIds.toSet())
+
+        // LRU touch — these events are visible / about-to-be-visible.
+        // Eviction will skip them in favor of less-recently-touched candidates.
+        mes.markTouched(warmRowIds)
+
+        // Also touch referenced events (e-tags) that exist in MES.
+        // Without this, a quoted event from another author can be evicted
+        // while navigating away → returning shows blank quote.
+        val referencedIds = mutableListOf<String>()
+        for (event in warmEvents) {
+            for (tag in event.tags) {
+                if (tag.size >= 2 && tag[0] == "e" && tag[1].length == 64) {
+                    referencedIds.add(tag[1])
+                }
+            }
+        }
+        if (referencedIds.isNotEmpty()) {
+            mes.markTouched(referencedIds)
+        }
 
         val now = System.currentTimeMillis()
 
