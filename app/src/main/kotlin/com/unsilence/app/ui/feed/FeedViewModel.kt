@@ -3,38 +3,30 @@ package com.unsilence.app.ui.feed
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.init.InitGate
+import com.unsilence.app.data.memory.FeedFilter
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.relay.RelayPreferencesStore
-import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.relay.ConnectionPurpose
-import com.unsilence.app.data.relay.CoverageIntent
-import com.unsilence.app.data.relay.CoverageStatus
-import com.unsilence.app.data.relay.OutboxRouter
-import com.unsilence.app.data.relay.RelayBrowseSession
-import com.unsilence.app.data.relay.OgFetcher
-import com.unsilence.app.data.relay.ProfileResolver
-import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.cache.CoverageTracker
-import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.OutboxRelayResolver
+import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.SubRequest
+import com.unsilence.app.data.relay.TimelineConsumer
+import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
-import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -43,12 +35,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
+private const val TAG = "FeedVM"
+
 sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
     data class  SingleRelay(val url: String, val label: String) : FeedType() {
-        /** User-facing name — friendly aliases for known relay URLs. */
         val displayLabel: String get() = when {
             url.contains("antiprimal.net/hot") -> "Popular"
             else -> label
@@ -56,7 +49,6 @@ sealed class FeedType {
     }
 
     companion object {
-        /** Built-in Popular feed — always present in carousel. */
         val Popular = SingleRelay("wss://antiprimal.net/hot", "Popular")
     }
 }
@@ -66,52 +58,118 @@ enum class FeedContentFilter(val value: Int) {
     REPLIES_ONLY(2),
 }
 
-data class FeedUiState(
-    val loading: Boolean = true,
-    val coverageStatus: CoverageStatus = CoverageStatus.NEVER_FETCHED,
-)
-
-@OptIn(ExperimentalCoroutinesApi::class)
+/**
+ * THE feed ViewModel -- sole owner of feed-screen state.
+ *
+ * Owns:
+ *   - UI state: feedType, contentFilter, coldStart, splash, userAvatar,
+ *     userSets, pinnedRelays, hasFollows, filter
+ *   - Subscription state: delegated to TimelineConsumer (feedRows,
+ *     showDot, pendingCount, isLoading, isLoadingMore)
+ *   - Actions: setFeedType, setContentFilter, addPinnedRelay,
+ *     removePinnedRelay, nextFeed, previousFeed, updateFilter,
+ *     onViewportChanged, onDotTapped, loadMore, refresh
+ */
 @HiltViewModel
 class FeedViewModel @Inject constructor(
-    private val userRepository: UserRepository,
-    private val relayPool: RelayPool,
-    private val outboxRouter: OutboxRouter,
-    private val browseSession: RelayBrowseSession,
-    private val coverageTracker: CoverageTracker,
     private val keyManager: KeyManager,
-    private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
-    private val feedWindowLoader: FeedWindowLoader,
-    private val profileResolver: ProfileResolver,
-    private val ogFetcher: OgFetcher,
-    private val videoThumbnailCache: VideoThumbnailCache,
+    private val initGate: InitGate,
+    private val timelineService: TimelineService,
+    private val outboxResolver: OutboxRelayResolver,
+    private val userRepository: UserRepository,
+    private val relayPreferencesStore: RelayPreferencesStore,
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(FeedUiState())
-    val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
+    // -- TimelineConsumer (feed state) -----------------------------------------
+
+    private val consumer = TimelineConsumer(
+        timelineService = timelineService,
+        memoryEventStore = memoryEventStore,
+        ownerScope = viewModelScope,
+    )
+
+    val feedRows = consumer.feedRows
+    val showDot = consumer.showDot
+    val pendingCount = consumer.pendingCount
+    val isLoading = consumer.isLoading
+    val isLoadingMore = consumer.isLoadingMore
+
+    // -- Feed type -------------------------------------------------------------
 
     private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
+
+    fun setFeedType(type: FeedType) {
+        _feedType.value = type
+        if (_coldStartState.value == ColdStartState.LOADING) {
+            _coldStartState.value = if (type is FeedType.Following)
+                ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
+        }
+    }
+
+    // -- Content filter --------------------------------------------------------
+
+    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
+    val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
+
+    fun setContentFilter(f: FeedContentFilter) {
+        if (_contentFilter.value == f) return
+        _contentFilter.value = f
+        consumer.setContentFilter(f)
+    }
+
+    // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
+
+    private val _filter = MutableStateFlow(com.unsilence.app.domain.model.FeedFilter())
+    val filterFlow: StateFlow<com.unsilence.app.domain.model.FeedFilter> = _filter.asStateFlow()
+
+    fun updateFilter(filter: com.unsilence.app.domain.model.FeedFilter) {
+        _filter.value = filter
+        viewModelScope.launch { resubscribe(_feedType.value) }
+    }
+
+    // -- Cold-start ------------------------------------------------------------
 
     enum class ColdStartState { LOADING, READY_FOLLOWING, READY_GLOBAL }
 
     private val _coldStartState = MutableStateFlow(ColdStartState.LOADING)
     val coldStartState: StateFlow<ColdStartState> = _coldStartState.asStateFlow()
-
-    /** Backward-compat alias — AppNavigation consumes this to gate bar visibility. */
     val splashDone: StateFlow<Boolean> = _coldStartState
         .map { it != ColdStartState.LOADING }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    /** All relay sets (NIP-51 kind 30002) for the dropdown. */
+    private val _hasFollows = MutableStateFlow(false)
+    val hasFollows: StateFlow<Boolean> = _hasFollows.asStateFlow()
+
+    // -- User avatar -----------------------------------------------------------
+
+    val userAvatarUrl: StateFlow<String?> = keyManager.getPublicKeyHex()?.let { pubkey ->
+        userRepository.userFlow(pubkey)
+            .map { it?.picture }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    } ?: MutableStateFlow(null)
+
+    // -- Profile lookup for repost original authors ----------------------------
+
+    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
+
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        profileCache.getOrPut(pubkey) {
+            userRepository.userFlow(pubkey)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
+
+    // -- User relay sets (kind-30002) ------------------------------------------
+
     val userSetsFlow: StateFlow<List<RelaySet>> =
         keyManager.getPublicKeyHex()?.let { pk ->
             memoryEventStore.getAllSetsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
-    /** Favorite relays pinned to the feed picker — backed by DataStore for persistence. */
+    // -- Pinned relays (carousel) ----------------------------------------------
+
     val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
         keyManager.getPublicKeyHex()?.let { pk ->
             relayPreferencesStore.pinnedRelaysFlow(pk)
@@ -133,129 +191,13 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private val _filter = MutableStateFlow(FeedFilter())
-    val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
-
-    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
-    val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
-
-    fun setContentFilter(f: FeedContentFilter) { _contentFilter.value = f }
-
-    /** Signed-in user's avatar URL, for nav icons. */
-    val userAvatarUrl: StateFlow<String?> = keyManager.getPublicKeyHex()?.let { pubkey ->
-        userRepository.userFlow(pubkey)
-            .map { it?.picture }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-    } ?: MutableStateFlow(null)
-
-    fun updateFilter(filter: FeedFilter) { _filter.value = filter }
-
-    // ── FeedWindow 2-slot cache ─────────────────────────────────────────
-    @Volatile private var activeWindow: FeedWindow? = null
-    @Volatile private var prevWindow: FeedWindow? = null
-    private val _activeKey = MutableStateFlow<WindowKey.Home?>(null)
-    private val _refreshTrigger = MutableStateFlow(0)
-
-    /** Live snapshot from the active window — drives all screen state. */
-    private val snapshot: StateFlow<WindowSnapshot> = _activeKey
-        .flatMapLatest { key ->
-            if (key != null) activeWindow?.snapshot ?: flowOf(WindowSnapshot())
-            else flowOf(WindowSnapshot())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WindowSnapshot())
-
-    /** Backward-compat: FeedScreen reads ReducerState shape. */
-    val reducerState: StateFlow<ReducerState> = snapshot
-        .map { snap ->
-            ReducerState(
-                visibleEvents = snap.rows,
-                unreadCount = snap.pendingCount,
-                showDot = snap.showDot,
-                oldestCreatedAt = snap.oldestCreatedAt,
-            )
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReducerState())
-
-    val isLoadingMore: StateFlow<Boolean> = snapshot
-        .map { it.isLoadingMore }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    fun onViewportChanged(first: Int, last: Int) {
-        activeWindow?.onViewportChanged(first, last)
-    }
-
-    /** Backward-compat forwarder for any callers still using the old API. */
-    fun onScrollPositionChanged(firstVisibleIndex: Int, firstVisibleOffset: Int) {
-        activeWindow?.onScrollChanged(firstVisibleIndex, firstVisibleOffset)
-    }
-
-    fun onDotTapped() { activeWindow?.flushPending() }
-
-    /** True when there are queued new posts (used by nav bar dot indicator). */
-    val hasNewTopPost: Boolean get() = reducerState.value.showDot
-
-    /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
-    fun clearNewTopPost() { onDotTapped() }
-
-    // Degenerate scroll restore — FeedWindow manages its own state
-    private val _restoreScrollIndex = MutableStateFlow(0)
-    private val _restoreScrollOffset = MutableStateFlow(0)
-    private val _restoreGeneration = MutableStateFlow(0)
-    val restoreScrollIndex: StateFlow<Int> = _restoreScrollIndex.asStateFlow()
-    val restoreScrollOffset: StateFlow<Int> = _restoreScrollOffset.asStateFlow()
-    val restoreGeneration: StateFlow<Int> = _restoreGeneration.asStateFlow()
-
-    fun loadMore() { activeWindow?.loadMore() }
-
-    // ── Profile lookup for repost original authors ──────────────────────
-    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        profileCache.getOrPut(pubkey) {
-            userRepository.userFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-        }
+    // -- Carousel navigation ---------------------------------------------------
 
     val feedTypeLabel: String get() = when (val t = _feedType.value) {
         is FeedType.Global    -> "Global"
         is FeedType.Following -> "Following"
-        is FeedType.RelaySet    -> t.name
+        is FeedType.RelaySet  -> t.name
         is FeedType.SingleRelay -> t.displayLabel
-    }
-
-    /** Reactively tracks whether follows exist — used by buildFeedList and the feed sheet. */
-    private val _hasFollows = MutableStateFlow(false)
-    val hasFollows: StateFlow<Boolean> = _hasFollows.asStateFlow()
-
-    private val _feedVisible = MutableStateFlow(true)
-
-    fun setFeedVisible(visible: Boolean) {
-        _feedVisible.value = visible
-    }
-
-    fun setFeedType(type: FeedType) {
-        _feedType.value = type
-        // Dismiss splash on manual feed switch (e.g. user taps Global during loading)
-        if (_coldStartState.value == ColdStartState.LOADING) {
-            _coldStartState.value = if (type is FeedType.Following)
-                ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
-        }
-    }
-
-    /** Ordered list of available feeds for cycling. */
-    private fun buildFeedList(): List<FeedType> {
-        val list = mutableListOf<FeedType>()
-        if (_hasFollows.value) list.add(FeedType.Following)
-        list.add(FeedType.Global)
-        list.add(FeedType.Popular)
-        for (relay in pinnedRelays.value) {
-            if (relay.url == FeedType.Popular.url) continue  // already included as built-in
-            list.add(relay)
-        }
-        for (set in (userSetsFlow.value)) {
-            list.add(FeedType.RelaySet(set.dTag, set.title ?: set.dTag))
-        }
-        return list
     }
 
     private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
@@ -264,6 +206,21 @@ class FeedViewModel @Inject constructor(
         a is FeedType.RelaySet && b is FeedType.RelaySet -> a.dTag == b.dTag
         a is FeedType.SingleRelay && b is FeedType.SingleRelay -> a.url == b.url
         else -> false
+    }
+
+    private fun buildFeedList(): List<FeedType> {
+        val list = mutableListOf<FeedType>()
+        if (_hasFollows.value) list.add(FeedType.Following)
+        list.add(FeedType.Global)
+        list.add(FeedType.Popular)
+        for (relay in pinnedRelays.value) {
+            if (relay.url == FeedType.Popular.url) continue
+            list.add(relay)
+        }
+        for (set in userSetsFlow.value) {
+            list.add(FeedType.RelaySet(set.dTag, set.title ?: set.dTag))
+        }
+        return list
     }
 
     fun nextFeed() {
@@ -280,87 +237,27 @@ class FeedViewModel @Inject constructor(
         _feedType.value = list[(idx - 1 + list.size) % list.size]
     }
 
-    /** Force re-fetch by incrementing refresh trigger — combine re-emits same key. */
-    fun refresh() { _refreshTrigger.value++ }
+    /** True when there are queued new posts (used by nav bar dot indicator). */
+    val hasNewTopPost: Boolean get() = showDot.value
 
-    /** Read kind-10002 read relays from MES, falling back to hardcoded defaults. */
-    private fun resolveGlobalUrls(): List<String> {
-        val ownPubkey = keyManager.getPublicKeyHex() ?: return GLOBAL_RELAY_URLS
-        val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
-            .filter { it.marker == null || it.marker == "read" }
-            .mapNotNull { normalizeRelayUrl(it.url) }
-        return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+    /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
+    fun clearNewTopPost() { consumer.onDotTapped() }
+
+    // -- User actions delegated to consumer ------------------------------------
+
+    fun onViewportChanged(idx: Int) = consumer.onViewportChanged(idx)
+    fun onDotTapped() = consumer.onDotTapped()
+    fun loadMore() = consumer.loadMore()
+    fun refresh() {
+        viewModelScope.launch { resubscribe(_feedType.value) }
     }
 
-    // ── Window lifecycle ─────────────────────────────────────────────────
-
-    private fun swapToWindow(key: WindowKey.Home) {
-        val prev = activeWindow
-        prev?.deactivate()
-
-        // Check if prevWindow matches this key — hot swap
-        val cached = prevWindow
-        if (cached != null && cached.key == key && cached.hasLoaded) {
-            prevWindow = prev
-            activeWindow = cached
-            cached.activate()
-            _activeKey.value = key
-            return
-        }
-
-        // Cold path: release prev, create fresh
-        prevWindow?.release()
-        prevWindow = prev
-        val window = FeedWindow(
-            key = key,
-            mes = memoryEventStore,
-            loader = feedWindowLoader,
-            keyManager = keyManager,
-            parentScope = viewModelScope,
-            profileResolver = profileResolver,
-            relayPool = relayPool,
-            ogFetcher = ogFetcher,
-            videoThumbnailCache = videoThumbnailCache,
-        )
-        activeWindow = window
-        window.activate()
-        _activeKey.value = key
-    }
-
-    private suspend fun connectRelaysForFeedType(type: FeedType) {
-        when (type) {
-            is FeedType.Global -> {
-                browseSession.stop()
-                val globalUrls = resolveGlobalUrls()
-                for (url in globalUrls) {
-                    normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
-                }
-                relayPool.connect(globalUrls, isHomeFeed = true)
-            }
-            is FeedType.Following -> {
-                browseSession.stop()
-                outboxRouter.start()
-            }
-            is FeedType.RelaySet -> {
-                val ownerPk = keyManager.getPublicKeyHex() ?: ""
-                val members = memoryEventStore.getSetMembers(ownerPk, type.dTag)
-                val setUrls = members.mapNotNull { normalizeRelayUrl(it) }
-                    .ifEmpty { resolveGlobalUrls() }
-                browseSession.start(setUrls)
-            }
-            is FeedType.SingleRelay -> {
-                val singleUrl = listOfNotNull(normalizeRelayUrl(type.url))
-                browseSession.start(singleUrl)
-            }
-        }
-    }
+    // -- Init: cold-start + feedType subscription ------------------------------
 
     init {
-        // Deterministic cold-start: wait for kind-3 (follows) up to 10s, then
-        // kind-10002 (relay lists) up to 5s. Warm resume resolves instantly from
-        // snapshot — followsFlow emits in <300ms when MES already has data.
+        Log.d(TAG, "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}")
+
         val ownPubkey = keyManager.getPublicKeyHex()
-        Log.d("FeedVM", "init: ownPubkey=${ownPubkey?.take(8)}…")
         if (ownPubkey != null) {
             viewModelScope.launch {
                 val follows = withTimeoutOrNull(10_000L) {
@@ -368,29 +265,23 @@ class FeedViewModel @Inject constructor(
                         .filter { it.isNotEmpty() }
                         .first()
                 }
-
                 if (follows == null) {
                     _feedType.value = FeedType.Global
                     _coldStartState.value = ColdStartState.READY_GLOBAL
-                    Log.d("FeedVM", "Cold-start: no follows after 10s → Global")
+                    Log.d(TAG, "cold-start: no follows after 10s -> Global")
                     return@launch
                 }
-
                 _hasFollows.value = true
-
-                // Follows arrived — wait for own relay list (kind-10002) up to 5s.
                 withTimeoutOrNull(5_000L) {
                     memoryEventStore.readWriteRelayConfigsFlow(ownPubkey)
                         .filter { it.isNotEmpty() }
                         .first()
                 }
-
                 _feedType.value = FeedType.Following
                 _coldStartState.value = ColdStartState.READY_FOLLOWING
-                Log.d("FeedVM", "Cold-start: ${follows.size} follows → Following")
+                Log.d(TAG, "cold-start: ${follows.size} follows -> Following")
             }
 
-            // Track follows reactively for _hasFollows (feed list building).
             viewModelScope.launch {
                 memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
                     _hasFollows.value = count > 0
@@ -400,16 +291,105 @@ class FeedViewModel @Inject constructor(
             _coldStartState.value = ColdStartState.READY_GLOBAL
         }
 
-        // V2 handles all relay connections, subscriptions, and feed rendering.
-        // Old VM retained only for UI state (feedType, filter, coldStart,
-        // userSets, pinnedRelays, userAvatar). No relayPool.connect, no
-        // browseSession, no FeedWindow, no subscribeAfterConnect.
-        _uiState.value = FeedUiState(loading = false, coverageStatus = CoverageStatus.COMPLETE)
+        viewModelScope.launch {
+            _feedType.collectLatest { type ->
+                resubscribe(type)
+            }
+        }
+    }
+
+    private suspend fun resubscribe(type: FeedType) {
+        val ownPubkey = keyManager.getPublicKeyHex()
+        var cached = loadCachedEvents(type, ownPubkey)
+        if (cached.isEmpty()) {
+            withTimeoutOrNull(120_000L) { initGate.awaitFeedConnections() }
+            cached = loadCachedEvents(type, ownPubkey)
+        }
+        val subRequests = buildSubRequests(type)
+        consumer.subscribe(subRequests, cached)
+    }
+
+    private fun loadCachedEvents(type: FeedType, ownPubkey: String?): List<NostrEvent> {
+        val kinds = setOf(1, 6, 20, 21, 30023)
+        val filter = when (type) {
+            is FeedType.Following -> {
+                val follows = ownPubkey
+                    ?.let { memoryEventStore.getFollows(it) }
+                    ?: return emptyList()
+                if (follows.isEmpty()) return emptyList()
+                FeedFilter(kinds = kinds, followedPubkeys = follows, contentFilter = 0)
+            }
+            is FeedType.Global -> FeedFilter(kinds = kinds, contentFilter = 0)
+            is FeedType.SingleRelay -> FeedFilter(
+                kinds = kinds,
+                contentFilter = 0,
+                relayUrls = setOf(type.url),
+            )
+            is FeedType.RelaySet -> {
+                val members = ownPubkey
+                    ?.let { memoryEventStore.getSetMembers(it, type.dTag) }
+                    ?: return emptyList()
+                if (members.isEmpty()) return emptyList()
+                FeedFilter(kinds = kinds, contentFilter = 0, relayUrls = members.toSet())
+            }
+        }
+        return memoryEventStore.feedEvents(filter, 300)
+    }
+
+    private fun buildSubRequests(type: FeedType): List<SubRequest> {
+        val ownPubkey = keyManager.getPublicKeyHex()
+        val blockedRelays = ownPubkey
+            ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
+            ?: emptySet()
+        val readRelays = ownPubkey
+            ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
+            ?: emptyList()
+        val config = OutboxRelayResolver.Config(
+            kinds = listOf(1, 6, 20, 21, 30023),
+            limit = 300,
+        )
+        return when (type) {
+            is FeedType.Following -> {
+                val follows = ownPubkey
+                    ?.let { memoryEventStore.getFollows(it) }
+                    ?: emptySet()
+                if (follows.isEmpty()) return emptyList()
+                outboxResolver.resolveFollowing(
+                    authors = follows,
+                    fallbackRelays = readRelays.ifEmpty { GLOBAL_RELAY_URLS },
+                    blockedRelays = blockedRelays,
+                    config = config,
+                )
+            }
+            is FeedType.Global -> outboxResolver.resolveGlobal(
+                readRelays = readRelays,
+                fallbackRelays = GLOBAL_RELAY_URLS,
+                blockedRelays = blockedRelays,
+                config = config,
+            )
+            is FeedType.SingleRelay -> outboxResolver.resolveSingleRelay(
+                url = type.url,
+                config = config,
+            )
+            is FeedType.RelaySet -> {
+                val members = ownPubkey
+                    ?.let { memoryEventStore.getSetMembers(it, type.dTag) }
+                    ?: emptySet()
+                val setUrls = members.mapNotNull { normalizeRelayUrl(it) }
+                    .filter { it !in blockedRelays }
+                    .ifEmpty { readRelays.ifEmpty { GLOBAL_RELAY_URLS } }
+                outboxResolver.resolveGlobal(
+                    readRelays = setUrls,
+                    fallbackRelays = GLOBAL_RELAY_URLS,
+                    blockedRelays = blockedRelays,
+                    config = config,
+                )
+            }
+        }
     }
 
     override fun onCleared() {
+        consumer.close()
         super.onCleared()
-        activeWindow?.release()
-        prevWindow?.release()
     }
 }

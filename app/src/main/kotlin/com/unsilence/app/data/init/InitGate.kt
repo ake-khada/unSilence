@@ -15,7 +15,7 @@ import javax.inject.Singleton
  *   2. `signalRelaysReady()` — own kind-10002 relay list loaded (or timed out)
  *   3. `signalFeedConnectionsReady()` — global relay WebSockets connected
  *      (Phase1 Step5 complete). Consumers that need relay subs to work
- *      (FeedViewModelV2) gate on this before issuing subscriptions.
+ *      (FeedViewModel) gate on this before issuing subscriptions.
  *
  * Consumers call `awaitFollows()` / `awaitRelays()` / `awaitReady()` /
  * `awaitFeedConnections()` before issuing relay subscriptions that depend

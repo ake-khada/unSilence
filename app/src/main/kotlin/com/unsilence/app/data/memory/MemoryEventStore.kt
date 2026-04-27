@@ -216,6 +216,9 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     private val _followsSignal = MutableStateFlow(0L)
     private val _actionSignal = MutableStateFlow(0L)
 
+    /** Bumps when feed-relevant content (kinds 1/6/30023) is inserted. Consumers re-query to pick up new events. */
+    val feedSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _feedSignal
+
     /** Bumps when any kind-0 (profile metadata) is inserted. Consumers re-render to pick up new names/avatars. */
     val profileSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _profileSignal
 
@@ -228,37 +231,6 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
-
-    // ─── Targeted listener registry (for FeedWindow) ────────────────────────
-
-    interface FeedListener {
-        fun onContentInsert(event: NostrEvent)
-        fun onEngagementUpdate(targetId: String)
-        fun onProfileUpdate(pubkey: String)
-    }
-
-    private val feedListeners = java.util.concurrent.CopyOnWriteArrayList<FeedListener>()
-
-    fun registerFeedListener(listener: FeedListener) { feedListeners.add(listener) }
-    fun unregisterFeedListener(listener: FeedListener) { feedListeners.remove(listener) }
-
-    private fun fireContentInsert(event: NostrEvent) {
-        for (l in feedListeners) {
-            try { l.onContentInsert(event) } catch (_: Throwable) {}
-        }
-    }
-
-    private fun fireEngagementUpdate(targetId: String) {
-        for (l in feedListeners) {
-            try { l.onEngagementUpdate(targetId) } catch (_: Throwable) {}
-        }
-    }
-
-    private fun fireProfileUpdate(pubkey: String) {
-        for (l in feedListeners) {
-            try { l.onProfileUpdate(pubkey) } catch (_: Throwable) {}
-        }
-    }
 
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
@@ -355,14 +327,6 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             _actionSignal.value = System.nanoTime()
         }
 
-        // Targeted listener callbacks (FeedWindow consumers)
-        if (feedListeners.isNotEmpty()) {
-            when (event.kind) {
-                1, 6, 20, 21, 30023 -> fireContentInsert(event)
-                0 -> fireProfileUpdate(event.pubkey)
-            }
-        }
-
         // Periodic eviction check (every 500 inserts)
         if (++insertsSinceLastEviction >= 500) {
             insertsSinceLastEviction = 0
@@ -457,7 +421,6 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reposted
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
-        fireEngagementUpdate(targetId)
     }
 
     private fun handleReaction(event: NostrEvent) {
@@ -469,7 +432,6 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         // Actor-side index: track what this pubkey has reacted to
         addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
-        fireEngagementUpdate(targetId)
     }
 
     private fun handleZapRequest(event: NostrEvent) {
@@ -537,7 +499,6 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
-        fireEngagementUpdate(targetId)
     }
 
     /**
@@ -1088,7 +1049,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
     /**
      * Mark event ids as recently accessed. Prevents eviction of events the user
-     * is actively viewing/referencing. Called by FeedWindow warm zone + lookupEvent.
+     * is actively viewing/referencing. Called by TimelineConsumer warm zone + lookupEvent.
      */
     fun markTouched(eventIds: Collection<String>) {
         if (eventIds.isEmpty()) return
@@ -1341,21 +1302,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             .sortedByDescending { it.createdAt }
             .map { toFeedRow(it) }
 
-    /** Reactive variant — re-emits when events arrive (relay echo may populate missing IDs). */
-    fun feedRowsByIdsFlow(ids: Set<String>): Flow<List<FeedRow>> =
-        _feedSignal
-            .map { feedRowsByIds(ids) }
-            .distinctUntilChanged()
-            .flowOn(Dispatchers.Default)
-
     // ─── Reactive flows ─────────────────────────────────────────────────────
-
-    @OptIn(kotlinx.coroutines.FlowPreview::class)
-    fun feedFlow(filter: FeedFilter, limit: Int = 300): Flow<List<FeedRow>> =
-        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
-            .sample(200)
-            .map { feedEvents(filter, limit).map { toFeedRow(it) } }
-            .flowOn(Dispatchers.Default)
 
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun userFeedFlow(

@@ -520,21 +520,17 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(5, thread.size)
     }
 
-    // ── Feed flow reactivity ────────────────────────────────────────────────
+    // ── Feed query correctness ────────────────────────────────────────────────
 
     @Test
-    fun `feed flow eventually emits after insert`() = runTest {
-        store.feedFlow(defaultFilter).test {
-            val initial = awaitItem()
-            assertTrue(initial.isEmpty())
+    fun `feedEvents returns inserted event`() = runTest {
+        assertTrue(store.feedEvents(defaultFilter).isEmpty())
 
-            val evt = event(id = "flow-test", kind = 1, createdAt = 99999)
-            store.insert(evt)
+        val evt = event(id = "flow-test", kind = 1, createdAt = 99999)
+        store.insert(evt)
 
-            val emitted = awaitItem()
-            assertTrue(emitted.any { it.id == "flow-test" })
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(defaultFilter)
+        assertTrue(events.any { it.id == "flow-test" })
     }
 
     // ── Snapshot round-trip ─────────────────────────────────────────────────
@@ -622,18 +618,15 @@ class MemoryEventStoreInvariantsTest {
             // Fresh store — subscribe to flows BEFORE restore
             val restored = MemoryEventStore()
 
-            restored.feedFlow(defaultFilter).test {
-                val initial = awaitItem()
-                assertTrue(initial.isEmpty())
+            // Before restore, feedEvents should be empty
+            assertTrue(restored.feedEvents(defaultFilter).isEmpty())
 
-                // Restore should bump _feedSignal → trigger re-emission
-                tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
+            // Restore populates MES
+            tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
-                val afterRestore = awaitItem()
-                assertTrue(afterRestore.isNotEmpty())
-                assertTrue(afterRestore.any { it.id == "sig-note" })
-                cancelAndIgnoreRemainingEvents()
-            }
+            val afterRestore = restored.feedEvents(defaultFilter)
+            assertTrue(afterRestore.isNotEmpty())
+            assertTrue(afterRestore.any { it.id == "sig-note" })
 
             // Verify profile signal was bumped too (profile is populated)
             assertNotNull(restored.getProfile("sig-pk"))
@@ -970,35 +963,29 @@ class MemoryEventStoreInvariantsTest {
     // ── A.5.1 T1: FeedFilter.relayUrls contract ────────────────────────────
 
     @Test
-    fun `feedFlow with relayUrls filter returns only events seen on those relays`() = runTest {
+    fun `feedEvents with relayUrls filter returns only events seen on those relays`() {
         val targetRelay = "wss://target.example.com"
         store.insert(event(id = "on-target", kind = 1, relayUrl = targetRelay, createdAt = 2))
         store.insert(event(id = "off-target", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
 
         val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(targetRelay))
-        store.feedFlow(filter).test {
-            val rows = awaitItem()
-            assertEquals(1, rows.size)
-            assertEquals("on-target", rows[0].id)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter)
+        assertEquals(1, events.size)
+        assertEquals("on-target", events[0].id)
     }
 
     @Test
-    fun `feedFlow with null relayUrls filter returns events from all relays`() = runTest {
+    fun `feedEvents with null relayUrls filter returns events from all relays`() {
         store.insert(event(id = "a", kind = 1, relayUrl = "wss://r1.example.com", createdAt = 2))
         store.insert(event(id = "b", kind = 1, relayUrl = "wss://r2.example.com", createdAt = 1))
 
         val filter = FeedFilter(kinds = setOf(1), relayUrls = null)
-        store.feedFlow(filter).test {
-            val rows = awaitItem()
-            assertEquals(2, rows.size)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter)
+        assertEquals(2, events.size)
     }
 
     @Test
-    fun `feedFlow with relayUrls returns events seen on ANY of the listed relays (OR semantics)`() = runTest {
+    fun `feedEvents with relayUrls returns events seen on ANY of the listed relays (OR semantics)`() {
         val relay1 = "wss://r1.example.com"
         val relay2 = "wss://r2.example.com"
         store.insert(event(id = "on-r1", kind = 1, relayUrl = relay1, createdAt = 3))
@@ -1006,63 +993,50 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "on-other", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
 
         val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay1, relay2))
-        store.feedFlow(filter).test {
-            val rows = awaitItem()
-            val ids = rows.map { it.id }.toSet()
-            assertEquals(2, ids.size)
-            assertTrue("on-r1" in ids)
-            assertTrue("on-r2" in ids)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter)
+        val ids = events.map { it.id }.toSet()
+        assertEquals(2, ids.size)
+        assertTrue("on-r1" in ids)
+        assertTrue("on-r2" in ids)
     }
 
     @Test
-    fun `feedFlow with relayUrls excludes events seen only on other relays`() = runTest {
+    fun `feedEvents with relayUrls excludes events seen only on other relays`() {
         store.insert(event(id = "match", kind = 1, relayUrl = "wss://target.example.com", createdAt = 2))
         store.insert(event(id = "nomatch", kind = 1, relayUrl = "wss://wrong.example.com", createdAt = 1))
 
         val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf("wss://target.example.com"))
-        store.feedFlow(filter).test {
-            val rows = awaitItem()
-            assertEquals(1, rows.size)
-            assertEquals("match", rows[0].id)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter)
+        assertEquals(1, events.size)
+        assertEquals("match", events[0].id)
     }
 
     @Test
-    fun `feedFlow with relayUrls respects limit and sort order (createdAt DESC)`() = runTest {
+    fun `feedEvents with relayUrls respects limit and sort order (createdAt DESC)`() {
         val relay = "wss://relay.example.com"
         for (i in 1..10) {
             store.insert(event(id = "lim-$i", kind = 1, relayUrl = relay, createdAt = i.toLong()))
         }
 
         val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
-        store.feedFlow(filter, limit = 5).test {
-            val rows = awaitItem()
-            assertEquals(5, rows.size)
-            // Should be the 5 most recent (10, 9, 8, 7, 6) in descending order
-            assertEquals(listOf(10L, 9L, 8L, 7L, 6L), rows.map { it.createdAt })
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter, limit = 5)
+        assertEquals(5, events.size)
+        // Should be the 5 most recent (10, 9, 8, 7, 6) in descending order
+        assertEquals(listOf(10L, 9L, 8L, 7L, 6L), events.map { it.createdAt })
     }
 
     @Test
-    fun `feedFlow with relayUrls updates when new event arrives with matching relaysSeen`() = runTest {
+    fun `feedEvents with relayUrls returns newly inserted event with matching relaysSeen`() {
         val relay = "wss://live.example.com"
         val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
 
-        store.feedFlow(filter).test {
-            val initial = awaitItem()
-            assertTrue(initial.isEmpty())
+        assertTrue(store.feedEvents(filter).isEmpty())
 
-            store.insert(event(id = "live-1", kind = 1, relayUrl = relay, createdAt = 100))
+        store.insert(event(id = "live-1", kind = 1, relayUrl = relay, createdAt = 100))
 
-            val updated = awaitItem()
-            assertEquals(1, updated.size)
-            assertEquals("live-1", updated[0].id)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val events = store.feedEvents(filter)
+        assertEquals(1, events.size)
+        assertEquals("live-1", events[0].id)
     }
 
     // ── updateFollows: dedicated follows path ──────────────────────────────
@@ -2320,57 +2294,47 @@ class MemoryEventStoreInvariantsTest {
         }
     }
 
-    // ── feedRowsByIdsFlow ───────────────────────────────────────────────────
+    // ── feedRowsByIds ───────────────────────────────────────────────────────
 
     @Test
-    fun `feedRowsByIdsFlow returns FeedRows for known IDs only`() = runTest {
+    fun `feedRowsByIds returns FeedRows for known IDs only`() {
         store.insert(event(id = "exists-1", kind = 1, content = "one"))
         store.insert(event(id = "exists-2", kind = 1, content = "two"))
 
-        store.feedRowsByIdsFlow(setOf("exists-1", "exists-2", "missing-3")).test {
-            val results = awaitItem()
-            assertEquals("Only 2 known IDs", 2, results.size)
-            val ids = results.map { it.id }.toSet()
-            assertTrue("exists-1" in ids)
-            assertTrue("exists-2" in ids)
-            assertFalse("missing-3" in ids)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val results = store.feedRowsByIds(setOf("exists-1", "exists-2", "missing-3"))
+        assertEquals("Only 2 known IDs", 2, results.size)
+        val ids = results.map { it.id }.toSet()
+        assertTrue("exists-1" in ids)
+        assertTrue("exists-2" in ids)
+        assertFalse("missing-3" in ids)
     }
 
     @Test
-    fun `feedRowsByIdsFlow sorts by createdAt DESC`() = runTest {
+    fun `feedRowsByIds sorts by createdAt DESC`() {
         store.insert(event(id = "old", kind = 1, content = "old", createdAt = 100))
         store.insert(event(id = "new", kind = 1, content = "new", createdAt = 200))
         store.insert(event(id = "mid", kind = 1, content = "mid", createdAt = 150))
 
-        store.feedRowsByIdsFlow(setOf("old", "new", "mid")).test {
-            val results = awaitItem()
-            assertEquals(3, results.size)
-            assertEquals("new", results[0].id)
-            assertEquals("mid", results[1].id)
-            assertEquals("old", results[2].id)
-            cancelAndIgnoreRemainingEvents()
-        }
+        val results = store.feedRowsByIds(setOf("old", "new", "mid"))
+        assertEquals(3, results.size)
+        assertEquals("new", results[0].id)
+        assertEquals("mid", results[1].id)
+        assertEquals("old", results[2].id)
     }
 
     @Test
-    fun `feedRowsByIdsFlow re-emits when a previously-missing ID arrives`() = runTest {
+    fun `feedRowsByIds returns updated results after late arrival`() {
         store.insert(event(id = "present", kind = 1, content = "here", createdAt = 100))
 
-        store.feedRowsByIdsFlow(setOf("present", "late")).test {
-            val first = awaitItem()
-            assertEquals("Initially only 1", 1, first.size)
-            assertEquals("present", first[0].id)
+        val first = store.feedRowsByIds(setOf("present", "late"))
+        assertEquals("Initially only 1", 1, first.size)
+        assertEquals("present", first[0].id)
 
-            // Late arrival
-            store.insert(event(id = "late", kind = 1, content = "arrived", createdAt = 200))
-            val second = awaitItem()
-            assertEquals("Now 2", 2, second.size)
-            assertEquals("late", second[0].id) // newest first
-
-            cancelAndIgnoreRemainingEvents()
-        }
+        // Late arrival
+        store.insert(event(id = "late", kind = 1, content = "arrived", createdAt = 200))
+        val second = store.feedRowsByIds(setOf("present", "late"))
+        assertEquals("Now 2", 2, second.size)
+        assertEquals("late", second[0].id) // newest first
     }
 
     // ── Kind 10006: Blocked relays ──────────────────────────────────────────

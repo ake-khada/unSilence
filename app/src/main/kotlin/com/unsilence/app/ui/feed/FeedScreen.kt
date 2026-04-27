@@ -36,7 +36,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,7 +79,6 @@ fun FeedScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
-    feedVm2: FeedViewModelV2 = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
@@ -92,26 +90,13 @@ fun FeedScreen(
     val zapFlash      by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar    = LocalShowSnackbar.current
-    val isLoadingV2   by feedVm2.isLoading.collectAsStateWithLifecycle()
-    val isLoadingMore by feedVm2.isLoadingMore.collectAsStateWithLifecycle()
-    val v2Events      by feedVm2.feedRows.collectAsStateWithLifecycle()
-    val v2ShowDot     by feedVm2.showDot.collectAsStateWithLifecycle()
-
-    // Bridge feedType + contentFilter from old VM to V2
-    LaunchedEffect(Unit) {
-        viewModel.feedType.collect { feedVm2.setFeedType(it) }
-    }
-    LaunchedEffect(Unit) {
-        viewModel.contentFilter.collect { feedVm2.setContentFilter(it) }
-    }
+    val isLoadingV     by viewModel.isLoading.collectAsStateWithLifecycle()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
+    val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
+    val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
-
-    DisposableEffect(Unit) {
-        viewModel.setFeedVisible(true)
-        onDispose { viewModel.setFeedVisible(false) }
-    }
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -122,7 +107,7 @@ fun FeedScreen(
     }
 
     // ── New-post flash animation tracking ──────────────────────────────────────
-    val events = v2Events
+    val events = feedEvents
     val currentEvents by rememberUpdatedState(events)
     val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
     var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -131,7 +116,7 @@ fun FeedScreen(
         if (previousEventIds.isNotEmpty()) {
             val freshIds = currentIds - previousEventIds
             for (id in freshIds) newEventIds[id] = true
-            if (freshIds.isNotEmpty() && !v2ShowDot) {
+            if (freshIds.isNotEmpty() && !feedShowDot) {
                 val firstFreshIdx = events.indexOfFirst { it.id in freshIds }
                 if (firstFreshIdx == 0) {
                     listState.scrollToItem(0)
@@ -204,8 +189,8 @@ fun FeedScreen(
         Crossfade(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
-                isLoadingV2 && events.isEmpty() -> "loading"
-                !isLoadingV2 && events.isEmpty() -> "empty"
+                isLoadingV && events.isEmpty() -> "loading"
+                !isLoadingV && events.isEmpty() -> "empty"
                 else -> "content"
             },
             label = "feedState",
@@ -297,7 +282,7 @@ fun FeedScreen(
                                             .clickable(
                                                 interactionSource = remember { MutableInteractionSource() },
                                                 indication = null,
-                                            ) { feedVm2.loadMore() }
+                                            ) { viewModel.loadMore() }
                                             .background(
                                                 color = Surface1,
                                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
@@ -319,8 +304,7 @@ fun FeedScreen(
                         val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
                         first to last
                     }.sample(100).collect { (first, last) ->
-                        viewModel.onViewportChanged(first, last)
-                        feedVm2.onViewportChanged(first)
+                        viewModel.onViewportChanged(first)
                     }
                 }
             }
