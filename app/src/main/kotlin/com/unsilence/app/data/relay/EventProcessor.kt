@@ -61,9 +61,23 @@ private const val DEDUP_TRIM = 2_000
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val outboxRouter: dagger.Lazy<OutboxRouter>,
-) {
+) : TapRegistration {
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
+
+    // ── Subscription tap registry ─────────────────────────────────────────────
+    // Subscriptions register a tap to receive raw relay messages (EVENT/EOSE/
+    // CLOSED) before our dedup. Demuxing by subId is the tap's responsibility.
+    // CopyOnWriteArrayList — registrations are rare, iterations frequent.
+    private val taps = java.util.concurrent.CopyOnWriteArrayList<RelayMessageTap>()
+
+    override fun registerTap(tap: RelayMessageTap) {
+        if (!taps.contains(tap)) taps.add(tap)
+    }
+
+    override fun unregisterTap(tap: RelayMessageTap) {
+        taps.remove(tap)
+    }
 
     // ── Testing support ──────────────────────────────────────────────────────
 
@@ -205,11 +219,25 @@ class EventProcessor @Inject constructor(
      *   4. JSON parse + route   — only for novel EVENT messages
      */
     suspend fun process(raw: String, rawRelayUrl: String) {
-        // ── Fix: early return for non-EVENT messages before ANY JSON work ──────
-        if (!raw.startsWith("[\"EVENT\"")) return
         val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: rawRelayUrl
 
-        // ── Fix 1: dedup by event ID, extracted without JSON parsing ──────────
+        // ── Subscription taps fire for ALL relay messages (EVENT/EOSE/CLOSED).
+        // Taps are registered by Subscription instances; they demux by subId.
+        // Must fire before our EVENT-only dedup so non-EVENT messages reach taps.
+        if (taps.isNotEmpty()) {
+            for (tap in taps) {
+                try {
+                    tap.onMessage(raw, relayUrl)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "tap.onMessage threw", t)
+                }
+            }
+        }
+
+        // ── Early return for non-EVENT messages (existing behavior) ────────────
+        if (!raw.startsWith("[\"EVENT\"")) return
+
+        // ── Dedup by event ID, extracted without JSON parsing ──────────────────
         val eventId = extractEventId(raw) ?: return
         if (seenIds.putIfAbsent(eventId, Unit) != null) {
             // Already processed — just record this relay as a source so
