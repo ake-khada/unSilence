@@ -83,7 +83,10 @@ class TimelineService @Inject constructor(
         // floor(N/2) was too aggressive — many small outbox relays accept REQ
         // without ever sending EOSE. Use ceil(N/4) so threshold trips after
         // roughly a quarter of subs respond. Single-sub case unchanged.
-        val threshold = if (subRequests.size <= 1) 1 else ((subRequests.size + 3) / 4)
+        // Jumble client.service.ts:351 uses floor(N/2). For N=1 this is 0 — emits
+        // on first partial EOSE so a single multi-URL SubRequest (Global, RelaySet)
+        // renders as soon as ANY relay responds, instead of waiting for all.
+        val threshold = if (subRequests.size <= 1) 0 else ((subRequests.size + 3) / 4)
 
         // Cross-sub dedup for onNew (Jumble's newEventIdSet)
         val newEventIdSet = ConcurrentHashMap.newKeySet<String>()
