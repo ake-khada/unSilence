@@ -8,6 +8,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.delay
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -106,11 +107,32 @@ class Subscription @Inject constructor(
 
         // Build REQ once, send to each relay.
         val req = buildReqJson(subId, filter)
+        val failedUrls = mutableListOf<String>()
         for (url in urls) {
-            val sent = transport.sendToRelay(url, req)
-            if (!sent) {
-                // Connection not present — treat as immediate EOSE for this relay
-                // so callers don't hang waiting on it.
+            if (!transport.sendToRelay(url, req)) {
+                failedUrls.add(url)
+            }
+        }
+
+        // Retry failed sends — connections may still be establishing after
+        // connectAndAwait returned (it waits for ANY 1, not all). Poll up
+        // to 10s for remaining connections to come up.
+        if (failedUrls.isNotEmpty()) {
+            Log.w(TAG, "subscribe $subId: ${failedUrls.size}/${urls.size} sends failed, retrying up to 10s")
+            val retryDeadline = System.currentTimeMillis() + 10_000L
+            val remaining = failedUrls.toMutableList()
+            while (remaining.isNotEmpty() && System.currentTimeMillis() < retryDeadline) {
+                delay(500)
+                if (subs[subId] == null) return HandleImpl(subId) // closed during retry
+                val iter = remaining.iterator()
+                while (iter.hasNext()) {
+                    if (transport.sendToRelay(iter.next(), req)) iter.remove()
+                }
+            }
+            if (remaining.isNotEmpty()) {
+                Log.w(TAG, "subscribe $subId: ${remaining.size} relays unreachable after retry")
+            }
+            for (url in remaining) {
                 handleRelayEose(subId, url)
             }
         }

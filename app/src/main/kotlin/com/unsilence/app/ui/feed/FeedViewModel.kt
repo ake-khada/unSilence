@@ -400,69 +400,11 @@ class FeedViewModel @Inject constructor(
             _coldStartState.value = ColdStartState.READY_GLOBAL
         }
 
-        // ── Window lifecycle driven by feed+filter combine ──────────────
-        viewModelScope.launch(Dispatchers.IO) {
-            // Initial relay connection
-            val initialUrls = resolveGlobalUrls()
-            for (url in initialUrls) {
-                normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
-            }
-            relayPool.connect(initialUrls, isHomeFeed = true)
-
-            combine(_feedType, _filter, _contentFilter, _refreshTrigger) { type, filter, cf, _ ->
-                WindowKey.Home(type, cf, filter)
-            }
-            .collectLatest { key ->
-                val isBrowse = key.feedType is FeedType.SingleRelay || key.feedType is FeedType.RelaySet
-
-                _uiState.value = FeedUiState(loading = true, coverageStatus = CoverageStatus.LOADING)
-
-                connectRelaysForFeedType(key.feedType)
-                swapToWindow(key)
-
-                if (!isBrowse) {
-                    val intent = CoverageIntent.HomeFeed()
-                    coverageTracker.ensureCoverage(intent)
-                }
-
-                // Timeout: if still LOADING after 10s, mark failed
-                val timeoutJob = viewModelScope.launch {
-                    delay(10_000)
-                    if (_uiState.value.loading) {
-                        if (!isBrowse) {
-                            val intent = CoverageIntent.HomeFeed()
-                            coverageTracker.markFailed(
-                                intent.scopeType, intent.scopeKey, intent.relaySetId
-                            )
-                        }
-                        _uiState.update { it.copy(loading = false, coverageStatus = CoverageStatus.FAILED) }
-                    }
-                }
-
-                // Watch snapshot — update uiState when window finishes loading
-                try {
-                    snapshot.collect { snap ->
-                        if (snap.isLoadingInitial) return@collect
-                        timeoutJob.cancel()
-                        if (isBrowse) {
-                            _uiState.value = FeedUiState(
-                                loading = false,
-                                coverageStatus = if (snap.rows.isNotEmpty()) CoverageStatus.COMPLETE
-                                    else CoverageStatus.FAILED,
-                            )
-                        } else {
-                            val intent = CoverageIntent.HomeFeed()
-                            val status = coverageTracker.getStatus(
-                                intent.scopeType, intent.scopeKey, intent.relaySetId,
-                            )
-                            _uiState.value = FeedUiState(loading = false, coverageStatus = status)
-                        }
-                    }
-                } finally {
-                    timeoutJob.cancel()
-                }
-            }
-        }
+        // V2 handles all relay connections, subscriptions, and feed rendering.
+        // Old VM retained only for UI state (feedType, filter, coldStart,
+        // userSets, pinnedRelays, userAvatar). No relayPool.connect, no
+        // browseSession, no FeedWindow, no subscribeAfterConnect.
+        _uiState.value = FeedUiState(loading = false, coverageStatus = CoverageStatus.COMPLETE)
     }
 
     override fun onCleared() {

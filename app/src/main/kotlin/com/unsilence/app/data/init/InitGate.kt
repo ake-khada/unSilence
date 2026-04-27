@@ -10,14 +10,16 @@ import javax.inject.Singleton
 /**
  * Coroutine-based readiness signal for cold-start data dependencies.
  *
- * Bootstrap signals two milestones:
+ * Bootstrap signals three milestones:
  *   1. `signalFollowsReady()` — kind-3 contact list loaded (or timed out)
  *   2. `signalRelaysReady()` — own kind-10002 relay list loaded (or timed out)
+ *   3. `signalFeedConnectionsReady()` — global relay WebSockets connected
+ *      (Phase1 Step5 complete). Consumers that need relay subs to work
+ *      (FeedViewModelV2) gate on this before issuing subscriptions.
  *
- * Consumers (FeedViewModel and friends) call `awaitFollows()` /
- * `awaitRelays()` / `awaitReady()` before issuing relay subscriptions
- * that depend on those datasets. Awaiters that arrive AFTER the signal
- * resume immediately.
+ * Consumers call `awaitFollows()` / `awaitRelays()` / `awaitReady()` /
+ * `awaitFeedConnections()` before issuing relay subscriptions that depend
+ * on those datasets. Awaiters that arrive AFTER the signal resume immediately.
  *
  * Idempotent — second signal call is a no-op. Cannot be reset; create a
  * new InitGate (or rebuild the Hilt graph) for a fresh cold start.
@@ -29,6 +31,7 @@ class InitGate @Inject constructor() {
 
     private val followsDeferred = CompletableDeferred<Unit>()
     private val relaysDeferred = CompletableDeferred<Unit>()
+    private val feedConnectionsDeferred = CompletableDeferred<Unit>()
 
     private val _phase = MutableStateFlow(Phase.CONNECTING)
 
@@ -51,6 +54,11 @@ class InitGate @Inject constructor() {
         }
     }
 
+    /** Bootstrap calls this after Phase1 Step5 — global relay connections established. Idempotent. */
+    fun signalFeedConnectionsReady() {
+        feedConnectionsDeferred.complete(Unit)
+    }
+
     /** Suspend until follows are ready. Returns immediately if already signaled. */
     suspend fun awaitFollows() = followsDeferred.await()
 
@@ -63,9 +71,13 @@ class InitGate @Inject constructor() {
         relaysDeferred.await()
     }
 
+    /** Suspend until global relay connections are established (Phase1 Step5). */
+    suspend fun awaitFeedConnections() = feedConnectionsDeferred.await()
+
     /** Non-suspending status check — useful for early-exit paths. */
     val followsReady: Boolean get() = followsDeferred.isCompleted
     val relaysReady: Boolean get() = relaysDeferred.isCompleted
+    val feedConnectionsReady: Boolean get() = feedConnectionsDeferred.isCompleted
     val isReady: Boolean get() = followsReady && relaysReady
 
     private fun recomputePhase() {

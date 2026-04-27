@@ -865,9 +865,11 @@ class RelayPool @Inject constructor(
         try {
             conn.messages.consumeEach { raw ->
                 connectionLastActivity[conn.url] = System.currentTimeMillis()
-                // Fix 3: intercept EOSE before EventProcessor so we can send CLOSE
-                // for one-shot subscriptions. EventProcessor's process() would already
-                // early-return for non-EVENT strings, but we need the relay URL here.
+                // Fire taps for ALL message types (EVENT/EOSE/CLOSED).
+                // Subscription taps demux by subId and need EOSE/CLOSED delivery.
+                // For non-EVENT, EventProcessor fires taps then returns early.
+                // For EVENT, it also handles dedup + MES routing.
+                processor.process(raw, conn.url)
                 if (raw.startsWith("[\"EOSE\"")) {
                     val eoseSubId = extractEoseSubId(raw)
                     if (eoseSubId != null && eoseSubId.startsWith("search-")) {
@@ -981,7 +983,7 @@ class RelayPool @Inject constructor(
                         }
                     }
                 }
-                processor.process(raw, conn.url)
+                // NOTE: processor.process already called at top of consumeEach
             }
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
