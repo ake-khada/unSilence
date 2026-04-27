@@ -97,6 +97,7 @@ class TimelineConsumer(
     private var currentHandle: TimelineService.TimelineHandle? = null
     private var currentSubRequests: List<SubRequest> = emptyList()
     private var sinceCursor: Long = 0L
+    private var subscribeSeq = 0L
 
     /**
      * Subscribe to a new set of subRequests. Closes previous subscription.
@@ -110,6 +111,7 @@ class TimelineConsumer(
         initialCachedEvents: List<NostrEvent> = emptyList(),
     ) {
         currentHandle?.close()
+        currentHandle = null
         currentSubRequests = subRequests
         _events.value = initialCachedEvents
         _pendingNew.value = emptyList()
@@ -123,8 +125,9 @@ class TimelineConsumer(
         sinceCursor = initialCachedEvents.firstOrNull()?.createdAt?.plus(1)
             ?: (System.currentTimeMillis() / 1000L - 60)
 
+        val mySeq = ++subscribeSeq
         ownerScope.launch {
-            currentHandle = timelineService.subscribeTimeline(
+            val handle = timelineService.subscribeTimeline(
                 subRequests = subRequests,
                 onEvents = { batch, eosed ->
                     if (initialCachedEvents.isEmpty() && _events.value.isEmpty()) {
@@ -137,6 +140,12 @@ class TimelineConsumer(
                 },
                 onNew = { event -> handleNewEvents(listOf(event)) },
             )
+            // Guard against stale launches from rapid subscribe calls
+            if (subscribeSeq == mySeq) {
+                currentHandle = handle
+            } else {
+                handle.close()
+            }
         }
     }
 
