@@ -11,15 +11,13 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
-import com.unsilence.app.data.relay.OgFetcher
-import com.unsilence.app.data.relay.ProfileResolver
+import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.SubRequest
+import com.unsilence.app.data.relay.TimelineConsumer
+import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.repository.UserRepository
-import com.unsilence.app.ui.feed.FeedWindow
-import com.unsilence.app.ui.feed.FeedWindowLoader
-import com.unsilence.app.ui.feed.VideoThumbnailCache
-import com.unsilence.app.ui.feed.WindowKey
-import com.unsilence.app.ui.feed.WindowSnapshot
+import com.unsilence.app.ui.feed.FeedContentFilter
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
@@ -36,7 +34,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -57,10 +54,7 @@ class UserProfileViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
-    private val feedWindowLoader: FeedWindowLoader,
-    private val profileResolver: ProfileResolver,
-    private val ogFetcher: OgFetcher,
-    private val videoThumbnailCache: VideoThumbnailCache,
+    private val timelineService: TimelineService,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -76,24 +70,27 @@ class UserProfileViewModel @Inject constructor(
         .filterNotNull()
         .flatMapLatest { memoryEventStore.userEntityFlow(it) }
 
-    // ── FeedWindow management ────────────────────────────────────────────
-    @Volatile private var activeWindow: FeedWindow? = null
-    private val windowCache = mutableMapOf<ProfileTab, FeedWindow>()
-    private val _activeProfileKey = MutableStateFlow<WindowKey.Profile?>(null)
+    // ── TimelineConsumer ─────────────────────────────────────────────────
 
-    // ── Profile tabs ──────────────────────────────────────────────────
+    private val consumer = TimelineConsumer(
+        timelineService = timelineService,
+        memoryEventStore = memoryEventStore,
+        ownerScope = viewModelScope,
+    )
+
+    val tabPostsFlow: StateFlow<List<FeedRow>> = consumer.feedRows
+    val isLoadingPosts: StateFlow<Boolean> = consumer.isLoading
+
+    // ── Profile tabs ─────────────────────────────────────────────────────
+
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
 
-    /** Live posts from the active window, newest-first. */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val tabPostsFlow: StateFlow<List<FeedRow>> = _activeProfileKey
-        .flatMapLatest { key ->
-            if (key != null) activeWindow?.snapshot?.map { it.rows } ?: flowOf(emptyList())
-            else flowOf(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    // Track last subscription group to optimize Notes↔Replies (filter-only swap)
+    private var lastSubGroup: SubGroup? = null
+    private var lastSubPubkey: String? = null
 
-    // ── Profile lookup for repost original authors ─────────────────────
+    // ── Profile lookup for repost original authors ───────────────────────
+
     private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
@@ -101,14 +98,6 @@ class UserProfileViewModel @Inject constructor(
             memoryEventStore.userEntityFlow(pubkey)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val isLoadingPosts: StateFlow<Boolean> = _activeProfileKey
-        .flatMapLatest { key ->
-            if (key != null) activeWindow?.snapshot?.map { it.isLoadingInitial } ?: flowOf(true)
-            else flowOf(true)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
     val followerCount = MutableStateFlow<Long?>(null)
@@ -132,23 +121,22 @@ class UserProfileViewModel @Inject constructor(
     val followLoading = MutableStateFlow(false)
 
     init {
-        // Combine pubkey + tab → window key. Drives window lifecycle.
+        // Combine pubkey + tab → resubscribe. Drives timeline lifecycle.
         viewModelScope.launch {
             @OptIn(ExperimentalCoroutinesApi::class)
-            combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab ->
-                WindowKey.Profile(pk, tab)
-            }
-            .collectLatest { key ->
-                swapToWindow(key)
-            }
+            combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab -> pk to tab }
+                .collectLatest { (pk, tab) ->
+                    resubscribeForTab(pk, tab)
+                }
         }
     }
 
     fun loadProfile(pubkey: String) {
         if (_pubkeyHex.value == pubkey) return
-        // Release cached windows for previous profile
-        windowCache.values.forEach { it.release() }
-        windowCache.clear()
+        // Reset subscription tracking for new profile
+        consumer.close()
+        lastSubGroup = null
+        lastSubPubkey = null
         _pubkeyHex.value = pubkey
         memoryEventStore.viewedPubkey = pubkey
         selectedTab.value = ProfileTab.NOTES
@@ -190,14 +178,52 @@ class UserProfileViewModel @Inject constructor(
         }
     }
 
+    // ── User actions ─────────────────────────────────────────────────────
+
     fun onViewportChanged(first: Int, last: Int) {
-        activeWindow?.onViewportChanged(first, last)
+        consumer.onViewportChanged(first)
     }
 
-    /** Keep signature — ignore param, delegate to window. */
     fun loadMore(currentOldest: Long) {
-        activeWindow?.loadMore()
+        consumer.loadMore()
     }
+
+    // ── Tab → subscription logic ─────────────────────────────────────────
+
+    private fun resubscribeForTab(pubkey: String, tab: ProfileTab) {
+        // Set content filter at render boundary
+        val contentFilter = when (tab) {
+            ProfileTab.NOTES, ProfileTab.LONGFORM -> FeedContentFilter.NOTES_ONLY
+            ProfileTab.REPLIES -> FeedContentFilter.REPLIES_ONLY
+        }
+        consumer.setContentFilter(contentFilter)
+
+        // Notes↔Replies share the same kinds — skip resubscribe, just filter
+        val group = subGroupFor(tab)
+        if (lastSubPubkey == pubkey && lastSubGroup == group) return
+        lastSubPubkey = pubkey
+        lastSubGroup = group
+
+        val kinds = kindsForTab(tab)
+        val cached = memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
+        val writeRelays = memoryEventStore.writeRelaysFor(pubkey)
+            .ifEmpty { GLOBAL_RELAY_URLS }
+        val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
+
+        consumer.subscribe(
+            subRequests = listOf(SubRequest(
+                urls = writeRelays,
+                filter = NostrFilter(
+                    kinds = kinds,
+                    authors = listOf(pubkey),
+                    limit = limit,
+                ),
+            )),
+            initialCachedEvents = cached,
+        )
+    }
+
+    // ── Follow / Unfollow ────────────────────────────────────────────────
 
     fun toggleFollow() {
         val targetPubkey = _pubkeyHex.value ?: return
@@ -252,43 +278,28 @@ class UserProfileViewModel @Inject constructor(
         }
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────
+
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: GLOBAL_RELAY_URLS
 
-    private fun swapToWindow(key: WindowKey.Profile) {
-        activeWindow?.deactivate()
-
-        // Check cache for a loaded window matching this tab+pubkey
-        val cached = windowCache[key.tab]
-        if (cached != null && cached.key == key && cached.hasLoaded) {
-            activeWindow = cached
-            cached.activate()
-            _activeProfileKey.value = key
-            return
-        }
-
-        // Cold: create fresh, cache by tab
-        val window = FeedWindow(
-            key = key,
-            mes = memoryEventStore,
-            loader = feedWindowLoader,
-            keyManager = keyManager,
-            parentScope = viewModelScope,
-            profileResolver = profileResolver,
-            relayPool = relayPool,
-            ogFetcher = ogFetcher,
-            videoThumbnailCache = videoThumbnailCache,
-        )
-        windowCache[key.tab]?.release()
-        windowCache[key.tab] = window
-        activeWindow = window
-        window.activate()
-        _activeProfileKey.value = key
+    override fun onCleared() {
+        consumer.close()
+        memoryEventStore.viewedPubkey = null
+        super.onCleared()
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        windowCache.values.forEach { it.release() }
-        memoryEventStore.viewedPubkey = null
+    private companion object {
+        enum class SubGroup { NOTES_REPLIES, LONGFORM }
+
+        fun subGroupFor(tab: ProfileTab): SubGroup = when (tab) {
+            ProfileTab.NOTES, ProfileTab.REPLIES -> SubGroup.NOTES_REPLIES
+            ProfileTab.LONGFORM -> SubGroup.LONGFORM
+        }
+
+        fun kindsForTab(tab: ProfileTab): List<Int> = when (tab) {
+            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6)
+            ProfileTab.LONGFORM -> listOf(30023)
+        }
     }
 }
