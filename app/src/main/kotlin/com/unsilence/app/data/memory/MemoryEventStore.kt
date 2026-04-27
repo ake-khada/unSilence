@@ -180,6 +180,31 @@ class MemoryEventStore @Inject constructor() {
 
     fun getEventModel(eventId: String): com.unsilence.app.data.model.EventModel? = eventModelsByEventId[eventId]
 
+    /**
+     * Lazy parse: returns cached EventModel or parses on first access via computeIfAbsent.
+     * Thread-safe — ConcurrentHashMap guarantees at-most-once parse per event ID.
+     * Cache-first: survives eviction if model was already parsed.
+     */
+    fun getOrParseEventModel(eventId: String): com.unsilence.app.data.model.EventModel? {
+        eventModelsByEventId[eventId]?.let { return it }
+        val event = eventsById[eventId] ?: return null
+        return eventModelsByEventId.computeIfAbsent(eventId) {
+            com.unsilence.app.data.model.ContentParser.parse(
+                id = event.id,
+                pubkey = event.pubkey,
+                kind = event.kind,
+                content = event.content,
+                tagsJson = event.tagsJson,
+                createdAt = event.createdAt,
+                relayUrl = event.relayUrl,
+                replyToId = event.replyToId,
+                rootId = event.rootId,
+                hasContentWarning = event.hasContentWarning,
+                contentWarningReason = event.contentWarningReason,
+            )
+        }
+    }
+
     fun putEventModel(eventId: String, model: com.unsilence.app.data.model.EventModel) {
         eventModelsByEventId[eventId] = model
     }
@@ -2091,7 +2116,7 @@ class MemoryEventStore @Inject constructor() {
         // Evict old content events from snapshot (may contain stale data)
         evictOldContentEvents()
 
-        Log.d("MES", "EventModel restore: ${eventModelsByEventId.size} models parsed")
+        Log.d("MES", "Snapshot restore complete (EventModel parsing deferred to first read)")
     }
 
     private fun insertFromSnapshot(event: NostrEvent) {
@@ -2108,36 +2133,18 @@ class MemoryEventStore @Inject constructor() {
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
-        // Pre-compute media metadata + EventModel. Parse imeta once for all consumers.
-        if (event.kind in setOf(1, 6, 20, 21, 30023)) {
+        // Pre-compute media metadata at snapshot-restore time (sidecar caches).
+        // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
+        if (event.kind in setOf(1, 6, 20, 21)) {
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
-
-            if (event.kind in setOf(1, 6, 20, 21)) {
-                val models = com.unsilence.app.data.model.buildVideoRenderModels(
-                    event.kind, event.content, event.tags,
-                )
-                if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
-                val imageDims = imetaMedia
-                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
-                    .associate { it.url to (it.width!!.toFloat() / it.height!!) }
-                if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
-            }
-
-            val model = com.unsilence.app.data.model.ContentParser.parse(
-                id = event.id,
-                pubkey = event.pubkey,
-                kind = event.kind,
-                content = event.content,
-                tagsJson = event.tagsJson,
-                createdAt = event.createdAt,
-                relayUrl = event.relayUrl,
-                replyToId = event.replyToId,
-                rootId = event.rootId,
-                hasContentWarning = event.hasContentWarning,
-                contentWarningReason = event.contentWarningReason,
-                preparsedImeta = imetaMedia,
+            val models = com.unsilence.app.data.model.buildVideoRenderModels(
+                event.kind, event.content, event.tags,
             )
-            eventModelsByEventId[event.id] = model
+            if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
+            val imageDims = imetaMedia
+                .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
+                .associate { it.url to (it.width!!.toFloat() / it.height!!) }
+            if (imageDims.isNotEmpty()) imetaImageDimsByEventId[event.id] = imageDims
         }
 
         // Restore kind-derived state (profiles, follows, relay lists)

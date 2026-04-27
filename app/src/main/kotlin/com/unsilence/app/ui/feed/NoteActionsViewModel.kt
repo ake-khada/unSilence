@@ -78,7 +78,7 @@ class NoteActionsViewModel @Inject constructor(
     fun getImetaImageDims(eventId: String) = memoryEventStore.getImetaImageDims(eventId)
 
     /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
-    fun getEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
+    fun getEventModel(eventId: String) = memoryEventStore.getOrParseEventModel(eventId)
 
     /**
      * Set of event IDs the current user has reacted to.

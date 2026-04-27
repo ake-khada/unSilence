@@ -425,35 +425,16 @@ class EventProcessor @Inject constructor(
 
         for (event in events.values) {
             memoryEventStore.insert(event)
-            // Pre-compute media metadata + EventModel at insert time (sidecar caches).
-            // Parse imeta once for all downstream consumers.
-            if (event.kind in setOf(1, 6, 20, 21, 30023)) {
+            // Pre-compute media metadata at insert time (sidecar caches).
+            // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
+            if (event.kind in setOf(1, 6, 20, 21)) {
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
-
-                if (event.kind in setOf(1, 6, 20, 21)) {
-                    val models = buildVideoRenderModels(event.kind, event.content, event.tags)
-                    memoryEventStore.putVideoRenderModels(event.id, models)
-                    val imageDims = imetaMedia
-                        .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
-                        .associate { it.url to (it.width!!.toFloat() / it.height!!) }
-                    memoryEventStore.putImetaImageDims(event.id, imageDims)
-                }
-
-                val model = com.unsilence.app.data.model.ContentParser.parse(
-                    id = event.id,
-                    pubkey = event.pubkey,
-                    kind = event.kind,
-                    content = event.content,
-                    tagsJson = event.tagsJson,
-                    createdAt = event.createdAt,
-                    relayUrl = event.relayUrl,
-                    replyToId = event.replyToId,
-                    rootId = event.rootId,
-                    hasContentWarning = event.hasContentWarning,
-                    contentWarningReason = event.contentWarningReason,
-                    preparsedImeta = imetaMedia,
-                )
-                memoryEventStore.putEventModel(event.id, model)
+                val models = buildVideoRenderModels(event.kind, event.content, event.tags)
+                memoryEventStore.putVideoRenderModels(event.id, models)
+                val imageDims = imetaMedia
+                    .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
+                    .associate { it.url to (it.width!!.toFloat() / it.height!!) }
+                memoryEventStore.putImetaImageDims(event.id, imageDims)
             }
         }
     }
