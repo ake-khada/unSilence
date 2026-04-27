@@ -6,6 +6,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.ui.feed.FeedContentFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -95,9 +96,9 @@ class TimelineConsumer(
     // ── Subscription handle ───────────────────────────────────────────────
 
     private var currentHandle: TimelineService.TimelineHandle? = null
+    private var subscribeJob: Job? = null
     private var currentSubRequests: List<SubRequest> = emptyList()
     private var sinceCursor: Long = 0L
-    private var subscribeSeq = 0L
 
     /**
      * Subscribe to a new set of subRequests. Closes previous subscription.
@@ -112,6 +113,8 @@ class TimelineConsumer(
     ) {
         currentHandle?.close()
         currentHandle = null
+        subscribeJob?.cancel()
+        subscribeJob = null
         currentSubRequests = subRequests
         _events.value = initialCachedEvents
         _pendingNew.value = emptyList()
@@ -125,8 +128,7 @@ class TimelineConsumer(
         sinceCursor = initialCachedEvents.firstOrNull()?.createdAt?.plus(1)
             ?: (System.currentTimeMillis() / 1000L - 60)
 
-        val mySeq = ++subscribeSeq
-        ownerScope.launch {
+        subscribeJob = ownerScope.launch {
             val handle = timelineService.subscribeTimeline(
                 subRequests = subRequests,
                 onEvents = { batch, eosed ->
@@ -140,12 +142,7 @@ class TimelineConsumer(
                 },
                 onNew = { event -> handleNewEvents(listOf(event)) },
             )
-            // Guard against stale launches from rapid subscribe calls
-            if (subscribeSeq == mySeq) {
-                currentHandle = handle
-            } else {
-                handle.close()
-            }
+            currentHandle = handle
         }
     }
 
@@ -207,6 +204,8 @@ class TimelineConsumer(
     }
 
     fun close() {
+        subscribeJob?.cancel()
+        subscribeJob = null
         currentHandle?.close()
         currentHandle = null
         currentSubRequests = emptyList()

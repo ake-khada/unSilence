@@ -8,7 +8,12 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -99,45 +104,65 @@ class Subscription @Inject constructor(
         )
         subs[subId] = state
 
-        // Connection establishment is the caller's responsibility for
-        // PERSISTENT-purpose relays (browse / outbox / home feed). For
-        // ad-hoc one-off subs we still call connectAndAwait — it's a no-op
-        // for already-connected relays.
-        transport.connectAndAwait(urls, timeoutMs = 5_000)
+        try {
+            // Connection establishment is the caller's responsibility for
+            // PERSISTENT-purpose relays (browse / outbox / home feed). For
+            // ad-hoc one-off subs we still call connectAndAwait — it's a no-op
+            // for already-connected relays.
+            transport.connectAndAwait(urls, timeoutMs = 5_000)
 
-        // Build REQ once, send to each relay.
-        val req = buildReqJson(subId, filter)
-        val failedUrls = mutableListOf<String>()
-        for (url in urls) {
-            if (!transport.sendToRelay(url, req)) {
-                failedUrls.add(url)
-            }
-        }
-
-        // Retry failed sends — connections may still be establishing after
-        // connectAndAwait returned (it waits for ANY 1, not all). Poll up
-        // to 10s for remaining connections to come up.
-        if (failedUrls.isNotEmpty()) {
-            Log.w(TAG, "subscribe $subId: ${failedUrls.size}/${urls.size} sends failed, retrying up to 10s")
-            val retryDeadline = System.currentTimeMillis() + 10_000L
-            val remaining = failedUrls.toMutableList()
-            while (remaining.isNotEmpty() && System.currentTimeMillis() < retryDeadline) {
-                delay(500)
-                if (subs[subId] == null) return HandleImpl(subId) // closed during retry
-                val iter = remaining.iterator()
-                while (iter.hasNext()) {
-                    if (transport.sendToRelay(iter.next(), req)) iter.remove()
+            // Build REQ once, send to each relay.
+            val req = buildReqJson(subId, filter)
+            val failedUrls = mutableListOf<String>()
+            for (url in urls) {
+                if (!transport.sendToRelay(url, req)) {
+                    failedUrls.add(url)
                 }
             }
-            if (remaining.isNotEmpty()) {
-                Log.w(TAG, "subscribe $subId: ${remaining.size} relays unreachable after retry")
+
+            // Retry failed sends — connections may still be establishing after
+            // connectAndAwait returned (it waits for ANY 1, not all). Poll up
+            // to 10s for remaining connections to come up.
+            if (failedUrls.isNotEmpty()) {
+                Log.w(TAG, "subscribe $subId: ${failedUrls.size}/${urls.size} sends failed, retrying up to 10s")
+                val retryDeadline = System.currentTimeMillis() + 10_000L
+                val remaining = failedUrls.toMutableList()
+                while (remaining.isNotEmpty() && System.currentTimeMillis() < retryDeadline) {
+                    delay(500)
+                    if (subs[subId] == null) return HandleImpl(subId) // closed during retry
+                    val iter = remaining.iterator()
+                    while (iter.hasNext()) {
+                        if (transport.sendToRelay(iter.next(), req)) iter.remove()
+                    }
+                }
+                if (remaining.isNotEmpty()) {
+                    Log.w(TAG, "subscribe $subId: ${remaining.size} relays unreachable after retry")
+                }
+                for (url in remaining) {
+                    handleRelayEose(subId, url)
+                }
             }
-            for (url in remaining) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            subs.remove(subId)
+            throw e
+        }
+
+        // Per-relay EOSE watchdog: if a relay accepts REQ but never sends
+        // EOSE within 30s, synthesize one so callers don't hang.
+        val watchdogScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        for (url in urls) {
+            watchdogScope.launch {
+                delay(30_000L)
+                val s = subs[subId] ?: return@launch
+                if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
+                Log.d(TAG, "EOSE watchdog: synthesizing for sub=$subId relay=$url")
                 handleRelayEose(subId, url)
             }
         }
 
-        return HandleImpl(subId)
+        val handle = HandleImpl(subId)
+        handle.watchdogScope = watchdogScope
+        return handle
     }
 
     private fun ensureTapRegistered() {
@@ -310,10 +335,12 @@ class Subscription @Inject constructor(
 
     private inner class HandleImpl(private val subId: String) : Handle {
         @Volatile private var closed = false
+        var watchdogScope: CoroutineScope? = null
 
         override fun close() {
             if (closed) return
             closed = true
+            watchdogScope?.cancel()
             val state = subs.remove(subId) ?: return
             val closeMsg = buildJsonArray {
                 add(JsonPrimitive("CLOSE"))
