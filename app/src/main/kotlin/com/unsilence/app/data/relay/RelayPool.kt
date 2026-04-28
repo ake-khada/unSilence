@@ -69,7 +69,11 @@ class RelayPool @Inject constructor(
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
 ) : RelayTransport {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // WebSocket consume loops MUST not be starved by snapshot restore or
+    // other heavy IO. limitedParallelism(8) reserves dedicated threads for
+    // inbound message processing.
+    private val wsDispatcher = Dispatchers.IO.limitedParallelism(8)
+    private val scope = CoroutineScope(SupervisorJob() + wsDispatcher)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
     /** Cached blocked relay URLs, refreshed before each connect(). */
@@ -240,6 +244,7 @@ class RelayPool @Inject constructor(
         // Safety rail against runaway bugs. Not a resource policy.
         // BROWSE is session-scoped. If this fires, something is misbehaving — investigate.
         const val POOL_SAFETY_CAP = 50
+        const val POOL_SWEEP_CAP = 20
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
@@ -447,12 +452,28 @@ class RelayPool @Inject constructor(
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
             }
         }
-        // Periodic pool state logging — piggybacks on MesMetricsLogger cadence
-        // but also provides standalone fallback every 60s.
+        // Periodic pool state logging + connection sweep — every 60s.
         scope.launch {
             while (true) {
                 delay(60_000)
                 logPoolState()
+                // Sweep unused connections
+                for (url in connections.keys.toList()) {
+                    releaseIfUnused(url)
+                }
+                // Hard cap: if pool > 20, force-close oldest by activity
+                if (connections.size > POOL_SWEEP_CAP) {
+                    val byActivity = connections.keys
+                        .sortedBy { connectionLastActivity[it] ?: 0L }
+                    val toClose = connections.size - POOL_SWEEP_CAP
+                    for (url in byActivity.take(toClose)) {
+                        connections[url]?.close()
+                        connections.remove(url)
+                        connectionPurposes.remove(url)
+                        connectionLastActivity.remove(url)
+                        Log.w(TAG, "Pool over cap, force-closed: $url")
+                    }
+                }
             }
         }
     }
@@ -2281,8 +2302,16 @@ class RelayPool @Inject constructor(
      * Placeholder for future disconnect logic. In this PR browse CLOSE is enough;
      * connections may be reused by outbox routing or other consumers.
      */
-    fun releaseIfUnused(@Suppress("UNUSED_PARAMETER") url: String) {
-        // Intentionally no disconnect logic in this PR.
+    fun releaseIfUnused(url: String) {
+        val purposes = connectionPurposes[url]
+        if (purposes != null && purposes.isNotEmpty()) return  // still in use
+        val lastActivity = connectionLastActivity[url] ?: 0L
+        if (System.currentTimeMillis() - lastActivity < 60_000L) return  // recent
+        connections[url]?.close()
+        connections.remove(url)
+        connectionLastActivity.remove(url)
+        connectionPurposes.remove(url)
+        Log.d(TAG, "Released unused connection: $url")
     }
 
     fun disconnectAll() {

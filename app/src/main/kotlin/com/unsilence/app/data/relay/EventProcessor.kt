@@ -61,7 +61,11 @@ private const val DEDUP_TRIM = 2_000
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
 ) : TapRegistration {
-    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // CPU-bound work (JSON parse, MES insert, kind handlers).
+    // Belongs on Default not IO. limitedParallelism(2) keeps this from
+    // hogging Default and stalling Compose recomposition.
+    private val processDispatcher = Dispatchers.Default.limitedParallelism(2)
+    private var scope = CoroutineScope(SupervisorJob() + processDispatcher)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
 
     // ── Subscription tap registry ─────────────────────────────────────────────

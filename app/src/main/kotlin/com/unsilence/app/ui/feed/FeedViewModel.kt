@@ -94,6 +94,9 @@ class FeedViewModel @Inject constructor(
     val pendingCount = consumer.pendingCount
     val isLoading = consumer.isLoading
     val isLoadingMore = consumer.isLoadingMore
+    val rawEventCount: StateFlow<Int> = consumer.events
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
 
@@ -150,6 +153,20 @@ class FeedViewModel @Inject constructor(
         if (_contentFilter.value == f) return
         _contentFilter.value = f
         consumer.setContentFilter(f)
+
+        // If switching to Conversations and we have few replies, fetch a wider
+        // batch to populate the tab. Replies are often older than top-level
+        // notes — initial limit=300 may not include any.
+        if (f == FeedContentFilter.REPLIES_ONLY) {
+            viewModelScope.launch {
+                val current = consumer.events.value
+                val replyCount = current.count { it.replyToId != null || it.rootId != null }
+                if (replyCount < 30) {
+                    Log.d(TAG, "Conversations tab has $replyCount replies, fetching more")
+                    _refreshCounter.value = _refreshCounter.value + 1
+                }
+            }
+        }
     }
 
     // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
@@ -159,7 +176,7 @@ class FeedViewModel @Inject constructor(
 
     fun updateFilter(filter: com.unsilence.app.domain.model.FeedFilter) {
         _filter.value = filter
-        viewModelScope.launch { resubscribe(_feedType.value) }
+        // Resubscribe collector picks up the change
     }
 
     // -- Cold-start ------------------------------------------------------------
@@ -282,8 +299,10 @@ class FeedViewModel @Inject constructor(
     fun onDotTapped() = consumer.onDotTapped()
     fun loadMore() = consumer.loadMore()
     fun refresh() {
-        viewModelScope.launch { resubscribe(_feedType.value) }
+        _refreshCounter.value = _refreshCounter.value + 1
     }
+
+    private val _refreshCounter = MutableStateFlow(0)
 
     // -- Init: cold-start + feedType subscription ------------------------------
 
@@ -341,21 +360,32 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        // Resubscribe collector — fires when feedType OR relay-metadata-version
-        // changes. Gated on coldStartState != LOADING. 750ms debounce coalesces
-        // the burst of follow kind-10002 inserts during Phase 2.
+        // Resubscribe collector — fires when feedType, relay-metadata-version,
+        // refreshCounter, or filter changes. Gated on coldStartState != LOADING.
+        // 2s debounce coalesces the burst of kind-10002 inserts during Phase 2.
         viewModelScope.launch {
             combine(
                 _coldStartState,
                 _feedType,
                 relayMetadataVersion,
-            ) { state, type, ver -> Triple(state, type, ver) }
-                .filter { it.first != ColdStartState.LOADING }
+                _refreshCounter,
+                _filter,
+            ) { args ->
+                @Suppress("UNCHECKED_CAST")
+                ResubKey(
+                    state = args[0] as ColdStartState,
+                    type = args[1] as FeedType,
+                    ver = args[2] as Int,
+                    refresh = args[3] as Int,
+                    filter = args[4] as com.unsilence.app.domain.model.FeedFilter,
+                )
+            }
+                .filter { it.state != ColdStartState.LOADING }
                 .debounce(2_000L)
-                .distinctUntilChangedBy { (_, type, ver) -> type to ver }
-                .collectLatest { (_, type, ver) ->
-                    Log.d(TAG, "resubscribe trigger: type=$type metaVer=$ver")
-                    resubscribe(type)
+                .distinctUntilChangedBy { it.type to it.ver to it.refresh to it.filter }
+                .collectLatest { key ->
+                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} refresh=${key.refresh}")
+                    resubscribe(key.type)
                 }
         }
     }
@@ -421,4 +451,12 @@ class FeedViewModel @Inject constructor(
         consumer.close()
         super.onCleared()
     }
+
+    private data class ResubKey(
+        val state: ColdStartState,
+        val type: FeedType,
+        val ver: Int,
+        val refresh: Int,
+        val filter: com.unsilence.app.domain.model.FeedFilter,
+    )
 }

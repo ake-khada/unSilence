@@ -54,6 +54,7 @@ class TimelineConsumer(
     // ── Event state ───────────────────────────────────────────────────────
 
     private val _events = MutableStateFlow<List<NostrEvent>>(emptyList())
+    val events: StateFlow<List<NostrEvent>> = _events.asStateFlow()
     private val _pendingNew = MutableStateFlow<List<NostrEvent>>(emptyList())
     private val _isAtTop = MutableStateFlow(true)
     private val _isLoading = MutableStateFlow(true)

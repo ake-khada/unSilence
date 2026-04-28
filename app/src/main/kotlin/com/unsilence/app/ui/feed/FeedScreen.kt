@@ -94,6 +94,7 @@ fun FeedScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
     val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
+    val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -190,7 +191,8 @@ fun FeedScreen(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
-                !isLoadingV && events.isEmpty() -> "empty"
+                !isLoadingV && events.isEmpty() && rawEventCount == 0 -> "empty"
+                !isLoadingV && events.isEmpty() && rawEventCount > 0 -> "filtered_empty"
                 else -> "content"
             },
             label = "feedState",
@@ -225,6 +227,16 @@ fun FeedScreen(
                     message = "No posts yet",
                     hint    = "Tap to retry",
                     modifier = Modifier.clickable { viewModel.refresh() },
+                )
+            }
+
+            "filtered_empty" -> {
+                EmptyState(
+                    icon    = Icons.Outlined.Forum,
+                    message = if (contentFilter == FeedContentFilter.REPLIES_ONLY)
+                        "No conversations yet" else "No notes match",
+                    hint    = "Loading more...",
+                    modifier = Modifier,
                 )
             }
 
