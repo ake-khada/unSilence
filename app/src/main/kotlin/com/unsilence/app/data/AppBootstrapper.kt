@@ -141,20 +141,40 @@ class AppBootstrapper @Inject constructor(
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
-        // Phase 1.5: Restore MemoryEventStore snapshot
-        snapshotScheduler.restoreIfPresent()
-        Log.d(TAG, "Phase1.5: snapshot restore complete")
-
-        // Step 2: Fetch kind-3, wait for follows in MES.
-        // Skip if snapshot was saved recently (< 6h) and has follows — data already confirmed.
+        // Phase 1.5: Launch snapshot restore in background — does NOT block bootstrap.
+        // Follows-first snapshot format fires _followsSignal early so downstream
+        // steps can await follows via signal flows without waiting for full parse.
         val snapshotAgeSec = snapshotScheduler.getSnapshotAgeSeconds()
         val snapshotFresh = snapshotAgeSec < FRESHNESS_WINDOW_SEC
+        val snapshotJob = scope.launch {
+            snapshotScheduler.restoreIfPresent()
+            Log.d(TAG, "Phase1.5: snapshot restore complete (background)")
+        }
+
+        // Step 2: Wait for follows in MES, with snapshot-fresh fast path.
         val followsCached = memoryEventStore.getFollows(pubkeyHex)?.isNotEmpty() == true
 
-        val follows: Set<String>?
+        var follows: Set<String>?
         if (followsCached && snapshotFresh) {
             follows = memoryEventStore.getFollows(pubkeyHex)
             Log.d(TAG, "Phase1 Step2: follows snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${follows?.size} follows) — skipping refetch")
+        } else if (snapshotFresh) {
+            // Snapshot is fresh but follows not yet in MES — wait briefly for
+            // background restore. If the wait yields nothing (corrupted snapshot
+            // missing follows section, or restore is slower than expected), fall
+            // through to relay fetch. NEVER accept a null follows result when
+            // we have a relay connection available.
+            follows = withTimeoutOrNull(3_000L) {
+                memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
+            }
+            if (follows.isNullOrEmpty()) {
+                Log.w(TAG, "Phase1 Step2: snapshot follows missing — fetching from relay")
+                relayPool.fetchFollowList(pubkeyHex)
+                follows = withTimeoutOrNull(10_000L) {
+                    memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
+                }
+            }
+            Log.d(TAG, "Phase1 Step2: follows resolved (count=${follows?.size})")
         } else {
             relayPool.fetchFollowList(pubkeyHex)
             follows = withTimeoutOrNull(10_000L) {
@@ -166,13 +186,21 @@ class AppBootstrapper @Inject constructor(
         Log.d(TAG, "InitGate: follows signaled")
 
         // Step 3: Fetch kind-10002 (relay list) — wait for response via MES.
-        // Skip if snapshot was saved recently (< 6h) and has relay configs.
         val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
 
         val freshRelays: List<RelayConfig>?
         if (relaysBefore.isNotEmpty() && snapshotFresh) {
             freshRelays = relaysBefore
             Log.d(TAG, "Phase1 Step3: kind-10002 snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${freshRelays.size} relays) — skipping refetch")
+        } else if (snapshotFresh) {
+            // Snapshot being parsed in background — relay configs arrive during
+            // events section. Wait briefly for them.
+            freshRelays = withTimeoutOrNull(2_000L) {
+                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
+                    .filter { it.isNotEmpty() }
+                    .first()
+            }
+            Log.d(TAG, "Phase1 Step3: kind-10002 from background snapshot (${freshRelays?.size ?: "timeout"})")
         } else {
             relayPool.fetchRelayLists(listOf(pubkeyHex))
             freshRelays = withTimeoutOrNull(5_000L) {

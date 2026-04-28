@@ -2086,9 +2086,15 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         var section = 0  // 0=events, 1=aggregates, 2=relay_health, 3=follows
         var versionChecked = false
         var followsFiredEarly = false
+        var lineCount = 0
 
         reader.useLines { lines ->
             for (line in lines) {
+                // Yield every 500 events so dispatcher can service other work.
+                // Critical when restore runs in parallel with relay subscribe.
+                if (++lineCount % 500 == 0) {
+                    kotlinx.coroutines.yield()
+                }
                 if (!versionChecked) {
                     versionChecked = true
                     if (line != SNAPSHOT_VERSION) {

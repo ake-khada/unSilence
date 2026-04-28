@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -41,9 +42,18 @@ class SnapshotScheduler @Inject constructor(
     private val snapshotFile: AtomicFile,
 ) : DefaultLifecycleObserver {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Dedicated dispatcher. Snapshot restore is a long blocking parse —
+    // must not compete with WebSocket consume threads.
+    private val snapshotDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val scope = CoroutineScope(SupervisorJob() + snapshotDispatcher)
     private val mutex = Mutex()
     internal var periodicJob: Job? = null
+
+    // Guard: save() must not run before restoreIfPresent completes.
+    // Without this, a lifecycle-triggered save can overwrite the valid
+    // snapshot with empty MES data before restore reads it.
+    @Volatile
+    private var restored = false
 
     /**
      * Register as a ProcessLifecycleOwner observer.
@@ -73,10 +83,11 @@ class SnapshotScheduler @Inject constructor(
         }
     }
 
-    /** Age of the snapshot file in seconds, or [Long.MAX_VALUE] if no snapshot exists. */
+    /** Age of the snapshot file in seconds, or [Long.MAX_VALUE] if no snapshot exists or file is empty. */
     fun getSnapshotAgeSeconds(): Long {
         val baseFile = snapshotFile.baseFile
         if (!baseFile.exists()) return Long.MAX_VALUE
+        if (baseFile.length() == 0L) return Long.MAX_VALUE
         val lastModified = baseFile.lastModified()
         if (lastModified == 0L) return Long.MAX_VALUE
         return (System.currentTimeMillis() - lastModified) / 1000L
@@ -86,11 +97,12 @@ class SnapshotScheduler @Inject constructor(
      * Restore snapshot into MemoryEventStore if a valid snapshot file exists.
      * Called during AppBootstrapper Phase 1.5, BEFORE relay connections open.
      */
-    suspend fun restoreIfPresent() {
+    suspend fun restoreIfPresent() = withContext(snapshotDispatcher) {
         val baseFile = snapshotFile.baseFile
         if (!baseFile.exists()) {
             Log.d(TAG, "No snapshot file found, starting fresh")
-            return
+            restored = true
+            return@withContext
         }
         mutex.withLock {
             try {
@@ -100,6 +112,8 @@ class SnapshotScheduler @Inject constructor(
                 Log.d(TAG, "Snapshot restored from ${baseFile.length() / 1024}KB")
             } catch (e: Exception) {
                 Log.e(TAG, "Snapshot restore failed, starting fresh", e)
+            } finally {
+                restored = true
             }
         }
     }
@@ -107,9 +121,10 @@ class SnapshotScheduler @Inject constructor(
     /**
      * Save snapshot immediately. Called during teardown (logout) to persist
      * final state before clearing MemoryEventStore.
+     * Always runs — bypasses the [restored] guard (explicit caller intent).
      */
     suspend fun saveNow() {
-        save()
+        doSave()
     }
 
     /**
@@ -118,10 +133,19 @@ class SnapshotScheduler @Inject constructor(
      */
     fun deleteSnapshot() {
         snapshotFile.delete()
+        restored = false
         Log.d(TAG, "Snapshot deleted")
     }
 
     private suspend fun save() {
+        if (!restored) {
+            Log.d(TAG, "save() skipped — restore not yet complete")
+            return
+        }
+        doSave()
+    }
+
+    private suspend fun doSave() {
         mutex.withLock {
             val stream = snapshotFile.startWrite()
             try {
