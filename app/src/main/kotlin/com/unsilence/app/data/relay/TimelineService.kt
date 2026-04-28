@@ -80,14 +80,6 @@ class TimelineService @Inject constructor(
         val eosedCount = AtomicInteger(0)
         val multiHandles = Collections.synchronizedList(mutableListOf<Subscription.Handle>())
 
-        // floor(N/2) was too aggressive — many small outbox relays accept REQ
-        // without ever sending EOSE. Use ceil(N/4) so threshold trips after
-        // roughly a quarter of subs respond. Single-sub case unchanged.
-        // Jumble client.service.ts:351 uses floor(N/2). For N=1 this is 0 — emits
-        // on first partial EOSE so a single multi-URL SubRequest (Global, RelaySet)
-        // renders as soon as ANY relay responds, instead of waiting for all.
-        val threshold = if (subRequests.size <= 1) 0 else ((subRequests.size + 3) / 4)
-
         // Cross-sub dedup for onNew (Jumble's newEventIdSet)
         val newEventIdSet = ConcurrentHashMap.newKeySet<String>()
 
@@ -105,10 +97,12 @@ class TimelineService @Inject constructor(
                     onPerSubEvents = { events, eosed ->
                         perSubTimelines[index] = events
                         if (eosed) eosedCount.incrementAndGet()
-                        val totalEosed = eosedCount.get()
-                        if (totalEosed >= threshold) {
-                            val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
-                            val allEosed = totalEosed >= subRequests.size
+                        // Emit on every per-sub update so cached events render
+                        // immediately and pre-EOSE batches stream through. The
+                        // allEosed flag tells consumers when the load is final.
+                        val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
+                        if (merged.isNotEmpty()) {
+                            val allEosed = eosedCount.get() >= subRequests.size
                             try { onEvents(merged, allEosed) } catch (t: Throwable) {
                                 Log.w(TAG, "onEvents threw", t)
                             }

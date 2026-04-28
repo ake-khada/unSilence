@@ -84,7 +84,7 @@ class TimelineServiceTest {
     }
 
     @Test
-    fun `multi subRequest threshold fires onEvents at half`() = runTest {
+    fun `multi subRequest emits on each per-sub update`() = runTest {
         val emissions = CopyOnWriteArrayList<Pair<Int, Boolean>>()
         val subRequests = listOf("a", "b", "c", "d").map {
             SubRequest(urls = listOf("wss://$it"), filter = NostrFilter(kinds = listOf(1), limit = 100))
@@ -97,12 +97,14 @@ class TimelineServiceTest {
             .filter { it.msg.startsWith("[\"REQ\"") }
             .map { extractSubId(it.msg) }
         assertEquals(4, reqSubIds.size)
-        // EOSE first 2 — threshold met
+        // First sub gets an event + EOSE — emits immediately (no threshold gate)
+        tapRegistry.fire(eventMessage(reqSubIds[0], id = "a".repeat(64), createdAt = 100), "wss://a")
         tapRegistry.fire("""["EOSE","${reqSubIds[0]}"]""", "wss://a")
+        assertTrue("should emit on first per-sub EOSE with events", emissions.isNotEmpty())
+        assertEquals("merged has 1 event", 1, emissions.last().first)
+        assertTrue("not all subs done yet", !emissions.last().second)
+        // Complete remaining (no events — merged still non-empty from sub a)
         tapRegistry.fire("""["EOSE","${reqSubIds[1]}"]""", "wss://b")
-        assertTrue("threshold should have fired onEvents", emissions.isNotEmpty())
-        assertTrue("first emission should be eosed=false", emissions.any { !it.second })
-        // Complete remaining
         tapRegistry.fire("""["EOSE","${reqSubIds[2]}"]""", "wss://c")
         tapRegistry.fire("""["EOSE","${reqSubIds[3]}"]""", "wss://d")
         assertTrue("final emission should be eosed=true", emissions.last().second)

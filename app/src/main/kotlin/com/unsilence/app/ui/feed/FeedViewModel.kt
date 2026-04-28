@@ -4,9 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.memory.FeedFilter
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -363,37 +361,8 @@ class FeedViewModel @Inject constructor(
     }
 
     private suspend fun resubscribe(type: FeedType) {
-        val ownPubkey = keyManager.getPublicKeyHex()
-        val cached = loadCachedEvents(type, ownPubkey)
         val subRequests = buildSubRequests(type)
-        consumer.subscribe(subRequests, cached)
-    }
-
-    private fun loadCachedEvents(type: FeedType, ownPubkey: String?): List<NostrEvent> {
-        val kinds = setOf(1, 6, 20, 21, 30023)
-        val filter = when (type) {
-            is FeedType.Following -> {
-                val follows = ownPubkey
-                    ?.let { memoryEventStore.getFollows(it) }
-                    ?: return emptyList()
-                if (follows.isEmpty()) return emptyList()
-                FeedFilter(kinds = kinds, followedPubkeys = follows, contentFilter = 0)
-            }
-            is FeedType.Global -> FeedFilter(kinds = kinds, contentFilter = 0)
-            is FeedType.SingleRelay -> FeedFilter(
-                kinds = kinds,
-                contentFilter = 0,
-                relayUrls = setOf(type.url),
-            )
-            is FeedType.RelaySet -> {
-                val members = ownPubkey
-                    ?.let { memoryEventStore.getSetMembers(it, type.dTag) }
-                    ?: return emptyList()
-                if (members.isEmpty()) return emptyList()
-                FeedFilter(kinds = kinds, contentFilter = 0, relayUrls = members.toSet())
-            }
-        }
-        return memoryEventStore.feedEvents(filter, 300)
+        consumer.subscribe(subRequests)
     }
 
     private fun buildSubRequests(type: FeedType): List<SubRequest> {

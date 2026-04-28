@@ -2,6 +2,7 @@ package com.unsilence.app.data.relay
 
 import com.unsilence.app.data.memory.RelayTrustScoreEntity
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -24,6 +25,8 @@ class OutboxRelayResolverTest {
 
     private fun hexPubkey(i: Int): String = "%064x".format(i)
 
+    // ── resolveFollowing ─────────────────────────────────────────────────
+
     @Test
     fun `resolveFollowing returns empty for empty authors`() {
         val result = resolver.resolveFollowing(
@@ -36,7 +39,7 @@ class OutboxRelayResolverTest {
     }
 
     @Test
-    fun `resolveFollowing returns single SubRequest with deduplicated relays`() {
+    fun `resolveFollowing produces per-relay SubRequests`() {
         metadata.setWriteRelays("a".repeat(64), listOf("wss://shared.example", "wss://r1.example"))
         metadata.setWriteRelays("b".repeat(64), listOf("wss://shared.example", "wss://r2.example"))
         metadata.setWriteRelays("c".repeat(64), listOf("wss://shared.example"))
@@ -48,37 +51,33 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals(1, result.size)
-        // All 3 authors in the single SubRequest
-        assertEquals(3, result[0].filter.authors?.size)
-        // 4 unique relays: global (fallback) + shared, r1, r2
-        assertEquals(4, result[0].urls.size)
-        assertTrue(result[0].urls.contains("wss://global.example"))
-        assertTrue(result[0].urls.contains("wss://shared.example"))
-        assertTrue(result[0].urls.contains("wss://r1.example"))
-        assertTrue(result[0].urls.contains("wss://r2.example"))
+        // 1 fallback + 3 write relays = 4 SubRequests
+        assertEquals(4, result.size)
+
+        // Each SubRequest has exactly 1 URL
+        assertTrue(result.all { it.urls.size == 1 })
+
+        // Fallback relay has all 3 authors
+        val fallback = result.first { it.urls[0] == "wss://global.example" }
+        assertEquals(3, fallback.filter.authors?.size)
+
+        // shared.example has all 3 authors
+        val shared = result.first { it.urls[0] == "wss://shared.example" }
+        assertEquals(3, shared.filter.authors?.size)
+
+        // r1 has only "a"
+        val r1 = result.first { it.urls[0] == "wss://r1.example" }
+        assertEquals(1, r1.filter.authors?.size)
+        assertTrue(r1.filter.authors!!.contains("a".repeat(64)))
+
+        // r2 has only "b"
+        val r2 = result.first { it.urls[0] == "wss://r2.example" }
+        assertEquals(1, r2.filter.authors?.size)
+        assertTrue(r2.filter.authors!!.contains("b".repeat(64)))
     }
 
     @Test
-    fun `resolveFollowing includes all authors in single SubRequest`() {
-        metadata.setWriteRelays("a".repeat(64), listOf("wss://r1.example", "wss://r2.example"))
-        metadata.setWriteRelays("b".repeat(64), listOf("wss://r1.example", "wss://r2.example"))
-
-        val result = resolver.resolveFollowing(
-            authors = setOf("a".repeat(64), "b".repeat(64)),
-            fallbackRelays = listOf("wss://global.example"),
-            blockedRelays = emptySet(),
-            config = defaultConfig,
-        )
-
-        assertEquals(1, result.size)
-        assertEquals(2, result[0].filter.authors?.size)
-        // global (fallback) + r1 + r2 = 3 URLs
-        assertEquals(3, result[0].urls.size)
-    }
-
-    @Test
-    fun `resolveFollowing takes top 5 write relays per author`() {
+    fun `resolveFollowing takes top 4 write relays per author`() {
         val relays = (1..8).map { "wss://r$it.example" }
         metadata.setWriteRelays("a".repeat(64), relays)
 
@@ -89,10 +88,9 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals(1, result.size)
-        // 1 fallback + 5 write = 6 URLs
-        assertEquals(6, result[0].urls.size)
-        assertTrue(result[0].urls.contains("wss://global.example"))
+        // 1 fallback + 4 write = 5 SubRequests
+        assertEquals(5, result.size)
+        assertTrue(result.all { it.urls.size == 1 })
     }
 
     @Test
@@ -106,10 +104,10 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals(1, result.size)
-        assertTrue(result[0].urls.contains("wss://ok.example"))
-        assertTrue(result[0].urls.contains("wss://global.example"))
-        assertTrue(!result[0].urls.contains("wss://blocked.example"))
+        val allUrls = result.flatMap { it.urls }.toSet()
+        assertTrue(allUrls.contains("wss://ok.example"))
+        assertTrue(allUrls.contains("wss://global.example"))
+        assertFalse(allUrls.contains("wss://blocked.example"))
     }
 
     @Test
@@ -125,9 +123,9 @@ class OutboxRelayResolverTest {
             config = defaultConfig.copy(minTrustScore = 30),
         )
 
-        assertEquals(1, result.size)
-        assertTrue(result[0].urls.contains("wss://ok.example"))
-        assertTrue(!result[0].urls.contains("wss://lowtrust.example"))
+        val allUrls = result.flatMap { it.urls }.toSet()
+        assertTrue(allUrls.contains("wss://ok.example"))
+        assertFalse(allUrls.contains("wss://lowtrust.example"))
     }
 
     @Test
@@ -141,8 +139,8 @@ class OutboxRelayResolverTest {
             config = defaultConfig.copy(minTrustScore = 30),
         )
 
-        assertEquals(1, result.size)
-        assertTrue(result[0].urls.contains("wss://unknown.example"))
+        val allUrls = result.flatMap { it.urls }.toSet()
+        assertTrue(allUrls.contains("wss://unknown.example"))
     }
 
     @Test
@@ -154,14 +152,14 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
+        // Only 1 fallback SubRequest, no write relays
         assertEquals(1, result.size)
         assertEquals(listOf("wss://fallback.example"), result[0].urls)
         assertEquals(2, result[0].filter.authors?.size)
     }
 
     @Test
-    fun `resolveFollowing always includes fallback relays`() {
-        // Mix: one author with relays, one without
+    fun `resolveFollowing fallback has all authors and write has subset`() {
         metadata.setWriteRelays("a".repeat(64), listOf("wss://known.example"))
 
         val result = resolver.resolveFollowing(
@@ -171,20 +169,46 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals(1, result.size)
-        assertEquals(2, result[0].filter.authors?.size)
-        // Both fallback and write relay included
-        assertTrue(result[0].urls.contains("wss://fallback.example"))
-        assertTrue(result[0].urls.contains("wss://known.example"))
-        assertEquals(2, result[0].urls.size)
+        // 1 fallback + 1 write = 2 SubRequests
+        assertEquals(2, result.size)
+
+        // Fallback has ALL authors
+        val fallback = result.first { it.urls[0] == "wss://fallback.example" }
+        assertEquals(2, fallback.filter.authors?.size)
+
+        // Write relay has only its covered author
+        val write = result.first { it.urls[0] == "wss://known.example" }
+        assertEquals(1, write.filter.authors?.size)
+        assertTrue(write.filter.authors!!.contains("a".repeat(64)))
     }
 
     @Test
-    fun `resolveFollowing many authors produce single SubRequest`() {
-        for (i in 0 until 100) {
-            metadata.setWriteRelays(hexPubkey(i), listOf("wss://r${i % 20}.example"))
+    fun `resolveFollowing deduplicates write relay that matches fallback`() {
+        metadata.setWriteRelays("a".repeat(64), listOf("wss://global.example", "wss://other.example"))
+
+        val result = resolver.resolveFollowing(
+            authors = setOf("a".repeat(64)),
+            fallbackRelays = listOf("wss://global.example"),
+            blockedRelays = emptySet(),
+            config = defaultConfig,
+        )
+
+        // Fallback already covers global.example — only 1 fallback + 1 other = 2
+        assertEquals(2, result.size)
+        val urls = result.map { it.urls[0] }.toSet()
+        assertEquals(setOf("wss://global.example", "wss://other.example"), urls)
+    }
+
+    @Test
+    fun `resolveFollowing prunes write relays beyond 10 by coverage`() {
+        // 15 unique relays. r0 covers 5 authors, r1-r14 each cover 1 unique author.
+        for (i in 0 until 5) {
+            metadata.setWriteRelays(hexPubkey(i), listOf("wss://r0.example", "wss://r${i + 1}.example"))
         }
-        val authors = (0 until 100).map { hexPubkey(it) }.toSet()
+        for (i in 5 until 15) {
+            metadata.setWriteRelays(hexPubkey(i), listOf("wss://r${i + 1}.example"))
+        }
+        val authors = (0 until 15).map { hexPubkey(it) }.toSet()
 
         val result = resolver.resolveFollowing(
             authors = authors,
@@ -193,19 +217,42 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals("always 1 SubRequest", 1, result.size)
-        assertEquals(100, result[0].filter.authors?.size)
-        // 20 write relays + 1 fallback = 21 URLs
-        assertEquals(21, result[0].urls.size)
+        // 1 fallback + max 10 write = 11 SubRequests
+        val fallbackCount = result.count { it.urls[0] == "wss://fallback.example" }
+        val writeCount = result.size - fallbackCount
+        assertEquals(1, fallbackCount)
+        assertTrue("write relays should be capped at 10, got $writeCount", writeCount <= 10)
+
+        // r0 should be selected (covers 5 authors — highest coverage)
+        val writeUrls = result.filter { it.urls[0] != "wss://fallback.example" }.map { it.urls[0] }
+        assertTrue("highest-coverage relay should be selected", writeUrls.contains("wss://r0.example"))
     }
 
     @Test
-    fun `resolveFollowing caps write relays at MAX_WRITE_RELAYS`() {
-        // 50 authors, each on a unique relay — 50 unique write relays
-        for (i in 0 until 50) {
+    fun `resolveFollowing authors are sorted in each SubRequest`() {
+        metadata.setWriteRelays("c".repeat(64), listOf("wss://shared.example"))
+        metadata.setWriteRelays("a".repeat(64), listOf("wss://shared.example"))
+        metadata.setWriteRelays("b".repeat(64), listOf("wss://shared.example"))
+
+        val result = resolver.resolveFollowing(
+            authors = setOf("c".repeat(64), "a".repeat(64), "b".repeat(64)),
+            fallbackRelays = listOf("wss://global.example"),
+            blockedRelays = emptySet(),
+            config = defaultConfig,
+        )
+
+        for (sr in result) {
+            val authors = sr.filter.authors!!
+            assertEquals("authors should be sorted in SubRequest for ${sr.urls}", authors.sorted(), authors)
+        }
+    }
+
+    @Test
+    fun `resolveFollowing no pruning when 10 or fewer write relays`() {
+        for (i in 0 until 10) {
             metadata.setWriteRelays(hexPubkey(i), listOf("wss://r$i.example"))
         }
-        val authors = (0 until 50).map { hexPubkey(it) }.toSet()
+        val authors = (0 until 10).map { hexPubkey(it) }.toSet()
 
         val result = resolver.resolveFollowing(
             authors = authors,
@@ -214,12 +261,11 @@ class OutboxRelayResolverTest {
             config = defaultConfig,
         )
 
-        assertEquals(1, result.size)
-        // 1 fallback + 20 top-coverage write relays = 21
-        assertEquals(21, result[0].urls.size)
-        // Fallback relay is always included
-        assertTrue(result[0].urls.contains("wss://fallback.example"))
+        // 1 fallback + 10 write = 11 (no pruning needed)
+        assertEquals(11, result.size)
     }
+
+    // ── resolveGlobal ────────────────────────────────────────────────────
 
     @Test
     fun `resolveGlobal returns single SubRequest with read relays`() {
