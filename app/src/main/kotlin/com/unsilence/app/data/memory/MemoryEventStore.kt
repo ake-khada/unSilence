@@ -7,6 +7,7 @@ import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
@@ -231,6 +232,8 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
+    private val _snapshotRestoredSignal = MutableStateFlow(0L)
+    val snapshotRestoredFlow: StateFlow<Long> = _snapshotRestoredSignal
 
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
@@ -2173,6 +2176,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _followsSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
+        _snapshotRestoredSignal.value = now
 
         // Evict old content events from snapshot (may contain stale data)
         evictOldContentEvents()
@@ -2478,6 +2482,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _statsSignal.value = 0L
         _followsSignal.value = 0L
         _actionSignal.value = 0L
+        _snapshotRestoredSignal.value = 0L
         _relayConfigSignal.value = 0L
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()

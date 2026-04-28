@@ -150,6 +150,19 @@ class TimelineConsumer(
         }
     }
 
+    /**
+     * Merge cached events (e.g. from snapshot restore) into the current event
+     * list without disrupting an active subscription. Unlike [subscribe], this
+     * does NOT close the current handle or reset pending state.
+     */
+    fun addCachedEvents(events: List<NostrEvent>) {
+        if (events.isEmpty()) return
+        _events.update { current ->
+            (events + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
+        }
+        _isLoading.value = false
+    }
+
     private fun handleNewEvents(newEvents: List<NostrEvent>) {
         if (newEvents.isEmpty()) return
         if (_isAtTop.value) {

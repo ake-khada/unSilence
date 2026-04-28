@@ -128,6 +128,7 @@ class FeedViewModel @Inject constructor(
                 }
             }
                 .distinctUntilChanged()
+                .debounce(2_000L) // coalesce kind-10002 bursts HERE, not globally
                 .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
         }
     }
@@ -363,7 +364,8 @@ class FeedViewModel @Inject constructor(
 
         // Resubscribe collector — fires when feedType, relay-metadata-version,
         // refreshCounter, or filter changes. Gated on coldStartState != LOADING.
-        // 2s debounce coalesces the burst of kind-10002 inserts during Phase 2.
+        // Debounce is on relayMetadataVersion only (kind-10002 burst coalescing)
+        // so user actions (feed switch, refresh, filter) fire immediately.
         viewModelScope.launch {
             combine(
                 _coldStartState,
@@ -371,23 +373,29 @@ class FeedViewModel @Inject constructor(
                 relayMetadataVersion,
                 _refreshCounter,
                 _filter,
-            ) { args ->
-                @Suppress("UNCHECKED_CAST")
-                ResubKey(
-                    state = args[0] as ColdStartState,
-                    type = args[1] as FeedType,
-                    ver = args[2] as Int,
-                    refresh = args[3] as Int,
-                    filter = args[4] as com.unsilence.app.domain.model.FeedFilter,
-                )
+            ) { state, type, ver, refresh, filter ->
+                ResubKey(state, type, ver, refresh, filter)
             }
                 .filter { it.state != ColdStartState.LOADING }
-                .debounce(2_000L)
-                .distinctUntilChangedBy { it.type to it.ver to it.refresh to it.filter }
+                .distinctUntilChangedBy {
+                    Triple(it.type, it.ver to it.refresh, it.filter)
+                }
                 .collectLatest { key ->
                     Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} refresh=${key.refresh}")
                     resubscribe(key.type)
                 }
+        }
+
+        // One-shot: merge cached events when snapshot restore completes.
+        // Fires once — snapshot events merge into whatever the consumer already
+        // has from relay subscriptions, without disrupting active subs.
+        viewModelScope.launch {
+            memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
+            val cached = loadCachedEvents(_feedType.value)
+            if (cached.isNotEmpty()) {
+                Log.d(TAG, "snapshot restored: merging ${cached.size} cached events")
+                consumer.addCachedEvents(cached)
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 28, 2026 (P9: V2 subscription pipeline, V1 orphan deletion, flat-list outbox routing, batch signal coalescing.)
+**Last updated:** April 28, 2026 (P11-fix: pre-debounce relay metadata, snapshot merge, deferred notifications.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -175,11 +175,11 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 35. **TimelineConsumer is the sole feed primitive** — FeedViewModel, ProfileViewModel, UserProfileViewModel all delegate to TimelineConsumer instances. Each consumer owns a Subscription lifecycle. Events arrive via Subscription tap callbacks, not MES signal polling
 36. **Outbox routing is flat-list + coverage cap** — OutboxRelayResolver produces ONE SubRequest with all authors + all relays. User's read relays always included (PERSISTENT-connected). Top-20 write relays by author coverage added. Total ~21 URLs. No bin-packing, no multi-SubRequest splitting
 37. **EOSE threshold** — `floor(N/2)` for N>1 SubRequests, 0 for N=1. Single SubRequest (the normal case) means events emit on first relay's partial EOSE
-38. **Resubscribe on relay-metadata milestones** — FeedViewModel watches MES relay-metadata version (`metaVer`). As kind-10002 events arrive during cold start, outbox resolution improves (more write relays known). Each milestone triggers resubscribe with updated relay URLs
+38. **Resubscribe on relay-metadata milestones** — FeedViewModel watches MES relay-metadata version (`metaVer`). Debounce(2s) is on `relayMetadataVersion` only (pre-debounce), NOT on the combine — user actions (feed switch, refresh, filter) fire immediately. Each milestone triggers resubscribe with updated relay URLs
 39. **No V1 parallel pipelines** — `subscribeAfterConnect`, `OutboxRouter.connectForAuthors`, `RelayPool.fetchNotifications` all deleted. No `feed-{hash}`, `follows-{hash}`, or `notifs-{ts}` subscription IDs. No `persistentSubs` replay infrastructure. All feed subscriptions are V2 `sub-{seq}-{hash}`
 40. **Viewport tracking in screens** — `onViewportChanged(first, last)` forwarded to TimelineConsumer for load-more triggers. All three screens wired (FeedScreen, ProfileScreen, UserProfileScreen)
-41. **Feed cache hydration on resubscribe** — `FeedViewModel.loadCachedEvents()` queries MES by feed type (Following → `eventsByAuthors`, Global → `recentEvents`, SingleRelay → `eventsByRelay`, RelaySet → per-URL merge). Passed as `initialCachedEvents` to `TimelineConsumer.subscribe()` for instant render before relay EOSE
-42. **Notifications relay subscription** — `NotificationsViewModel` owns a `Subscription.Handle` for `#p` mentions (kinds 1/6/7/9735) on user's read relays. Events flow through EventProcessor → MES → `notificationsFlow`. Handle closed in `onCleared()`
+41. **Feed cache hydration on resubscribe** — `FeedViewModel.loadCachedEvents()` queries MES by feed type (Following → `eventsByAuthors`, Global → `recentEvents`, SingleRelay → `eventsByRelay`, RelaySet → per-URL merge). Passed as `initialCachedEvents` to `TimelineConsumer.subscribe()` for instant render before relay EOSE. **Snapshot merge** — one-shot `snapshotRestoredFlow` handler merges cached events via `consumer.addCachedEvents()` without disrupting active subscriptions
+42. **Notifications relay subscription** — `NotificationsViewModel` owns a `Subscription.Handle` for `#p` mentions (kinds 1/6/7/9735) on user's read relays. **Deferred via InitGate** — `awaitFeedConnections()` ensures subscription fires after relay connections are established, not at T+0. Events flow through EventProcessor → MES → `notificationsFlow`. Handle closed in `onCleared()`
 43. **Avatar profile autofetch** — `AvatarImage` accepts optional `lookupProfile` callback. When picture is null, triggers 800ms debounced `LaunchedEffect` to fetch profile. Wired through `AuthorHeader` → `EventCard` (standard layout) and `QuoteCard`
 44. **Embedded video in all card roles** — `showVideo = role != CardRole.Article` (not just Feed/Profile). Quoted notes and thread replies render inline video
 
