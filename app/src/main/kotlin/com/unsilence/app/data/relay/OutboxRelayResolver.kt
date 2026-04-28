@@ -6,6 +6,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "OutboxResolver"
+private const val MAX_WRITE_RELAYS_PER_AUTHOR = 4
+private const val MAX_OUTBOX_RELAYS = 10
 
 /**
  * Read-only relay metadata source. Implemented by [com.unsilence.app.data.memory.MemoryEventStore]
@@ -20,13 +22,13 @@ interface RelayMetadataSource {
 /**
  * Builds [SubRequest] lists for outbox-routed feeds.
  *
- * Mirrors Jumble's pattern (client.service.ts:160-170): for each followed
- * author, gather their top-5 write relays, flatten + deduplicate into a
- * single flat URL list. ONE SubRequest with all authors + all relays.
- * Relays handle server-side author filtering.
+ * Mirrors Jumble's generateSubRequestsForPubkeys (client.service.ts:1542):
+ * produces N SubRequests, ONE PER RELAY, each with `urls: [oneRelay]` ×
+ * `authors: [authorsAtThisRelay]`. Fallback relays (user's read relays)
+ * carry all authors; write relays carry only the authors who publish there.
  *
- * This produces a single Subscription → single EOSE threshold (0 for N=1
- * SubRequest) → events emit on FIRST relay's partial EOSE.
+ * Per-relay routing means each relay gets a targeted author list instead of
+ * the full 250+ author set, and each relay's EOSE is independent.
  */
 @Singleton
 class OutboxRelayResolver @Inject constructor(
@@ -54,11 +56,11 @@ class OutboxRelayResolver @Inject constructor(
         if (authors.isEmpty()) return emptyList()
 
         val trustScores = metadata.getTrustScores()
+        val sortedAuthors = authors.sorted()
 
-        // Build relay → authors-who-write-there map from per-author write relays.
-        // Used to rank relays by coverage (how many followed authors they serve).
+        // Build relay → covered-authors map (per-relay SubRequest routing).
         val relayCoverage = HashMap<String, MutableSet<String>>()
-        for (author in authors) {
+        for (author in sortedAuthors) {
             val authorRelays = metadata.writeRelaysFor(author)
                 .mapNotNull { normalizeRelayUrl(it) }
                 .filter { it !in blockedRelays }
@@ -66,49 +68,77 @@ class OutboxRelayResolver @Inject constructor(
                     val score = trustScores[url]?.score
                     score == null || score >= config.minTrustScore
                 }
-                .take(5)
+                .take(MAX_WRITE_RELAYS_PER_AUTHOR)
             for (relay in authorRelays) {
                 relayCoverage.getOrPut(relay) { mutableSetOf() }.add(author)
             }
         }
 
-        // Always include user's read relays — they're PERSISTENT-connected
-        // and aggregate content from many authors.
-        val baseUrls = fallbackRelays
+        // Fallback relays — always included, each as own SubRequest with ALL authors.
+        val baseUrlSet = fallbackRelays
             .mapNotNull { normalizeRelayUrl(it) }
             .filter { it !in blockedRelays }
+            .distinct()
+            .toSet()
 
-        // Add top write relays sorted by author coverage. Cap at 20 to
-        // avoid connecting to hundreds of personal outbox relays.
-        val topWriteRelays = relayCoverage.entries
-            .sortedByDescending { it.value.size }
-            .take(MAX_WRITE_RELAYS)
-            .map { it.key }
+        // Write relays (exclude fallbacks — they already carry all authors).
+        val writeRelayUrls = relayCoverage.keys.filter { it !in baseUrlSet }
 
-        val finalUrls = (baseUrls + topWriteRelays).distinct()
+        // Coverage pruning: greedy set cover if >10 write relays.
+        val selectedWriteRelays: List<String> = if (writeRelayUrls.size > MAX_OUTBOX_RELAYS) {
+            val uncovered = sortedAuthors.toMutableSet()
+            val selected = mutableListOf<String>()
+            val remaining = writeRelayUrls.toMutableList()
+            while (selected.size < MAX_OUTBOX_RELAYS && uncovered.isNotEmpty() && remaining.isNotEmpty()) {
+                val best = remaining.maxByOrNull { url ->
+                    relayCoverage[url]?.count { it in uncovered } ?: 0
+                } ?: break
+                val newCoverage = relayCoverage[best]?.count { it in uncovered } ?: 0
+                if (newCoverage == 0) break
+                selected.add(best)
+                uncovered.removeAll(relayCoverage[best] ?: emptySet())
+                remaining.remove(best)
+            }
+            selected
+        } else {
+            writeRelayUrls
+        }
 
-        if (finalUrls.isEmpty()) return emptyList()
+        val subRequests = mutableListOf<SubRequest>()
 
-        Log.d(TAG, "resolveFollowing: ${authors.size} authors, " +
-            "${relayCoverage.size} total write relays -> ${finalUrls.size} URLs " +
-            "(${baseUrls.size} read + ${topWriteRelays.size} top-write)")
-
-        return listOf(
-            SubRequest(
-                urls = finalUrls,
+        // Fallback relays: each gets all authors.
+        for (url in baseUrlSet.sorted()) {
+            subRequests.add(SubRequest(
+                urls = listOf(url),
                 filter = NostrFilter(
                     kinds = config.kinds,
-                    authors = authors.toList(),
+                    authors = sortedAuthors,
                     limit = config.limit,
                     since = config.since,
                 ),
-            )
-        )
-    }
+            ))
+        }
 
-    companion object {
-        /** Max write relays to include beyond the user's read relays. */
-        const val MAX_WRITE_RELAYS = 20
+        // Write relays: each gets only its covered authors (sorted for stable cache keys).
+        for (url in selectedWriteRelays.sorted()) {
+            val relayAuthors = relayCoverage[url]?.sorted() ?: continue
+            subRequests.add(SubRequest(
+                urls = listOf(url),
+                filter = NostrFilter(
+                    kinds = config.kinds,
+                    authors = relayAuthors,
+                    limit = config.limit,
+                    since = config.since,
+                ),
+            ))
+        }
+
+        if (subRequests.isEmpty()) return emptyList()
+
+        Log.d(TAG, "resolveFollowing: ${authors.size} authors -> ${subRequests.size} SubRequests " +
+            "(${baseUrlSet.size} fallback + ${selectedWriteRelays.size} write)")
+
+        return subRequests
     }
 
     /**

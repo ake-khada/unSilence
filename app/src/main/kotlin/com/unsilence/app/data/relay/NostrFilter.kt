@@ -24,23 +24,23 @@ data class NostrFilter(
     val search: String? = null,
     val tags: Map<String, List<String>>? = null,
 ) {
-    /** Serialize to a NIP-01 filter JSON object. */
+    /** Serialize to a NIP-01 filter JSON object. Collections sorted for stable cache keys. */
     fun toJsonObject(): JsonObject = buildJsonObject {
         kinds?.let {
-            put("kinds", buildJsonArray { it.forEach { v -> add(JsonPrimitive(v)) } })
+            put("kinds", buildJsonArray { it.sorted().forEach { v -> add(JsonPrimitive(v)) } })
         }
         authors?.let {
-            put("authors", buildJsonArray { it.forEach { v -> add(JsonPrimitive(v)) } })
+            put("authors", buildJsonArray { it.sorted().forEach { v -> add(JsonPrimitive(v)) } })
         }
         ids?.let {
-            put("ids", buildJsonArray { it.forEach { v -> add(JsonPrimitive(v)) } })
+            put("ids", buildJsonArray { it.sorted().forEach { v -> add(JsonPrimitive(v)) } })
         }
         since?.let { put("since", JsonPrimitive(it)) }
         until?.let { put("until", JsonPrimitive(it)) }
         limit?.let { put("limit", JsonPrimitive(it)) }
         search?.let { put("search", JsonPrimitive(it)) }
-        tags?.forEach { (name, values) ->
-            put("#$name", buildJsonArray { values.forEach { add(JsonPrimitive(it)) } })
+        tags?.toSortedMap()?.forEach { (name, values) ->
+            put("#$name", buildJsonArray { values.sorted().forEach { add(JsonPrimitive(it)) } })
         }
     }
 }
