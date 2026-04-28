@@ -429,10 +429,13 @@ class EventProcessor @Inject constructor(
             }
         }
 
-        for (event in events.values) {
-            memoryEventStore.insert(event)
-            // Pre-compute media metadata at insert time (sidecar caches).
-            // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
+        // Batch insert with coalesced signal bumps: ≤5 bumps instead of N.
+        val eventList = events.values.toList()
+        memoryEventStore.insertBatch(eventList)
+
+        // Pre-compute media metadata at insert time (sidecar caches).
+        // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
+        for (event in eventList) {
             if (event.kind in setOf(1, 6, 20, 21)) {
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
                 val models = buildVideoRenderModels(event.kind, event.content, event.tags)
