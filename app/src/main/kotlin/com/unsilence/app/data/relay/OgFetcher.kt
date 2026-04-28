@@ -121,17 +121,19 @@ class OgFetcher @Inject constructor(
         private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
         private const val MAX_BODY_SIZE = 50_000L
 
-        // Matches property= or name= with og: prefix, in either order with content=
+        // Matches property= or name= with og: prefix, in either order with content=.
+        // Handles both quoted (content="val") and unquoted (content=val) attributes
+        // — minified HTML often drops quotes from values without spaces.
         private val OG_TAG_REGEX = Regex(
-            """<meta\s+[^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
-            """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*(?:property|name)\s*=\s*["']og:(\w+)["'][^>]*/?>""",
+            """<meta\s+[^>]*(?:property|name)\s*=\s*["']?og:(\w+)["']?[\s/][^>]*content\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*/?>|""" +
+            """<meta\s+[^>]*content\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[\s/][^>]*(?:property|name)\s*=\s*["']?og:(\w+)["']?[^>]*/?>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
         )
 
         // Fallback: twitter card tags (twitter:image, twitter:title, etc.)
         private val TWITTER_TAG_REGEX = Regex(
-            """<meta\s+[^>]*(?:property|name)\s*=\s*["']twitter:(\w+)["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*/?>|""" +
-            """<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*(?:property|name)\s*=\s*["']twitter:(\w+)["'][^>]*/?>""",
+            """<meta\s+[^>]*(?:property|name)\s*=\s*["']?twitter:(\w+)["']?[\s/][^>]*content\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[^>]*/?>|""" +
+            """<meta\s+[^>]*content\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))[\s/][^>]*(?:property|name)\s*=\s*["']?twitter:(\w+)["']?[^>]*/?>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
         )
 
@@ -169,15 +171,23 @@ class OgFetcher @Inject constructor(
             }
         }
 
+        /** Extract key and value from a 6-group OG/Twitter regex match. */
+        private fun extractKeyValue(match: MatchResult): Pair<String, String> {
+            // Pattern 1 (property before content): groups 1=key, 2=quoted-val, 3=unquoted-val
+            // Pattern 2 (content before property): groups 4=quoted-val, 5=unquoted-val, 6=key
+            val key = match.groupValues[1].ifBlank { match.groupValues[6] }
+            val value = match.groupValues[2].ifBlank {
+                match.groupValues[3].ifBlank {
+                    match.groupValues[4].ifBlank { match.groupValues[5] }
+                }
+            }
+            return key to value
+        }
+
         internal fun parseOgTags(html: String, originalUrl: String): OgMetadata? {
             val ogTags = mutableMapOf<String, String>()
             for (match in OG_TAG_REGEX.findAll(html)) {
-                val key1 = match.groupValues[1]
-                val val1 = match.groupValues[2]
-                val key2 = match.groupValues[4]
-                val val2 = match.groupValues[3]
-                val key = key1.ifBlank { key2 }
-                val value = val1.ifBlank { val2 }
+                val (key, value) = extractKeyValue(match)
                 if (key.isNotBlank() && value.isNotBlank()) {
                     ogTags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
                 }
@@ -186,12 +196,7 @@ class OgFetcher @Inject constructor(
             // Fallback: twitter card tags fill any gaps
             val twitterTags = mutableMapOf<String, String>()
             for (match in TWITTER_TAG_REGEX.findAll(html)) {
-                val key1 = match.groupValues[1]
-                val val1 = match.groupValues[2]
-                val key2 = match.groupValues[4]
-                val val2 = match.groupValues[3]
-                val key = key1.ifBlank { key2 }
-                val value = val1.ifBlank { val2 }
+                val (key, value) = extractKeyValue(match)
                 if (key.isNotBlank() && value.isNotBlank()) {
                     twitterTags.putIfAbsent(key.lowercase(), decodeHtmlEntities(value))
                 }
