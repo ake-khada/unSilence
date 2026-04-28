@@ -94,7 +94,7 @@ class Subscription @Inject constructor(
     ): Handle {
         ensureTapRegistered()
 
-        val urlSet = urls.toSet()
+        val urlSet = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val subId = generateSubId(urls)
         val state = SubState(
             urls = urlSet,

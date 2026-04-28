@@ -240,7 +240,7 @@ class AppBootstrapper @Inject constructor(
         for (url in globalUrls) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
-        relayPool.connect(globalUrls)
+        relayPool.connectAndAwait(globalUrls, timeoutMs = 5_000)
         initGate.signalFeedConnectionsReady()
         Log.d(TAG, "Phase1 complete: relay connections active (${globalUrls.size} relays)")
 

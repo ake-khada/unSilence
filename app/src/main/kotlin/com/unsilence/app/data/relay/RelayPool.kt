@@ -585,7 +585,30 @@ class RelayPool @Inject constructor(
             scope.launch { listenForEvents(conn) }
             newConns.add(conn)
         }
-        if (newConns.isEmpty()) return connections.values.count { it.isConnected }
+        if (newConns.isEmpty()) {
+            // All URLs already in pool — wait for at least one to be connected.
+            // connect() (non-suspending) creates connection entries that may still
+            // be handshaking. Return early only if at least one is ready; otherwise
+            // poll just like we do for newly-created connections.
+            val existingConns = relayUrls.mapNotNull { normalizeRelayUrl(it) }
+                .filter { it !in blockedUrls }
+                .mapNotNull { connections[it] }
+            if (existingConns.isEmpty()) return 0
+            val alreadyReady = existingConns.count { it.isConnected }
+            if (alreadyReady > 0) return alreadyReady
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val ready = existingConns.count { it.isConnected }
+                if (ready > 0) {
+                    Log.d(TAG, "connectAndAwait: $ready/${existingConns.size} relay(s) ready (existing)")
+                    return ready
+                }
+                delay(50)
+            }
+            val ready = existingConns.count { it.isConnected }
+            Log.w(TAG, "connectAndAwait: timeout — $ready/${existingConns.size} relay(s) ready (existing)")
+            return ready
+        }
         // Poll until at least one connection is ready
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -2295,8 +2318,10 @@ class RelayPool @Inject constructor(
     var onRelayReconnected: ((String) -> Unit)? = null
 
     /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
-    override fun sendToRelay(url: String, msg: String): Boolean =
-        connections[url]?.send(msg) == true
+    override fun sendToRelay(url: String, msg: String): Boolean {
+        val normalized = normalizeRelayUrl(url) ?: return false
+        return connections[normalized]?.send(msg) == true
+    }
 
     /**
      * Placeholder for future disconnect logic. In this PR browse CLOSE is enough;
