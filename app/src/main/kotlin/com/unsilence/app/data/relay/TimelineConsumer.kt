@@ -138,7 +138,10 @@ class TimelineConsumer(
                         val newOnes = batch.filter { it.createdAt >= sinceCursor }
                         if (newOnes.isNotEmpty()) handleNewEvents(newOnes)
                     }
-                    if (eosed) _isLoading.value = false
+                    // Hide loading as soon as we have ANY events — relay batch arrived OR
+                    // cache populated. EOSE may take 30s+ on slow outbox relays; user
+                    // shouldn't see a spinner over already-populated content.
+                    if (_events.value.isNotEmpty()) _isLoading.value = false
                 },
                 onNew = { event -> handleNewEvents(listOf(event)) },
             )
