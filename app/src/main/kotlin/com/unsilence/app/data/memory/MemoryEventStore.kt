@@ -263,9 +263,68 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    // ─── Insert (called by EventProcessor.flushBatch) ───────────────────────
+    // ─── Insert (called by EventProcessor.flushBatch via insertBatch) ──────
 
+    /**
+     * Insert a single event with per-event signal bumps and eviction check.
+     * Used for direct-path inserts (control-plane kinds from EventProcessor).
+     * For batched inserts from channel drainers, use [insertBatch].
+     */
     fun insert(event: NostrEvent): Boolean {
+        val inserted = insertCore(event)
+        if (inserted) {
+            bumpSignalsForKind(event.kind)
+            evictionTickAfterInsert()
+        }
+        return inserted
+    }
+
+    /**
+     * Insert a batch of events with coalesced signal bumps.
+     * Instead of N signal bumps for N events, bumps each dirty signal type
+     * exactly once at the end. Returns the number of novel events inserted.
+     */
+    fun insertBatch(events: List<NostrEvent>): Int {
+        if (events.isEmpty()) return 0
+        var dirtyFeed = false
+        var dirtyProfile = false
+        var dirtyStats = false
+        var dirtyFollows = false
+        var dirtyAction = false
+        var inserted = 0
+
+        for (event in events) {
+            if (!insertCore(event)) continue
+            inserted++
+            when (event.kind) {
+                0 -> dirtyProfile = true
+                3 -> dirtyFollows = true
+                1, 6, 30023 -> dirtyFeed = true
+                7, 9734, 9735 -> dirtyStats = true
+            }
+            if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
+                dirtyAction = true
+            }
+        }
+
+        // One bump per signal type — ≤5 bumps for any batch size
+        val now = System.nanoTime()
+        if (dirtyFeed) _feedSignal.value = now
+        if (dirtyProfile) _profileSignal.value = now
+        if (dirtyStats) _statsSignal.value = now
+        if (dirtyFollows) _followsSignal.value = now
+        if (dirtyAction) _actionSignal.value = now
+
+        if (inserted > 0) evictionTickAfterInsert(inserted)
+        return inserted
+    }
+
+    /**
+     * Core insert logic shared by [insert] and [insertBatch].
+     * Handles dedup, indexing, and kind handlers. Does NOT bump signals or
+     * check eviction — callers are responsible for those.
+     */
+    private fun insertCore(event: NostrEvent): Boolean {
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
         if (existing != null) {
@@ -314,26 +373,27 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             30385 -> handleTrustScore(event)
         }
 
-        // 5. Bump signals
-        when (event.kind) {
+        return true
+    }
+
+    private fun bumpSignalsForKind(kind: Int) {
+        when (kind) {
             0 -> _profileSignal.value = System.nanoTime()
             3 -> _followsSignal.value = System.nanoTime()
             1, 6, 30023 -> _feedSignal.value = System.nanoTime()
             7, 9734, 9735 -> _statsSignal.value = System.nanoTime()
-            // _actionSignal bumped below for actor-side indexes
         }
-        // Actor-side signal: bumped for kinds that populate the action indexes
-        if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
+        if (kind == 7 || kind == 6 || kind == 9734) {
             _actionSignal.value = System.nanoTime()
         }
+    }
 
-        // Periodic eviction check (every 500 inserts)
-        if (++insertsSinceLastEviction >= 500) {
+    private fun evictionTickAfterInsert(count: Int = 1) {
+        insertsSinceLastEviction += count
+        if (insertsSinceLastEviction >= 500) {
             insertsSinceLastEviction = 0
             evictOldContentEvents()
         }
-
-        return true
     }
 
     // ─── Kind handlers ──────────────────────────────────────────────────────
