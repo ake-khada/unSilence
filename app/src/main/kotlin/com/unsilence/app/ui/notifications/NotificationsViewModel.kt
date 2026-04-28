@@ -1,8 +1,10 @@
 package com.unsilence.app.ui.notifications
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationItem
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -20,6 +22,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+private const val TAG = "NotifVM"
+
 data class NotificationsUiState(
     val items: List<NotificationItem> = emptyList(),
     val loading: Boolean = true,
@@ -30,6 +34,7 @@ enum class NotifFilter { Following, Global }
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
     private val keyManager: KeyManager,
+    private val initGate: InitGate,
     private val memoryEventStore: MemoryEventStore,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
@@ -64,7 +69,12 @@ class NotificationsViewModel @Inject constructor(
 
     init {
         keyManager.getPublicKeyHex()?.let { pubkey ->
-            startNotifSubscription(pubkey)
+            // Defer subscription until relay connections are established —
+            // firing at T+0 before AppBootstrapper has no relay URLs to use.
+            viewModelScope.launch {
+                initGate.awaitFeedConnections()
+                startNotifSubscription(pubkey)
+            }
             startCollecting(pubkey)
         }
     }
@@ -110,6 +120,8 @@ class NotificationsViewModel @Inject constructor(
                 .map { it.url }
                 .ifEmpty { GLOBAL_RELAY_URLS }
 
+            Log.d(TAG, "subscribing for mentions of ${pubkey.take(8)}, urls=${readRelays.size}")
+
             val filter = NostrFilter(
                 kinds = listOf(1, 6, 7, 9735),
                 tags = mapOf("p" to listOf(pubkey)),
@@ -122,6 +134,7 @@ class NotificationsViewModel @Inject constructor(
                 filter = filter,
                 onevent = { /* events flow through EventProcessor → MES → notificationsFlow */ },
             )
+            Log.d(TAG, "subscription handle obtained")
         }
     }
 

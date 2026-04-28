@@ -259,6 +259,27 @@ class AppBootstrapper @Inject constructor(
         relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
 
+        // Fetch kind-10002 (relay lists) for ALL follows. Outbox routing in
+        // OutboxRelayResolver requires writeRelaysFor(author) to return real data
+        // for each followed author. Without this, every author falls back to
+        // user's read relays, and queries on relays that don't have those
+        // authors' content time out at 30s with zero events.
+        //
+        // Indexer relays (purplepag.es, user.kindpag.es) aggregate kind-10002
+        // globally — one REQ with 251 authors returns all relay lists.
+        val followsToFetchRelayLists = follows?.toList().orEmpty()
+        if (followsToFetchRelayLists.isNotEmpty()) {
+            val staleAuthors = followsToFetchRelayLists.filter { author ->
+                memoryEventStore.getReadWriteRelayConfigs(author).isEmpty()
+            }
+            if (staleAuthors.isNotEmpty()) {
+                Log.d(TAG, "Phase2: fetching kind-10002 for ${staleAuthors.size}/${followsToFetchRelayLists.size} follows")
+                relayPool.fetchRelayLists(staleAuthors)
+            } else {
+                Log.d(TAG, "Phase2: kind-10002 cached for all ${followsToFetchRelayLists.size} follows")
+            }
+        }
+
         // Seed kind 10007 search relays in MES if none exist after fetch
         val existingSearch = memoryEventStore.getSearchRelayUrls(pubkeyHex)
         if (existingSearch.isEmpty()) {
