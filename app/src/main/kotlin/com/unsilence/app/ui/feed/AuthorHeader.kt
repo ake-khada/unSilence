@@ -20,6 +20,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -40,6 +41,7 @@ internal fun AuthorHeader(
     onAuthorClick: (String) -> Unit,
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
 ) {
     val authorLabel = displayName
         ?: "${pubkey.take(6)}…${pubkey.takeLast(4)}"
@@ -58,9 +60,10 @@ internal fun AuthorHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AvatarImage(
-                pubkey   = pubkey,
-                picture  = picture,
-                modifier = Modifier.size(Sizing.avatar),
+                pubkey        = pubkey,
+                picture       = picture,
+                modifier      = Modifier.size(Sizing.avatar),
+                lookupProfile = lookupProfile,
             )
             Spacer(Modifier.width(Spacing.small))
             Row(

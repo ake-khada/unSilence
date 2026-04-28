@@ -188,7 +188,7 @@ class AppBootstrapper @Inject constructor(
         // Step 3: Fetch kind-10002 (relay list) — wait for response via MES.
         val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
 
-        val freshRelays: List<RelayConfig>?
+        var freshRelays: List<RelayConfig>?
         if (relaysBefore.isNotEmpty() && snapshotFresh) {
             freshRelays = relaysBefore
             Log.d(TAG, "Phase1 Step3: kind-10002 snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${freshRelays.size} relays) — skipping refetch")
@@ -199,6 +199,15 @@ class AppBootstrapper @Inject constructor(
                 memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
                     .filter { it.isNotEmpty() }
                     .first()
+            }
+            if (freshRelays.isNullOrEmpty()) {
+                Log.w(TAG, "Phase1 Step3: snapshot relay-configs missing — fetching from relay")
+                relayPool.fetchRelayLists(listOf(pubkeyHex))
+                freshRelays = withTimeoutOrNull(5_000L) {
+                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
+                        .filter { it.isNotEmpty() }
+                        .first()
+                }
             }
             Log.d(TAG, "Phase1 Step3: kind-10002 from background snapshot (${freshRelays?.size ?: "timeout"})")
         } else {

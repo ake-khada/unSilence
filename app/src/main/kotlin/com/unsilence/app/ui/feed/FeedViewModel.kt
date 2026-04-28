@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -392,7 +393,36 @@ class FeedViewModel @Inject constructor(
 
     private suspend fun resubscribe(type: FeedType) {
         val subRequests = buildSubRequests(type)
-        consumer.subscribe(subRequests)
+        val cachedEvents = loadCachedEvents(type)
+        consumer.subscribe(subRequests, cachedEvents)
+    }
+
+    private fun loadCachedEvents(type: FeedType): List<NostrEvent> {
+        val kinds = setOf(1, 6, 20, 21, 30023)
+        return when (type) {
+            is FeedType.Following -> {
+                val follows = keyManager.getPublicKeyHex()
+                    ?.let { memoryEventStore.getFollows(it) }
+                    ?: emptySet()
+                if (follows.isEmpty()) emptyList()
+                else memoryEventStore.eventsByAuthors(follows, kinds)
+            }
+            is FeedType.Global -> memoryEventStore.recentEvents(kinds)
+            is FeedType.SingleRelay -> memoryEventStore.eventsByRelay(type.url, kinds)
+            is FeedType.RelaySet -> {
+                val members = keyManager.getPublicKeyHex()
+                    ?.let { memoryEventStore.getSetMembers(it, type.dTag) }
+                    ?: emptySet()
+                val urls = members.mapNotNull { normalizeRelayUrl(it) }
+                if (urls.isEmpty()) emptyList()
+                else {
+                    urls.flatMap { memoryEventStore.eventsByRelay(it, kinds, 100) }
+                        .distinctBy { it.id }
+                        .sortedByDescending { it.createdAt }
+                        .take(300)
+                }
+            }
+        }
     }
 
     private fun buildSubRequests(type: FeedType): List<SubRequest> {
