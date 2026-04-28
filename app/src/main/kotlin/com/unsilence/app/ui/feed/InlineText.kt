@@ -30,13 +30,14 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /**
- * Renders pre-parsed segments as rich text with inline @mention links.
+ * Renders pre-parsed segments as rich text with inline @mention links and
+ * clickable URLs.
  *
- * Walks [Segment.Text] and [Segment.MentionPubkey] in order, building an
- * AnnotatedString. No regex parsing at render time — segments come from
- * [ContentParser] at insert time.
+ * Walks [Segment.Text], [Segment.MentionPubkey], and [Segment.Link] in order,
+ * building an AnnotatedString. Links render as cyan clickable text that opens
+ * the URL via the system handler.
  *
- * Non-text segments (Image, Video, YouTube, Link, QuoteEvent, QuoteAddress)
+ * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
  */
 @Composable
@@ -52,7 +53,7 @@ internal fun InlineText(
 ) {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
-        segments.filter { it is Segment.Text || it is Segment.MentionPubkey }
+        segments.filter { it is Segment.Text || it is Segment.MentionPubkey || it is Segment.Link }
     }
 
     // No text content at all — skip rendering
@@ -63,8 +64,12 @@ internal fun InlineText(
         textSegments.filterIsInstance<Segment.MentionPubkey>().map { it.pubkeyHex }.distinct()
     }
 
-    // No mentions — plain Text with click handler (fast path)
-    if (mentionPubkeys.isEmpty()) {
+    val hasLinks = remember(textSegments) {
+        textSegments.any { it is Segment.Link }
+    }
+
+    // No mentions AND no links — plain Text with click handler (fast path)
+    if (mentionPubkeys.isEmpty() && !hasLinks) {
         val plainText = remember(textSegments) {
             textSegments.joinToString("") { (it as Segment.Text).text }
         }
@@ -86,7 +91,7 @@ internal fun InlineText(
         mutableStateOf(emptyMap<String, UserEntity?>())
     }
     LaunchedEffect(mentionPubkeys) {
-        if (lookupProfile != null) {
+        if (lookupProfile != null && mentionPubkeys.isNotEmpty()) {
             profileMap = coroutineScope {
                 mentionPubkeys.map { hex ->
                     async { hex to lookupProfile(hex) }
@@ -123,6 +128,21 @@ internal fun InlineText(
                             ),
                         ) {
                             append("@$displayName")
+                        }
+                    }
+                    is Segment.Link -> {
+                        withLink(
+                            LinkAnnotation.Url(
+                                url = segment.url,
+                                styles = TextLinkStyles(
+                                    style = SpanStyle(
+                                        color          = Cyan,
+                                        textDecoration = TextDecoration.None,
+                                    ),
+                                ),
+                            ),
+                        ) {
+                            append(segment.url)
                         }
                     }
                     else -> { /* skip non-text segments */ }

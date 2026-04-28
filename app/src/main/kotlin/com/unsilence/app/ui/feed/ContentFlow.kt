@@ -24,14 +24,18 @@ import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 
+/** Maximum number of OG preview cards rendered per note. */
+private const val MAX_OG_CARDS = 1
+
 /**
  * Walks the segment list from an [EventModel] and renders each content section
  * in source order.
  *
  * Consecutive Image segments collapse into one EventMediaGrid, consecutive
- * Video segments into one EventVideoGrid, consecutive Text/MentionPubkey
- * runs into one InlineText. Everything else renders inline at its source
- * position.
+ * Video segments into one EventVideoGrid, consecutive Text/MentionPubkey/Link
+ * runs into one InlineText (URLs render as inline cyan clickable text).
+ * After each text run, OG preview cards render for links in that run (up to
+ * [MAX_OG_CARDS] total per note).
  *
  * [nestDepth] controls quote nesting. At depth 0 (top-level cards), quotes
  * render as full QuoteCards. QuoteCard increments depth before calling
@@ -62,12 +66,13 @@ internal fun ContentFlow(
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
 
-    // Compute total text length for collapse logic (over Text segments only)
+    // Compute total text length for collapse logic (Text + Links contribute)
     val textLength = remember(model.segments) {
         model.segments.sumOf {
             when (it) {
                 is Segment.Text -> it.text.length
                 is Segment.MentionPubkey -> 20  // chip estimate
+                is Segment.Link -> it.url.length
                 else -> 0
             }
         }
@@ -82,21 +87,20 @@ internal fun ContentFlow(
     }
     val overflow = if (maxLines < Int.MAX_VALUE) TextOverflow.Ellipsis else TextOverflow.Clip
 
-    // Primary link = first Segment.Link in source order. When present,
-    // suppress inline images (OG card shows hero image instead).
-    val ogCandidate = model.media.ogCandidate
-    val suppressImages = ogCandidate != null
+    val hPad = if (isEmbedded) 0.dp else Spacing.medium
 
     Column(modifier = modifier) {
         var i = 0
+        var ogCardsRendered = 0
         while (i < model.segments.size) {
             when (model.segments[i]) {
-                is Segment.Text, is Segment.MentionPubkey -> {
-                    // Collect consecutive text/mention run
+                is Segment.Text, is Segment.MentionPubkey, is Segment.Link -> {
+                    // Collect consecutive text/mention/link run
                     var j = i
                     while (j < model.segments.size &&
                         (model.segments[j] is Segment.Text ||
-                            model.segments[j] is Segment.MentionPubkey)) j++
+                            model.segments[j] is Segment.MentionPubkey ||
+                            model.segments[j] is Segment.Link)) j++
                     val run = model.segments.subList(i, j).toList()
                     InlineText(
                         segments      = run,
@@ -107,26 +111,42 @@ internal fun ContentFlow(
                         overflow      = overflow,
                         modifier      = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
+                            .padding(horizontal = hPad)
                             .padding(bottom = Spacing.micro),
                     )
+
+                    // Render OG preview cards for links in this run
+                    if (ogCardsRendered < MAX_OG_CARDS) {
+                        val links = run.filterIsInstance<Segment.Link>()
+                        for (link in links) {
+                            if (ogCardsRendered >= MAX_OG_CARDS) break
+                            OgPreviewCard(
+                                url               = link.url,
+                                fetchOgMetadata   = fetchOgMetadata,
+                                showMinimalFallback = false,
+                                modifier          = Modifier
+                                    .padding(horizontal = hPad)
+                                    .padding(bottom = Spacing.small),
+                            )
+                            ogCardsRendered++
+                        }
+                    }
+
                     i = j
                 }
                 is Segment.Image -> {
-                    // Collect consecutive images, suppress if og candidate present
+                    // Collect consecutive images — always render
                     var j = i
                     while (j < model.segments.size && model.segments[j] is Segment.Image) j++
-                    if (!suppressImages) {
-                        val images = model.segments.subList(i, j)
-                            .filterIsInstance<Segment.Image>()
-                        EventMediaGrid(
-                            images              = images,
-                            imageDimensionCache = imageDimensionCache,
-                            modifier            = Modifier
-                                .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
-                                .padding(bottom = Spacing.small),
-                        )
-                    }
+                    val images = model.segments.subList(i, j)
+                        .filterIsInstance<Segment.Image>()
+                    EventMediaGrid(
+                        images              = images,
+                        imageDimensionCache = imageDimensionCache,
+                        modifier            = Modifier
+                            .padding(horizontal = hPad)
+                            .padding(bottom = Spacing.small),
+                    )
                     i = j
                 }
                 is Segment.Video -> {
@@ -145,7 +165,7 @@ internal fun ContentFlow(
                         onToggleMute     = onToggleMute,
                         thumbnailCache   = thumbnailCache,
                         modifier         = Modifier
-                            .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
+                            .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
                     )
                     i = j
@@ -163,7 +183,7 @@ internal fun ContentFlow(
                         imageDimensionCache = imageDimensionCache,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
-                            .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
+                            .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
                     )
                     i++
@@ -175,7 +195,7 @@ internal fun ContentFlow(
                         onNoteClick   = onNoteClick,
                         lookupProfile = lookupProfile,
                         modifier      = Modifier
-                            .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
+                            .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
                     )
                     i++
@@ -185,31 +205,10 @@ internal fun ContentFlow(
                     YouTubeCard(
                         segment  = seg,
                         modifier = Modifier.padding(
-                            horizontal = if (isEmbedded) 0.dp else Spacing.medium,
+                            horizontal = hPad,
                             vertical = Spacing.small,
                         ),
                     )
-                    i++
-                }
-                is Segment.Link -> {
-                    // Render OG preview only for the primary link (ogCandidate);
-                    // additional links folded into OgSection's additionalLinks list.
-                    val seg = model.segments[i] as Segment.Link
-                    if (seg == ogCandidate) {
-                        val additionalLinks = model.segments
-                            .filterIsInstance<Segment.Link>()
-                            .filter { it != ogCandidate }
-                        OgSection(
-                            ogCandidate     = seg,
-                            additionalLinks = additionalLinks,
-                            fetchOgMetadata = fetchOgMetadata,
-                            modifier        = Modifier
-                                .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
-                                .padding(bottom = Spacing.small),
-                        )
-                    }
-                    // Non-primary links are folded into OgSection's additionalLinks
-                    // and don't render twice.
                     i++
                 }
             }

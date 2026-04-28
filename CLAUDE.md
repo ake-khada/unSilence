@@ -1,6 +1,6 @@
 # unSilence — Claude Code Context
 
-**Last updated:** April 28, 2026 (P11-fix: pre-debounce relay metadata, snapshot merge, deferred notifications.)
+**Last updated:** April 28, 2026 (P12: inline URL text, single OG card, unquoted OG attribute parsing.)
 **Package:** com.unsilence.app
 **Path:** /home/aivii/projects/unsilence
 
@@ -130,7 +130,7 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 2. **EventModel is lazy-parsed on first read** — `MES.getOrParseEventModel()` uses `computeIfAbsent` for thread-safe at-most-once parsing. NOT called at insert time or snapshot restore. Composables call through `NoteActionsViewModel.getEventModel()` → `getOrParseEventModel()`. Cache-first check survives eviction if model was already parsed. imeta dims and video render models remain **eager** at insert time for frame-1 layout stability. Never wrap the model lookup in `remember` — `computeIfAbsent` deduplicates, and `remember` locks in null for evicted events
 3. **ContentParser is a pure function** — no Android dependencies, no side effects, O(n) tokenization. Token precedence: nostr: URIs > YouTube > video > image > generic URL > text
 4. **CardRole enum replaces RenderContext** — Feed, Thread, Reply, Profile, Article, Search, Embedded, NotificationCompact. Controls action bar visibility, avatar size, content line limits
-5. **Segment sealed class** — Text, Link, Image, Video, YouTube, MentionPubkey, QuoteEvent, QuoteAddress. ContentFlow walks segments in source order — consecutive same-type segments collapse (Text/MentionPubkey → InlineText, Image → EventMediaGrid, Video → EventVideoGrid). No bucket-then-render
+5. **Segment sealed class** — Text, Link, Image, Video, YouTube, MentionPubkey, QuoteEvent, QuoteAddress. ContentFlow walks segments in source order — consecutive same-type segments collapse (Text/MentionPubkey/Link → InlineText, Image → EventMediaGrid, Video → EventVideoGrid). Links render as inline cyan clickable URL text via `LinkAnnotation.Url`. First link gets OG preview card (MAX_OG_CARDS=1), remaining links are inline text only. Images never suppressed by links. No bucket-then-render
 6. **QuoteCard uses same pipeline** — resolves EventModel from `lookupModel` or parses on-the-fly via ContentParser. Renders via ContentFlow with `CardRole.Embedded`. `nestDepth` controls recursion: depth < 1 → full ContentFlow, depth >= 1 → text-only from segments. Falls back to NostrRichText if model parse fails
 7. **NoteCardHelpers.kt holds shared utilities** — AvatarImage, NostrRichText, LinkPreviewCard, ActionButton, ZapButton, FullScreenVideoDialog, regex constants, extension properties. Same package as old NoteCard (`ui.feed`)
 
@@ -226,8 +226,8 @@ Feed (Following/Global/Popular + relay-specific, Notes/Conversations tabs, filte
 76. **`lookupEventWithAuthor` is the 3-arg variant** — `(id, hints, authorPk?)` vs 2-arg `lookupEvent(id, hints)`. The 3-arg variant routes through `writeRelaysFor(authorPk)` for outbox relay discovery. Wired through `EventActionCallbacks` and all screen call sites
 
 ### OG Preview Pipeline
-77. **OgFetcher uses Chrome 130 headers** — full Sec-Fetch/sec-ch-ua/Accept/Accept-Language header set. NEVER set Accept-Encoding (OkHttp handles transparent decompression; explicit header disables it → compressed bytes parsed as UTF-8)
-78. **MinimalLinkCard is the OG fallback** — when OG fetch returns nothing useful (WAF 403, no og: tags), renders favicon + hostname instead of blank space. Favicon resolution chain: Google API (`/s2/favicons?domain=...&sz=128`) → `/apple-touch-icon.png` → `/favicon.ico` → generic link icon. Google API bypasses WAF that blocks direct favicon requests
+77. **OgFetcher uses Chrome 130 headers** — full Sec-Fetch/sec-ch-ua/Accept/Accept-Language header set. NEVER set Accept-Encoding (OkHttp handles transparent decompression; explicit header disables it → compressed bytes parsed as UTF-8). OG/Twitter tag regex handles both quoted (`content="val"`) and unquoted (`content=val`) HTML attributes — minified HTML often drops quotes from values without spaces
+78. **MinimalLinkCard is the OG fallback** — when OG fetch returns nothing useful (WAF 403, no og: tags), renders favicon + hostname instead of blank space. `OgPreviewCard(showMinimalFallback=false)` suppresses the fallback when URL is already shown inline. Favicon resolution chain: Google API (`/s2/favicons?domain=...&sz=128`) → `/apple-touch-icon.png` → `/favicon.ico` → generic link icon. Google API bypasses WAF that blocks direct favicon requests
 
 ---
 

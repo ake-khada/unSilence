@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -32,11 +31,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.SubcomposeAsyncImage
-import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -44,41 +41,19 @@ import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 
 /**
- * Link preview section for pre-parsed segments.
+ * OpenGraph link preview card. Fetches OG metadata and renders a rich card
+ * (image + title + description + domain).
  *
- * Renders the first OG-eligible URL as a rich preview card (image + title +
- * description + domain). Additional links render as compact domain chips.
+ * When [showMinimalFallback] is true (default), falls back to [MinimalLinkCard]
+ * if OG fetch returns nothing useful. When false, renders nothing on empty OG
+ * (caller already shows the URL as inline text, so the fallback is redundant).
  */
-@Composable
-internal fun OgSection(
-    ogCandidate: Segment.Link?,
-    additionalLinks: List<Segment.Link>,
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
-    modifier: Modifier = Modifier,
-) {
-    if (ogCandidate == null && additionalLinks.isEmpty()) return
-
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(Spacing.small),
-    ) {
-        if (ogCandidate != null) {
-            OgPreviewCard(
-                url             = ogCandidate.url,
-                fetchOgMetadata = fetchOgMetadata,
-            )
-        }
-        additionalLinks.forEach { link ->
-            OgLinkChip(url = link.url)
-        }
-    }
-}
-
-/** OpenGraph link preview card. Falls back to a simple domain chip if OG fetch fails. */
 @Composable
 internal fun OgPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    showMinimalFallback: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
     val domain = remember(url) {
@@ -97,7 +72,7 @@ internal fun OgPreviewCard(
     if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
         var imageLoadFailed by remember { mutableStateOf(false) }
         Column(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
@@ -160,7 +135,7 @@ internal fun OgPreviewCard(
     } else if (!ogLoaded) {
         // Loading state — fixed height placeholder matching rich preview card
         Column(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
@@ -174,35 +149,12 @@ internal fun OgPreviewCard(
                 Box(Modifier.fillMaxWidth(0.5f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
             }
         }
-    } else {
+    } else if (showMinimalFallback) {
         // OG fetch returned nothing useful — minimal link card with favicon + domain
         MinimalLinkCard(
             url = url,
             onClick = { runCatching { uriHandler.openUri(url) } },
         )
     }
-}
-
-/** Clickable URL chip shown for non-media links in note content. */
-@Composable
-internal fun OgLinkChip(url: String) {
-    val uriHandler = LocalUriHandler.current
-    val domain     = remember(url) {
-        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
-    }
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { runCatching { uriHandler.openUri(url) } }
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    ) {
-        Text(
-            text     = domain,
-            color    = Cyan,
-            fontSize = AppType.footnote,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
+    // else: showMinimalFallback=false and OG empty → render nothing (URL already inline)
 }
