@@ -5,7 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationItem
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -30,6 +33,7 @@ class NotificationsViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
+    private val subscription: Subscription,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NotificationsUiState())
@@ -56,9 +60,11 @@ class NotificationsViewModel @Inject constructor(
     }
 
     private var collectJob: Job? = null
+    private var notifSubHandle: Subscription.Handle? = null
 
     init {
         keyManager.getPublicKeyHex()?.let { pubkey ->
+            startNotifSubscription(pubkey)
             startCollecting(pubkey)
         }
     }
@@ -94,5 +100,33 @@ class NotificationsViewModel @Inject constructor(
                     }
                 }
         }
+    }
+
+    private fun startNotifSubscription(pubkey: String) {
+        notifSubHandle?.close()
+        viewModelScope.launch {
+            val readRelays = memoryEventStore.getReadWriteRelayConfigs(pubkey)
+                .filter { it.marker == null || it.marker == "read" }
+                .map { it.url }
+                .ifEmpty { GLOBAL_RELAY_URLS }
+
+            val filter = NostrFilter(
+                kinds = listOf(1, 6, 7, 9735),
+                tags = mapOf("p" to listOf(pubkey)),
+                limit = 100,
+                since = System.currentTimeMillis() / 1000L - 86_400L,
+            )
+
+            notifSubHandle = subscription.subscribe(
+                urls = readRelays,
+                filter = filter,
+                onevent = { /* events flow through EventProcessor → MES → notificationsFlow */ },
+            )
+        }
+    }
+
+    override fun onCleared() {
+        notifSubHandle?.close()
+        super.onCleared()
     }
 }

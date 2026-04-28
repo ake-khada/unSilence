@@ -59,7 +59,7 @@ internal fun ContentFlow(
     modifier: Modifier = Modifier,
 ) {
     val navigateId = model.navigateId
-    val showVideo = role == CardRole.Feed || role == CardRole.Profile
+    val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
 
     // Compute total text length for collapse logic (over Text segments only)

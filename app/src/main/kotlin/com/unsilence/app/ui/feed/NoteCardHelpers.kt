@@ -89,6 +89,7 @@ import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.ZapAmber
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -221,7 +222,17 @@ internal fun AvatarImage(
     picture: String?,
     modifier: Modifier = Modifier,
     sizeDp: Dp = Sizing.avatar,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
 ) {
+    // Trigger profile fetch when picture is missing — debounced to avoid
+    // thundering-herd on initial feed render where many avatars are null.
+    if (picture.isNullOrBlank() && lookupProfile != null) {
+        LaunchedEffect(pubkey) {
+            delay(800)
+            lookupProfile(pubkey)
+        }
+    }
+
     Box(modifier = modifier.clip(CircleShape)) {
         IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
         if (!picture.isNullOrBlank()) {

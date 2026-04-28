@@ -107,10 +107,11 @@ internal fun QuoteCard(
                 // Header: avatar + name + timestamp
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AvatarImage(
-                        pubkey   = loadedEvent.pubkey,
-                        picture  = author?.picture,
-                        modifier = Modifier.size(24.dp),
-                        sizeDp   = 24.dp,
+                        pubkey        = loadedEvent.pubkey,
+                        picture       = author?.picture,
+                        modifier      = Modifier.size(24.dp),
+                        sizeDp        = 24.dp,
+                        lookupProfile = lookupProfile,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(

@@ -1082,6 +1082,45 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         return result.sortedBy { it.createdAt }
     }
 
+    /** Events by author set, sorted by createdAt desc. Used for Following feed cache hydration. */
+    fun eventsByAuthors(authors: Set<String>, kinds: Set<Int>, limit: Int = 300): List<NostrEvent> {
+        if (authors.isEmpty()) return emptyList()
+        val result = mutableListOf<NostrEvent>()
+        for (entry in recentByCreatedAt) {
+            if (result.size >= limit) break
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in kinds) continue
+            if (event.pubkey !in authors) continue
+            result.add(event)
+        }
+        return result
+    }
+
+    /** Recent events across all authors, sorted by createdAt desc. Used for Global feed cache hydration. */
+    fun recentEvents(kinds: Set<Int>, limit: Int = 300): List<NostrEvent> {
+        val result = mutableListOf<NostrEvent>()
+        for (entry in recentByCreatedAt) {
+            if (result.size >= limit) break
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in kinds) continue
+            result.add(event)
+        }
+        return result
+    }
+
+    /** Events seen on a specific relay, sorted by createdAt desc. Used for SingleRelay feed cache hydration. */
+    fun eventsByRelay(relayUrl: String, kinds: Set<Int>, limit: Int = 300): List<NostrEvent> {
+        val result = mutableListOf<NostrEvent>()
+        for (entry in recentByCreatedAt) {
+            if (result.size >= limit) break
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in kinds) continue
+            if (relayUrl !in event.relaysSeen) continue
+            result.add(event)
+        }
+        return result
+    }
+
     fun searchEvents(query: String): List<NostrEvent> {
         val lowerQuery = query.lowercase()
         return eventsById.values
