@@ -238,6 +238,41 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
 
+    // ─── Signal-bump coalescing ───────────────────────────────────────────
+    // Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+    // ...) each bump their own signal. During a cold-start burst (244
+    // kind-10002, 1000+ kind-30166) per-event bumps drive downstream Flow
+    // re-emits — each allocating a fresh HashMap snapshot — and trigger
+    // 6-8s Daveys via GC pressure.
+    //
+    // InsertDirty defers those bumps. When non-null, handlers set the flag
+    // and the batch caller flushes once at end. When null (snapshot restore
+    // and a few legacy paths), handlers self-bump as before.
+    internal class InsertDirty {
+        var feed = false
+        var profile = false
+        var stats = false
+        var follows = false
+        var action = false
+        var relayConfig = false
+        var trustScore = false
+        var relayMonitor = false
+        var relaySet = false
+    }
+
+    private fun flushDirty(d: InsertDirty) {
+        val now = System.nanoTime()
+        if (d.feed) _feedSignal.value = now
+        if (d.profile) _profileSignal.value = now
+        if (d.stats) _statsSignal.value = now
+        if (d.follows) _followsSignal.value = now
+        if (d.action) _actionSignal.value = now
+        if (d.relayConfig) _relayConfigSignal.value = now
+        if (d.trustScore) _trustScoreSignal.value = now
+        if (d.relayMonitor) _relayMonitorSignal.value = now
+        if (d.relaySet) _relaySetSignal.value = now
+    }
+
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
     // Buffer for relay URLs that arrive via addRelaySeen before the event
@@ -266,17 +301,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    // ─── Insert (called by EventProcessor.flushBatch via insertBatch) ──────
+    // ─── Insert (called by EventProcessor flushBatch / flushControlBatch via insertBatch) ──────
 
     /**
-     * Insert a single event with per-event signal bumps and eviction check.
-     * Used for direct-path inserts (control-plane kinds from EventProcessor).
-     * For batched inserts from channel drainers, use [insertBatch].
+     * Insert a single event with coalesced end-of-call signal bumps and
+     * eviction check. Used for direct-path inserts (control-plane kinds
+     * from EventProcessor). For batched inserts from channel drainers,
+     * use [insertBatch].
      */
     fun insert(event: NostrEvent): Boolean {
-        val inserted = insertCore(event)
+        val dirty = InsertDirty()
+        val inserted = insertCore(event, dirty)
         if (inserted) {
-            bumpSignalsForKind(event.kind)
+            markKindDirty(event.kind, dirty)
+            flushDirty(dirty)
             evictionTickAfterInsert()
         }
         return inserted
@@ -286,48 +324,50 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
      * Insert a batch of events with coalesced signal bumps.
      * Instead of N signal bumps for N events, bumps each dirty signal type
      * exactly once at the end. Returns the number of novel events inserted.
+     *
+     * Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+     * ...) populate the same [InsertDirty] accumulator instead of bumping
+     * directly, so a 1000-event control-plane burst produces one bump per
+     * affected signal — not 1000.
      */
     fun insertBatch(events: List<NostrEvent>): Int {
         if (events.isEmpty()) return 0
-        var dirtyFeed = false
-        var dirtyProfile = false
-        var dirtyStats = false
-        var dirtyFollows = false
-        var dirtyAction = false
+        val dirty = InsertDirty()
         var inserted = 0
 
         for (event in events) {
-            if (!insertCore(event)) continue
+            if (!insertCore(event, dirty)) continue
             inserted++
-            when (event.kind) {
-                0 -> dirtyProfile = true
-                3 -> dirtyFollows = true
-                1, 6, 30023 -> dirtyFeed = true
-                7, 9734, 9735 -> dirtyStats = true
-            }
-            if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
-                dirtyAction = true
-            }
+            markKindDirty(event.kind, dirty)
         }
 
-        // One bump per signal type — ≤5 bumps for any batch size
-        val now = System.nanoTime()
-        if (dirtyFeed) _feedSignal.value = now
-        if (dirtyProfile) _profileSignal.value = now
-        if (dirtyStats) _statsSignal.value = now
-        if (dirtyFollows) _followsSignal.value = now
-        if (dirtyAction) _actionSignal.value = now
-
+        flushDirty(dirty)
         if (inserted > 0) evictionTickAfterInsert(inserted)
         return inserted
+    }
+
+    /** Map a kind to its corresponding feed/profile/stats/follows/action dirty flags. */
+    private fun markKindDirty(kind: Int, d: InsertDirty) {
+        when (kind) {
+            0 -> d.profile = true
+            3 -> d.follows = true
+            1, 6, 30023 -> d.feed = true
+            7, 9734, 9735 -> d.stats = true
+        }
+        if (kind == 7 || kind == 6 || kind == 9734) d.action = true
     }
 
     /**
      * Core insert logic shared by [insert] and [insertBatch].
      * Handles dedup, indexing, and kind handlers. Does NOT bump signals or
      * check eviction — callers are responsible for those.
+     *
+     * [dirty] is the accumulator for deferred signal bumps. Kind handlers
+     * that would normally bump _relayConfigSignal / _trustScoreSignal /
+     * _relayMonitorSignal / _relaySetSignal set the corresponding flag
+     * here instead. The caller (insert / insertBatch) flushes once at end.
      */
-    private fun insertCore(event: NostrEvent): Boolean {
+    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
         if (existing != null) {
@@ -358,37 +398,25 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         when (event.kind) {
             0 -> handleProfile(event)
             1 -> handleNote(event)
-            3 -> handleFollows(event)
+            3 -> handleFollows(event, dirty)
             6 -> handleRepost(event)
             7 -> handleReaction(event)
             9734 -> handleZapRequest(event)
             9735 -> handleZapReceipt(event)
             10000 -> handleMuteList(event)
-            10002 -> handleRelayList(event)
-            10006 -> handleBlocked(event)
-            10007 -> handleSearchRelays(event)
-            10012 -> handleFavorites(event)
+            10002 -> handleRelayList(event, dirty)
+            10006 -> handleBlocked(event, dirty)
+            10007 -> handleSearchRelays(event, dirty)
+            10012 -> handleFavorites(event, dirty)
             30002 -> {
                 handleParameterizedReplaceable(event)
-                handleRelaySetMaterialized(event)
+                handleRelaySetMaterialized(event, dirty)
             }
-            30166 -> handleRelayMonitor(event)
-            30385 -> handleTrustScore(event)
+            30166 -> handleRelayMonitor(event, dirty)
+            30385 -> handleTrustScore(event, dirty)
         }
 
         return true
-    }
-
-    private fun bumpSignalsForKind(kind: Int) {
-        when (kind) {
-            0 -> _profileSignal.value = System.nanoTime()
-            3 -> _followsSignal.value = System.nanoTime()
-            1, 6, 30023 -> _feedSignal.value = System.nanoTime()
-            7, 9734, 9735 -> _statsSignal.value = System.nanoTime()
-        }
-        if (kind == 7 || kind == 6 || kind == 9734) {
-            _actionSignal.value = System.nanoTime()
-        }
     }
 
     private fun evictionTickAfterInsert(count: Int = 1) {
@@ -470,12 +498,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleFollows(event: NostrEvent) {
+    private fun handleFollows(event: NostrEvent, dirty: InsertDirty? = null) {
         val pubkeys = event.tags
             .filter { it.size >= 2 && it[0] == "p" }
             .map { it[1] }
             .toSet()
-        updateFollows(event.pubkey, pubkeys, event.createdAt)
+        updateFollowsInternal(event.pubkey, pubkeys, event.createdAt, dirty)
     }
 
     private fun handleRepost(event: NostrEvent) {
@@ -642,7 +670,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleRelayList(event: NostrEvent) {
+    private fun handleRelayList(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10002"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -672,11 +700,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existingConfigs = readWriteRelayConfigsByPubkey[event.pubkey]
         if (existingConfigs != configs) {
             readWriteRelayConfigsByPubkey[event.pubkey] = configs
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleBlocked(event: NostrEvent) {
+    private fun handleBlocked(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10006"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -690,11 +719,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = blockedRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             blockedRelaysByPubkey[event.pubkey] = urls
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleSearchRelays(event: NostrEvent) {
+    private fun handleSearchRelays(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10007"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -708,11 +738,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = searchRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             searchRelaysByPubkey[event.pubkey] = urls
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleFavorites(event: NostrEvent) {
+    private fun handleFavorites(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10012"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -743,13 +774,14 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = favoritesByPubkey[event.pubkey]
         if (existing != entries) {
             favoritesByPubkey[event.pubkey] = entries
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
     // ─── Kind 30385: Trusted Relay Assertions ─────────────────────────────
 
-    private fun handleTrustScore(event: NostrEvent) {
+    private fun handleTrustScore(event: NostrEvent, dirty: InsertDirty? = null) {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
@@ -779,12 +811,13 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                 updatedAt = event.createdAt,
             )
         }
-        _trustScoreSignal.value = System.nanoTime()
+        if (dirty != null) dirty.trustScore = true
+        else _trustScoreSignal.value = System.nanoTime()
     }
 
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
-    private fun handleRelayMonitor(event: NostrEvent) {
+    private fun handleRelayMonitor(event: NostrEvent, dirty: InsertDirty? = null) {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
@@ -832,10 +865,11 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                 createdAt = event.createdAt,
             )
         }
-        _relayMonitorSignal.value = System.nanoTime()
+        if (dirty != null) dirty.relayMonitor = true
+        else _relayMonitorSignal.value = System.nanoTime()
     }
 
-    private fun handleRelaySetMaterialized(event: NostrEvent) {
+    private fun handleRelaySetMaterialized(event: NostrEvent, dirty: InsertDirty? = null) {
         val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
         val coordKey = "${event.pubkey}:$dTag"
 
@@ -870,7 +904,8 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = relaySetsByCoordinate[coordKey]
         if (existing != newSet) {
             relaySetsByCoordinate[coordKey] = newSet
-            _relaySetSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relaySet = true
+            else _relaySetSignal.value = System.nanoTime()
         }
     }
 
@@ -1177,6 +1212,15 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
      * the follows index. Stale updates (lower createdAt) are ignored.
      */
     fun updateFollows(pubkey: String, followedPubkeys: Set<String>, createdAt: Long) {
+        updateFollowsInternal(pubkey, followedPubkeys, createdAt, dirty = null)
+    }
+
+    private fun updateFollowsInternal(
+        pubkey: String,
+        followedPubkeys: Set<String>,
+        createdAt: Long,
+        dirty: InsertDirty?,
+    ) {
         followsCreatedAt.compute(pubkey) { _, existingTs ->
             if (existingTs != null && existingTs > createdAt) {
                 Log.d("MES", "updateFollows: stale for ${pubkey.take(8)}… (existing=$existingTs > new=$createdAt)")
@@ -1186,7 +1230,8 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             val changed = existing == null || existing != followedPubkeys
             followsByPubkey[pubkey] = followedPubkeys
             if (changed) {
-                _followsSignal.value = System.nanoTime()
+                if (dirty != null) dirty.follows = true
+                else _followsSignal.value = System.nanoTime()
             }
             Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt, changed=$changed)")
             createdAt
@@ -2184,6 +2229,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         Log.d("MES", "Snapshot restore complete (EventModel parsing deferred to first read)")
     }
 
+    // Sink for handler self-bumps during snapshot restore. The bumps are
+    // discarded — restoreSnapshotFrom fires every signal once at end, so
+    // per-event bumps inside the 21s parse loop only waste CPU and cause
+    // mid-restore Compose recomposes.
+    private val snapshotDirtySink = InsertDirty()
+
     private fun insertFromSnapshot(event: NostrEvent) {
         eventsById[event.id] = event
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -2213,17 +2264,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
 
         // Restore kind-derived state (profiles, follows, relay lists)
+        // Pass snapshotDirtySink so handlers don't bump signals per-event
+        // during the 21s parse loop. End-of-restore bumps every signal once.
+        val sink = snapshotDirtySink
         when (event.kind) {
             0 -> handleProfile(event)
-            3 -> handleFollows(event)
+            3 -> handleFollows(event, sink)
             10000 -> handleMuteList(event)
-            10002 -> handleRelayList(event)
-            10006 -> handleBlocked(event)
-            10007 -> handleSearchRelays(event)
-            10012 -> handleFavorites(event)
+            10002 -> handleRelayList(event, sink)
+            10006 -> handleBlocked(event, sink)
+            10007 -> handleSearchRelays(event, sink)
+            10012 -> handleFavorites(event, sink)
             30002 -> {
                 handleParameterizedReplaceable(event)
-                handleRelaySetMaterialized(event)
+                handleRelaySetMaterialized(event, sink)
             }
         }
     }
