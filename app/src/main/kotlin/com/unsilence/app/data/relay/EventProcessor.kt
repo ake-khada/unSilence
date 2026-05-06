@@ -108,6 +108,16 @@ class EventProcessor @Inject constructor(
         }
         if (buffer.isNotEmpty()) {
             flushBatch(buffer)
+            buffer.clear()
+        }
+        // Control-plane events go through a separate batch path — no media
+        // sidecars and they may include kind-10012 relay set refs.
+        while (true) {
+            val event = controlChannel.tryReceive().getOrNull() ?: break
+            buffer.add(event)
+        }
+        if (buffer.isNotEmpty()) {
+            flushControlBatch(buffer)
         }
     }
 
@@ -166,6 +176,18 @@ class EventProcessor @Inject constructor(
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<NostrEvent>(capacity = 500)
 
+    /** CONTROL lane: control-plane kinds (10002, 10006, 10007, 10012, 30002,
+     *  30166, 30385). Flushed every 150 ms via [MemoryEventStore.insertBatch]
+     *  so signal bumps coalesce — a 1000-event monitor burst produces ONE
+     *  _relayMonitorSignal bump instead of 1000.
+     *
+     *  Capacity 2000 sized for the largest observed burst (1175 kind-30166
+     *  monitor events from a single fetchRelayMonitors call) plus headroom
+     *  for parallel kind-10002 fetches (≤300 follows). trySend drops silently
+     *  if the drainer can't keep up; control-plane events are re-fetched on
+     *  next bootstrap. */
+    private val controlChannel = Channel<NostrEvent>(capacity = 2000)
+
     private var drainerJob: Job? = null
 
     init {
@@ -179,6 +201,7 @@ class EventProcessor @Inject constructor(
         val drainerScope = CoroutineScope(scope.coroutineContext + drainerJob!!)
         drainerScope.launch { drainHot() }
         drainerScope.launch { drainCold() }
+        drainerScope.launch { drainControl() }
         Log.d(TAG, "Drainers started")
     }
 
@@ -190,6 +213,7 @@ class EventProcessor @Inject constructor(
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
+        while (controlChannel.tryReceive().isSuccess) { /* discard */ }
         Log.d(TAG, "Stopped and cleared state")
     }
 
@@ -328,9 +352,9 @@ class EventProcessor @Inject constructor(
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
         )
 
-        // ── Direct-path control-plane updates (not channeled) ────────────────
-        // Control-plane kinds (3, 10002) update MemoryEventStore state directly
-        // without entering the feed-content channels. They are NOT feed items.
+        // ── Kind-3 follows update (not stored in eventsById) ─────────────────
+        // Updates the followsByPubkey index directly without entering MES
+        // proper. Snapshot persists followsByPubkey so this is reconstructible.
         if (kind == 3) {
             val follows = nostrEvent.tags
                 .filter { it.size >= 2 && it[0] == "p" }
@@ -339,20 +363,14 @@ class EventProcessor @Inject constructor(
             memoryEventStore.updateFollows(pubkey, follows, createdAt)
             Log.d(TAG, "Kind-3 direct path: pubkey=${pubkey.take(8)}… ${follows.size} follows (createdAt=$createdAt)")
         }
-        // Control-plane events → direct insert into MES (bypass cold channel).
-        // These are NOT feed content and need immediate processing:
-        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config UI,
-        // 30385 for trust scores, 30166 for relay monitors (hundreds arrive in
-        // burst — cold channel drops via trySend; direct insert ensures none are
-        // lost). Both are ephemeral (not snapshot-persisted, re-fetched every bootstrap).
+        // Control-plane events → CONTROL channel (separate lane, batched).
+        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config
+        // UI, 30385 for trust scores, 30166 for relay monitors (hundreds arrive
+        // in burst — capacity-2000 channel handles the largest observed burst).
+        // The drainer flushes via insertBatch so per-event signal bumps coalesce.
+        // Kind-10012 relay set refs are resolved inside flushControlBatch.
         if (kind in setOf(10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
-            memoryEventStore.insert(nostrEvent)
-        }
-        // Kind-10012 (favorites) may contain ["a", "30002:pubkey:dtag", "hint-relay"]
-        // tags referencing relay sets that exist on specific hint relays (not indexers).
-        // Resolve these references so the actual relay sets appear in the UI.
-        if (kind == 10012) {
-            resolveRelaySetRefs(nostrEvent)
+            controlChannel.trySend(nostrEvent)
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
@@ -415,6 +433,64 @@ class EventProcessor @Inject constructor(
                 flushBatch(buffer)
                 buffer.clear()
             }
+        }
+    }
+
+    /**
+     * CONTROL drainer: collects up to 500 control-plane events within a
+     * 150 ms window, then dispatches via [MemoryEventStore.insertBatch].
+     *
+     * Coalesces signal bumps for kind-10002/10006/10007/10012/30002/30166/
+     * 30385 bursts that previously hit MES one event at a time and bumped
+     * _relayConfigSignal / _trustScoreSignal / _relayMonitorSignal once per
+     * event. A 1175-event relay-monitor burst now produces one bump.
+     *
+     * Window of 150 ms is short enough that user-perceived latency for
+     * kind-10002 outbox routing remains <200 ms, but long enough to let
+     * a 1000-event burst coalesce into a single batch.
+     */
+    private suspend fun drainControl() {
+        val buffer = ArrayDeque<NostrEvent>(500)
+        while (true) {
+            val first = withTimeoutOrNull(150L) { controlChannel.receive() }
+            if (first != null) {
+                buffer.add(first)
+                var next = controlChannel.tryReceive().getOrNull()
+                while (next != null && buffer.size < 500) {
+                    buffer.add(next)
+                    next = controlChannel.tryReceive().getOrNull()
+                }
+            }
+            if (buffer.isNotEmpty()) {
+                flushControlBatch(buffer)
+                buffer.clear()
+            }
+        }
+    }
+
+    /**
+     * Insert control-plane events via the MES batch path so signal bumps
+     * coalesce. Unlike [flushBatch], does NOT compute imeta/video sidecars
+     * (control-plane kinds carry no media).
+     */
+    private fun flushControlBatch(batch: List<NostrEvent>) {
+        // Dedup by event ID within the batch — same kind-10002 from N relays
+        val events = LinkedHashMap<String, NostrEvent>(batch.size)
+        for (event in batch) {
+            val existing = events[event.id]
+            if (existing != null) {
+                existing.relaysSeen.addAll(event.relaysSeen)
+            } else {
+                events[event.id] = event
+            }
+        }
+        memoryEventStore.insertBatch(events.values.toList())
+
+        // Kind-10012 favorites may reference relay sets via "a" tags that
+        // need a follow-up fetch from a hint relay. Resolve outside the
+        // insert path — fetcher dispatches its own REQ.
+        for (event in events.values) {
+            if (event.kind == 10012) resolveRelaySetRefs(event)
         }
     }
 
