@@ -55,13 +55,39 @@ class OgFetcher @Inject constructor(
         }.also { attempted[url] = true; if (it != null) cache[url] = it }
     }
 
-    /** Execute an OkHttp call with coroutine cancellation propagation. */
+    /**
+     * Execute an OkHttp call with coroutine cancellation propagation.
+     *
+     * Race-safe handling: there's a window between `call.execute()` returning
+     * a Response and `cont.resume(response, ...)` being called where the
+     * coroutine can be cancelled (e.g. CardHydrator's `collectLatest` swaps
+     * to a newer warm zone). In that window, the Response is allocated with
+     * an open body but no .use{} block has been entered yet — and the
+     * `cont.resume(value, onCancellation)` contract for invoking the
+     * onCancellation lambda when the continuation is already cancelled
+     * has historically been brittle across kotlinx-coroutines versions.
+     *
+     * Defense: explicitly check `cont.isCancelled` immediately after
+     * execute() returns and close the Response ourselves before bailing.
+     * This eliminates the documented leak path that surfaces in field
+     * logs as 'A resource failed to call close' bursts after GC during
+     * heavy cold-start OG-fetch traffic.
+     */
     private suspend fun executeWithCancellation(call: okhttp3.Call): okhttp3.Response {
         return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation { call.cancel() }
+            cont.invokeOnCancellation { runCatching { call.cancel() } }
             try {
                 val response = call.execute()
-                cont.resume(response) { _, _, _ -> response.close() }
+                if (cont.isCancelled) {
+                    // Lost the cancellation race — close the response we
+                    // were about to hand off, and leave the coroutine
+                    // machinery to drop the resume on the floor.
+                    runCatching { response.close() }
+                    return@suspendCancellableCoroutine
+                }
+                cont.resume(response) { _, value, _ ->
+                    runCatching { value.close() }
+                }
             } catch (e: Exception) {
                 if (!cont.isCancelled) cont.resumeWithException(e)
             }
