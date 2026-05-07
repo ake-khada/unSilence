@@ -122,11 +122,21 @@ class NotificationsViewModel @Inject constructor(
 
             Log.d(TAG, "subscribing for mentions of ${pubkey.take(8)}, urls=${readRelays.size}")
 
+            // No `since` filter — relays return the most-recent N mentions
+            // regardless of age, which is what users actually want when they
+            // open the notifications screen. The previous 24h cap meant
+            // anything older than a day never loaded; combined with MES-only
+            // reads in notificationsFlow, that produced the user-visible bug
+            // where historical notifications were missing on a fresh install.
+            //
+            // The `limit = 100` is the bound — relays send the 100 most
+            // recent matching events. Live updates after EOSE flow through
+            // EventProcessor → MES → notificationsFlow; nothing else needs
+            // a since clause.
             val filter = NostrFilter(
                 kinds = listOf(1, 6, 7, 9735),
                 tags = mapOf("p" to listOf(pubkey)),
                 limit = 100,
-                since = System.currentTimeMillis() / 1000L - 86_400L,
             )
 
             notifSubHandle = subscription.subscribe(

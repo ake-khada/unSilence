@@ -74,6 +74,7 @@ fun EventCard(
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     imageDimensionCache: ImageDimensionCache?,
     thumbnailCache: VideoThumbnailCache?,
     // Video
@@ -101,12 +102,14 @@ fun EventCard(
         }
     }
 
-    // Resolve source profile for repost header
+    // Resolve source profile for repost header (kind-6 wrapper author).
     val sourceProfile = if (model.repost != null && profileFlow != null) {
         profileFlow(model.sourcePubkey).collectAsState().value
     } else null
 
-    // Fallback profile fetch for reposts
+    // Fallback profile fetch for reposts when the source's profile hasn't
+    // arrived yet — the existing AvatarImage `lookupProfile` debounce covers
+    // most cases; this LaunchedEffect catches the long tail.
     if (model.repost != null && sourceProfile == null && lookupProfile != null) {
         LaunchedEffect(model.sourcePubkey) {
             delay(1500)
@@ -114,10 +117,37 @@ fun EventCard(
         }
     }
 
-    // Resolve effective author profile (for kind-6, this is the inner author)
-    val effectiveProfile = if (model.repost != null && profileFlow != null) {
+    // Resolve the EFFECTIVE author profile reactively. Previously we only
+    // observed profileFlow for repost inner-authors; non-repost cards read
+    // from the FeedRow snapshot, which forced a list-wide recompute every
+    // time any profile updated. Now every card observes its own author's
+    // profile flow — profile X arriving only re-composes cards by X.
+    //
+    // The FeedRow author fields remain as the initial snapshot — used as
+    // a fallback when the flow hasn't emitted yet, so the first frame after
+    // mount doesn't flash empty avatars on rows whose profiles MES already
+    // has cached.
+    val authorProfile = if (profileFlow != null) {
         profileFlow(model.pubkey).collectAsState().value
     } else null
+
+    // For repost cards, model.pubkey is the inner (effective) author and
+    // model.sourcePubkey is the wrapper author. authorProfile reactively
+    // resolves the inner author for both cases.
+    val effectiveProfile = authorProfile
+
+    // Live engagement counts. statsFlow re-emits when reactionCounts /
+    // replyCounts / repostCounts / zapStatsByEventId change for THIS event;
+    // distinctUntilChanged inside MES filters out signal bumps caused by
+    // unrelated events. Falls back to the FeedRow snapshot when no provider
+    // is wired (older surfaces, tests).
+    val liveStats = if (statsFlow != null)
+        statsFlow(model.engagementId).collectAsState().value
+    else null
+    val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
+    val liveRepostCount   = liveStats?.repostCount   ?: row.repostCount
+    val liveReactionCount = liveStats?.reactionCount ?: row.reactionCount
+    val liveZapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
 
     // Article layout
     if (role == CardRole.Article || model.article != null) {
@@ -125,6 +155,10 @@ fun EventCard(
             model = model,
             row = row,
             engagement = engagement,
+            replyCount = liveReplyCount,
+            repostCount = liveRepostCount,
+            reactionCount = liveReactionCount,
+            zapTotalSats = liveZapTotalSats,
             onNoteClick = onNoteClick,
             onArticleClick = onArticleClick,
             onReact = onReact,
@@ -154,19 +188,19 @@ fun EventCard(
             )
         }
 
-        // Author header
+        // Author header. Picture/displayName/nip05 read live from authorProfile
+        // (profileFlow) when present, falling back to the FeedRow snapshot for
+        // first-frame stability. authorProfile reactively updates when MES
+        // profile data changes — eliminates list-wide feedRows recompute on
+        // every kind-0 arrival.
         AuthorHeader(
             pubkey      = model.pubkey,
-            picture     = if (model.repost != null) effectiveProfile?.picture else row.authorPicture,
-            displayName = if (model.repost != null) {
-                effectiveProfile?.displayName?.takeIf { it.isNotBlank() }
-                    ?: effectiveProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-                    ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}"
-            } else {
-                row.displayName
-                    ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
-            },
-            nip05       = if (model.repost != null) effectiveProfile?.nip05 else row.authorNip05,
+            picture     = authorProfile?.picture ?: row.authorPicture,
+            displayName = authorProfile?.displayName?.takeIf { it.isNotBlank() }
+                ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
+                ?: row.displayName
+                ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
+            nip05       = authorProfile?.nip05 ?: row.authorNip05,
             createdAt   = model.createdAt,
             onAuthorClick = onAuthorClick,
             onNoteClick = { onNoteClick(model.navigateId) },
@@ -232,10 +266,10 @@ fun EventCard(
         // Action bar
         EventActionBar(
             noteId          = row.id,
-            replyCount      = row.replyCount,
-            repostCount     = row.repostCount,
-            reactionCount   = row.reactionCount,
-            zapTotalSats    = row.zapTotalSats,
+            replyCount      = liveReplyCount,
+            repostCount     = liveRepostCount,
+            reactionCount   = liveReactionCount,
+            zapTotalSats    = liveZapTotalSats,
             hasReacted      = model.engagementId in engagement.reactedIds,
             hasReposted     = model.engagementId in engagement.repostedIds,
             hasZapped       = model.engagementId in engagement.zappedIds,
@@ -264,6 +298,10 @@ private fun ArticleLayout(
     model: EventModel,
     row: FeedRow,
     engagement: EngagementSnapshot,
+    replyCount: Int,
+    repostCount: Int,
+    reactionCount: Int,
+    zapTotalSats: Long,
     onNoteClick: (String) -> Unit,
     onArticleClick: (FeedRow) -> Unit,
     onReact: () -> Unit,
@@ -349,10 +387,10 @@ private fun ArticleLayout(
             // Action bar
             EventActionBar(
                 noteId          = row.id,
-                replyCount      = row.replyCount,
-                repostCount     = row.repostCount,
-                reactionCount   = row.reactionCount,
-                zapTotalSats    = row.zapTotalSats,
+                replyCount      = replyCount,
+                repostCount     = repostCount,
+                reactionCount   = reactionCount,
+                zapTotalSats    = zapTotalSats,
                 hasReacted      = model.engagementId in engagement.reactedIds,
                 hasReposted     = model.engagementId in engagement.repostedIds,
                 hasZapped       = model.engagementId in engagement.zappedIds,

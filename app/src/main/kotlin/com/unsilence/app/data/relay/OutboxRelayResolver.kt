@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import com.unsilence.app.data.memory.RelayMonitorEntity
 import com.unsilence.app.data.memory.RelayTrustScoreEntity
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -8,6 +9,12 @@ import javax.inject.Singleton
 private const val TAG = "OutboxResolver"
 private const val MAX_WRITE_RELAYS_PER_AUTHOR = 4
 private const val MAX_OUTBOX_RELAYS = 10
+/** Treat unknown trust scores as average (not great, not bad). Matches the
+ *  pre-existing convention in [com.unsilence.app.data.memory.MemoryEventStore.writeRelaysForRanked]. */
+private const val DEFAULT_TRUST_SCORE = 50
+/** Treat unknown RTTs as median. Picked so that monitored low-RTT relays
+ *  beat unknown ones, and unknown relays beat monitored high-RTT ones. */
+private const val DEFAULT_RTT_MS = 250
 
 /**
  * Read-only relay metadata source. Implemented by [com.unsilence.app.data.memory.MemoryEventStore]
@@ -17,6 +24,9 @@ private const val MAX_OUTBOX_RELAYS = 10
 interface RelayMetadataSource {
     fun writeRelaysFor(pubkey: String): List<String>
     fun getTrustScores(): Map<String, RelayTrustScoreEntity>
+    /** NIP-66 RTT data per relay (kind-30166 monitor events). Empty until
+     *  [com.unsilence.app.data.relay.RelayPool.fetchRelayMonitors] populates MES. */
+    fun getRelayMonitors(): Map<String, RelayMonitorEntity> = emptyMap()
 }
 
 /**
@@ -56,9 +66,28 @@ class OutboxRelayResolver @Inject constructor(
         if (authors.isEmpty()) return emptyList()
 
         val trustScores = metadata.getTrustScores()
+        val monitors = metadata.getRelayMonitors()
         val sortedAuthors = authors.sorted()
 
+        // Quality comparator: higher trust first, then lower RTT first. Unknown
+        // values get the DEFAULT_TRUST_SCORE / DEFAULT_RTT_MS placeholders so
+        // monitored fast relays outrank unknown ones, but unknown relays still
+        // outrank monitored-slow ones. Lexicographic url tiebreak keeps the
+        // ranking deterministic for stable cache keys / set-cover behaviour.
+        val relayQuality = Comparator<String> { a, b ->
+            val sa = trustScores[a]?.score ?: DEFAULT_TRUST_SCORE
+            val sb = trustScores[b]?.score ?: DEFAULT_TRUST_SCORE
+            if (sa != sb) return@Comparator sb.compareTo(sa)
+            val ra = monitors[a]?.rttRead ?: DEFAULT_RTT_MS
+            val rb = monitors[b]?.rttRead ?: DEFAULT_RTT_MS
+            if (ra != rb) return@Comparator ra.compareTo(rb)
+            a.compareTo(b)
+        }
+
         // Build relay → covered-authors map (per-relay SubRequest routing).
+        // Per-author candidates are sorted by [relayQuality] before the
+        // MAX_WRITE_RELAYS_PER_AUTHOR cap, so each author contributes its
+        // best-known relays first.
         val relayCoverage = HashMap<String, MutableSet<String>>()
         for (author in sortedAuthors) {
             val authorRelays = metadata.writeRelaysFor(author)
@@ -68,6 +97,8 @@ class OutboxRelayResolver @Inject constructor(
                     val score = trustScores[url]?.score
                     score == null || score >= config.minTrustScore
                 }
+                .distinct()
+                .sortedWith(relayQuality)
                 .take(MAX_WRITE_RELAYS_PER_AUTHOR)
             for (relay in authorRelays) {
                 relayCoverage.getOrPut(relay) { mutableSetOf() }.add(author)
@@ -84,24 +115,36 @@ class OutboxRelayResolver @Inject constructor(
         // Write relays (exclude fallbacks — they already carry all authors).
         val writeRelayUrls = relayCoverage.keys.filter { it !in baseUrlSet }
 
-        // Coverage pruning: greedy set cover if >10 write relays.
+        // Coverage pruning: greedy set cover if >MAX_OUTBOX_RELAYS write relays.
+        // Pick by max remaining coverage; tiebreak by relay quality so that on
+        // equal coverage, the higher-trust / faster-RTT relay wins.
+        //
+        // Comparator returns >0 when `a` is the better candidate (max-by-this
+        // semantics). Coverage is the primary signal; quality breaks ties.
+        val pickBest = Comparator<Pair<String, Int>> { a, b ->
+            val cov = a.second.compareTo(b.second)
+            if (cov != 0) cov
+            else relayQuality.compare(b.first, a.first)  // higher-quality URL wins
+        }
         val selectedWriteRelays: List<String> = if (writeRelayUrls.size > MAX_OUTBOX_RELAYS) {
             val uncovered = sortedAuthors.toMutableSet()
             val selected = mutableListOf<String>()
             val remaining = writeRelayUrls.toMutableList()
             while (selected.size < MAX_OUTBOX_RELAYS && uncovered.isNotEmpty() && remaining.isNotEmpty()) {
-                val best = remaining.maxByOrNull { url ->
-                    relayCoverage[url]?.count { it in uncovered } ?: 0
-                } ?: break
-                val newCoverage = relayCoverage[best]?.count { it in uncovered } ?: 0
-                if (newCoverage == 0) break
+                val best = remaining
+                    .map { url -> url to (relayCoverage[url]?.count { it in uncovered } ?: 0) }
+                    .filter { it.second > 0 }
+                    .maxWithOrNull(pickBest)
+                    ?.first ?: break
                 selected.add(best)
                 uncovered.removeAll(relayCoverage[best] ?: emptySet())
                 remaining.remove(best)
             }
             selected
         } else {
-            writeRelayUrls
+            // Within-cap: emit relays in quality order so the resulting
+            // SubRequest lists are deterministic and best-relay-first.
+            writeRelayUrls.sortedWith(relayQuality)
         }
 
         val subRequests = mutableListOf<SubRequest>()

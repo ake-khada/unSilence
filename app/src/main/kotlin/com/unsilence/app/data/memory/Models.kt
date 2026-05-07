@@ -34,6 +34,26 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
     }
 }
 
+/**
+ * Per-event engagement counts. Snapshot of MES aggregate state for a single
+ * event, surfaced via [com.unsilence.app.data.memory.MemoryEventStore.statsFlow]
+ * so individual cards can observe their own counts without going through a
+ * list-wide signal trigger. Equality enables [kotlinx.coroutines.flow.distinctUntilChanged]
+ * to suppress emissions when counts didn't change for THIS event.
+ */
+@androidx.compose.runtime.Immutable
+data class EventStats(
+    val replyCount: Int,
+    val repostCount: Int,
+    val reactionCount: Int,
+    val zapCount: Int,
+    val zapTotalSats: Long,
+) {
+    companion object {
+        val EMPTY = EventStats(0, 0, 0, 0, 0L)
+    }
+}
+
 data class RelayList(val read: List<String>, val write: List<String>)
 
 data class MuteList(val pubkeys: Set<String>, val words: Set<String>)

@@ -11,17 +11,36 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import com.unsilence.app.data.model.buildVideoRenderModels
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Wire DTO for the inner event object inside `["EVENT", subId, {...}]`.
+ *
+ * Decoded via kotlinx-serialization's streaming decoder
+ * ([NostrJson.decodeFromString]) directly into final-shape primitives —
+ * no intermediate JsonObject / JsonArray tree, no per-field jsonPrimitive
+ * allocation, no second pass to convert tags from JsonArray to
+ * List<List<String>>.
+ *
+ * NostrJson has ignoreUnknownKeys = true so relay-specific extras (e.g.
+ * NIP-19 'a' tags, custom moderation flags) don't break decode.
+ */
+@Serializable
+private data class EventDto(
+    val id: String,
+    val pubkey: String,
+    val kind: Int,
+    val content: String,
+    @SerialName("created_at") val createdAt: Long,
+    val tags: List<List<String>> = emptyList(),
+    val sig: String,
+)
 
 private const val TAG = "EventProcessor"
 
@@ -108,6 +127,16 @@ class EventProcessor @Inject constructor(
         }
         if (buffer.isNotEmpty()) {
             flushBatch(buffer)
+            buffer.clear()
+        }
+        // Control-plane events go through a separate batch path — no media
+        // sidecars and they may include kind-10012 relay set refs.
+        while (true) {
+            val event = controlChannel.tryReceive().getOrNull() ?: break
+            buffer.add(event)
+        }
+        if (buffer.isNotEmpty()) {
+            flushControlBatch(buffer)
         }
     }
 
@@ -166,6 +195,18 @@ class EventProcessor @Inject constructor(
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<NostrEvent>(capacity = 500)
 
+    /** CONTROL lane: control-plane kinds (10002, 10006, 10007, 10012, 30002,
+     *  30166, 30385). Flushed every 150 ms via [MemoryEventStore.insertBatch]
+     *  so signal bumps coalesce — a 1000-event monitor burst produces ONE
+     *  _relayMonitorSignal bump instead of 1000.
+     *
+     *  Capacity 2000 sized for the largest observed burst (1175 kind-30166
+     *  monitor events from a single fetchRelayMonitors call) plus headroom
+     *  for parallel kind-10002 fetches (≤300 follows). trySend drops silently
+     *  if the drainer can't keep up; control-plane events are re-fetched on
+     *  next bootstrap. */
+    private val controlChannel = Channel<NostrEvent>(capacity = 2000)
+
     private var drainerJob: Job? = null
 
     init {
@@ -179,6 +220,7 @@ class EventProcessor @Inject constructor(
         val drainerScope = CoroutineScope(scope.coroutineContext + drainerJob!!)
         drainerScope.launch { drainHot() }
         drainerScope.launch { drainCold() }
+        drainerScope.launch { drainControl() }
         Log.d(TAG, "Drainers started")
     }
 
@@ -190,6 +232,7 @@ class EventProcessor @Inject constructor(
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
+        while (controlChannel.tryReceive().isSuccess) { /* discard */ }
         Log.d(TAG, "Stopped and cleared state")
     }
 
@@ -202,7 +245,7 @@ class EventProcessor @Inject constructor(
      *   1. startsWith ["EVENT"  — rejects EOSE/OK/NOTICE with one call
      *   2. extractEventId       — substring scan, no JSON allocation
      *   3. seenIds cache hit    — ConcurrentHashMap lookup, returns immediately for dups
-     *   4. JSON parse + route   — only for novel EVENT messages
+     *   4. Streaming JSON decode — only for novel EVENT messages
      */
     suspend fun process(raw: String, rawRelayUrl: String) {
         val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: rawRelayUrl
@@ -234,13 +277,77 @@ class EventProcessor @Inject constructor(
         trimDedupCacheIfNeeded()
 
         // Only novel EVENT messages reach here (~20 % of total messages).
-        try {
-            val msg = NostrJson.parseToJsonElement(raw).jsonArray
-            if (msg.size < 3) return
-            handleEvent(eventId, msg[2].jsonObject, relayUrl)
+        // Streaming decode bypasses the JsonElement tree: instead of allocating
+        // a JsonObject + per-field JsonPrimitive + JsonArray of tags + nested
+        // JsonArrays, kotlinx-serialization's streaming decoder writes straight
+        // into the final EventDto fields. Saves ~5KB of allocation per event
+        // — at 20 events/sec that's the dominant ~1.5MB/sec heap churn that
+        // drove the 85MB GC cycles every 30-60s.
+        val eventJsonStart = findEventObjectStart(raw)
+        val eventJsonEnd = if (eventJsonStart >= 0) findMatchingBraceEnd(raw, eventJsonStart) else -1
+        if (eventJsonStart < 0 || eventJsonEnd < 0) return
+        val eventJson = raw.substring(eventJsonStart, eventJsonEnd + 1)
+        val dto = try {
+            NostrJson.decodeFromString<EventDto>(eventJson)
         } catch (_: Exception) {
-            // Malformed relay message — skip silently
+            return  // malformed event object — skip silently
         }
+        // Sanity: the precomputed eventId must match the decoded id. If a
+        // relay returned a tampered or mis-aligned message, refuse it now
+        // before we touch MES state.
+        if (dto.id != eventId) return
+        handleEvent(dto, relayUrl)
+    }
+
+    /**
+     * Walk [raw] to find the start of the inner event object — the first
+     * `{` character outside of a JSON string literal. The preamble is
+     * `["EVENT","sub-id",` and neither EVENT nor sub-id can legitimately
+     * contain a `{`, so a simple linear scan suffices and there's no need
+     * to match string boundaries here.
+     */
+    private fun findEventObjectStart(raw: String): Int {
+        var i = 0
+        var inString = false
+        var escape = false
+        while (i < raw.length) {
+            val c = raw[i]
+            if (escape) { escape = false; i++; continue }
+            if (c == '\\') { escape = true; i++; continue }
+            if (c == '"') { inString = !inString; i++; continue }
+            if (!inString && c == '{') return i
+            i++
+        }
+        return -1
+    }
+
+    /**
+     * Find the `}` that matches the opening `{` at [openIdx], respecting
+     * string-literal boundaries. Used to slice out the event object's JSON
+     * substring for streaming decode.
+     */
+    private fun findMatchingBraceEnd(raw: String, openIdx: Int): Int {
+        var depth = 0
+        var inString = false
+        var escape = false
+        var i = openIdx
+        while (i < raw.length) {
+            val c = raw[i]
+            if (escape) { escape = false; i++; continue }
+            if (c == '\\') { escape = true; i++; continue }
+            if (c == '"') { inString = !inString; i++; continue }
+            if (!inString) {
+                when (c) {
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return i
+                    }
+                }
+            }
+            i++
+        }
+        return -1
     }
 
     // ── Dedup helpers ─────────────────────────────────────────────────────────
@@ -279,46 +386,35 @@ class EventProcessor @Inject constructor(
 
     // ── Event routing ─────────────────────────────────────────────────────────
 
-    private suspend fun handleEvent(id: String, obj: JsonObject, relayUrl: String) {
-        val pubkey    = obj["pubkey"]?.jsonPrimitive?.content        ?: return
-        val kind      = obj["kind"]?.jsonPrimitive?.intOrNull        ?: return
-        val content   = obj["content"]?.jsonPrimitive?.content       ?: return
-        val createdAt = obj["created_at"]?.jsonPrimitive?.longOrNull ?: return
-        val sig       = obj["sig"]?.jsonPrimitive?.content           ?: return
-        val tags      = obj["tags"]?.jsonArray ?: JsonArray(emptyList())
+    private suspend fun handleEvent(dto: EventDto, relayUrl: String) {
+        val tags = dto.tags
 
-        // NIP-40: skip events that have already expired
-        val expiration = tags.firstOrNull {
-            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "expiration"
-        }?.jsonArray?.getOrNull(1)?.jsonPrimitive?.longOrNull
+        // NIP-40: skip events that have already expired.
+        val expiration = tags.firstOrNull { it.size >= 2 && it[0] == "expiration" }
+            ?.getOrNull(1)?.toLongOrNull()
         if (expiration != null && expiration < nowSeconds) return
 
         // Skip machine-generated spam: JSON payloads and broadcast protocols
         // posted as kind-1 notes. Normal notes are always plain text/markdown.
-        if (kind == 1 && (content.startsWith("{") || content.startsWith("xitchat-broadcast-v1-"))) return
+        if (dto.kind == 1 && (dto.content.startsWith("{") || dto.content.startsWith("xitchat-broadcast-v1-"))) return
 
-        // Parse NIP-10 threading for content event kinds
-        val (replyToId, rootId) = when (kind) {
+        // Parse NIP-10 threading for content event kinds.
+        val (replyToId, rootId) = when (dto.kind) {
             1, 6, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
             else -> Pair(null, null)
         }
 
         val (hasCw, cwReason) = parseContentWarning(tags)
 
-        // Convert JsonArray tags to List<List<String>>
-        val tagsList = tags.map { tag ->
-            tag.jsonArray.map { it.jsonPrimitive.content }
-        }
-
         val nostrEvent = NostrEvent(
-            id = id,
-            pubkey = pubkey,
-            kind = kind,
-            content = content,
-            createdAt = createdAt,
-            tags = tagsList,
-            tagsJson = tagsToJson(tagsList),
-            sig = sig,
+            id = dto.id,
+            pubkey = dto.pubkey,
+            kind = dto.kind,
+            content = dto.content,
+            createdAt = dto.createdAt,
+            tags = tags,
+            tagsJson = tagsToJson(tags),
+            sig = dto.sig,
             relayUrl = relayUrl,
             replyToId = replyToId,
             rootId = rootId,
@@ -328,44 +424,37 @@ class EventProcessor @Inject constructor(
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
         )
 
-        // ── Direct-path control-plane updates (not channeled) ────────────────
-        // Control-plane kinds (3, 10002) update MemoryEventStore state directly
-        // without entering the feed-content channels. They are NOT feed items.
-        if (kind == 3) {
-            val follows = nostrEvent.tags
+        // ── Kind-3 follows update (not stored in eventsById) ─────────────────
+        // Updates the followsByPubkey index directly without entering MES
+        // proper. Snapshot persists followsByPubkey so this is reconstructible.
+        if (dto.kind == 3) {
+            val follows = tags
                 .filter { it.size >= 2 && it[0] == "p" }
                 .map { it[1] }
                 .toSet()
-            memoryEventStore.updateFollows(pubkey, follows, createdAt)
-            Log.d(TAG, "Kind-3 direct path: pubkey=${pubkey.take(8)}… ${follows.size} follows (createdAt=$createdAt)")
+            memoryEventStore.updateFollows(dto.pubkey, follows, dto.createdAt)
+            Log.d(TAG, "Kind-3 direct path: pubkey=${dto.pubkey.take(8)}… ${follows.size} follows (createdAt=${dto.createdAt})")
         }
-        // Control-plane events → direct insert into MES (bypass cold channel).
-        // These are NOT feed content and need immediate processing:
-        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config UI,
-        // 30385 for trust scores, 30166 for relay monitors (hundreds arrive in
-        // burst — cold channel drops via trySend; direct insert ensures none are
-        // lost). Both are ephemeral (not snapshot-persisted, re-fetched every bootstrap).
-        if (kind in setOf(10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
-            memoryEventStore.insert(nostrEvent)
-        }
-        // Kind-10012 (favorites) may contain ["a", "30002:pubkey:dtag", "hint-relay"]
-        // tags referencing relay sets that exist on specific hint relays (not indexers).
-        // Resolve these references so the actual relay sets appear in the UI.
-        if (kind == 10012) {
-            resolveRelaySetRefs(nostrEvent)
+        // Control-plane events → CONTROL channel (separate lane, batched).
+        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config
+        // UI, 30385 for trust scores, 30166 for relay monitors (hundreds arrive
+        // in burst — capacity-2000 channel handles the largest observed burst).
+        // The drainer flushes via insertBatch so per-event signal bumps coalesce.
+        // Kind-10012 relay set refs are resolved inside flushControlBatch.
+        if (dto.kind in setOf(10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
+            controlChannel.trySend(nostrEvent)
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
         // Kind-3 is NOT channeled — updateFollows (above) provides the MES
         // update, and the snapshot persists followsByPubkey directly.
-        val shouldChannel = kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023)
+        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023)
         if (shouldChannel) {
-            val isHot = kind == 1 || kind == 6 || kind == 20 || kind == 21 || kind == 30023
+            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 20 || dto.kind == 21 || dto.kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)
         }
-
     }
 
     // ── Channel drainers ──────────────────────────────────────────────────────
@@ -418,6 +507,64 @@ class EventProcessor @Inject constructor(
         }
     }
 
+    /**
+     * CONTROL drainer: collects up to 500 control-plane events within a
+     * 150 ms window, then dispatches via [MemoryEventStore.insertBatch].
+     *
+     * Coalesces signal bumps for kind-10002/10006/10007/10012/30002/30166/
+     * 30385 bursts that previously hit MES one event at a time and bumped
+     * _relayConfigSignal / _trustScoreSignal / _relayMonitorSignal once per
+     * event. A 1175-event relay-monitor burst now produces one bump.
+     *
+     * Window of 150 ms is short enough that user-perceived latency for
+     * kind-10002 outbox routing remains <200 ms, but long enough to let
+     * a 1000-event burst coalesce into a single batch.
+     */
+    private suspend fun drainControl() {
+        val buffer = ArrayDeque<NostrEvent>(500)
+        while (true) {
+            val first = withTimeoutOrNull(150L) { controlChannel.receive() }
+            if (first != null) {
+                buffer.add(first)
+                var next = controlChannel.tryReceive().getOrNull()
+                while (next != null && buffer.size < 500) {
+                    buffer.add(next)
+                    next = controlChannel.tryReceive().getOrNull()
+                }
+            }
+            if (buffer.isNotEmpty()) {
+                flushControlBatch(buffer)
+                buffer.clear()
+            }
+        }
+    }
+
+    /**
+     * Insert control-plane events via the MES batch path so signal bumps
+     * coalesce. Unlike [flushBatch], does NOT compute imeta/video sidecars
+     * (control-plane kinds carry no media).
+     */
+    private fun flushControlBatch(batch: List<NostrEvent>) {
+        // Dedup by event ID within the batch — same kind-10002 from N relays
+        val events = LinkedHashMap<String, NostrEvent>(batch.size)
+        for (event in batch) {
+            val existing = events[event.id]
+            if (existing != null) {
+                existing.relaysSeen.addAll(event.relaysSeen)
+            } else {
+                events[event.id] = event
+            }
+        }
+        memoryEventStore.insertBatch(events.values.toList())
+
+        // Kind-10012 favorites may reference relay sets via "a" tags that
+        // need a follow-up fetch from a hint relay. Resolve outside the
+        // insert path — fetcher dispatches its own REQ.
+        for (event in events.values) {
+            if (event.kind == 10012) resolveRelaySetRefs(event)
+        }
+    }
+
     // ── Batch insert ──────────────────────────────────────────────────────────
 
     private fun flushBatch(batch: List<NostrEvent>) {
@@ -460,17 +607,13 @@ class EventProcessor @Inject constructor(
      * Priority: explicit "root"/"reply" markers. Fallback: positional
      * (first e = root, last e = reply-to). If only one e tag, it is the root.
      */
-    internal fun parseNip10Threading(tags: JsonArray): Pair<String?, String?> {
-        val eTags = tags.filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
-            .map { it.jsonArray }
-
+    internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String?> {
+        val eTags = tags.filter { it.isNotEmpty() && it[0] == "e" }
         if (eTags.isEmpty()) return Pair(null, null)
 
         // Marker-based (NIP-10 recommended)
-        val rootId    = eTags.firstOrNull { it.getOrNull(3)?.jsonPrimitive?.content == "root" }
-            ?.getOrNull(1)?.jsonPrimitive?.content
-        val replyToId = eTags.firstOrNull { it.getOrNull(3)?.jsonPrimitive?.content == "reply" }
-            ?.getOrNull(1)?.jsonPrimitive?.content
+        val rootId    = eTags.firstOrNull { it.getOrNull(3) == "root" }?.getOrNull(1)
+        val replyToId = eTags.firstOrNull { it.getOrNull(3) == "reply" }?.getOrNull(1)
 
         if (rootId != null || replyToId != null) {
             // If root marker exists but no reply marker, the reply target IS the root
@@ -478,7 +621,7 @@ class EventProcessor @Inject constructor(
         }
 
         // Positional fallback
-        val ids = eTags.mapNotNull { it.getOrNull(1)?.jsonPrimitive?.content }
+        val ids = eTags.mapNotNull { it.getOrNull(1) }
         return when (ids.size) {
             0    -> Pair(null, null)
             1    -> Pair(ids[0], ids[0])   // single e = both root and reply-to
@@ -488,12 +631,10 @@ class EventProcessor @Inject constructor(
 
     // ── NIP-36: content-warning ───────────────────────────────────────────────
 
-    private fun parseContentWarning(tags: JsonArray): Pair<Boolean, String?> {
-        val cwTag = tags.firstOrNull { tag ->
-            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "content-warning"
-        }?.jsonArray ?: return Pair(false, null)
-
-        val reason = cwTag.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+    private fun parseContentWarning(tags: List<List<String>>): Pair<Boolean, String?> {
+        val cwTag = tags.firstOrNull { it.isNotEmpty() && it[0] == "content-warning" }
+            ?: return Pair(false, null)
+        val reason = cwTag.getOrNull(1)?.takeIf { it.isNotBlank() }
         return Pair(true, reason)
     }
 }

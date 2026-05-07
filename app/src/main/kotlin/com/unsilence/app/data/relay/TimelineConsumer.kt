@@ -7,16 +7,19 @@ import com.unsilence.app.ui.feed.FeedContentFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Generalized timeline state holder, modelled after Jumble's NoteList.
@@ -70,29 +73,34 @@ class TimelineConsumer(
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
     /**
-     * UI-bound feed rows. Derived from _events × _contentFilter × MES signal
-     * flows. matchesContentFilter is applied at the render boundary so that
+     * UI-bound feed rows. Derived ONLY from _events × _contentFilter.
+     *
+     * Per-card reactivity replaces every list-level signal trigger:
+     *   - Profile updates re-compose only the affected card via
+     *     [profileFlow(pubkey)] in [com.unsilence.app.ui.feed.EventCard].
+     *   - Engagement counts (replyCount / repostCount / reactionCount /
+     *     zapTotalSats) re-compose only the affected card via
+     *     [MemoryEventStore.statsFlow(eventId)].
+     *
+     * No more list-wide rebuilds on signal floods. _events and
+     * _contentFilter changes fire immediately so new posts tail in
+     * without delay.
+     *
+     * matchesContentFilter is applied at the render boundary so that
      * Notes/Conversations tab switching doesn't require resubscribing.
      */
-    val feedRows: StateFlow<List<FeedRow>> = combine(
-        _events,
-        _contentFilter,
-        memoryEventStore.profileSignalFlow,
-        memoryEventStore.actionSignalFlow,
-        memoryEventStore.statsSignalFlow,
-    ) { args ->
-        @Suppress("UNCHECKED_CAST")
-        val events = args[0] as List<NostrEvent>
-        val cf = args[1] as FeedContentFilter
-        if (events.isEmpty()) return@combine emptyList()
-        val filtered = events.filter { matchesContentFilter(it, cf) }
-        if (filtered.isEmpty()) return@combine emptyList()
-        val ids = filtered.map { it.id }
-        val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
-        ids.mapNotNull { rowsById[it] }
-    }
-    .flowOn(Dispatchers.Default)
-    .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
+    val feedRows: StateFlow<List<FeedRow>> =
+        combine(_events, _contentFilter) { events, cf ->
+            if (events.isEmpty()) return@combine emptyList()
+            val filtered = events.filter { matchesContentFilter(it, cf) }
+            if (filtered.isEmpty()) return@combine emptyList()
+            val ids = filtered.map { it.id }
+            val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
+            ids.mapNotNull { rowsById[it] }
+        }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
 
     // ── Subscription handle ───────────────────────────────────────────────
 
@@ -100,6 +108,70 @@ class TimelineConsumer(
     private var subscribeJob: Job? = null
     private var currentSubRequests: List<SubRequest> = emptyList()
     private var sinceCursor: Long = 0L
+
+    // ── Arrival coalescing ────────────────────────────────────────────────
+    //
+    // High-volume relays (Ditto, primal cache, etc.) deliver events in
+    // many small batches per second. Each batch hitting handleNewEvents
+    // synchronously fires _events.update → eventsTrigger → feedRowsByIds
+    // → Compose recomposition. Field log on Ditto showed 14 frame drops
+    // (max 72 frames / 1200ms) clustered around batch arrivals even with
+    // hydration on background threads — Compose on Main couldn't keep up
+    // with N _events updates per second.
+    //
+    // Solution: enqueue arrivals on an unbounded channel, drainer wakes
+    // every 100ms and applies ONE coalesced merge. Worst-case tail-in
+    // latency is 100ms (imperceptible) and N batches arriving in 100ms
+    // produce one Compose recompose instead of N.
+    //
+    // Channel.UNLIMITED so trySend never drops. Drainer is bound to
+    // ownerScope and cancelled in close().
+
+    private val arrivalQueue = Channel<List<NostrEvent>>(Channel.UNLIMITED)
+    private val arrivalDrainerJob: Job
+
+    init {
+        arrivalDrainerJob = ownerScope.launch {
+            // Adaptive coalescing: the drain window starts at ARRIVAL_WINDOW_MIN_MS
+            // and stretches toward ARRIVAL_WINDOW_MAX_MS as arrival rate climbs.
+            // On Following (steady ~10 events/sec) the window stays near the
+            // minimum and posts tail in promptly. On Ditto-class firehoses
+            // (~100+ events/sec) it stretches to absorb the burst and produce
+            // one Compose recompose per ~500ms instead of per-batch. Each
+            // applied batch updates `currentWindowMs` based on what we just saw.
+            var currentWindowMs = ARRIVAL_WINDOW_MIN_MS
+            while (true) {
+                // Suspend until at least one batch arrives. CancellationException
+                // exits the loop when ownerScope is cancelled.
+                val first = arrivalQueue.receive()
+                val buffer = ArrayList<NostrEvent>(first.size + 32)
+                buffer.addAll(first)
+                val windowStartNs = System.nanoTime()
+                // Drain anything that arrives within currentWindowMs.
+                withTimeoutOrNull(currentWindowMs) {
+                    while (true) {
+                        val next = arrivalQueue.receive()
+                        buffer.addAll(next)
+                    }
+                }
+                val elapsedMs = ((System.nanoTime() - windowStartNs) / 1_000_000L).coerceAtLeast(1L)
+                val rate = (buffer.size * 1000L) / elapsedMs   // events/sec for this window
+                applyArrival(buffer)
+                // Update window for the NEXT batch based on observed rate.
+                // Linear interpolation: ≤ARRIVAL_LOW_RATE → MIN, ≥ARRIVAL_HIGH_RATE → MAX.
+                currentWindowMs = when {
+                    rate <= ARRIVAL_LOW_RATE -> ARRIVAL_WINDOW_MIN_MS
+                    rate >= ARRIVAL_HIGH_RATE -> ARRIVAL_WINDOW_MAX_MS
+                    else -> {
+                        val span = ARRIVAL_WINDOW_MAX_MS - ARRIVAL_WINDOW_MIN_MS
+                        val t = (rate - ARRIVAL_LOW_RATE).toDouble() /
+                            (ARRIVAL_HIGH_RATE - ARRIVAL_LOW_RATE)
+                        ARRIVAL_WINDOW_MIN_MS + (span * t).toLong()
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * Subscribe to a new set of subRequests. Closes previous subscription.
@@ -116,6 +188,12 @@ class TimelineConsumer(
         currentHandle = null
         subscribeJob?.cancel()
         subscribeJob = null
+
+        // Drain stale arrivals from the previous subscription. Without this,
+        // a queued batch from the closed sub would be applied to the new
+        // feed's _events on the next drainer tick.
+        while (arrivalQueue.tryReceive().isSuccess) { /* discard */ }
+
         currentSubRequests = subRequests
         _events.value = initialCachedEvents
         _pendingNew.value = emptyList()
@@ -157,18 +235,30 @@ class TimelineConsumer(
      */
     fun addCachedEvents(events: List<NostrEvent>) {
         if (events.isEmpty()) return
-        _events.update { current ->
-            (events + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-        }
+        _events.update { current -> mergeSorted(current, events) }
         _isLoading.value = false
     }
 
+    /**
+     * Subscription tap entry point. Enqueues the batch on the arrival queue;
+     * the drainer coalesces into 100ms windows and calls [applyArrival].
+     * Non-suspending — must not block the WebSocket consume thread.
+     */
     private fun handleNewEvents(newEvents: List<NostrEvent>) {
         if (newEvents.isEmpty()) return
+        arrivalQueue.trySend(newEvents)
+    }
+
+    /**
+     * Apply one coalesced batch (drainer-only entry point). Reads `_isAtTop`
+     * at apply time so events queued while at-top still go to `_events` even
+     * if the drainer wake is slightly delayed; events queued while scrolled
+     * down go to `_pendingNew`.
+     */
+    private fun applyArrival(newEvents: List<NostrEvent>) {
+        if (newEvents.isEmpty()) return
         if (_isAtTop.value) {
-            _events.update { current ->
-                (newEvents + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-            }
+            _events.update { current -> mergeSorted(current, newEvents) }
         } else {
             _pendingNew.update { current ->
                 (current + newEvents).distinctBy { it.id }
@@ -187,9 +277,7 @@ class TimelineConsumer(
     private fun flushPending() {
         val pending = _pendingNew.value
         if (pending.isEmpty()) return
-        _events.update { current ->
-            (pending + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-        }
+        _events.update { current -> mergeSorted(current, pending) }
         _pendingNew.value = emptyList()
     }
 
@@ -206,9 +294,7 @@ class TimelineConsumer(
                     limit = 100,
                 )
                 if (older.isNotEmpty()) {
-                    _events.update { current ->
-                        (current + older).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-                    }
+                    _events.update { current -> mergeSorted(current, older) }
                 }
             } finally {
                 _isLoadingMore.value = false
@@ -223,6 +309,9 @@ class TimelineConsumer(
     fun close() {
         subscribeJob?.cancel()
         subscribeJob = null
+        arrivalDrainerJob.cancel()
+        // Drain anything still queued so it's eligible for GC.
+        while (arrivalQueue.tryReceive().isSuccess) { /* discard */ }
         currentHandle?.close()
         currentHandle = null
         currentSubRequests = emptyList()
@@ -236,7 +325,76 @@ class TimelineConsumer(
                 evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
         }
 
+    /**
+     * Merge new events into a sorted current list via binary insertion.
+     *
+     * Replaces the previous `(new + current).distinctBy.sortedWith(EVENT_ORDER)`
+     * which allocated and sorted the entire list on every batch (O(N log N)).
+     * Each batch from a SubRequest hits this — with 13 SubRequests delivering
+     * a few batches each, that's 30+ full sorts of a growing list during a
+     * single feed warm-up.
+     *
+     * Binary insertion: O(M log N + M) where M=newEvents, N=current. The
+     * O(N) shift is unavoidable when inserting into an ArrayList, but we
+     * skip the per-batch quicksort overhead.
+     *
+     * Assumes `current` is already sorted by EVENT_ORDER. Snapshots and
+     * relay batches respect createdAt-desc ordering, so this is true after
+     * the initial subscribe() set.
+     */
+    private fun mergeSorted(current: List<NostrEvent>, newEvents: List<NostrEvent>): List<NostrEvent> {
+        if (newEvents.isEmpty()) return current
+        if (current.isEmpty()) {
+            // First batch — sort once.
+            return newEvents.distinctBy { it.id }.sortedWith(EVENT_ORDER)
+        }
+
+        // Build id set for dedup (cheaper than distinctBy on the merged list).
+        val seen = HashSet<String>(current.size + newEvents.size)
+        for (e in current) seen.add(e.id)
+
+        // Filter out events we already have, then sort the new ones.
+        val novelSorted = newEvents
+            .asSequence()
+            .filter { seen.add(it.id) }
+            .sortedWith(EVENT_ORDER)
+            .toList()
+        if (novelSorted.isEmpty()) return current
+
+        // Two-pointer merge — both inputs are sorted by EVENT_ORDER (createdAt DESC).
+        val result = ArrayList<NostrEvent>(current.size + novelSorted.size)
+        var i = 0
+        var j = 0
+        while (i < current.size && j < novelSorted.size) {
+            if (EVENT_ORDER.compare(current[i], novelSorted[j]) <= 0) {
+                result.add(current[i]); i++
+            } else {
+                result.add(novelSorted[j]); j++
+            }
+        }
+        while (i < current.size) { result.add(current[i]); i++ }
+        while (j < novelSorted.size) { result.add(novelSorted[j]); j++ }
+        return result
+    }
+
     private companion object {
+        /** Minimum coalescing window (ms). Used at low arrival rates so live-
+         *  tail posts appear with imperceptible delay. */
+        const val ARRIVAL_WINDOW_MIN_MS = 100L
+
+        /** Maximum coalescing window (ms). Used under firehose load so a
+         *  Ditto-class relay can't outrun Compose. The trade-off is up to
+         *  500ms tail-in delay; still well below human "feels laggy" threshold
+         *  for live updates and the user is by definition NOT at top of a
+         *  firehose feed if they're getting hundreds of events/sec. */
+        const val ARRIVAL_WINDOW_MAX_MS = 500L
+
+        /** Below this rate (events/sec) keep the minimum window. */
+        const val ARRIVAL_LOW_RATE = 20L
+
+        /** At or above this rate, stretch to the maximum window. */
+        const val ARRIVAL_HIGH_RATE = 100L
+
         val EVENT_ORDER: Comparator<NostrEvent> = Comparator { a, b ->
             when {
                 a.createdAt != b.createdAt -> b.createdAt.compareTo(a.createdAt)

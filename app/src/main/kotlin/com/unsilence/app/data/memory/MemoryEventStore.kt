@@ -18,6 +18,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.IOException
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
@@ -25,7 +29,16 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** V2 (TSV) header — kept for one-shot migration read of pre-V3 snapshots. */
 private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
+
+/** V3 binary snapshot magic — first 4 bytes of every V3 file. */
+internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
+private const val SNAPSHOT_BINARY_VERSION = 3
+private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
+/** Defensive cap on per-string length read from snapshot (1 MB). */
+private const val MAX_SNAPSHOT_STR_LEN = 1024 * 1024
+
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private const val MAX_CONTENT_EVENTS = 10_000
@@ -97,11 +110,16 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
     private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
     private val profileAccessedAt = ConcurrentHashMap<String, Long>()
-    // ─── FeedRow cache (R2: version-stamped, invalidated on profile/stats change) ──
+    // ─── FeedRow cache (per-author / per-event keys) ───────────────────────
+    // Cache hit requires the row's author profile timestamp AND the row's
+    // own stats timestamp to be unchanged. Profile/stats updates for OTHER
+    // pubkeys/events leave this row's cache valid — only the affected rows
+    // recompute. Replaces the old global-signal-version key that invalidated
+    // every cached row whenever any profile/stat changed anywhere.
     private data class CachedFeedRow(
         val row: FeedRow,
-        val profileVersion: Long,
-        val statsVersion: Long,
+        val authorProfileTs: Long,
+        val statsTs: Long,
     )
     private val feedRowCache = ConcurrentHashMap<String, CachedFeedRow>()
     private val feedRowAccessedAt = ConcurrentHashMap<String, Long>()
@@ -238,6 +256,41 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
 
+    // ─── Signal-bump coalescing ───────────────────────────────────────────
+    // Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+    // ...) each bump their own signal. During a cold-start burst (244
+    // kind-10002, 1000+ kind-30166) per-event bumps drive downstream Flow
+    // re-emits — each allocating a fresh HashMap snapshot — and trigger
+    // 6-8s Daveys via GC pressure.
+    //
+    // InsertDirty defers those bumps. When non-null, handlers set the flag
+    // and the batch caller flushes once at end. When null (snapshot restore
+    // and a few legacy paths), handlers self-bump as before.
+    internal class InsertDirty {
+        var feed = false
+        var profile = false
+        var stats = false
+        var follows = false
+        var action = false
+        var relayConfig = false
+        var trustScore = false
+        var relayMonitor = false
+        var relaySet = false
+    }
+
+    private fun flushDirty(d: InsertDirty) {
+        val now = System.nanoTime()
+        if (d.feed) _feedSignal.value = now
+        if (d.profile) _profileSignal.value = now
+        if (d.stats) _statsSignal.value = now
+        if (d.follows) _followsSignal.value = now
+        if (d.action) _actionSignal.value = now
+        if (d.relayConfig) _relayConfigSignal.value = now
+        if (d.trustScore) _trustScoreSignal.value = now
+        if (d.relayMonitor) _relayMonitorSignal.value = now
+        if (d.relaySet) _relaySetSignal.value = now
+    }
+
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
 
     // Buffer for relay URLs that arrive via addRelaySeen before the event
@@ -266,17 +319,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    // ─── Insert (called by EventProcessor.flushBatch via insertBatch) ──────
+    // ─── Insert (called by EventProcessor flushBatch / flushControlBatch via insertBatch) ──────
 
     /**
-     * Insert a single event with per-event signal bumps and eviction check.
-     * Used for direct-path inserts (control-plane kinds from EventProcessor).
-     * For batched inserts from channel drainers, use [insertBatch].
+     * Insert a single event with coalesced end-of-call signal bumps and
+     * eviction check. Used for direct-path inserts (control-plane kinds
+     * from EventProcessor). For batched inserts from channel drainers,
+     * use [insertBatch].
      */
     fun insert(event: NostrEvent): Boolean {
-        val inserted = insertCore(event)
+        val dirty = InsertDirty()
+        val inserted = insertCore(event, dirty)
         if (inserted) {
-            bumpSignalsForKind(event.kind)
+            markKindDirty(event.kind, dirty)
+            flushDirty(dirty)
             evictionTickAfterInsert()
         }
         return inserted
@@ -286,48 +342,50 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
      * Insert a batch of events with coalesced signal bumps.
      * Instead of N signal bumps for N events, bumps each dirty signal type
      * exactly once at the end. Returns the number of novel events inserted.
+     *
+     * Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+     * ...) populate the same [InsertDirty] accumulator instead of bumping
+     * directly, so a 1000-event control-plane burst produces one bump per
+     * affected signal — not 1000.
      */
     fun insertBatch(events: List<NostrEvent>): Int {
         if (events.isEmpty()) return 0
-        var dirtyFeed = false
-        var dirtyProfile = false
-        var dirtyStats = false
-        var dirtyFollows = false
-        var dirtyAction = false
+        val dirty = InsertDirty()
         var inserted = 0
 
         for (event in events) {
-            if (!insertCore(event)) continue
+            if (!insertCore(event, dirty)) continue
             inserted++
-            when (event.kind) {
-                0 -> dirtyProfile = true
-                3 -> dirtyFollows = true
-                1, 6, 30023 -> dirtyFeed = true
-                7, 9734, 9735 -> dirtyStats = true
-            }
-            if (event.kind == 7 || event.kind == 6 || event.kind == 9734) {
-                dirtyAction = true
-            }
+            markKindDirty(event.kind, dirty)
         }
 
-        // One bump per signal type — ≤5 bumps for any batch size
-        val now = System.nanoTime()
-        if (dirtyFeed) _feedSignal.value = now
-        if (dirtyProfile) _profileSignal.value = now
-        if (dirtyStats) _statsSignal.value = now
-        if (dirtyFollows) _followsSignal.value = now
-        if (dirtyAction) _actionSignal.value = now
-
+        flushDirty(dirty)
         if (inserted > 0) evictionTickAfterInsert(inserted)
         return inserted
+    }
+
+    /** Map a kind to its corresponding feed/profile/stats/follows/action dirty flags. */
+    private fun markKindDirty(kind: Int, d: InsertDirty) {
+        when (kind) {
+            0 -> d.profile = true
+            3 -> d.follows = true
+            1, 6, 30023 -> d.feed = true
+            7, 9734, 9735 -> d.stats = true
+        }
+        if (kind == 7 || kind == 6 || kind == 9734) d.action = true
     }
 
     /**
      * Core insert logic shared by [insert] and [insertBatch].
      * Handles dedup, indexing, and kind handlers. Does NOT bump signals or
      * check eviction — callers are responsible for those.
+     *
+     * [dirty] is the accumulator for deferred signal bumps. Kind handlers
+     * that would normally bump _relayConfigSignal / _trustScoreSignal /
+     * _relayMonitorSignal / _relaySetSignal set the corresponding flag
+     * here instead. The caller (insert / insertBatch) flushes once at end.
      */
-    private fun insertCore(event: NostrEvent): Boolean {
+    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
         if (existing != null) {
@@ -358,37 +416,25 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         when (event.kind) {
             0 -> handleProfile(event)
             1 -> handleNote(event)
-            3 -> handleFollows(event)
+            3 -> handleFollows(event, dirty)
             6 -> handleRepost(event)
             7 -> handleReaction(event)
             9734 -> handleZapRequest(event)
             9735 -> handleZapReceipt(event)
             10000 -> handleMuteList(event)
-            10002 -> handleRelayList(event)
-            10006 -> handleBlocked(event)
-            10007 -> handleSearchRelays(event)
-            10012 -> handleFavorites(event)
+            10002 -> handleRelayList(event, dirty)
+            10006 -> handleBlocked(event, dirty)
+            10007 -> handleSearchRelays(event, dirty)
+            10012 -> handleFavorites(event, dirty)
             30002 -> {
                 handleParameterizedReplaceable(event)
-                handleRelaySetMaterialized(event)
+                handleRelaySetMaterialized(event, dirty)
             }
-            30166 -> handleRelayMonitor(event)
-            30385 -> handleTrustScore(event)
+            30166 -> handleRelayMonitor(event, dirty)
+            30385 -> handleTrustScore(event, dirty)
         }
 
         return true
-    }
-
-    private fun bumpSignalsForKind(kind: Int) {
-        when (kind) {
-            0 -> _profileSignal.value = System.nanoTime()
-            3 -> _followsSignal.value = System.nanoTime()
-            1, 6, 30023 -> _feedSignal.value = System.nanoTime()
-            7, 9734, 9735 -> _statsSignal.value = System.nanoTime()
-        }
-        if (kind == 7 || kind == 6 || kind == 9734) {
-            _actionSignal.value = System.nanoTime()
-        }
     }
 
     private fun evictionTickAfterInsert(count: Int = 1) {
@@ -470,12 +516,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleFollows(event: NostrEvent) {
+    private fun handleFollows(event: NostrEvent, dirty: InsertDirty? = null) {
         val pubkeys = event.tags
             .filter { it.size >= 2 && it[0] == "p" }
             .map { it[1] }
             .toSet()
-        updateFollows(event.pubkey, pubkeys, event.createdAt)
+        updateFollowsInternal(event.pubkey, pubkeys, event.createdAt, dirty)
     }
 
     private fun handleRepost(event: NostrEvent) {
@@ -642,7 +688,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleRelayList(event: NostrEvent) {
+    private fun handleRelayList(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10002"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -672,11 +718,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existingConfigs = readWriteRelayConfigsByPubkey[event.pubkey]
         if (existingConfigs != configs) {
             readWriteRelayConfigsByPubkey[event.pubkey] = configs
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleBlocked(event: NostrEvent) {
+    private fun handleBlocked(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10006"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -690,11 +737,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = blockedRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             blockedRelaysByPubkey[event.pubkey] = urls
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleSearchRelays(event: NostrEvent) {
+    private fun handleSearchRelays(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10007"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -708,11 +756,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = searchRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             searchRelaysByPubkey[event.pubkey] = urls
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
-    private fun handleFavorites(event: NostrEvent) {
+    private fun handleFavorites(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10012"
         val existingTs = relayKindCreatedAt[key]
         if (existingTs != null && existingTs >= event.createdAt) return
@@ -743,13 +792,14 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = favoritesByPubkey[event.pubkey]
         if (existing != entries) {
             favoritesByPubkey[event.pubkey] = entries
-            _relayConfigSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relayConfig = true
+            else _relayConfigSignal.value = System.nanoTime()
         }
     }
 
     // ─── Kind 30385: Trusted Relay Assertions ─────────────────────────────
 
-    private fun handleTrustScore(event: NostrEvent) {
+    private fun handleTrustScore(event: NostrEvent, dirty: InsertDirty? = null) {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
@@ -779,12 +829,13 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                 updatedAt = event.createdAt,
             )
         }
-        _trustScoreSignal.value = System.nanoTime()
+        if (dirty != null) dirty.trustScore = true
+        else _trustScoreSignal.value = System.nanoTime()
     }
 
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
-    private fun handleRelayMonitor(event: NostrEvent) {
+    private fun handleRelayMonitor(event: NostrEvent, dirty: InsertDirty? = null) {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
@@ -832,10 +883,11 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                 createdAt = event.createdAt,
             )
         }
-        _relayMonitorSignal.value = System.nanoTime()
+        if (dirty != null) dirty.relayMonitor = true
+        else _relayMonitorSignal.value = System.nanoTime()
     }
 
-    private fun handleRelaySetMaterialized(event: NostrEvent) {
+    private fun handleRelaySetMaterialized(event: NostrEvent, dirty: InsertDirty? = null) {
         val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
         val coordKey = "${event.pubkey}:$dTag"
 
@@ -870,7 +922,8 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         val existing = relaySetsByCoordinate[coordKey]
         if (existing != newSet) {
             relaySetsByCoordinate[coordKey] = newSet
-            _relaySetSignal.value = System.nanoTime()
+            if (dirty != null) dirty.relaySet = true
+            else _relaySetSignal.value = System.nanoTime()
         }
     }
 
@@ -987,6 +1040,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         if (toEvict.isEmpty()) {
             if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
                 Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed")
+                // Diagnostic: log when own-anchored count is unexpectedly high.
+                // Field captures show own=1758/4242 events for one user — investigating
+                // whether the test account really posts that much, ownPubkey is
+                // matching too aggressively, or some import path is loading other
+                // users' events under the own pubkey.
+                if (anchoredOwn > 500 && ownPubkeyAnchor != null) {
+                    val sampleAuthors = eventsById.values
+                        .asSequence()
+                        .filter { it.pubkey == ownPubkeyAnchor }
+                        .take(3)
+                        .map { "${it.kind}:${it.id.take(8)}" }
+                        .toList()
+                    Log.d("MES", "Eviction diag: ownPubkey=${ownPubkeyAnchor.take(8)}… (full=${ownPubkeyAnchor.length}ch) anchoredOwn=$anchoredOwn samples=$sampleAuthors")
+                }
             }
             return
         }
@@ -1177,6 +1244,15 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
      * the follows index. Stale updates (lower createdAt) are ignored.
      */
     fun updateFollows(pubkey: String, followedPubkeys: Set<String>, createdAt: Long) {
+        updateFollowsInternal(pubkey, followedPubkeys, createdAt, dirty = null)
+    }
+
+    private fun updateFollowsInternal(
+        pubkey: String,
+        followedPubkeys: Set<String>,
+        createdAt: Long,
+        dirty: InsertDirty?,
+    ) {
         followsCreatedAt.compute(pubkey) { _, existingTs ->
             if (existingTs != null && existingTs > createdAt) {
                 Log.d("MES", "updateFollows: stale for ${pubkey.take(8)}… (existing=$existingTs > new=$createdAt)")
@@ -1186,7 +1262,8 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             val changed = existing == null || existing != followedPubkeys
             followsByPubkey[pubkey] = followedPubkeys
             if (changed) {
-                _followsSignal.value = System.nanoTime()
+                if (dirty != null) dirty.follows = true
+                else _followsSignal.value = System.nanoTime()
             }
             Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt, changed=$changed)")
             createdAt
@@ -1510,6 +1587,31 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     fun userEntityFlow(pubkey: String): Flow<UserEntity?> =
         _profileSignal.map { getUserEntity(pubkey) }
 
+    /**
+     * Observe per-event engagement counts. Used by EventActionBar so individual
+     * cards update their counts without going through a list-wide signal trigger.
+     *
+     * Trigger: _statsSignal (kind 7/9735) plus _actionSignal (own kind 6/7/9734
+     * inserts) plus _feedSignal (kind 1 replies bump replyCounts). distinctUntilChanged
+     * via [EventStats] equality suppresses emission when THIS event's counts
+     * didn't change — so a kind-7 reaction on an unrelated event doesn't
+     * recompose 100 visible cards, only the affected card.
+     */
+    fun statsFlow(eventId: String): Flow<EventStats> =
+        combine(_feedSignal, _statsSignal, _actionSignal) { _, _, _ -> }
+            .map {
+                val zap = zapStats(eventId)
+                EventStats(
+                    replyCount = replyCount(eventId),
+                    repostCount = repostCount(eventId),
+                    reactionCount = reactionCount(eventId),
+                    zapCount = zap.count,
+                    zapTotalSats = zap.totalSats,
+                )
+            }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
     override fun writeRelaysFor(pubkey: String): List<String> =
@@ -1591,7 +1693,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
     // ─── Relay monitor query APIs (kind 30166 / NIP-66) ──────────────────
 
-    fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
+    override fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
         HashMap(relayMonitorsByUrl)
 
     fun relayMonitorCount(): Int = relayMonitorsByUrl.size
@@ -1926,20 +2028,24 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
-        val currentProfileVersion = _profileSignal.value
-        val currentStatsVersion = _statsSignal.value
+        // Per-author + per-event cache keys. A profile update for author X
+        // bumps profileUpdatedAt[X] but leaves other authors' timestamps
+        // unchanged — rows for those authors stay cached. A stat update for
+        // event Y bumps statsUpdatedAt[Y] but leaves other rows alone.
+        val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
+        val authorProfileTs = profileUpdatedAt[event.pubkey] ?: 0L
+        val statsTs = statsUpdatedAt[statsId] ?: 0L
 
         val cached = feedRowCache[event.id]
         if (cached != null
-            && cached.profileVersion == currentProfileVersion
-            && cached.statsVersion == currentStatsVersion
+            && cached.authorProfileTs == authorProfileTs
+            && cached.statsTs == statsTs
         ) {
             feedRowAccessedAt[event.id] = System.nanoTime()
             return cached.row
         }
 
         val fields = cachedProfileFields(event.pubkey)
-        val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
         val zap = zapStats(statsId)
 
         val row = FeedRow(
@@ -1966,7 +2072,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             zapCount = zap.count,
         )
 
-        feedRowCache[event.id] = CachedFeedRow(row, currentProfileVersion, currentStatsVersion)
+        feedRowCache[event.id] = CachedFeedRow(row, authorProfileTs, statsTs)
         feedRowAccessedAt[event.id] = System.nanoTime()
         trimFeedRowCacheIfNeeded()
         return row
@@ -2184,6 +2290,419 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         Log.d("MES", "Snapshot restore complete (EventModel parsing deferred to first read)")
     }
 
+    // Sink for handler self-bumps during snapshot restore. The bumps are
+    // discarded — restoreSnapshotFrom fires every signal once at end, so
+    // per-event bumps inside the 21s parse loop only waste CPU and cause
+    // mid-restore Compose recomposes.
+    private val snapshotDirtySink = InsertDirty()
+
+    // ─── Binary snapshot V3 ─────────────────────────────────────────────────
+    //
+    // Replaces the V2 TSV format whose 10-15s parse cost is dominated by
+    // String.split + escape decoding. The binary format:
+    //   - Length-prefixed UTF-8 strings (no escape decoding)
+    //   - Fixed-width primitives (long, int, byte) via DataOutput*
+    //   - Section-offset header for future lazy section loading
+    //
+    // Header layout (32 bytes, big-endian):
+    //   [0..3]   magic "USNS"
+    //   [4..7]   version (= 3)
+    //   [8..11]  followsOffset
+    //   [12..15] eventsOffset
+    //   [16..19] aggregatesOffset
+    //   [20..23] relayHealthOffset
+    //   [24..27] eventsCount (sanity / progress)
+    //   [28..31] reserved (= 0)
+    //
+    // V2 TSV files are still readable — SnapshotScheduler peeks the first
+    // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
+
+    suspend fun saveSnapshotBinary(out: DataOutputStream) {
+        // Two-pass: serialize each section to a ByteArrayOutputStream, then
+        // write the header (with computed offsets) + concatenated sections.
+        // Memory cost: ~2× snapshot size peak. For typical 5MB snapshots
+        // that's 10MB peak — acceptable for the save path.
+
+        val followsBuf = ByteArrayOutputStream(8 * 1024)
+        DataOutputStream(followsBuf).use { d ->
+            val pairs = followsByPubkey.toList()
+            d.writeInt(pairs.size)
+            for ((pubkey, follows) in pairs) {
+                val createdAt = followsCreatedAt[pubkey] ?: 0L
+                d.writeStr(pubkey)
+                d.writeLong(createdAt)
+                d.writeInt(follows.size)
+                for (f in follows) d.writeStr(f)
+            }
+        }
+
+        // Build the events list: nonContent (profiles, relay configs, stats
+        // events) first, then content sorted DESC by createdAt and capped.
+        // kind-3 is persisted in the FOLLOWS section, not as raw events.
+        val contentEvents = mutableListOf<NostrEvent>()
+        val nonContentEvents = mutableListOf<NostrEvent>()
+        for (event in eventsById.values) {
+            if (event.kind in CONTENT_KINDS) contentEvents.add(event)
+            else if (event.kind != 3) nonContentEvents.add(event)
+        }
+        contentEvents.sortByDescending { it.createdAt }
+        val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
+        val totalEvents = nonContentEvents.size + cappedContent.size
+
+        val eventsBuf = ByteArrayOutputStream(2 * 1024 * 1024)
+        DataOutputStream(eventsBuf).use { d ->
+            d.writeInt(totalEvents)
+            for (event in nonContentEvents) d.writeEventBinary(event)
+            for (event in cappedContent) d.writeEventBinary(event)
+        }
+
+        val aggregatesBuf = ByteArrayOutputStream(64 * 1024)
+        DataOutputStream(aggregatesBuf).use { d ->
+            d.writeInt(replyCounts.size)
+            for ((id, count) in replyCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(repostCounts.size)
+            for ((id, count) in repostCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(reactionCounts.size)
+            for ((id, count) in reactionCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(zapStatsByEventId.size)
+            for ((id, zap) in zapStatsByEventId) {
+                d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
+            }
+        }
+
+        val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
+        DataOutputStream(relayHealthBuf).use { d ->
+            d.writeInt(trustScoresByUrl.size)
+            for ((url, ts) in trustScoresByUrl) {
+                d.writeStr(url)
+                d.writeInt(ts.score); d.writeInt(ts.reliability)
+                d.writeInt(ts.quality); d.writeInt(ts.accessibility)
+                d.writeStr(ts.confidence); d.writeInt(ts.observations)
+                d.writeStrOrNull(ts.policy)
+                d.writeStrOrNull(ts.countryCode)
+                d.writeStrOrNull(ts.operatorVerified)
+                d.writeLong(ts.updatedAt)
+            }
+            d.writeInt(relayMonitorsByUrl.size)
+            for ((url, m) in relayMonitorsByUrl) {
+                d.writeStr(url)
+                d.writeIntOrNull(m.rttOpen)
+                d.writeIntOrNull(m.rttRead)
+                d.writeIntOrNull(m.rttWrite)
+                d.writeStr(m.monitorPubkey)
+                d.writeLong(m.createdAt)
+                d.writeStrOrNull(m.network)
+                d.writeStrOrNull(m.geohash)
+                d.writeStrOrNull(m.iconUrl)
+                d.writeInt(m.supportedNips.size)
+                for (n in m.supportedNips) d.writeInt(n)
+            }
+        }
+
+        val followsBytes = followsBuf.toByteArray()
+        val eventsBytes = eventsBuf.toByteArray()
+        val aggregatesBytes = aggregatesBuf.toByteArray()
+        val relayHealthBytes = relayHealthBuf.toByteArray()
+
+        val followsOffset = SNAPSHOT_HEADER_SIZE
+        val eventsOffset = followsOffset + followsBytes.size
+        val aggregatesOffset = eventsOffset + eventsBytes.size
+        val relayHealthOffset = aggregatesOffset + aggregatesBytes.size
+
+        // Header
+        out.write(SNAPSHOT_BINARY_MAGIC)
+        out.writeInt(SNAPSHOT_BINARY_VERSION)
+        out.writeInt(followsOffset)
+        out.writeInt(eventsOffset)
+        out.writeInt(aggregatesOffset)
+        out.writeInt(relayHealthOffset)
+        out.writeInt(totalEvents)
+        out.writeInt(0) // reserved
+
+        // Sections in offset order.
+        out.write(followsBytes)
+        out.write(eventsBytes)
+        out.write(aggregatesBytes)
+        out.write(relayHealthBytes)
+    }
+
+    suspend fun restoreSnapshotBinary(input: DataInputStream) {
+        val magic = ByteArray(4)
+        input.readFully(magic)
+        if (!magic.contentEquals(SNAPSHOT_BINARY_MAGIC)) {
+            throw IOException("Invalid snapshot magic: " +
+                magic.joinToString("") { "%02x".format(it) })
+        }
+        val version = input.readInt()
+        if (version != SNAPSHOT_BINARY_VERSION) {
+            throw IOException("Unsupported snapshot version: $version")
+        }
+        // Section offsets — currently informational; we read sections
+        // sequentially below. Future lazy-load can seek to these offsets
+        // to read FOLLOWS first and defer EVENTS.
+        input.readInt() // followsOffset
+        input.readInt() // eventsOffset
+        input.readInt() // aggregatesOffset
+        input.readInt() // relayHealthOffset
+        val declaredEventsCount = input.readInt()
+        input.readInt() // reserved
+
+        // FOLLOWS section
+        val followsCount = input.readInt()
+        if (followsCount < 0 || followsCount > 100_000) {
+            throw IOException("Invalid follows count: $followsCount")
+        }
+        for (i in 0 until followsCount) {
+            val pubkey = input.readStr()
+            val createdAt = input.readLong()
+            val followCount = input.readInt()
+            if (followCount < 0 || followCount > 1_000_000) {
+                throw IOException("Invalid follow count: $followCount")
+            }
+            val pks = HashSet<String>(followCount)
+            for (j in 0 until followCount) pks.add(input.readStr())
+            if (pks.isNotEmpty()) {
+                followsByPubkey[pubkey] = pks
+                followsCreatedAt[pubkey] = createdAt
+            }
+        }
+
+        // Fire follows signal early — matches the V2 reader's behavior at
+        // the ---EVENTS--- marker boundary so FeedVM cold-start resolves
+        // before the events parse completes.
+        if (followsByPubkey.isNotEmpty()) {
+            _followsSignal.value = System.nanoTime()
+        }
+
+        // EVENTS section
+        val eventsCount = input.readInt()
+        if (eventsCount < 0 || eventsCount > 1_000_000) {
+            throw IOException("Invalid events count: $eventsCount")
+        }
+        var lineCount = 0
+        for (i in 0 until eventsCount) {
+            if (++lineCount % 500 == 0) kotlinx.coroutines.yield()
+            val event = input.readEventBinary()
+            insertFromSnapshot(event)
+        }
+
+        // AGGREGATES section
+        val replyN = input.readInt()
+        if (replyN < 0 || replyN > 5_000_000) throw IOException("Invalid reply count: $replyN")
+        for (i in 0 until replyN) {
+            val id = input.readStr(); val c = input.readInt()
+            replyCounts[id] = c
+        }
+        val repostN = input.readInt()
+        if (repostN < 0 || repostN > 5_000_000) throw IOException("Invalid repost count: $repostN")
+        for (i in 0 until repostN) {
+            val id = input.readStr(); val c = input.readInt()
+            repostCounts[id] = c
+        }
+        val reactionN = input.readInt()
+        if (reactionN < 0 || reactionN > 5_000_000) throw IOException("Invalid reaction count: $reactionN")
+        for (i in 0 until reactionN) {
+            val id = input.readStr(); val c = input.readInt()
+            reactionCounts[id] = c
+        }
+        val zapN = input.readInt()
+        if (zapN < 0 || zapN > 5_000_000) throw IOException("Invalid zap count: $zapN")
+        for (i in 0 until zapN) {
+            val id = input.readStr()
+            val c = input.readInt()
+            val sats = input.readLong()
+            zapStatsByEventId[id] = ZapAggregate(c, sats)
+        }
+
+        // RELAY_HEALTH section
+        val trustN = input.readInt()
+        if (trustN < 0 || trustN > 100_000) throw IOException("Invalid trust count: $trustN")
+        for (i in 0 until trustN) {
+            val url = input.readStr()
+            val score = input.readInt(); val reliability = input.readInt()
+            val quality = input.readInt(); val accessibility = input.readInt()
+            val confidence = input.readStr(); val observations = input.readInt()
+            val policy = input.readStrOrNull()
+            val countryCode = input.readStrOrNull()
+            val operatorVerified = input.readStrOrNull()
+            val updatedAt = input.readLong()
+            trustScoresByUrl[url] = RelayTrustScoreEntity(
+                relayUrl = url,
+                score = score, reliability = reliability,
+                quality = quality, accessibility = accessibility,
+                confidence = confidence, observations = observations,
+                policy = policy, countryCode = countryCode,
+                operatorVerified = operatorVerified, updatedAt = updatedAt,
+            )
+        }
+        val monitorN = input.readInt()
+        if (monitorN < 0 || monitorN > 100_000) throw IOException("Invalid monitor count: $monitorN")
+        for (i in 0 until monitorN) {
+            val url = input.readStr()
+            val rttOpen = input.readIntOrNull()
+            val rttRead = input.readIntOrNull()
+            val rttWrite = input.readIntOrNull()
+            val monitorPubkey = input.readStr()
+            val createdAt = input.readLong()
+            val network = input.readStrOrNull()
+            val geohash = input.readStrOrNull()
+            val iconUrl = input.readStrOrNull()
+            val nipsN = input.readInt()
+            if (nipsN < 0 || nipsN > 1_000) throw IOException("Invalid NIPs count: $nipsN")
+            val nips = ArrayList<Int>(nipsN)
+            for (j in 0 until nipsN) nips.add(input.readInt())
+            relayMonitorsByUrl[url] = RelayMonitorEntity(
+                relayUrl = url,
+                rttOpen = rttOpen, rttRead = rttRead, rttWrite = rttWrite,
+                supportedNips = nips,
+                network = network,
+                requirements = emptyList(), // V2 didn't persist this either; populated live
+                geohash = geohash,
+                iconUrl = iconUrl,
+                monitorPubkey = monitorPubkey,
+                createdAt = createdAt,
+            )
+        }
+
+        // End-of-restore signal bumps (matches V2 reader)
+        val now = System.nanoTime()
+        _feedSignal.value = now
+        _profileSignal.value = now
+        _statsSignal.value = now
+        _followsSignal.value = now
+        _trustScoreSignal.value = now
+        _relayMonitorSignal.value = now
+        _snapshotRestoredSignal.value = now
+
+        evictOldContentEvents()
+
+        Log.d("MES", "Snapshot restore complete (binary V$version, $declaredEventsCount events declared, EventModel parsing deferred)")
+    }
+
+    private fun DataOutputStream.writeEventBinary(e: NostrEvent) {
+        writeLong(e.createdAt)
+        writeInt(e.kind)
+        writeStr(e.id)
+        writeStr(e.pubkey)
+        writeStr(e.sig)
+        writeStr(e.content)
+        writeStr(e.relayUrl)
+        writeInt(e.tags.size)
+        for (tag in e.tags) {
+            writeInt(tag.size)
+            for (item in tag) writeStr(item)
+        }
+        var flags = 0
+        if (e.replyToId != null) flags = flags or 0x01
+        if (e.rootId != null) flags = flags or 0x02
+        if (e.hasContentWarning) flags = flags or 0x04
+        if (e.contentWarningReason != null) flags = flags or 0x08
+        writeByte(flags)
+        if (e.replyToId != null) writeStr(e.replyToId)
+        if (e.rootId != null) writeStr(e.rootId)
+        if (e.contentWarningReason != null) writeStr(e.contentWarningReason)
+        writeLong(e.firstSeenAt)
+        // relaysSeen is a Set<String> (ConcurrentHashMap-backed); snapshot
+        // a list now to avoid surprises if it mutates during iteration.
+        val seenSnapshot = e.relaysSeen.toList()
+        writeInt(seenSnapshot.size)
+        for (r in seenSnapshot) writeStr(r)
+    }
+
+    private fun DataInputStream.readEventBinary(): NostrEvent {
+        val createdAt = readLong()
+        val kind = readInt()
+        val id = readStr()
+        val pubkey = readStr()
+        val sig = readStr()
+        val content = readStr()
+        val relayUrl = readStr()
+        val tagsCount = readInt()
+        if (tagsCount < 0 || tagsCount > 10_000) {
+            throw IOException("Invalid tag count: $tagsCount")
+        }
+        val tags = ArrayList<List<String>>(tagsCount)
+        for (i in 0 until tagsCount) {
+            val itemCount = readInt()
+            if (itemCount < 0 || itemCount > 10_000) {
+                throw IOException("Invalid tag item count: $itemCount")
+            }
+            val tag = ArrayList<String>(itemCount)
+            for (j in 0 until itemCount) tag.add(readStr())
+            tags.add(tag)
+        }
+        val flags = readByte().toInt() and 0xff
+        val replyToId = if (flags and 0x01 != 0) readStr() else null
+        val rootId = if (flags and 0x02 != 0) readStr() else null
+        val hasCW = flags and 0x04 != 0
+        val cwReason = if (flags and 0x08 != 0) readStr() else null
+        val firstSeenAt = readLong()
+        val seenCount = readInt()
+        if (seenCount < 0 || seenCount > 10_000) {
+            throw IOException("Invalid relaysSeen count: $seenCount")
+        }
+        val relaysSeen = ConcurrentHashMap.newKeySet<String>()
+        for (i in 0 until seenCount) relaysSeen.add(readStr())
+
+        return NostrEvent(
+            id = id,
+            pubkey = pubkey,
+            kind = kind,
+            content = content,
+            createdAt = createdAt,
+            tags = tags,
+            tagsJson = tagsToJson(tags),
+            sig = sig,
+            relayUrl = relayUrl,
+            replyToId = replyToId,
+            rootId = rootId,
+            hasContentWarning = hasCW,
+            contentWarningReason = cwReason,
+            firstSeenAt = firstSeenAt,
+            relaysSeen = relaysSeen,
+        )
+    }
+
+    private fun DataOutputStream.writeStr(s: String) {
+        val bytes = s.toByteArray(Charsets.UTF_8)
+        writeInt(bytes.size)
+        write(bytes)
+    }
+
+    private fun DataInputStream.readStr(): String {
+        val len = readInt()
+        if (len < 0 || len > MAX_SNAPSHOT_STR_LEN) {
+            throw IOException("Invalid string length: $len")
+        }
+        val bytes = ByteArray(len)
+        readFully(bytes)
+        return String(bytes, Charsets.UTF_8)
+    }
+
+    private fun DataOutputStream.writeStrOrNull(s: String?) {
+        if (s == null) {
+            writeBoolean(false)
+        } else {
+            writeBoolean(true)
+            writeStr(s)
+        }
+    }
+
+    private fun DataInputStream.readStrOrNull(): String? =
+        if (readBoolean()) readStr() else null
+
+    private fun DataOutputStream.writeIntOrNull(i: Int?) {
+        if (i == null) {
+            writeBoolean(false)
+        } else {
+            writeBoolean(true)
+            writeInt(i)
+        }
+    }
+
+    private fun DataInputStream.readIntOrNull(): Int? =
+        if (readBoolean()) readInt() else null
+
     private fun insertFromSnapshot(event: NostrEvent) {
         eventsById[event.id] = event
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -2213,17 +2732,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
 
         // Restore kind-derived state (profiles, follows, relay lists)
+        // Pass snapshotDirtySink so handlers don't bump signals per-event
+        // during the 21s parse loop. End-of-restore bumps every signal once.
+        val sink = snapshotDirtySink
         when (event.kind) {
             0 -> handleProfile(event)
-            3 -> handleFollows(event)
+            3 -> handleFollows(event, sink)
             10000 -> handleMuteList(event)
-            10002 -> handleRelayList(event)
-            10006 -> handleBlocked(event)
-            10007 -> handleSearchRelays(event)
-            10012 -> handleFavorites(event)
+            10002 -> handleRelayList(event, sink)
+            10006 -> handleBlocked(event, sink)
+            10007 -> handleSearchRelays(event, sink)
+            10012 -> handleFavorites(event, sink)
             30002 -> {
                 handleParameterizedReplaceable(event)
-                handleRelaySetMaterialized(event)
+                handleRelaySetMaterialized(event, sink)
             }
         }
     }
