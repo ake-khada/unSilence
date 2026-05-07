@@ -140,9 +140,14 @@ class SnapshotSchedulerInvariantsTest {
         assertTrue("Snapshot file should exist", snapshotFile.exists())
         assertTrue("Snapshot file should be non-empty", snapshotFile.length() > 0)
 
-        // First line should be the version header
-        val firstLine = snapshotFile.bufferedReader().use { it.readLine() }
-        assertEquals("SNAPSHOT_V2", firstLine)
+        // V3 binary format — first 4 bytes are the "USNS" magic.
+        val magic = snapshotFile.inputStream().use { input ->
+            val buf = ByteArray(4)
+            val n = input.read(buf)
+            assertEquals("Snapshot file should have at least 4 bytes", 4, n)
+            String(buf, Charsets.US_ASCII)
+        }
+        assertEquals("USNS", magic)
     }
 
     // ── Test 4: Corrupt file does not crash, store stays empty ─────────────

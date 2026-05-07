@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -17,6 +18,7 @@ import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -80,6 +82,7 @@ class FeedViewModel @Inject constructor(
     private val outboxResolver: OutboxRelayResolver,
     private val userRepository: UserRepository,
     private val relayPreferencesStore: RelayPreferencesStore,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     // -- TimelineConsumer (feed state) -----------------------------------------
@@ -212,6 +215,20 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
+    //
+    // Each visible card observes its own statsFlow so engagement counts update
+    // reactively without going through TimelineConsumer.feedRows. A kind-7
+    // reaction on event A only recomposes the card for event A; other cards
+    // see their statsFlow filter the bump via distinctUntilChanged.
+    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
+
+    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
+        statsCache.getOrPut(eventId) {
+            memoryEventStore.statsFlow(eventId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+        }
+
     // -- User relay sets (kind-30002) ------------------------------------------
 
     val userSetsFlow: StateFlow<List<RelaySet>> =
@@ -295,13 +312,60 @@ class FeedViewModel @Inject constructor(
     /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
     fun clearNewTopPost() { consumer.onDotTapped() }
 
+    // -- Warm-zone hydration ---------------------------------------------------
+    //
+    // Architecture: the feed loads the most-recent ~300 notes (chronological,
+    // append-mode growth). For the user to perceive the feed as instant, the
+    // WARM ZONE around the viewport — 10 above + 30 below the first visible
+    // row — must have its skeleton data (profiles, quoted notes, OG previews,
+    // image dimensions) ready BEFORE rendering. Otherwise cards pop in with
+    // late avatars, dimension shifts, and missing quotes.
+    //
+    // We debounce viewport changes by 300ms so a fast scroll doesn't fire
+    // hydration for every intermediate position. CardHydrator de-duplicates
+    // requests internally, so re-firing for an overlapping zone is cheap.
+
+    private val _viewportFirstVisible = MutableStateFlow(0)
+
+    init {
+        // CRITICAL: launch on Default — viewModelScope defaults to
+        // Main.immediate, and `cardHydrator.hydrateVisibleCards` does NOT
+        // wrap its body in withContext(IO/Default). It calls into RelayPool,
+        // ProfileResolver, ImageDimensionCache.resolveAll, all of which
+        // block briefly on lookup work and emit Log.d lines on the calling
+        // thread. Running this on Main was the dominant cause of the
+        // 30-76 frame skips after every batch arrival in field logs.
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch(Dispatchers.Default) {
+            combine(consumer.events, _viewportFirstVisible) { events, first -> events to first }
+                .debounce(300L)
+                .collectLatest { (events, first) ->
+                    if (events.isEmpty()) return@collectLatest
+                    val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
+                    val zoneEnd = (first + WARM_ZONE_BELOW).coerceAtMost(events.size)
+                    if (zoneStart >= zoneEnd) return@collectLatest
+                    val warmEvents = events.subList(zoneStart, zoneEnd)
+                    val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
+                    if (rows.isNotEmpty()) cardHydrator.hydrateVisibleCards(rows)
+                }
+        }
+    }
+
     // -- User actions delegated to consumer ------------------------------------
 
-    fun onViewportChanged(idx: Int) = consumer.onViewportChanged(idx)
+    fun onViewportChanged(idx: Int) {
+        _viewportFirstVisible.value = idx
+        consumer.onViewportChanged(idx)
+    }
     fun onDotTapped() = consumer.onDotTapped()
     fun loadMore() = consumer.loadMore()
     fun refresh() {
         _refreshCounter.value = _refreshCounter.value + 1
+    }
+
+    private companion object {
+        const val WARM_ZONE_ABOVE = 10
+        const val WARM_ZONE_BELOW = 30
     }
 
     private val _refreshCounter = MutableStateFlow(0)

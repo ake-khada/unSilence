@@ -70,6 +70,13 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.items
 
+/** Auto-page when the last visible item is within this distance of the
+ *  end of the list (excluding the load-more sentinel). 5 rows is roughly
+ *  half a viewport on a phone — far enough that the new batch arrives
+ *  before the user reaches the bottom, near enough not to over-fetch
+ *  while the user is mid-feed. */
+private const val AUTO_PAGE_TRIGGER_DISTANCE = 5
+
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -163,6 +170,7 @@ fun FeedScreen(
             lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             profileFlow = viewModel::profileFlow,
+            statsFlow = viewModel::statsFlow,
         )
     }
 
@@ -307,16 +315,37 @@ fun FeedScreen(
                     }
                 }
 
-                // Viewport tracking — V2 uses firstVisibleIndex for at-top detection
+                // Viewport tracking — used for at-top detection AND auto-paging.
+                //
+                // When the user scrolls within AUTO_PAGE_TRIGGER_DISTANCE rows
+                // of the bottom, fire viewModel.loadMore() so older events
+                // stream in before the user runs out. Matches the infinite-
+                // scroll feel of Jumble / Damus and removes the explicit
+                // "Load more" tap unless the user actively pulls.
+                //
+                // isLoadingMore is read from the ViewModel via collectAsState
+                // above; we also re-read it inside the snapshot block to avoid
+                // stacking parallel loadMore calls. consumer.loadMore() itself
+                // guards the same way, but stopping at the UI saves the round
+                // trip through viewModelScope.launch.
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
                         val info = listState.layoutInfo
                         val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
                         val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                        first to last
-                    }.sample(100).collect { (first, last) ->
+                        val total = info.totalItemsCount
+                        Triple(first, last, total)
+                    }.sample(100).collect { (first, last, total) ->
                         viewModel.onViewportChanged(first)
+                        // total includes the "load-more" sentinel item when
+                        // events.isNotEmpty(). last >= total - 1 - trigger
+                        // means the user is within `trigger` rows of the bottom.
+                        if (!isLoadingMore && total > 0 &&
+                            last >= total - 1 - AUTO_PAGE_TRIGGER_DISTANCE
+                        ) {
+                            viewModel.loadMore()
+                        }
                     }
                 }
             }

@@ -124,6 +124,15 @@ class ProfileViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    // ── Per-event stats (matches FeedViewModel.statsFlow) ────────────────
+    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
+
+    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
+        statsCache.getOrPut(eventId) {
+            memoryEventStore.statsFlow(eventId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+        }
+
     /** Live following count from MES follows index. */
     val followingCount: StateFlow<Int> = pubkeyHex?.let { pk ->
         memoryEventStore.followsFlow(pk).map { it.size }

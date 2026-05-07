@@ -15,6 +15,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.InputStreamReader
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -96,6 +102,14 @@ class SnapshotScheduler @Inject constructor(
     /**
      * Restore snapshot into MemoryEventStore if a valid snapshot file exists.
      * Called during AppBootstrapper Phase 1.5, BEFORE relay connections open.
+     *
+     * Dispatches by magic bytes:
+     *   - V3 binary: first 4 bytes "USNS" → [MemoryEventStore.restoreSnapshotBinary]
+     *   - V2 TSV (or anything else): falls through to [MemoryEventStore.restoreSnapshotFrom]
+     *
+     * The full file is read into a byte buffer first so we can peek the magic
+     * without losing the bytes; for typical 5MB snapshots this is ~50ms on
+     * flash storage and avoids any reader-rewind contortions.
      */
     suspend fun restoreIfPresent() = withContext(snapshotDispatcher) {
         val baseFile = snapshotFile.baseFile
@@ -106,10 +120,23 @@ class SnapshotScheduler @Inject constructor(
         }
         mutex.withLock {
             try {
-                snapshotFile.openRead().bufferedReader().use { reader ->
-                    memoryEventStore.restoreSnapshotFrom(reader)
+                val bytes = snapshotFile.openRead().use { it.readBytes() }
+                val isBinary = bytes.size >= 4 &&
+                    bytes[0] == SNAPSHOT_BINARY_MAGIC[0] &&
+                    bytes[1] == SNAPSHOT_BINARY_MAGIC[1] &&
+                    bytes[2] == SNAPSHOT_BINARY_MAGIC[2] &&
+                    bytes[3] == SNAPSHOT_BINARY_MAGIC[3]
+                if (isBinary) {
+                    DataInputStream(BufferedInputStream(ByteArrayInputStream(bytes))).use { input ->
+                        memoryEventStore.restoreSnapshotBinary(input)
+                    }
+                    Log.d(TAG, "Snapshot restored (binary V3) from ${bytes.size / 1024}KB")
+                } else {
+                    InputStreamReader(ByteArrayInputStream(bytes)).buffered().use { reader ->
+                        memoryEventStore.restoreSnapshotFrom(reader)
+                    }
+                    Log.d(TAG, "Snapshot restored (V2 TSV migration path) from ${bytes.size / 1024}KB")
                 }
-                Log.d(TAG, "Snapshot restored from ${baseFile.length() / 1024}KB")
             } catch (e: Exception) {
                 Log.e(TAG, "Snapshot restore failed, starting fresh", e)
             } finally {
@@ -149,11 +176,13 @@ class SnapshotScheduler @Inject constructor(
         mutex.withLock {
             val stream = snapshotFile.startWrite()
             try {
-                stream.bufferedWriter().use { writer ->
-                    memoryEventStore.saveSnapshotTo(writer)
+                // V3 binary writer is the only writer. V2 TSV writer remains
+                // in MES for restore-side migration but is no longer called.
+                DataOutputStream(BufferedOutputStream(stream)).use { out ->
+                    memoryEventStore.saveSnapshotBinary(out)
                 }
                 snapshotFile.finishWrite(stream)
-                Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB)")
+                Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB, binary V3)")
             } catch (e: Exception) {
                 snapshotFile.failWrite(stream)
                 Log.e(TAG, "Snapshot save failed", e)
