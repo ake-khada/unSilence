@@ -1668,7 +1668,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
     // ─── Relay monitor query APIs (kind 30166 / NIP-66) ──────────────────
 
-    fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
+    override fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
         HashMap(relayMonitorsByUrl)
 
     fun relayMonitorCount(): Int = relayMonitorsByUrl.size
