@@ -1587,6 +1587,31 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     fun userEntityFlow(pubkey: String): Flow<UserEntity?> =
         _profileSignal.map { getUserEntity(pubkey) }
 
+    /**
+     * Observe per-event engagement counts. Used by EventActionBar so individual
+     * cards update their counts without going through a list-wide signal trigger.
+     *
+     * Trigger: _statsSignal (kind 7/9735) plus _actionSignal (own kind 6/7/9734
+     * inserts) plus _feedSignal (kind 1 replies bump replyCounts). distinctUntilChanged
+     * via [EventStats] equality suppresses emission when THIS event's counts
+     * didn't change — so a kind-7 reaction on an unrelated event doesn't
+     * recompose 100 visible cards, only the affected card.
+     */
+    fun statsFlow(eventId: String): Flow<EventStats> =
+        combine(_feedSignal, _statsSignal, _actionSignal) { _, _, _ -> }
+            .map {
+                val zap = zapStats(eventId)
+                EventStats(
+                    replyCount = replyCount(eventId),
+                    repostCount = repostCount(eventId),
+                    reactionCount = reactionCount(eventId),
+                    zapCount = zap.count,
+                    zapTotalSats = zap.totalSats,
+                )
+            }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
     override fun writeRelaysFor(pubkey: String): List<String> =

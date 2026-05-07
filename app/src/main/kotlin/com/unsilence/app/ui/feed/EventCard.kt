@@ -74,6 +74,7 @@ fun EventCard(
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     imageDimensionCache: ImageDimensionCache?,
     thumbnailCache: VideoThumbnailCache?,
     // Video
@@ -135,12 +136,29 @@ fun EventCard(
     // resolves the inner author for both cases.
     val effectiveProfile = authorProfile
 
+    // Live engagement counts. statsFlow re-emits when reactionCounts /
+    // replyCounts / repostCounts / zapStatsByEventId change for THIS event;
+    // distinctUntilChanged inside MES filters out signal bumps caused by
+    // unrelated events. Falls back to the FeedRow snapshot when no provider
+    // is wired (older surfaces, tests).
+    val liveStats = if (statsFlow != null)
+        statsFlow(model.engagementId).collectAsState().value
+    else null
+    val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
+    val liveRepostCount   = liveStats?.repostCount   ?: row.repostCount
+    val liveReactionCount = liveStats?.reactionCount ?: row.reactionCount
+    val liveZapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
+
     // Article layout
     if (role == CardRole.Article || model.article != null) {
         ArticleLayout(
             model = model,
             row = row,
             engagement = engagement,
+            replyCount = liveReplyCount,
+            repostCount = liveRepostCount,
+            reactionCount = liveReactionCount,
+            zapTotalSats = liveZapTotalSats,
             onNoteClick = onNoteClick,
             onArticleClick = onArticleClick,
             onReact = onReact,
@@ -248,10 +266,10 @@ fun EventCard(
         // Action bar
         EventActionBar(
             noteId          = row.id,
-            replyCount      = row.replyCount,
-            repostCount     = row.repostCount,
-            reactionCount   = row.reactionCount,
-            zapTotalSats    = row.zapTotalSats,
+            replyCount      = liveReplyCount,
+            repostCount     = liveRepostCount,
+            reactionCount   = liveReactionCount,
+            zapTotalSats    = liveZapTotalSats,
             hasReacted      = model.engagementId in engagement.reactedIds,
             hasReposted     = model.engagementId in engagement.repostedIds,
             hasZapped       = model.engagementId in engagement.zappedIds,
@@ -280,6 +298,10 @@ private fun ArticleLayout(
     model: EventModel,
     row: FeedRow,
     engagement: EngagementSnapshot,
+    replyCount: Int,
+    repostCount: Int,
+    reactionCount: Int,
+    zapTotalSats: Long,
     onNoteClick: (String) -> Unit,
     onArticleClick: (FeedRow) -> Unit,
     onReact: () -> Unit,
@@ -365,10 +387,10 @@ private fun ArticleLayout(
             // Action bar
             EventActionBar(
                 noteId          = row.id,
-                replyCount      = row.replyCount,
-                repostCount     = row.repostCount,
-                reactionCount   = row.reactionCount,
-                zapTotalSats    = row.zapTotalSats,
+                replyCount      = replyCount,
+                repostCount     = repostCount,
+                reactionCount   = reactionCount,
+                zapTotalSats    = zapTotalSats,
                 hasReacted      = model.engagementId in engagement.reactedIds,
                 hasReposted     = model.engagementId in engagement.repostedIds,
                 hasZapped       = model.engagementId in engagement.zappedIds,

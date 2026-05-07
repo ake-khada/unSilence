@@ -215,6 +215,20 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
+    //
+    // Each visible card observes its own statsFlow so engagement counts update
+    // reactively without going through TimelineConsumer.feedRows. A kind-7
+    // reaction on event A only recomposes the card for event A; other cards
+    // see their statsFlow filter the bump via distinctUntilChanged.
+    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
+
+    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
+        statsCache.getOrPut(eventId) {
+            memoryEventStore.statsFlow(eventId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+        }
+
     // -- User relay sets (kind-30002) ------------------------------------------
 
     val userSetsFlow: StateFlow<List<RelaySet>> =

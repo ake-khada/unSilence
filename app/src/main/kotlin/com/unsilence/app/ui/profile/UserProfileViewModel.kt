@@ -99,6 +99,15 @@ class UserProfileViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    // ── Per-event stats (matches FeedViewModel.statsFlow) ────────────────
+    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
+
+    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
+        statsCache.getOrPut(eventId) {
+            memoryEventStore.statsFlow(eventId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+        }
+
     /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
     val followerCount = MutableStateFlow<Long?>(null)
     /** Following count parsed from the user's kind-3 event p-tags. */
