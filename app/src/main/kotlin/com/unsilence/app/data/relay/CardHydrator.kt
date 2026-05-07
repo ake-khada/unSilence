@@ -23,6 +23,11 @@ import javax.inject.Singleton
 
 private const val TAG = "CardHydrator"
 
+/** Bound on each per-phase hydrated-id memo. Sized so a tall warm-zone
+ *  fan-out (~150 events on aggressive scroll) plus a feed swap fits with
+ *  headroom; oldest IDs evict FIFO when the set exceeds this. */
+private const val HYDRATED_CAP = 500
+
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
@@ -61,6 +66,53 @@ class CardHydrator @Inject constructor(
     private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
 ) {
+    // ── Per-phase hydrated-id memo ───────────────────────────────────────
+    // hydrateVisibleCards re-fires on every viewport change (debounce 300ms).
+    // During a slow scroll the warm zone overlaps the previous pass by 30+
+    // events, so each phase repeats the same content regex scans, ref id
+    // extraction, and relay fetch orchestration for events already done.
+    // Track per-phase completion in bounded LRU sets and filter at entry.
+    // Downstream caches (UserRepository, RelayPool eventFetchInFlight,
+    // ImageDimensionCache) already dedup the actual fetches — these sets
+    // skip the upstream orchestration cost only.
+    private val profilesHydrated = LinkedHashSet<String>()
+    private val refsHydrated = LinkedHashSet<String>()
+    private val mediaHydrated = LinkedHashSet<String>()
+    private val hydratedLock = Any()
+
+    private fun filterNovel(
+        events: List<FeedRow>,
+        set: LinkedHashSet<String>,
+    ): List<FeedRow> {
+        if (events.isEmpty()) return events
+        return synchronized(hydratedLock) {
+            events.filter { it.id !in set }
+        }
+    }
+
+    private fun markHydrated(events: List<FeedRow>, set: LinkedHashSet<String>) {
+        if (events.isEmpty()) return
+        synchronized(hydratedLock) {
+            for (e in events) {
+                if (set.add(e.id) && set.size > HYDRATED_CAP) {
+                    val iter = set.iterator()
+                    if (iter.hasNext()) { iter.next(); iter.remove() }
+                }
+            }
+        }
+    }
+
+    /** Drop the per-phase memos. Called on logout / feed-switch teardown
+     *  if the caller wants a clean slate. Safe to call concurrently with
+     *  hydrate* — the lock guards both reads and writes. */
+    fun resetHydratedMemo() {
+        synchronized(hydratedLock) {
+            profilesHydrated.clear()
+            refsHydrated.clear()
+            mediaHydrated.clear()
+        }
+    }
+
     /**
      * Profile resolution — avatar, name, identity.
      *
@@ -69,11 +121,18 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, profilesHydrated)
+        if (novelEvents.isEmpty()) return
+        // Mark up front: profile hints come from the event's content/tags
+        // which are fixed at insert, so seeing the event once is enough.
+        // Cancellation / fetch failure isn't fatal — per-card avatar autofetch
+        // and other entry points retry on demand.
+        markHydrated(novelEvents, profilesHydrated)
 
         val pubkeys = mutableSetOf<String>()
         val profileHints = mutableMapOf<String, MutableList<String>>()
 
-        for (event in events) {
+        for (event in novelEvents) {
             pubkeys.add(event.pubkey)
             if (event.kind == 6) {
                 extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
@@ -97,7 +156,7 @@ class CardHydrator @Inject constructor(
         userRepository.fetchMissingProfiles(unresolved.toList())
 
         if (fanOut) {
-            val sourceRelays = events.map { it.relayUrl }.distinct()
+            val sourceRelays = novelEvents.map { it.relayUrl }.distinct()
                 .filter { it != excludeSourceRelay }
             if (sourceRelays.isNotEmpty()) {
                 relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
@@ -111,7 +170,8 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
+        val skipped = events.size - novelEvents.size
+        Log.d(TAG, "Phase1 profiles: ${novelEvents.size} novel cards (${skipped} skipped) → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${novelEvents.map { it.relayUrl }.distinct().size} source relays"}")
     }
 
     /**
@@ -121,10 +181,16 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateRefs(events: List<FeedRow>) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, refsHydrated)
+        if (novelEvents.isEmpty()) return
+        // Mark up front: refs are derived from tags/content fixed at insert.
+        // RelayPool.eventFetchInFlight + isEventUnresolved already dedup the
+        // actual fetches; this just spares the regex / map orchestration.
+        markHydrated(novelEvents, refsHydrated)
 
         val referencedIds = mutableSetOf<String>()
         val relayHints = mutableMapOf<String, String>()
-        for (event in events) {
+        for (event in novelEvents) {
             if (event.kind == 6) {
                 extractRepostTargetId(event.tags)?.let { id ->
                     referencedIds.add(id)
@@ -192,7 +258,7 @@ class CardHydrator @Inject constructor(
                 // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
                 // etc.), use the wrapper's own pubkey as fallback author for outbox routing.
                 val refAuthorPubkeys = mutableSetOf<String>()
-                for (event in events) {
+                for (event in novelEvents) {
                     val pTags = extractPTagPubkeys(event.tags)
                     if (pTags.isNotEmpty()) {
                         pTags.forEach { refAuthorPubkeys.add(it) }
@@ -276,7 +342,7 @@ class CardHydrator @Inject constructor(
         if (missingRefs.isNotEmpty()) {
             // Build refId → (referencedBy, referencedByKind) mapping
             val refToReferencer = mutableMapOf<String, Pair<String, Int>>()
-            for (event in events) {
+            for (event in novelEvents) {
                 if (event.kind == 6) {
                     extractRepostTargetId(event.tags)?.let { refToReferencer[it] = event.id to event.kind }
                 }
@@ -308,7 +374,8 @@ class CardHydrator @Inject constructor(
         }
 
         val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
-        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
+        val skipped = events.size - novelEvents.size
+        Log.d(TAG, "Phase2 refs: ${novelEvents.size} novel cards (${skipped} skipped) → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
     }
 
     /**
@@ -320,10 +387,13 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, mediaHydrated)
+        if (novelEvents.isEmpty()) return
+        markHydrated(novelEvents, mediaHydrated)
 
         // Image dimensions (always — lightweight header-only BitmapFactory decode)
         val imageUrls = mutableListOf<String>()
-        for (event in events) {
+        for (event in novelEvents) {
             if (event.kind == 30023) continue
             val content = event.content
             val afterVideos = VIDEO_URL_REGEX.replace(content, "")
@@ -338,7 +408,7 @@ class CardHydrator @Inject constructor(
         // Video thumbnails via MediaMetadataRetriever (REST-only, capped at 3)
         if (mmrAllowed) {
             var thumbnailCount = 0
-            for (event in events) {
+            for (event in novelEvents) {
                 if (thumbnailCount >= mmrCap) break
                 if (event.kind == 30023) continue
                 val models = buildVideoRenderModels(event)
