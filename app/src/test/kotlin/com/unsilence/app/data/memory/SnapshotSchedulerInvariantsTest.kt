@@ -1,8 +1,11 @@
 package com.unsilence.app.data.memory
 
 import androidx.core.util.AtomicFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -10,6 +13,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 
 /**
@@ -228,5 +235,85 @@ class SnapshotSchedulerInvariantsTest {
             "periodicJob should be null before ON_START fires",
             scheduler.periodicJob,
         )
+    }
+
+    // ── Test 8: Concurrent modification during save must not corrupt file ──
+    //
+    // Production bug: saveSnapshotBinary did `writeInt(chm.size)` followed by
+    // `for (e in chm) ...` for six ConcurrentHashMaps (replyCounts,
+    // repostCounts, reactionCounts, zapStatsByEventId, trustScoresByUrl,
+    // relayMonitorsByUrl). CHM iteration is weakly-consistent with respect
+    // to .size — a concurrent insert mid-iteration can produce more entries
+    // than the count we just wrote, leaving the reader misaligned. Field log
+    // showed `IOException: Invalid string length: 1631139890` on restore.
+    //
+    // Fix: snapshot each CHM to an immutable map BEFORE writing the count
+    // and iterating. This test exercises the race by mutating the maps
+    // while save is running. Without the fix, this fails randomly within a
+    // few iterations. With the fix, the file always round-trips.
+
+    @Test
+    fun `saveSnapshotBinary survives concurrent modification of aggregates`() = runTest {
+        // Populate the store with enough data to make the save non-trivial.
+        for (i in 1..100) {
+            store.insert(event(id = "ev-$i", kind = 1, createdAt = i.toLong()))
+            // Reactions populate reactionCounts + zapStatsByEventId paths.
+            store.insert(
+                event(
+                    id = "react-$i",
+                    pubkey = "actor-$i",
+                    kind = 7,
+                    tags = listOf(listOf("e", "ev-$i")),
+                    createdAt = (i + 1000).toLong(),
+                ),
+            )
+        }
+
+        // Repeat the race a handful of times. With the bug present, even
+        // one of these typically fails — the writer's iteration count
+        // diverges from the pre-recorded size.
+        repeat(20) { iter ->
+            val bytes = ByteArrayOutputStream()
+            // Save and concurrently insert more reactions / events. Both
+            // jobs run on the IO dispatcher to allow real concurrency.
+            val saveJob = async(Dispatchers.IO) {
+                DataOutputStream(bytes).use { out ->
+                    store.saveSnapshotBinary(out)
+                }
+            }
+            val mutateJob = launch(Dispatchers.IO) {
+                for (i in 0 until 200) {
+                    val seed = iter * 1000 + i
+                    store.insert(
+                        event(
+                            id = "concurrent-$seed",
+                            kind = 7,
+                            pubkey = "actor-c-$seed",
+                            tags = listOf(listOf("e", "ev-${seed % 100 + 1}")),
+                            createdAt = (10_000 + seed).toLong(),
+                        ),
+                    )
+                }
+            }
+            saveJob.await()
+            mutateJob.join()
+
+            // Restore from the bytes produced during the race. With the fix,
+            // this must always succeed — the snapshot is internally
+            // consistent regardless of what was added during the save.
+            val restored = MemoryEventStore()
+            withContext(Dispatchers.IO) {
+                DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use { input ->
+                    restored.restoreSnapshotBinary(input)
+                }
+            }
+            // Sanity: at minimum, the events written before the save started
+            // should round-trip. (Concurrent inserts may or may not appear,
+            // depending on iteration timing — that's allowed.)
+            assertTrue(
+                "iter=$iter: round-trip should preserve at least the pre-save events",
+                restored.eventsByIds(setOf("ev-1", "ev-50", "ev-100")).size == 3,
+            )
+        }
     }
 }
