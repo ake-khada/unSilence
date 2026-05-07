@@ -102,8 +102,29 @@ internal fun ContentFlow(
                             model.segments[j] is Segment.MentionPubkey ||
                             model.segments[j] is Segment.Link)) j++
                     val run = model.segments.subList(i, j).toList()
+
+                    // Pick the link(s) in this run that will become an OG
+                    // preview card, and HIDE them from the inline text.
+                    // Showing the URL inline AND as the OG card duplicates
+                    // information — Amethyst, Damus, Jumble all elide the
+                    // URL when a preview is rendered. The OG card itself
+                    // displays the title + thumbnail; if the OG fetch
+                    // returns nothing useful, MinimalLinkCard's favicon +
+                    // hostname covers the case so the user always sees
+                    // some affordance for the link.
+                    val ogToRender = mutableListOf<Segment.Link>()
+                    val runForInline = mutableListOf<Segment>()
+                    val availableSlots = MAX_OG_CARDS - ogCardsRendered
+                    for (seg in run) {
+                        if (seg is Segment.Link && ogToRender.size < availableSlots) {
+                            ogToRender.add(seg)
+                        } else {
+                            runForInline.add(seg)
+                        }
+                    }
+
                     InlineText(
-                        segments      = run,
+                        segments      = runForInline,
                         lookupProfile = lookupProfile,
                         onAuthorClick = onAuthorClick,
                         onTextClick   = { onNoteClick(navigateId) },
@@ -115,21 +136,19 @@ internal fun ContentFlow(
                             .padding(bottom = Spacing.micro),
                     )
 
-                    // Render OG preview cards for links in this run
-                    if (ogCardsRendered < MAX_OG_CARDS) {
-                        val links = run.filterIsInstance<Segment.Link>()
-                        for (link in links) {
-                            if (ogCardsRendered >= MAX_OG_CARDS) break
-                            OgPreviewCard(
-                                url               = link.url,
-                                fetchOgMetadata   = fetchOgMetadata,
-                                showMinimalFallback = false,
-                                modifier          = Modifier
-                                    .padding(horizontal = hPad)
-                                    .padding(bottom = Spacing.small),
-                            )
-                            ogCardsRendered++
-                        }
+                    // Render OG preview cards for the links we removed from
+                    // inline text. showMinimalFallback=true so a failed OG
+                    // fetch still produces a card (favicon + hostname).
+                    for (link in ogToRender) {
+                        OgPreviewCard(
+                            url               = link.url,
+                            fetchOgMetadata   = fetchOgMetadata,
+                            showMinimalFallback = true,
+                            modifier          = Modifier
+                                .padding(horizontal = hPad)
+                                .padding(bottom = Spacing.small),
+                        )
+                        ogCardsRendered++
                     }
 
                     i = j
