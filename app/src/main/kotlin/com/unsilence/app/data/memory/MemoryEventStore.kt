@@ -1027,6 +1027,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         if (toEvict.isEmpty()) {
             if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
                 Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed")
+                // Diagnostic: log when own-anchored count is unexpectedly high.
+                // Field captures show own=1758/4242 events for one user — investigating
+                // whether the test account really posts that much, ownPubkey is
+                // matching too aggressively, or some import path is loading other
+                // users' events under the own pubkey.
+                if (anchoredOwn > 500 && ownPubkeyAnchor != null) {
+                    val sampleAuthors = eventsById.values
+                        .asSequence()
+                        .filter { it.pubkey == ownPubkeyAnchor }
+                        .take(3)
+                        .map { "${it.kind}:${it.id.take(8)}" }
+                        .toList()
+                    Log.d("MES", "Eviction diag: ownPubkey=${ownPubkeyAnchor.take(8)}… (full=${ownPubkeyAnchor.length}ch) anchoredOwn=$anchoredOwn samples=$sampleAuthors")
+                }
             }
             return
         }
