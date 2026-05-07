@@ -6,7 +6,6 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.ui.feed.FeedContentFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,8 +16,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -78,42 +75,32 @@ class TimelineConsumer(
     /**
      * UI-bound feed rows. Derived ONLY from _events × _contentFilter.
      *
-     * Profile reactivity is handled per-card: EventCard observes
-     * profileFlow(pubkey) directly, so a profile arriving for author X
-     * only re-composes cards by X — no list-wide pass.
+     * Per-card reactivity replaces every list-level signal trigger:
+     *   - Profile updates re-compose only the affected card via
+     *     [profileFlow(pubkey)] in [com.unsilence.app.ui.feed.EventCard].
+     *   - Engagement counts (replyCount / repostCount / reactionCount /
+     *     zapTotalSats) re-compose only the affected card via
+     *     [MemoryEventStore.statsFlow(eventId)].
      *
-     * Stats signals (kind-7/9735) still bump global `_statsSignal` and
-     * stale FeedRow stats fields; sampled at 250 ms so an engagement
-     * flood doesn't drive list rebuilds. statsSignal-driven recomputes
-     * are now purely a fallback while we don't have per-event statsFlow.
-     *
-     * _events and _contentFilter changes fire immediately — new posts
-     * tail in without waiting for the sample window.
+     * No more list-wide rebuilds on signal floods. _events and
+     * _contentFilter changes fire immediately so new posts tail in
+     * without delay.
      *
      * matchesContentFilter is applied at the render boundary so that
      * Notes/Conversations tab switching doesn't require resubscribing.
      */
-    @OptIn(FlowPreview::class)
-    val feedRows: StateFlow<List<FeedRow>> = run {
-        val eventsTrigger = combine(_events, _contentFilter) { _, _ -> Unit }
-        // Stats signal: low-frequency relative to profiles. Sampled so a
-        // burst of kind-7 reactions doesn't trigger N rebuilds.
-        val statsTrigger = memoryEventStore.statsSignalFlow.sample(250)
-        merge(eventsTrigger, statsTrigger.map { Unit })
-            .map {
-                val events = _events.value
-                val cf = _contentFilter.value
-                if (events.isEmpty()) return@map emptyList()
-                val filtered = events.filter { matchesContentFilter(it, cf) }
-                if (filtered.isEmpty()) return@map emptyList()
-                val ids = filtered.map { it.id }
-                val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
-                ids.mapNotNull { rowsById[it] }
-            }
+    val feedRows: StateFlow<List<FeedRow>> =
+        combine(_events, _contentFilter) { events, cf ->
+            if (events.isEmpty()) return@combine emptyList()
+            val filtered = events.filter { matchesContentFilter(it, cf) }
+            if (filtered.isEmpty()) return@combine emptyList()
+            val ids = filtered.map { it.id }
+            val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
+            ids.mapNotNull { rowsById[it] }
+        }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
             .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
-    }
 
     // ── Subscription handle ───────────────────────────────────────────────
 

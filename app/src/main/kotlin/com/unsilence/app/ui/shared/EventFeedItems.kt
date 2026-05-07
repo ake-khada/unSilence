@@ -74,6 +74,10 @@ data class EventActionCallbacks(
     val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
+    /** Per-event stats observation. Cards collect this so engagement counts
+     *  update reactively without going through a list-wide signal trigger.
+     *  Falls back to the snapshot in FeedRow when null. */
+    val statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
 )
 
 /**
@@ -389,6 +393,7 @@ private fun EventFeedItem(
         lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         profileFlow         = callbacks.profileFlow,
+        statsFlow           = callbacks.statsFlow,
         imageDimensionCache = imageDimensionCache,
         thumbnailCache      = thumbnailCache,
         exoPlayer           = videoScope?.exoPlayer,

@@ -170,6 +170,7 @@ fun FeedScreen(
             lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             profileFlow = viewModel::profileFlow,
+            statsFlow = viewModel::statsFlow,
         )
     }
 
