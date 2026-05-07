@@ -74,17 +74,18 @@ class TimelineConsumer(
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
     /**
-     * UI-bound feed rows. Derived from _events × _contentFilter, with
-     * MES profile/action/stats signals merged in as a SAMPLED render trigger.
+     * UI-bound feed rows. Derived ONLY from _events × _contentFilter.
      *
-     * Why sampled: during cold start and active feeds, profile/stats/action
-     * signals fire 10-20×/sec as events arrive. With per-row cache keys
-     * (MES.toFeedRow uses profileUpdatedAt[pubkey] + statsUpdatedAt[id]),
-     * most rows hit cache cheaply, but the recomputation pass itself still
-     * walks every visible event id. Sampling that pass at 200 ms (≈5 fps)
-     * coalesces signal floods without making profile updates feel laggy.
+     * Profile reactivity is handled per-card: EventCard observes
+     * profileFlow(pubkey) directly, so a profile arriving for author X
+     * only re-composes cards by X — no list-wide pass.
      *
-     * _events and _contentFilter changes still fire IMMEDIATELY — new posts
+     * Stats signals (kind-7/9735) still bump global `_statsSignal` and
+     * stale FeedRow stats fields; sampled at 250 ms so an engagement
+     * flood doesn't drive list rebuilds. statsSignal-driven recomputes
+     * are now purely a fallback while we don't have per-event statsFlow.
+     *
+     * _events and _contentFilter changes fire immediately — new posts
      * tail in without waiting for the sample window.
      *
      * matchesContentFilter is applied at the render boundary so that
@@ -92,17 +93,11 @@ class TimelineConsumer(
      */
     @OptIn(FlowPreview::class)
     val feedRows: StateFlow<List<FeedRow>> = run {
-        // Fast path: events list or filter actually changed.
         val eventsTrigger = combine(_events, _contentFilter) { _, _ -> Unit }
-        // Slow path: profile/stats/action signals — sampled to 5 fps so a
-        // 100-event flood doesn't recompute 100 times.
-        val signalTrigger = combine(
-            memoryEventStore.profileSignalFlow,
-            memoryEventStore.actionSignalFlow,
-            memoryEventStore.statsSignalFlow,
-        ) { _, _, _ -> Unit }
-            .sample(200)
-        merge(eventsTrigger, signalTrigger)
+        // Stats signal: low-frequency relative to profiles. Sampled so a
+        // burst of kind-7 reactions doesn't trigger N rebuilds.
+        val statsTrigger = memoryEventStore.statsSignalFlow.sample(250)
+        merge(eventsTrigger, statsTrigger.map { Unit })
             .map {
                 val events = _events.value
                 val cf = _contentFilter.value
