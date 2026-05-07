@@ -97,11 +97,16 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
     private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
     private val profileAccessedAt = ConcurrentHashMap<String, Long>()
-    // ─── FeedRow cache (R2: version-stamped, invalidated on profile/stats change) ──
+    // ─── FeedRow cache (per-author / per-event keys) ───────────────────────
+    // Cache hit requires the row's author profile timestamp AND the row's
+    // own stats timestamp to be unchanged. Profile/stats updates for OTHER
+    // pubkeys/events leave this row's cache valid — only the affected rows
+    // recompute. Replaces the old global-signal-version key that invalidated
+    // every cached row whenever any profile/stat changed anywhere.
     private data class CachedFeedRow(
         val row: FeedRow,
-        val profileVersion: Long,
-        val statsVersion: Long,
+        val authorProfileTs: Long,
+        val statsTs: Long,
     )
     private val feedRowCache = ConcurrentHashMap<String, CachedFeedRow>()
     private val feedRowAccessedAt = ConcurrentHashMap<String, Long>()
@@ -1971,20 +1976,24 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
     private fun toFeedRow(event: NostrEvent): FeedRow {
-        val currentProfileVersion = _profileSignal.value
-        val currentStatsVersion = _statsSignal.value
+        // Per-author + per-event cache keys. A profile update for author X
+        // bumps profileUpdatedAt[X] but leaves other authors' timestamps
+        // unchanged — rows for those authors stay cached. A stat update for
+        // event Y bumps statsUpdatedAt[Y] but leaves other rows alone.
+        val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
+        val authorProfileTs = profileUpdatedAt[event.pubkey] ?: 0L
+        val statsTs = statsUpdatedAt[statsId] ?: 0L
 
         val cached = feedRowCache[event.id]
         if (cached != null
-            && cached.profileVersion == currentProfileVersion
-            && cached.statsVersion == currentStatsVersion
+            && cached.authorProfileTs == authorProfileTs
+            && cached.statsTs == statsTs
         ) {
             feedRowAccessedAt[event.id] = System.nanoTime()
             return cached.row
         }
 
         val fields = cachedProfileFields(event.pubkey)
-        val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
         val zap = zapStats(statsId)
 
         val row = FeedRow(
@@ -2011,7 +2020,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             zapCount = zap.count,
         )
 
-        feedRowCache[event.id] = CachedFeedRow(row, currentProfileVersion, currentStatsVersion)
+        feedRowCache[event.id] = CachedFeedRow(row, authorProfileTs, statsTs)
         feedRowAccessedAt[event.id] = System.nanoTime()
         trimFeedRowCacheIfNeeded()
         return row
