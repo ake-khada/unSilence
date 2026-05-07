@@ -202,13 +202,13 @@ class CardHydrator @Inject constructor(
                 }
                 Log.d(TAG, "Outbox: ${afterSourceRelay.size} still-missing refs, ${refAuthorPubkeys.size} p-tag authors")
 
-                // Phase 1: try write relays already cached in MemoryEventStore
+                // Phase 1: try write relays already cached in MemoryEventStore.
+                // The per-author relay-list dump was useful during early outbox
+                // debugging but produces multi-KB log lines — printing 60-relay
+                // arrays once per author per hydration pass added measurable
+                // Main-thread cost when this runs frequently.
                 val cachedWriteRelays = refAuthorPubkeys
-                    .flatMap { pk ->
-                        val relays = memoryEventStore.writeRelaysForRanked(pk)
-                        if (relays.isNotEmpty()) Log.d(TAG, "Outbox: cached write relays for ${pk.take(8)}… = $relays")
-                        relays
-                    }
+                    .flatMap { pk -> memoryEventStore.writeRelaysForRanked(pk) }
                     .distinct()
                     .take(5)
 

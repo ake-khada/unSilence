@@ -18,6 +18,7 @@ import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -313,8 +314,15 @@ class FeedViewModel @Inject constructor(
     private val _viewportFirstVisible = MutableStateFlow(0)
 
     init {
+        // CRITICAL: launch on Default — viewModelScope defaults to
+        // Main.immediate, and `cardHydrator.hydrateVisibleCards` does NOT
+        // wrap its body in withContext(IO/Default). It calls into RelayPool,
+        // ProfileResolver, ImageDimensionCache.resolveAll, all of which
+        // block briefly on lookup work and emit Log.d lines on the calling
+        // thread. Running this on Main was the dominant cause of the
+        // 30-76 frame skips after every batch arrival in field logs.
         @OptIn(FlowPreview::class)
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             combine(consumer.events, _viewportFirstVisible) { events, first -> events to first }
                 .debounce(300L)
                 .collectLatest { (events, first) ->
