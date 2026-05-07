@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -80,6 +81,7 @@ class FeedViewModel @Inject constructor(
     private val outboxResolver: OutboxRelayResolver,
     private val userRepository: UserRepository,
     private val relayPreferencesStore: RelayPreferencesStore,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     // -- TimelineConsumer (feed state) -----------------------------------------
@@ -295,13 +297,53 @@ class FeedViewModel @Inject constructor(
     /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
     fun clearNewTopPost() { consumer.onDotTapped() }
 
+    // -- Warm-zone hydration ---------------------------------------------------
+    //
+    // Architecture: the feed loads the most-recent ~300 notes (chronological,
+    // append-mode growth). For the user to perceive the feed as instant, the
+    // WARM ZONE around the viewport — 10 above + 30 below the first visible
+    // row — must have its skeleton data (profiles, quoted notes, OG previews,
+    // image dimensions) ready BEFORE rendering. Otherwise cards pop in with
+    // late avatars, dimension shifts, and missing quotes.
+    //
+    // We debounce viewport changes by 300ms so a fast scroll doesn't fire
+    // hydration for every intermediate position. CardHydrator de-duplicates
+    // requests internally, so re-firing for an overlapping zone is cheap.
+
+    private val _viewportFirstVisible = MutableStateFlow(0)
+
+    init {
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch {
+            combine(consumer.events, _viewportFirstVisible) { events, first -> events to first }
+                .debounce(300L)
+                .collectLatest { (events, first) ->
+                    if (events.isEmpty()) return@collectLatest
+                    val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
+                    val zoneEnd = (first + WARM_ZONE_BELOW).coerceAtMost(events.size)
+                    if (zoneStart >= zoneEnd) return@collectLatest
+                    val warmEvents = events.subList(zoneStart, zoneEnd)
+                    val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
+                    if (rows.isNotEmpty()) cardHydrator.hydrateVisibleCards(rows)
+                }
+        }
+    }
+
     // -- User actions delegated to consumer ------------------------------------
 
-    fun onViewportChanged(idx: Int) = consumer.onViewportChanged(idx)
+    fun onViewportChanged(idx: Int) {
+        _viewportFirstVisible.value = idx
+        consumer.onViewportChanged(idx)
+    }
     fun onDotTapped() = consumer.onDotTapped()
     fun loadMore() = consumer.loadMore()
     fun refresh() {
         _refreshCounter.value = _refreshCounter.value + 1
+    }
+
+    private companion object {
+        const val WARM_ZONE_ABOVE = 10
+        const val WARM_ZONE_BELOW = 30
     }
 
     private val _refreshCounter = MutableStateFlow(0)
