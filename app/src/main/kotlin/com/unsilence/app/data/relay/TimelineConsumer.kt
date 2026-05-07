@@ -181,18 +181,14 @@ class TimelineConsumer(
      */
     fun addCachedEvents(events: List<NostrEvent>) {
         if (events.isEmpty()) return
-        _events.update { current ->
-            (events + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-        }
+        _events.update { current -> mergeSorted(current, events) }
         _isLoading.value = false
     }
 
     private fun handleNewEvents(newEvents: List<NostrEvent>) {
         if (newEvents.isEmpty()) return
         if (_isAtTop.value) {
-            _events.update { current ->
-                (newEvents + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-            }
+            _events.update { current -> mergeSorted(current, newEvents) }
         } else {
             _pendingNew.update { current ->
                 (current + newEvents).distinctBy { it.id }
@@ -211,9 +207,7 @@ class TimelineConsumer(
     private fun flushPending() {
         val pending = _pendingNew.value
         if (pending.isEmpty()) return
-        _events.update { current ->
-            (pending + current).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-        }
+        _events.update { current -> mergeSorted(current, pending) }
         _pendingNew.value = emptyList()
     }
 
@@ -230,9 +224,7 @@ class TimelineConsumer(
                     limit = 100,
                 )
                 if (older.isNotEmpty()) {
-                    _events.update { current ->
-                        (current + older).distinctBy { it.id }.sortedWith(EVENT_ORDER)
-                    }
+                    _events.update { current -> mergeSorted(current, older) }
                 }
             } finally {
                 _isLoadingMore.value = false
@@ -259,6 +251,58 @@ class TimelineConsumer(
             FeedContentFilter.REPLIES_ONLY ->
                 evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
         }
+
+    /**
+     * Merge new events into a sorted current list via binary insertion.
+     *
+     * Replaces the previous `(new + current).distinctBy.sortedWith(EVENT_ORDER)`
+     * which allocated and sorted the entire list on every batch (O(N log N)).
+     * Each batch from a SubRequest hits this — with 13 SubRequests delivering
+     * a few batches each, that's 30+ full sorts of a growing list during a
+     * single feed warm-up.
+     *
+     * Binary insertion: O(M log N + M) where M=newEvents, N=current. The
+     * O(N) shift is unavoidable when inserting into an ArrayList, but we
+     * skip the per-batch quicksort overhead.
+     *
+     * Assumes `current` is already sorted by EVENT_ORDER. Snapshots and
+     * relay batches respect createdAt-desc ordering, so this is true after
+     * the initial subscribe() set.
+     */
+    private fun mergeSorted(current: List<NostrEvent>, newEvents: List<NostrEvent>): List<NostrEvent> {
+        if (newEvents.isEmpty()) return current
+        if (current.isEmpty()) {
+            // First batch — sort once.
+            return newEvents.distinctBy { it.id }.sortedWith(EVENT_ORDER)
+        }
+
+        // Build id set for dedup (cheaper than distinctBy on the merged list).
+        val seen = HashSet<String>(current.size + newEvents.size)
+        for (e in current) seen.add(e.id)
+
+        // Filter out events we already have, then sort the new ones.
+        val novelSorted = newEvents
+            .asSequence()
+            .filter { seen.add(it.id) }
+            .sortedWith(EVENT_ORDER)
+            .toList()
+        if (novelSorted.isEmpty()) return current
+
+        // Two-pointer merge — both inputs are sorted by EVENT_ORDER (createdAt DESC).
+        val result = ArrayList<NostrEvent>(current.size + novelSorted.size)
+        var i = 0
+        var j = 0
+        while (i < current.size && j < novelSorted.size) {
+            if (EVENT_ORDER.compare(current[i], novelSorted[j]) <= 0) {
+                result.add(current[i]); i++
+            } else {
+                result.add(novelSorted[j]); j++
+            }
+        }
+        while (i < current.size) { result.add(current[i]); i++ }
+        while (j < novelSorted.size) { result.add(novelSorted[j]); j++ }
+        return result
+    }
 
     private companion object {
         val EVENT_ORDER: Comparator<NostrEvent> = Comparator { a, b ->
