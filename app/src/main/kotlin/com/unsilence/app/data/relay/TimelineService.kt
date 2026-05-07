@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.Collections
@@ -16,6 +17,16 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "TimelineService"
+
+/** Max time we wait for the FAST tier to EOSE before kicking off the SLOW
+ *  tier anyway. Picked so that on a healthy network the user already has
+ *  events on screen by the time obscure outbox relays start handshaking,
+ *  but a slow / partial FAST tier still gets long-tail coverage. */
+private const val SLOW_TIER_WATCHDOG_MS = 2_000L
+
+/** Poll interval while waiting for FAST EOSEs. Coarse — we just need to
+ *  wake up promptly when allEosed flips. */
+private const val SLOW_TIER_POLL_MS = 50L
 
 /**
  * EOSE-aware multi-relay timeline subscription with persistent ref cache.
@@ -89,14 +100,33 @@ class TimelineService @Inject constructor(
         // The subScope is owned by the TimelineHandle; close() cancels it.
         val subScope = CoroutineScope(SupervisorJob() + subscribeDispatcher)
 
-        for ((index, sr) in subRequests.withIndex()) {
+        // ── Lazy outbox: defer SLOW-tier connects ────────────────────────
+        // The resolver tags low-priority outbox write relays as SubTier.SLOW.
+        // We launch FAST-tier subscribeSingles immediately, then either wait
+        // for ALL FAST tier to EOSE or for SLOW_TIER_WATCHDOG_MS, whichever
+        // comes first, before launching SLOW. If the user closes/swaps the
+        // feed before then, subScope.cancel() drops the deferred coroutines
+        // and those WebSockets are never opened.
+        val fastIndices = subRequests.withIndex()
+            .filter { it.value.tier == SubTier.FAST }
+            .map { it.index }
+        val slowIndices = subRequests.withIndex()
+            .filter { it.value.tier == SubTier.SLOW }
+            .map { it.index }
+        val fastEosedCount = AtomicInteger(0)
+
+        val launchSingle: (Int) -> Unit = { index ->
+            val sr = subRequests[index]
             subScope.launch {
                 subscribeSingle(
                     index = index,
                     subRequest = sr,
                     onPerSubEvents = { events, eosed ->
                         perSubTimelines[index] = events
-                        if (eosed) eosedCount.incrementAndGet()
+                        if (eosed) {
+                            eosedCount.incrementAndGet()
+                            if (sr.tier == SubTier.FAST) fastEosedCount.incrementAndGet()
+                        }
                         // Emit on every per-sub update so cached events render
                         // immediately and pre-EOSE batches stream through. The
                         // allEosed flag tells consumers when the load is final.
@@ -120,6 +150,27 @@ class TimelineService @Inject constructor(
                     outerKeysCollector = perSubKeys,
                     outerHandleCollector = multiHandles,
                 )
+            }
+        }
+
+        for (index in fastIndices) launchSingle(index)
+
+        if (slowIndices.isNotEmpty()) {
+            subScope.launch {
+                if (fastIndices.isEmpty()) {
+                    // No FAST tier to gate on — fall back to a fixed delay so
+                    // we never block the slow tier indefinitely.
+                    delay(SLOW_TIER_WATCHDOG_MS)
+                } else {
+                    val deadline = System.currentTimeMillis() + SLOW_TIER_WATCHDOG_MS
+                    while (fastEosedCount.get() < fastIndices.size &&
+                        System.currentTimeMillis() < deadline) {
+                        delay(SLOW_TIER_POLL_MS)
+                    }
+                }
+                Log.d(TAG, "lazy outbox: launching ${slowIndices.size} SLOW-tier sub(s) " +
+                    "(fastEosed=${fastEosedCount.get()}/${fastIndices.size})")
+                for (index in slowIndices) launchSingle(index)
             }
         }
 

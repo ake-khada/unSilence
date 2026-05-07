@@ -9,6 +9,12 @@ import javax.inject.Singleton
 private const val TAG = "OutboxResolver"
 private const val MAX_WRITE_RELAYS_PER_AUTHOR = 4
 private const val MAX_OUTBOX_RELAYS = 10
+/** Top-N write relays (by quality, post-set-cover) that should be opened
+ *  immediately on feed subscribe. The remaining write relays are tagged
+ *  [SubTier.SLOW] and only connected after the fast tier EOSEs / times out
+ *  (see TimelineService.subscribeTimeline). User read/fallback relays are
+ *  always FAST regardless of count. */
+private const val FAST_WRITE_RELAYS = 3
 /** Treat unknown trust scores as average (not great, not bad). Matches the
  *  pre-existing convention in [com.unsilence.app.data.memory.MemoryEventStore.writeRelaysForRanked]. */
 private const val DEFAULT_TRUST_SCORE = 50
@@ -149,7 +155,8 @@ class OutboxRelayResolver @Inject constructor(
 
         val subRequests = mutableListOf<SubRequest>()
 
-        // Fallback relays: each gets all authors.
+        // Fallback relays: each gets all authors. Always FAST tier — these
+        // are user read relays the client has to be connected to anyway.
         for (url in baseUrlSet.sorted()) {
             subRequests.add(SubRequest(
                 urls = listOf(url),
@@ -159,8 +166,15 @@ class OutboxRelayResolver @Inject constructor(
                     limit = config.limit,
                     since = config.since,
                 ),
+                tier = SubTier.FAST,
             ))
         }
+
+        // Tier write relays by quality before the alphabetical sort destroys
+        // the order. Top-FAST_WRITE_RELAYS by quality stay FAST; the rest
+        // are SLOW so TimelineService can defer their WebSocket handshake.
+        val fastWriteRelays = selectedWriteRelays.sortedWith(relayQuality)
+            .take(FAST_WRITE_RELAYS).toSet()
 
         // Write relays: each gets only its covered authors (sorted for stable cache keys).
         for (url in selectedWriteRelays.sorted()) {
@@ -173,6 +187,7 @@ class OutboxRelayResolver @Inject constructor(
                     limit = config.limit,
                     since = config.since,
                 ),
+                tier = if (url in fastWriteRelays) SubTier.FAST else SubTier.SLOW,
             ))
         }
 
