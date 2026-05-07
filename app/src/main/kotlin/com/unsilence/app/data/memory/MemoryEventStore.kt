@@ -2358,22 +2358,37 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
         val aggregatesBuf = ByteArrayOutputStream(64 * 1024)
         DataOutputStream(aggregatesBuf).use { d ->
-            d.writeInt(replyCounts.size)
-            for ((id, count) in replyCounts) { d.writeStr(id); d.writeInt(count) }
-            d.writeInt(repostCounts.size)
-            for ((id, count) in repostCounts) { d.writeStr(id); d.writeInt(count) }
-            d.writeInt(reactionCounts.size)
-            for ((id, count) in reactionCounts) { d.writeStr(id); d.writeInt(count) }
-            d.writeInt(zapStatsByEventId.size)
-            for ((id, zap) in zapStatsByEventId) {
+            // Snapshot each ConcurrentHashMap to an immutable copy BEFORE
+            // writing the pre-count and iterating. CHM's iteration is
+            // weakly-consistent with respect to .size: under concurrent
+            // inserts (which happen continuously while events arrive from
+            // relays during a save), the iterator can produce a different
+            // number of entries than the size we just recorded. The reader
+            // then reads garbage when it consumes the next field — observed
+            // in production as 'Invalid string length: 1631139890'.
+            val replies = replyCounts.toMap()
+            d.writeInt(replies.size)
+            for ((id, count) in replies) { d.writeStr(id); d.writeInt(count) }
+            val reposts = repostCounts.toMap()
+            d.writeInt(reposts.size)
+            for ((id, count) in reposts) { d.writeStr(id); d.writeInt(count) }
+            val reactions = reactionCounts.toMap()
+            d.writeInt(reactions.size)
+            for ((id, count) in reactions) { d.writeStr(id); d.writeInt(count) }
+            val zaps = zapStatsByEventId.toMap()
+            d.writeInt(zaps.size)
+            for ((id, zap) in zaps) {
                 d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
             }
         }
 
         val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
         DataOutputStream(relayHealthBuf).use { d ->
-            d.writeInt(trustScoresByUrl.size)
-            for ((url, ts) in trustScoresByUrl) {
+            // Same concurrent-modification hazard as aggregates above.
+            // Snapshot before count + iterate.
+            val trustScores = trustScoresByUrl.toMap()
+            d.writeInt(trustScores.size)
+            for ((url, ts) in trustScores) {
                 d.writeStr(url)
                 d.writeInt(ts.score); d.writeInt(ts.reliability)
                 d.writeInt(ts.quality); d.writeInt(ts.accessibility)
@@ -2383,8 +2398,9 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                 d.writeStrOrNull(ts.operatorVerified)
                 d.writeLong(ts.updatedAt)
             }
-            d.writeInt(relayMonitorsByUrl.size)
-            for ((url, m) in relayMonitorsByUrl) {
+            val monitors = relayMonitorsByUrl.toMap()
+            d.writeInt(monitors.size)
+            for ((url, m) in monitors) {
                 d.writeStr(url)
                 d.writeIntOrNull(m.rttOpen)
                 d.writeIntOrNull(m.rttRead)
