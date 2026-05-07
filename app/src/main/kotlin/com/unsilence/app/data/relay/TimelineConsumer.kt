@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Generalized timeline state holder, modelled after Jumble's NoteList.
@@ -120,6 +122,49 @@ class TimelineConsumer(
     private var currentSubRequests: List<SubRequest> = emptyList()
     private var sinceCursor: Long = 0L
 
+    // ── Arrival coalescing ────────────────────────────────────────────────
+    //
+    // High-volume relays (Ditto, primal cache, etc.) deliver events in
+    // many small batches per second. Each batch hitting handleNewEvents
+    // synchronously fires _events.update → eventsTrigger → feedRowsByIds
+    // → Compose recomposition. Field log on Ditto showed 14 frame drops
+    // (max 72 frames / 1200ms) clustered around batch arrivals even with
+    // hydration on background threads — Compose on Main couldn't keep up
+    // with N _events updates per second.
+    //
+    // Solution: enqueue arrivals on an unbounded channel, drainer wakes
+    // every 100ms and applies ONE coalesced merge. Worst-case tail-in
+    // latency is 100ms (imperceptible) and N batches arriving in 100ms
+    // produce one Compose recompose instead of N.
+    //
+    // Channel.UNLIMITED so trySend never drops. Drainer is bound to
+    // ownerScope and cancelled in close().
+
+    private val arrivalQueue = Channel<List<NostrEvent>>(Channel.UNLIMITED)
+    private val arrivalDrainerJob: Job
+
+    init {
+        arrivalDrainerJob = ownerScope.launch {
+            while (true) {
+                // Suspend until at least one batch arrives. CancellationException
+                // exits the loop when ownerScope is cancelled.
+                val first = arrivalQueue.receive()
+                val buffer = ArrayList<NostrEvent>(first.size + 32)
+                buffer.addAll(first)
+                // Drain anything that arrives in the next ARRIVAL_WINDOW_MS.
+                // withTimeoutOrNull cancels the inner receive when the window
+                // closes; the outer receive blocks until next batch.
+                withTimeoutOrNull(ARRIVAL_WINDOW_MS) {
+                    while (true) {
+                        val next = arrivalQueue.receive()
+                        buffer.addAll(next)
+                    }
+                }
+                applyArrival(buffer)
+            }
+        }
+    }
+
     /**
      * Subscribe to a new set of subRequests. Closes previous subscription.
      *
@@ -135,6 +180,12 @@ class TimelineConsumer(
         currentHandle = null
         subscribeJob?.cancel()
         subscribeJob = null
+
+        // Drain stale arrivals from the previous subscription. Without this,
+        // a queued batch from the closed sub would be applied to the new
+        // feed's _events on the next drainer tick.
+        while (arrivalQueue.tryReceive().isSuccess) { /* discard */ }
+
         currentSubRequests = subRequests
         _events.value = initialCachedEvents
         _pendingNew.value = emptyList()
@@ -180,7 +231,23 @@ class TimelineConsumer(
         _isLoading.value = false
     }
 
+    /**
+     * Subscription tap entry point. Enqueues the batch on the arrival queue;
+     * the drainer coalesces into 100ms windows and calls [applyArrival].
+     * Non-suspending — must not block the WebSocket consume thread.
+     */
     private fun handleNewEvents(newEvents: List<NostrEvent>) {
+        if (newEvents.isEmpty()) return
+        arrivalQueue.trySend(newEvents)
+    }
+
+    /**
+     * Apply one coalesced batch (drainer-only entry point). Reads `_isAtTop`
+     * at apply time so events queued while at-top still go to `_events` even
+     * if the drainer wake is slightly delayed; events queued while scrolled
+     * down go to `_pendingNew`.
+     */
+    private fun applyArrival(newEvents: List<NostrEvent>) {
         if (newEvents.isEmpty()) return
         if (_isAtTop.value) {
             _events.update { current -> mergeSorted(current, newEvents) }
@@ -234,6 +301,9 @@ class TimelineConsumer(
     fun close() {
         subscribeJob?.cancel()
         subscribeJob = null
+        arrivalDrainerJob.cancel()
+        // Drain anything still queued so it's eligible for GC.
+        while (arrivalQueue.tryReceive().isSuccess) { /* discard */ }
         currentHandle?.close()
         currentHandle = null
         currentSubRequests = emptyList()
@@ -300,6 +370,11 @@ class TimelineConsumer(
     }
 
     private companion object {
+        /** Coalescing window for the arrival queue drainer (ms). 100ms is
+         *  imperceptible as feed-tail latency but enough to absorb a Ditto
+         *  burst of ~10 batches/sec into a single Compose recomposition. */
+        const val ARRIVAL_WINDOW_MS = 100L
+
         val EVENT_ORDER: Comparator<NostrEvent> = Comparator { a, b ->
             when {
                 a.createdAt != b.createdAt -> b.createdAt.compareTo(a.createdAt)
