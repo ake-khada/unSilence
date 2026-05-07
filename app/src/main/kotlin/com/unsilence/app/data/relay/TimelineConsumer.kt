@@ -6,14 +6,18 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.ui.feed.FeedContentFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -70,29 +74,49 @@ class TimelineConsumer(
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
     /**
-     * UI-bound feed rows. Derived from _events × _contentFilter × MES signal
-     * flows. matchesContentFilter is applied at the render boundary so that
+     * UI-bound feed rows. Derived from _events × _contentFilter, with
+     * MES profile/action/stats signals merged in as a SAMPLED render trigger.
+     *
+     * Why sampled: during cold start and active feeds, profile/stats/action
+     * signals fire 10-20×/sec as events arrive. With per-row cache keys
+     * (MES.toFeedRow uses profileUpdatedAt[pubkey] + statsUpdatedAt[id]),
+     * most rows hit cache cheaply, but the recomputation pass itself still
+     * walks every visible event id. Sampling that pass at 200 ms (≈5 fps)
+     * coalesces signal floods without making profile updates feel laggy.
+     *
+     * _events and _contentFilter changes still fire IMMEDIATELY — new posts
+     * tail in without waiting for the sample window.
+     *
+     * matchesContentFilter is applied at the render boundary so that
      * Notes/Conversations tab switching doesn't require resubscribing.
      */
-    val feedRows: StateFlow<List<FeedRow>> = combine(
-        _events,
-        _contentFilter,
-        memoryEventStore.profileSignalFlow,
-        memoryEventStore.actionSignalFlow,
-        memoryEventStore.statsSignalFlow,
-    ) { args ->
-        @Suppress("UNCHECKED_CAST")
-        val events = args[0] as List<NostrEvent>
-        val cf = args[1] as FeedContentFilter
-        if (events.isEmpty()) return@combine emptyList()
-        val filtered = events.filter { matchesContentFilter(it, cf) }
-        if (filtered.isEmpty()) return@combine emptyList()
-        val ids = filtered.map { it.id }
-        val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
-        ids.mapNotNull { rowsById[it] }
+    @OptIn(FlowPreview::class)
+    val feedRows: StateFlow<List<FeedRow>> = run {
+        // Fast path: events list or filter actually changed.
+        val eventsTrigger = combine(_events, _contentFilter) { _, _ -> Unit }
+        // Slow path: profile/stats/action signals — sampled to 5 fps so a
+        // 100-event flood doesn't recompute 100 times.
+        val signalTrigger = combine(
+            memoryEventStore.profileSignalFlow,
+            memoryEventStore.actionSignalFlow,
+            memoryEventStore.statsSignalFlow,
+        ) { _, _, _ -> Unit }
+            .sample(200)
+        merge(eventsTrigger, signalTrigger)
+            .map {
+                val events = _events.value
+                val cf = _contentFilter.value
+                if (events.isEmpty()) return@map emptyList()
+                val filtered = events.filter { matchesContentFilter(it, cf) }
+                if (filtered.isEmpty()) return@map emptyList()
+                val ids = filtered.map { it.id }
+                val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
+                ids.mapNotNull { rowsById[it] }
+            }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
     }
-    .flowOn(Dispatchers.Default)
-    .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
 
     // ── Subscription handle ───────────────────────────────────────────────
 
