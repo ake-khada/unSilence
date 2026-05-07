@@ -18,6 +18,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.IOException
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
@@ -25,7 +29,16 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** V2 (TSV) header — kept for one-shot migration read of pre-V3 snapshots. */
 private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
+
+/** V3 binary snapshot magic — first 4 bytes of every V3 file. */
+internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
+private const val SNAPSHOT_BINARY_VERSION = 3
+private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
+/** Defensive cap on per-string length read from snapshot (1 MB). */
+private const val MAX_SNAPSHOT_STR_LEN = 1024 * 1024
+
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 private const val MAX_CONTENT_EVENTS = 10_000
@@ -2257,6 +2270,413 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     // per-event bumps inside the 21s parse loop only waste CPU and cause
     // mid-restore Compose recomposes.
     private val snapshotDirtySink = InsertDirty()
+
+    // ─── Binary snapshot V3 ─────────────────────────────────────────────────
+    //
+    // Replaces the V2 TSV format whose 10-15s parse cost is dominated by
+    // String.split + escape decoding. The binary format:
+    //   - Length-prefixed UTF-8 strings (no escape decoding)
+    //   - Fixed-width primitives (long, int, byte) via DataOutput*
+    //   - Section-offset header for future lazy section loading
+    //
+    // Header layout (32 bytes, big-endian):
+    //   [0..3]   magic "USNS"
+    //   [4..7]   version (= 3)
+    //   [8..11]  followsOffset
+    //   [12..15] eventsOffset
+    //   [16..19] aggregatesOffset
+    //   [20..23] relayHealthOffset
+    //   [24..27] eventsCount (sanity / progress)
+    //   [28..31] reserved (= 0)
+    //
+    // V2 TSV files are still readable — SnapshotScheduler peeks the first
+    // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
+
+    suspend fun saveSnapshotBinary(out: DataOutputStream) {
+        // Two-pass: serialize each section to a ByteArrayOutputStream, then
+        // write the header (with computed offsets) + concatenated sections.
+        // Memory cost: ~2× snapshot size peak. For typical 5MB snapshots
+        // that's 10MB peak — acceptable for the save path.
+
+        val followsBuf = ByteArrayOutputStream(8 * 1024)
+        DataOutputStream(followsBuf).use { d ->
+            val pairs = followsByPubkey.toList()
+            d.writeInt(pairs.size)
+            for ((pubkey, follows) in pairs) {
+                val createdAt = followsCreatedAt[pubkey] ?: 0L
+                d.writeStr(pubkey)
+                d.writeLong(createdAt)
+                d.writeInt(follows.size)
+                for (f in follows) d.writeStr(f)
+            }
+        }
+
+        // Build the events list: nonContent (profiles, relay configs, stats
+        // events) first, then content sorted DESC by createdAt and capped.
+        // kind-3 is persisted in the FOLLOWS section, not as raw events.
+        val contentEvents = mutableListOf<NostrEvent>()
+        val nonContentEvents = mutableListOf<NostrEvent>()
+        for (event in eventsById.values) {
+            if (event.kind in CONTENT_KINDS) contentEvents.add(event)
+            else if (event.kind != 3) nonContentEvents.add(event)
+        }
+        contentEvents.sortByDescending { it.createdAt }
+        val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
+        val totalEvents = nonContentEvents.size + cappedContent.size
+
+        val eventsBuf = ByteArrayOutputStream(2 * 1024 * 1024)
+        DataOutputStream(eventsBuf).use { d ->
+            d.writeInt(totalEvents)
+            for (event in nonContentEvents) d.writeEventBinary(event)
+            for (event in cappedContent) d.writeEventBinary(event)
+        }
+
+        val aggregatesBuf = ByteArrayOutputStream(64 * 1024)
+        DataOutputStream(aggregatesBuf).use { d ->
+            d.writeInt(replyCounts.size)
+            for ((id, count) in replyCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(repostCounts.size)
+            for ((id, count) in repostCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(reactionCounts.size)
+            for ((id, count) in reactionCounts) { d.writeStr(id); d.writeInt(count) }
+            d.writeInt(zapStatsByEventId.size)
+            for ((id, zap) in zapStatsByEventId) {
+                d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
+            }
+        }
+
+        val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
+        DataOutputStream(relayHealthBuf).use { d ->
+            d.writeInt(trustScoresByUrl.size)
+            for ((url, ts) in trustScoresByUrl) {
+                d.writeStr(url)
+                d.writeInt(ts.score); d.writeInt(ts.reliability)
+                d.writeInt(ts.quality); d.writeInt(ts.accessibility)
+                d.writeStr(ts.confidence); d.writeInt(ts.observations)
+                d.writeStrOrNull(ts.policy)
+                d.writeStrOrNull(ts.countryCode)
+                d.writeStrOrNull(ts.operatorVerified)
+                d.writeLong(ts.updatedAt)
+            }
+            d.writeInt(relayMonitorsByUrl.size)
+            for ((url, m) in relayMonitorsByUrl) {
+                d.writeStr(url)
+                d.writeIntOrNull(m.rttOpen)
+                d.writeIntOrNull(m.rttRead)
+                d.writeIntOrNull(m.rttWrite)
+                d.writeStr(m.monitorPubkey)
+                d.writeLong(m.createdAt)
+                d.writeStrOrNull(m.network)
+                d.writeStrOrNull(m.geohash)
+                d.writeStrOrNull(m.iconUrl)
+                d.writeInt(m.supportedNips.size)
+                for (n in m.supportedNips) d.writeInt(n)
+            }
+        }
+
+        val followsBytes = followsBuf.toByteArray()
+        val eventsBytes = eventsBuf.toByteArray()
+        val aggregatesBytes = aggregatesBuf.toByteArray()
+        val relayHealthBytes = relayHealthBuf.toByteArray()
+
+        val followsOffset = SNAPSHOT_HEADER_SIZE
+        val eventsOffset = followsOffset + followsBytes.size
+        val aggregatesOffset = eventsOffset + eventsBytes.size
+        val relayHealthOffset = aggregatesOffset + aggregatesBytes.size
+
+        // Header
+        out.write(SNAPSHOT_BINARY_MAGIC)
+        out.writeInt(SNAPSHOT_BINARY_VERSION)
+        out.writeInt(followsOffset)
+        out.writeInt(eventsOffset)
+        out.writeInt(aggregatesOffset)
+        out.writeInt(relayHealthOffset)
+        out.writeInt(totalEvents)
+        out.writeInt(0) // reserved
+
+        // Sections in offset order.
+        out.write(followsBytes)
+        out.write(eventsBytes)
+        out.write(aggregatesBytes)
+        out.write(relayHealthBytes)
+    }
+
+    suspend fun restoreSnapshotBinary(input: DataInputStream) {
+        val magic = ByteArray(4)
+        input.readFully(magic)
+        if (!magic.contentEquals(SNAPSHOT_BINARY_MAGIC)) {
+            throw IOException("Invalid snapshot magic: " +
+                magic.joinToString("") { "%02x".format(it) })
+        }
+        val version = input.readInt()
+        if (version != SNAPSHOT_BINARY_VERSION) {
+            throw IOException("Unsupported snapshot version: $version")
+        }
+        // Section offsets — currently informational; we read sections
+        // sequentially below. Future lazy-load can seek to these offsets
+        // to read FOLLOWS first and defer EVENTS.
+        input.readInt() // followsOffset
+        input.readInt() // eventsOffset
+        input.readInt() // aggregatesOffset
+        input.readInt() // relayHealthOffset
+        val declaredEventsCount = input.readInt()
+        input.readInt() // reserved
+
+        // FOLLOWS section
+        val followsCount = input.readInt()
+        if (followsCount < 0 || followsCount > 100_000) {
+            throw IOException("Invalid follows count: $followsCount")
+        }
+        for (i in 0 until followsCount) {
+            val pubkey = input.readStr()
+            val createdAt = input.readLong()
+            val followCount = input.readInt()
+            if (followCount < 0 || followCount > 1_000_000) {
+                throw IOException("Invalid follow count: $followCount")
+            }
+            val pks = HashSet<String>(followCount)
+            for (j in 0 until followCount) pks.add(input.readStr())
+            if (pks.isNotEmpty()) {
+                followsByPubkey[pubkey] = pks
+                followsCreatedAt[pubkey] = createdAt
+            }
+        }
+
+        // Fire follows signal early — matches the V2 reader's behavior at
+        // the ---EVENTS--- marker boundary so FeedVM cold-start resolves
+        // before the events parse completes.
+        if (followsByPubkey.isNotEmpty()) {
+            _followsSignal.value = System.nanoTime()
+        }
+
+        // EVENTS section
+        val eventsCount = input.readInt()
+        if (eventsCount < 0 || eventsCount > 1_000_000) {
+            throw IOException("Invalid events count: $eventsCount")
+        }
+        var lineCount = 0
+        for (i in 0 until eventsCount) {
+            if (++lineCount % 500 == 0) kotlinx.coroutines.yield()
+            val event = input.readEventBinary()
+            insertFromSnapshot(event)
+        }
+
+        // AGGREGATES section
+        val replyN = input.readInt()
+        if (replyN < 0 || replyN > 5_000_000) throw IOException("Invalid reply count: $replyN")
+        for (i in 0 until replyN) {
+            val id = input.readStr(); val c = input.readInt()
+            replyCounts[id] = c
+        }
+        val repostN = input.readInt()
+        if (repostN < 0 || repostN > 5_000_000) throw IOException("Invalid repost count: $repostN")
+        for (i in 0 until repostN) {
+            val id = input.readStr(); val c = input.readInt()
+            repostCounts[id] = c
+        }
+        val reactionN = input.readInt()
+        if (reactionN < 0 || reactionN > 5_000_000) throw IOException("Invalid reaction count: $reactionN")
+        for (i in 0 until reactionN) {
+            val id = input.readStr(); val c = input.readInt()
+            reactionCounts[id] = c
+        }
+        val zapN = input.readInt()
+        if (zapN < 0 || zapN > 5_000_000) throw IOException("Invalid zap count: $zapN")
+        for (i in 0 until zapN) {
+            val id = input.readStr()
+            val c = input.readInt()
+            val sats = input.readLong()
+            zapStatsByEventId[id] = ZapAggregate(c, sats)
+        }
+
+        // RELAY_HEALTH section
+        val trustN = input.readInt()
+        if (trustN < 0 || trustN > 100_000) throw IOException("Invalid trust count: $trustN")
+        for (i in 0 until trustN) {
+            val url = input.readStr()
+            val score = input.readInt(); val reliability = input.readInt()
+            val quality = input.readInt(); val accessibility = input.readInt()
+            val confidence = input.readStr(); val observations = input.readInt()
+            val policy = input.readStrOrNull()
+            val countryCode = input.readStrOrNull()
+            val operatorVerified = input.readStrOrNull()
+            val updatedAt = input.readLong()
+            trustScoresByUrl[url] = RelayTrustScoreEntity(
+                relayUrl = url,
+                score = score, reliability = reliability,
+                quality = quality, accessibility = accessibility,
+                confidence = confidence, observations = observations,
+                policy = policy, countryCode = countryCode,
+                operatorVerified = operatorVerified, updatedAt = updatedAt,
+            )
+        }
+        val monitorN = input.readInt()
+        if (monitorN < 0 || monitorN > 100_000) throw IOException("Invalid monitor count: $monitorN")
+        for (i in 0 until monitorN) {
+            val url = input.readStr()
+            val rttOpen = input.readIntOrNull()
+            val rttRead = input.readIntOrNull()
+            val rttWrite = input.readIntOrNull()
+            val monitorPubkey = input.readStr()
+            val createdAt = input.readLong()
+            val network = input.readStrOrNull()
+            val geohash = input.readStrOrNull()
+            val iconUrl = input.readStrOrNull()
+            val nipsN = input.readInt()
+            if (nipsN < 0 || nipsN > 1_000) throw IOException("Invalid NIPs count: $nipsN")
+            val nips = ArrayList<Int>(nipsN)
+            for (j in 0 until nipsN) nips.add(input.readInt())
+            relayMonitorsByUrl[url] = RelayMonitorEntity(
+                relayUrl = url,
+                rttOpen = rttOpen, rttRead = rttRead, rttWrite = rttWrite,
+                supportedNips = nips,
+                network = network,
+                requirements = emptyList(), // V2 didn't persist this either; populated live
+                geohash = geohash,
+                iconUrl = iconUrl,
+                monitorPubkey = monitorPubkey,
+                createdAt = createdAt,
+            )
+        }
+
+        // End-of-restore signal bumps (matches V2 reader)
+        val now = System.nanoTime()
+        _feedSignal.value = now
+        _profileSignal.value = now
+        _statsSignal.value = now
+        _followsSignal.value = now
+        _trustScoreSignal.value = now
+        _relayMonitorSignal.value = now
+        _snapshotRestoredSignal.value = now
+
+        evictOldContentEvents()
+
+        Log.d("MES", "Snapshot restore complete (binary V$version, $declaredEventsCount events declared, EventModel parsing deferred)")
+    }
+
+    private fun DataOutputStream.writeEventBinary(e: NostrEvent) {
+        writeLong(e.createdAt)
+        writeInt(e.kind)
+        writeStr(e.id)
+        writeStr(e.pubkey)
+        writeStr(e.sig)
+        writeStr(e.content)
+        writeStr(e.relayUrl)
+        writeInt(e.tags.size)
+        for (tag in e.tags) {
+            writeInt(tag.size)
+            for (item in tag) writeStr(item)
+        }
+        var flags = 0
+        if (e.replyToId != null) flags = flags or 0x01
+        if (e.rootId != null) flags = flags or 0x02
+        if (e.hasContentWarning) flags = flags or 0x04
+        if (e.contentWarningReason != null) flags = flags or 0x08
+        writeByte(flags)
+        if (e.replyToId != null) writeStr(e.replyToId)
+        if (e.rootId != null) writeStr(e.rootId)
+        if (e.contentWarningReason != null) writeStr(e.contentWarningReason)
+        writeLong(e.firstSeenAt)
+        // relaysSeen is a Set<String> (ConcurrentHashMap-backed); snapshot
+        // a list now to avoid surprises if it mutates during iteration.
+        val seenSnapshot = e.relaysSeen.toList()
+        writeInt(seenSnapshot.size)
+        for (r in seenSnapshot) writeStr(r)
+    }
+
+    private fun DataInputStream.readEventBinary(): NostrEvent {
+        val createdAt = readLong()
+        val kind = readInt()
+        val id = readStr()
+        val pubkey = readStr()
+        val sig = readStr()
+        val content = readStr()
+        val relayUrl = readStr()
+        val tagsCount = readInt()
+        if (tagsCount < 0 || tagsCount > 10_000) {
+            throw IOException("Invalid tag count: $tagsCount")
+        }
+        val tags = ArrayList<List<String>>(tagsCount)
+        for (i in 0 until tagsCount) {
+            val itemCount = readInt()
+            if (itemCount < 0 || itemCount > 10_000) {
+                throw IOException("Invalid tag item count: $itemCount")
+            }
+            val tag = ArrayList<String>(itemCount)
+            for (j in 0 until itemCount) tag.add(readStr())
+            tags.add(tag)
+        }
+        val flags = readByte().toInt() and 0xff
+        val replyToId = if (flags and 0x01 != 0) readStr() else null
+        val rootId = if (flags and 0x02 != 0) readStr() else null
+        val hasCW = flags and 0x04 != 0
+        val cwReason = if (flags and 0x08 != 0) readStr() else null
+        val firstSeenAt = readLong()
+        val seenCount = readInt()
+        if (seenCount < 0 || seenCount > 10_000) {
+            throw IOException("Invalid relaysSeen count: $seenCount")
+        }
+        val relaysSeen = ConcurrentHashMap.newKeySet<String>()
+        for (i in 0 until seenCount) relaysSeen.add(readStr())
+
+        return NostrEvent(
+            id = id,
+            pubkey = pubkey,
+            kind = kind,
+            content = content,
+            createdAt = createdAt,
+            tags = tags,
+            tagsJson = tagsToJson(tags),
+            sig = sig,
+            relayUrl = relayUrl,
+            replyToId = replyToId,
+            rootId = rootId,
+            hasContentWarning = hasCW,
+            contentWarningReason = cwReason,
+            firstSeenAt = firstSeenAt,
+            relaysSeen = relaysSeen,
+        )
+    }
+
+    private fun DataOutputStream.writeStr(s: String) {
+        val bytes = s.toByteArray(Charsets.UTF_8)
+        writeInt(bytes.size)
+        write(bytes)
+    }
+
+    private fun DataInputStream.readStr(): String {
+        val len = readInt()
+        if (len < 0 || len > MAX_SNAPSHOT_STR_LEN) {
+            throw IOException("Invalid string length: $len")
+        }
+        val bytes = ByteArray(len)
+        readFully(bytes)
+        return String(bytes, Charsets.UTF_8)
+    }
+
+    private fun DataOutputStream.writeStrOrNull(s: String?) {
+        if (s == null) {
+            writeBoolean(false)
+        } else {
+            writeBoolean(true)
+            writeStr(s)
+        }
+    }
+
+    private fun DataInputStream.readStrOrNull(): String? =
+        if (readBoolean()) readStr() else null
+
+    private fun DataOutputStream.writeIntOrNull(i: Int?) {
+        if (i == null) {
+            writeBoolean(false)
+        } else {
+            writeBoolean(true)
+            writeInt(i)
+        }
+    }
+
+    private fun DataInputStream.readIntOrNull(): Int? =
+        if (readBoolean()) readInt() else null
 
     private fun insertFromSnapshot(event: NostrEvent) {
         eventsById[event.id] = event
