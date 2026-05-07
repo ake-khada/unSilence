@@ -2,12 +2,12 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.memory.NostrEvent
-import kotlinx.serialization.json.JsonArray
+import com.unsilence.app.data.memory.tagsToJson
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -196,23 +196,21 @@ class Subscription @Inject constructor(
     }
 
     private fun dispatchEvent(raw: String, relayUrl: String) {
-        // We need both the subId and the event. Full JSON parse required.
-        val msg = try {
-            NostrJson.parseToJsonElement(raw).jsonArray
-        } catch (_: Exception) {
-            return
-        }
-        if (msg.size < 3) return
-        val subId = (msg[1] as? JsonPrimitive)?.content ?: return
+        // Extract subId via substring scan — same trick used for EOSE/CLOSED.
+        // This lets us early-return for events on other taps' subs WITHOUT
+        // any JSON allocation. Hot path: a relay with multiple active subs
+        // sends all events through every tap, so most arrivals here are
+        // for other subscriptions.
+        val subId = extractSubId(raw) ?: return
         val state = subs[subId] ?: return  // not our sub, or already closed
 
-        val obj = msg[2].jsonObject
-        val eventId = (obj["id"] as? JsonPrimitive)?.content ?: return
-
-        // Cross-relay dedup
+        // Extract event id without parsing — Nostr event ids are 64-char
+        // lowercase hex right after the `"id":"` marker. Cross-relay dedup
+        // before paying for the full streaming decode.
+        val eventId = extractEventIdFromRaw(raw) ?: return
         if (!state.knownIds.add(eventId)) return
 
-        val event = parseEvent(obj, relayUrl) ?: return
+        val event = parseEvent(raw, eventId, relayUrl) ?: return
         try {
             state.onevent(event)
         } catch (t: Throwable) {
@@ -245,40 +243,46 @@ class Subscription @Inject constructor(
         }
     }
 
-    private fun parseEvent(obj: kotlinx.serialization.json.JsonObject, relayUrl: String): NostrEvent? {
-        return try {
-            val id = (obj["id"] as? JsonPrimitive)?.content ?: return null
-            val pubkey = (obj["pubkey"] as? JsonPrimitive)?.content ?: return null
-            val kind = (obj["kind"] as? JsonPrimitive)?.content?.toIntOrNull() ?: return null
-            val createdAt = (obj["created_at"] as? JsonPrimitive)?.content?.toLongOrNull() ?: return null
-            val content = (obj["content"] as? JsonPrimitive)?.content ?: ""
-            val sig = (obj["sig"] as? JsonPrimitive)?.content ?: ""
-            val tagsArray = (obj["tags"] as? JsonArray) ?: JsonArray(emptyList())
-            val tags = tagsArray.mapNotNull { tagEl ->
-                (tagEl as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }
-            }
-            val tagsJson = tagsArray.toString()
-            val now = System.currentTimeMillis()
-            NostrEvent(
-                id = id,
-                pubkey = pubkey,
-                kind = kind,
-                createdAt = createdAt,
-                content = content,
-                tags = tags,
-                tagsJson = tagsJson,
-                sig = sig,
-                relayUrl = relayUrl,
-                replyToId = null,
-                rootId = null,
-                hasContentWarning = false,
-                contentWarningReason = null,
-                firstSeenAt = now,
-                relaysSeen = ConcurrentHashMap.newKeySet<String>().also { it.add(relayUrl) },
-            )
+    /**
+     * Slice the inner event object out of [raw] and stream-decode straight
+     * into [EventDto], then map to [NostrEvent]. Mirrors the EventProcessor
+     * fast path — no JsonObject / JsonArray tree, no per-field JsonPrimitive
+     * allocation. NIP-10 threading and NIP-36 content-warning fields are
+     * left null/false here (preserving prior dispatchEvent semantics —
+     * EventProcessor populates those on its own write path into MES).
+     */
+    private fun parseEvent(raw: String, expectedId: String, relayUrl: String): NostrEvent? {
+        val objStart = findEventObjectStart(raw)
+        if (objStart < 0) return null
+        val objEnd = findMatchingBraceEnd(raw, objStart)
+        if (objEnd < 0) return null
+        val eventJson = raw.substring(objStart, objEnd + 1)
+        val dto = try {
+            NostrJson.decodeFromString<EventDto>(eventJson)
         } catch (_: Exception) {
-            null
+            return null
         }
+        // Sanity: the precomputed id must match the decoded one. A relay
+        // returning a tampered or mis-aligned message gets refused here —
+        // same defense EventProcessor.process applies.
+        if (dto.id != expectedId) return null
+        return NostrEvent(
+            id = dto.id,
+            pubkey = dto.pubkey,
+            kind = dto.kind,
+            createdAt = dto.createdAt,
+            content = dto.content,
+            tags = dto.tags,
+            tagsJson = tagsToJson(dto.tags),
+            sig = dto.sig,
+            relayUrl = relayUrl,
+            replyToId = null,
+            rootId = null,
+            hasContentWarning = false,
+            contentWarningReason = null,
+            firstSeenAt = System.currentTimeMillis(),
+            relaysSeen = ConcurrentHashMap.newKeySet<String>().also { it.add(relayUrl) },
+        )
     }
 
     private fun generateSubId(urls: List<String>): String {
