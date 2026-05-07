@@ -32,7 +32,7 @@ import javax.inject.Singleton
  * NIP-19 'a' tags, custom moderation flags) don't break decode.
  */
 @Serializable
-private data class EventDto(
+internal data class EventDto(
     val id: String,
     val pubkey: String,
     val kind: Int,
@@ -267,7 +267,7 @@ class EventProcessor @Inject constructor(
         if (!raw.startsWith("[\"EVENT\"")) return
 
         // ── Dedup by event ID, extracted without JSON parsing ──────────────────
-        val eventId = extractEventId(raw) ?: return
+        val eventId = extractEventIdFromRaw(raw) ?: return
         if (seenIds.putIfAbsent(eventId, Unit) != null) {
             // Already processed — just record this relay as a source so
             // relay-specific feeds (browse mode) include the event.
@@ -299,77 +299,9 @@ class EventProcessor @Inject constructor(
         handleEvent(dto, relayUrl)
     }
 
-    /**
-     * Walk [raw] to find the start of the inner event object — the first
-     * `{` character outside of a JSON string literal. The preamble is
-     * `["EVENT","sub-id",` and neither EVENT nor sub-id can legitimately
-     * contain a `{`, so a simple linear scan suffices and there's no need
-     * to match string boundaries here.
-     */
-    private fun findEventObjectStart(raw: String): Int {
-        var i = 0
-        var inString = false
-        var escape = false
-        while (i < raw.length) {
-            val c = raw[i]
-            if (escape) { escape = false; i++; continue }
-            if (c == '\\') { escape = true; i++; continue }
-            if (c == '"') { inString = !inString; i++; continue }
-            if (!inString && c == '{') return i
-            i++
-        }
-        return -1
-    }
-
-    /**
-     * Find the `}` that matches the opening `{` at [openIdx], respecting
-     * string-literal boundaries. Used to slice out the event object's JSON
-     * substring for streaming decode.
-     */
-    private fun findMatchingBraceEnd(raw: String, openIdx: Int): Int {
-        var depth = 0
-        var inString = false
-        var escape = false
-        var i = openIdx
-        while (i < raw.length) {
-            val c = raw[i]
-            if (escape) { escape = false; i++; continue }
-            if (c == '\\') { escape = true; i++; continue }
-            if (c == '"') { inString = !inString; i++; continue }
-            if (!inString) {
-                when (c) {
-                    '{' -> depth++
-                    '}' -> {
-                        depth--
-                        if (depth == 0) return i
-                    }
-                }
-            }
-            i++
-        }
-        return -1
-    }
-
     // ── Dedup helpers ─────────────────────────────────────────────────────────
-
-    /**
-     * Extract the event ID from a raw Nostr EVENT string WITHOUT JSON parsing.
-     *
-     * Nostr event IDs are always 64-char lowercase hex. The format of an EVENT
-     * message is: ["EVENT","sub-id",{"id":"<64-hex>","pubkey":...}]
-     * We scan for the literal `"id":"` marker and grab the next 64 bytes.
-     */
-    private fun extractEventId(raw: String): String? {
-        val marker = "\"id\":\""
-        val markerIdx = raw.indexOf(marker)
-        if (markerIdx < 0) return null
-        val idStart = markerIdx + marker.length
-        if (idStart + 64 > raw.length) return null
-        val id = raw.substring(idStart, idStart + 64)
-        // Validate: must be 64 lowercase hex chars (Nostr spec)
-        if (!id.all { it in '0'..'9' || it in 'a'..'f' }) return null
-        return id
-    }
+    // extractEventIdFromRaw / findEventObjectStart / findMatchingBraceEnd
+    // live as top-level helpers in RawEventJson.kt — shared with Subscription.
 
     internal fun trimDedupCacheIfNeeded() {
         if (seenIds.size <= DEDUP_MAX) return
