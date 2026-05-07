@@ -145,22 +145,43 @@ class TimelineConsumer(
 
     init {
         arrivalDrainerJob = ownerScope.launch {
+            // Adaptive coalescing: the drain window starts at ARRIVAL_WINDOW_MIN_MS
+            // and stretches toward ARRIVAL_WINDOW_MAX_MS as arrival rate climbs.
+            // On Following (steady ~10 events/sec) the window stays near the
+            // minimum and posts tail in promptly. On Ditto-class firehoses
+            // (~100+ events/sec) it stretches to absorb the burst and produce
+            // one Compose recompose per ~500ms instead of per-batch. Each
+            // applied batch updates `currentWindowMs` based on what we just saw.
+            var currentWindowMs = ARRIVAL_WINDOW_MIN_MS
             while (true) {
                 // Suspend until at least one batch arrives. CancellationException
                 // exits the loop when ownerScope is cancelled.
                 val first = arrivalQueue.receive()
                 val buffer = ArrayList<NostrEvent>(first.size + 32)
                 buffer.addAll(first)
-                // Drain anything that arrives in the next ARRIVAL_WINDOW_MS.
-                // withTimeoutOrNull cancels the inner receive when the window
-                // closes; the outer receive blocks until next batch.
-                withTimeoutOrNull(ARRIVAL_WINDOW_MS) {
+                val windowStartNs = System.nanoTime()
+                // Drain anything that arrives within currentWindowMs.
+                withTimeoutOrNull(currentWindowMs) {
                     while (true) {
                         val next = arrivalQueue.receive()
                         buffer.addAll(next)
                     }
                 }
+                val elapsedMs = ((System.nanoTime() - windowStartNs) / 1_000_000L).coerceAtLeast(1L)
+                val rate = (buffer.size * 1000L) / elapsedMs   // events/sec for this window
                 applyArrival(buffer)
+                // Update window for the NEXT batch based on observed rate.
+                // Linear interpolation: ≤ARRIVAL_LOW_RATE → MIN, ≥ARRIVAL_HIGH_RATE → MAX.
+                currentWindowMs = when {
+                    rate <= ARRIVAL_LOW_RATE -> ARRIVAL_WINDOW_MIN_MS
+                    rate >= ARRIVAL_HIGH_RATE -> ARRIVAL_WINDOW_MAX_MS
+                    else -> {
+                        val span = ARRIVAL_WINDOW_MAX_MS - ARRIVAL_WINDOW_MIN_MS
+                        val t = (rate - ARRIVAL_LOW_RATE).toDouble() /
+                            (ARRIVAL_HIGH_RATE - ARRIVAL_LOW_RATE)
+                        ARRIVAL_WINDOW_MIN_MS + (span * t).toLong()
+                    }
+                }
             }
         }
     }
@@ -370,10 +391,22 @@ class TimelineConsumer(
     }
 
     private companion object {
-        /** Coalescing window for the arrival queue drainer (ms). 100ms is
-         *  imperceptible as feed-tail latency but enough to absorb a Ditto
-         *  burst of ~10 batches/sec into a single Compose recomposition. */
-        const val ARRIVAL_WINDOW_MS = 100L
+        /** Minimum coalescing window (ms). Used at low arrival rates so live-
+         *  tail posts appear with imperceptible delay. */
+        const val ARRIVAL_WINDOW_MIN_MS = 100L
+
+        /** Maximum coalescing window (ms). Used under firehose load so a
+         *  Ditto-class relay can't outrun Compose. The trade-off is up to
+         *  500ms tail-in delay; still well below human "feels laggy" threshold
+         *  for live updates and the user is by definition NOT at top of a
+         *  firehose feed if they're getting hundreds of events/sec. */
+        const val ARRIVAL_WINDOW_MAX_MS = 500L
+
+        /** Below this rate (events/sec) keep the minimum window. */
+        const val ARRIVAL_LOW_RATE = 20L
+
+        /** At or above this rate, stretch to the maximum window. */
+        const val ARRIVAL_HIGH_RATE = 100L
 
         val EVENT_ORDER: Comparator<NostrEvent> = Comparator { a, b ->
             when {
