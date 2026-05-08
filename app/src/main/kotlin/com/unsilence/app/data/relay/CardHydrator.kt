@@ -228,12 +228,22 @@ class CardHydrator @Inject constructor(
         if (missingRefs.isNotEmpty()) {
             // Broadcast fetch for all missing refs
             relayPool.fetchEventsByIds(missingRefs.toList())
-            // Also try relay hints for repost targets (bridge events may only exist there).
-            // bypassDedup: the broadcast above already set eventFetchInFlight for these IDs,
-            // but the hint relay is likely different from the broadcast targets.
+
+            // Hint-relay coverage. The broadcast targets only 6 connected relays —
+            // events that live exclusively on the wrapper's source relay (or an
+            // explicit e-tag hint relay) won't be covered. Group missing refs by
+            // hint URL and send ONE batched REQ per hint relay instead of one per
+            // ref id; in field logs the per-id loop fires 30+ separate one-shot
+            // REQs at the same hint relay, queue-saturating it. bypassDedup:
+            // the broadcast already registered these ids in eventFetchInFlight,
+            // and we want the hint REQ to fire anyway.
+            val hintBatches = HashMap<String, MutableList<String>>()
             for (id in missingRefs) {
                 val hint = relayHints[id] ?: continue
-                relayPool.fetchEventById(id, listOf(hint), bypassDedup = true)
+                hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
+            }
+            for ((hint, ids) in hintBatches) {
+                relayPool.fetchEventsByIdsFromRelay(hint, ids, bypassDedup = true)
             }
         }
 
