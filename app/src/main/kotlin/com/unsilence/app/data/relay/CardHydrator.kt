@@ -445,14 +445,55 @@ class CardHydrator @Inject constructor(
     /**
      * Full hydration: profiles + refs + media. Used by IDLE state where
      * there's no urgency to split phases.
+     *
+     * Coalescing: when a previous pass fired <COALESCE_COOLDOWN_MS ago AND
+     * the current warm zone has only ≤COALESCE_NOVEL_THRESHOLD novel cards,
+     * skip this pass entirely. Field logs showed sustained 7+ hydrator
+     * firings per minute where each pass had only 1-2 novel events; each
+     * tiny pass still amplified into per-event relay fetches at the source-
+     * relay + hint-relay level. Holding a pass means those 1-2 events stay
+     * "novel" and merge into the next pass — same coverage, fewer one-shots,
+     * less radio churn. Cap is 2s so worst-case profile/ref delay is
+     * bounded; per-card avatar autofetch covers visible-but-unhydrated rows
+     * in the meantime.
+     *
+     * Bypass on big novel batches (cold start, fast scroll, feed swap):
+     * fires immediately so the first paint isn't delayed.
      */
+    @Volatile private var lastFullHydrationAt = 0L
+
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         if (events.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        val sinceLast = now - lastFullHydrationAt
+        // Cheap novel-count probe — same lock + set-membership check that the
+        // phase entry filter would do, but no allocation of a filtered list.
+        val novelCount = synchronized(hydratedLock) {
+            events.count { it.id !in profilesHydrated }
+        }
+        if (sinceLast < COALESCE_COOLDOWN_MS && novelCount <= COALESCE_NOVEL_THRESHOLD) {
+            Log.d(TAG, "Coalesce: ${events.size} events, $novelCount novel, " +
+                "${sinceLast}ms since last — defer")
+            return
+        }
+        lastFullHydrationAt = now
+
         hydrateProfiles(events)
         hydrateRefs(events)
         hydrateMedia(events, mmrAllowed = false)
     }
 }
+
+/** Min interval between full hydration passes when novel count is small.
+ *  Picked so worst-case profile/ref latency on a slow trickle of new events
+ *  stays under ~2s — within the per-card avatar autofetch debounce window. */
+private const val COALESCE_COOLDOWN_MS = 2_000L
+
+/** Novel-event threshold below which a pass within COALESCE_COOLDOWN_MS is
+ *  deferred. 3 lets tiny live-tail batches (1-2 events) coalesce while still
+ *  firing immediately for fast scrolls / feed swaps where ≥4 cards are new. */
+private const val COALESCE_NOVEL_THRESHOLD = 3
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
 fun extractRepostTargetRelay(tagsJson: String): String? {
