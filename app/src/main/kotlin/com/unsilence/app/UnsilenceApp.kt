@@ -2,7 +2,9 @@ package com.unsilence.app
 
 import android.app.Application
 import android.content.ComponentCallbacks2
+import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
+import android.os.StrictMode
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -29,6 +31,25 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
 
     override fun onCreate() {
         super.onCreate()
+
+        // Closeable-leak diagnostic in debug builds. Field logs show sustained
+        // 'A resource failed to call close' bursts from the FinalizerDaemon
+        // after every ~30-60s GC, but without stack traces it's impossible to
+        // pinpoint which OkHttp Response / FileInputStream / etc. wasn't closed.
+        // detectLeakedClosableObjects + penaltyLog gives us a stack trace at
+        // the point of leak in Android's StrictMode log channel. Debug-only:
+        // production builds keep the original quieter behaviour. Detected via
+        // FLAG_DEBUGGABLE on the application — works without a buildConfig step.
+        val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isDebuggable) {
+            StrictMode.setVmPolicy(
+                StrictMode.VmPolicy.Builder()
+                    .detectLeakedClosableObjects()
+                    .penaltyLog()
+                    .build()
+            )
+        }
+
         snapshotScheduler.attach()
         mesMetricsLogger.attach()
 

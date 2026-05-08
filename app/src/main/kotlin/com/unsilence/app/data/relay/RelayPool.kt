@@ -1762,30 +1762,56 @@ class RelayPool @Inject constructor(
     fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
 
     /**
-     * Fetch events by ID from a SPECIFIC relay (source-relay targeting).
-     * Used by EventProcessor's prefetch: when a reply arrives from relay X,
-     * the parent event is almost certainly on relay X too.
-     * Deduped via in-flight Deferred map + negative cache.
+     * Fetch events by ID from a SPECIFIC relay (source-relay or hint-relay targeting).
+     *
+     * Two modes:
+     *  - default (`bypassDedup=false`): registers each id in `eventFetchInFlight`,
+     *    skips ids already in flight or in the negative cache. Used by source-relay
+     *    prefetch where a single fetch is sufficient.
+     *  - `bypassDedup=true`: hint-relay retry path. Skips the in-flight guard so the
+     *    fetch fires even when a prior broadcast already registered the ids — the
+     *    point is to hit the hint relay specifically (which may not have been in the
+     *    broadcast's target set). Still respects the negative cache: if a prior
+     *    completed batch already determined the id is unresolvable, retrying won't
+     *    help.
+     *
+     * `connectAndAwait` runs first when no connection exists (hint-relay fetches
+     * frequently target obscure relays not in the persistent pool). 2s budget so
+     * unreachable hints don't block the hydrator.
+     *
+     * One REQ per call regardless of how many ids are passed — the wire form is
+     * `{"ids":[...]}` so a list of N ids is a single subscription, not N.
      */
-    fun fetchEventsByIdsFromRelay(relayUrl: String, eventIds: List<String>) {
+    suspend fun fetchEventsByIdsFromRelay(
+        relayUrl: String,
+        eventIds: List<String>,
+        bypassDedup: Boolean = false,
+    ) {
         if (eventIds.isEmpty()) return
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
-        val conn = connections[normalized]
-            ?: return  // no connection — don't register in-flight entries
+        if (connections[normalized] == null) {
+            connectAndAwait(listOf(normalized), timeoutMs = 2_000)
+        }
+        val conn = connections[normalized] ?: return
         val novel = mutableListOf<String>()
         for (id in eventIds) {
             if (isEventUnresolved(id)) continue
-            if (eventFetchInFlight.containsKey(id)) continue
-            val d = CompletableDeferred<NostrEvent?>()
-            if (eventFetchInFlight.putIfAbsent(id, d) == null) {
+            if (!bypassDedup) {
+                if (eventFetchInFlight.containsKey(id)) continue
+                val d = CompletableDeferred<NostrEvent?>()
+                if (eventFetchInFlight.putIfAbsent(id, d) == null) {
+                    novel.add(id)
+                    launchFetchMonitor(id, d)
+                }
+            } else {
                 novel.add(id)
-                launchFetchMonitor(id, d)
             }
         }
         if (novel.isEmpty()) return
         trackInFlightPeak()
-        val subId = "prefetch-${System.nanoTime()}"
+        val subId = if (bypassDedup) "hint-batch-${System.nanoTime()}"
+                    else "prefetch-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -1796,7 +1822,11 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         sendOneShotToRelay(conn, req)
-        Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
+        if (bypassDedup) {
+            Log.d(TAG, "fetchByIdsFromRelay (hint-batch): ${novel.size} events → $normalized")
+        } else {
+            Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
+        }
     }
 
     /**

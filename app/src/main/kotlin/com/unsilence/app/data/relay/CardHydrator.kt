@@ -23,6 +23,11 @@ import javax.inject.Singleton
 
 private const val TAG = "CardHydrator"
 
+/** Bound on each per-phase hydrated-id memo. Sized so a tall warm-zone
+ *  fan-out (~150 events on aggressive scroll) plus a feed swap fits with
+ *  headroom; oldest IDs evict FIFO when the set exceeds this. */
+private const val HYDRATED_CAP = 500
+
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
@@ -61,6 +66,53 @@ class CardHydrator @Inject constructor(
     private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
 ) {
+    // ── Per-phase hydrated-id memo ───────────────────────────────────────
+    // hydrateVisibleCards re-fires on every viewport change (debounce 300ms).
+    // During a slow scroll the warm zone overlaps the previous pass by 30+
+    // events, so each phase repeats the same content regex scans, ref id
+    // extraction, and relay fetch orchestration for events already done.
+    // Track per-phase completion in bounded LRU sets and filter at entry.
+    // Downstream caches (UserRepository, RelayPool eventFetchInFlight,
+    // ImageDimensionCache) already dedup the actual fetches — these sets
+    // skip the upstream orchestration cost only.
+    private val profilesHydrated = LinkedHashSet<String>()
+    private val refsHydrated = LinkedHashSet<String>()
+    private val mediaHydrated = LinkedHashSet<String>()
+    private val hydratedLock = Any()
+
+    private fun filterNovel(
+        events: List<FeedRow>,
+        set: LinkedHashSet<String>,
+    ): List<FeedRow> {
+        if (events.isEmpty()) return events
+        return synchronized(hydratedLock) {
+            events.filter { it.id !in set }
+        }
+    }
+
+    private fun markHydrated(events: List<FeedRow>, set: LinkedHashSet<String>) {
+        if (events.isEmpty()) return
+        synchronized(hydratedLock) {
+            for (e in events) {
+                if (set.add(e.id) && set.size > HYDRATED_CAP) {
+                    val iter = set.iterator()
+                    if (iter.hasNext()) { iter.next(); iter.remove() }
+                }
+            }
+        }
+    }
+
+    /** Drop the per-phase memos. Called on logout / feed-switch teardown
+     *  if the caller wants a clean slate. Safe to call concurrently with
+     *  hydrate* — the lock guards both reads and writes. */
+    fun resetHydratedMemo() {
+        synchronized(hydratedLock) {
+            profilesHydrated.clear()
+            refsHydrated.clear()
+            mediaHydrated.clear()
+        }
+    }
+
     /**
      * Profile resolution — avatar, name, identity.
      *
@@ -69,11 +121,18 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, profilesHydrated)
+        if (novelEvents.isEmpty()) return
+        // Mark up front: profile hints come from the event's content/tags
+        // which are fixed at insert, so seeing the event once is enough.
+        // Cancellation / fetch failure isn't fatal — per-card avatar autofetch
+        // and other entry points retry on demand.
+        markHydrated(novelEvents, profilesHydrated)
 
         val pubkeys = mutableSetOf<String>()
         val profileHints = mutableMapOf<String, MutableList<String>>()
 
-        for (event in events) {
+        for (event in novelEvents) {
             pubkeys.add(event.pubkey)
             if (event.kind == 6) {
                 extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
@@ -97,7 +156,7 @@ class CardHydrator @Inject constructor(
         userRepository.fetchMissingProfiles(unresolved.toList())
 
         if (fanOut) {
-            val sourceRelays = events.map { it.relayUrl }.distinct()
+            val sourceRelays = novelEvents.map { it.relayUrl }.distinct()
                 .filter { it != excludeSourceRelay }
             if (sourceRelays.isNotEmpty()) {
                 relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
@@ -111,7 +170,8 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        Log.d(TAG, "Phase1 profiles: ${events.size} cards → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${events.map { it.relayUrl }.distinct().size} source relays"}")
+        val skipped = events.size - novelEvents.size
+        Log.d(TAG, "Phase1 profiles: ${novelEvents.size} novel cards (${skipped} skipped) → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${novelEvents.map { it.relayUrl }.distinct().size} source relays"}")
     }
 
     /**
@@ -121,10 +181,16 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateRefs(events: List<FeedRow>) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, refsHydrated)
+        if (novelEvents.isEmpty()) return
+        // Mark up front: refs are derived from tags/content fixed at insert.
+        // RelayPool.eventFetchInFlight + isEventUnresolved already dedup the
+        // actual fetches; this just spares the regex / map orchestration.
+        markHydrated(novelEvents, refsHydrated)
 
         val referencedIds = mutableSetOf<String>()
         val relayHints = mutableMapOf<String, String>()
-        for (event in events) {
+        for (event in novelEvents) {
             if (event.kind == 6) {
                 extractRepostTargetId(event.tags)?.let { id ->
                     referencedIds.add(id)
@@ -162,12 +228,22 @@ class CardHydrator @Inject constructor(
         if (missingRefs.isNotEmpty()) {
             // Broadcast fetch for all missing refs
             relayPool.fetchEventsByIds(missingRefs.toList())
-            // Also try relay hints for repost targets (bridge events may only exist there).
-            // bypassDedup: the broadcast above already set eventFetchInFlight for these IDs,
-            // but the hint relay is likely different from the broadcast targets.
+
+            // Hint-relay coverage. The broadcast targets only 6 connected relays —
+            // events that live exclusively on the wrapper's source relay (or an
+            // explicit e-tag hint relay) won't be covered. Group missing refs by
+            // hint URL and send ONE batched REQ per hint relay instead of one per
+            // ref id; in field logs the per-id loop fires 30+ separate one-shot
+            // REQs at the same hint relay, queue-saturating it. bypassDedup:
+            // the broadcast already registered these ids in eventFetchInFlight,
+            // and we want the hint REQ to fire anyway.
+            val hintBatches = HashMap<String, MutableList<String>>()
             for (id in missingRefs) {
                 val hint = relayHints[id] ?: continue
-                relayPool.fetchEventById(id, listOf(hint), bypassDedup = true)
+                hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
+            }
+            for ((hint, ids) in hintBatches) {
+                relayPool.fetchEventsByIdsFromRelay(hint, ids, bypassDedup = true)
             }
         }
 
@@ -192,7 +268,7 @@ class CardHydrator @Inject constructor(
                 // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
                 // etc.), use the wrapper's own pubkey as fallback author for outbox routing.
                 val refAuthorPubkeys = mutableSetOf<String>()
-                for (event in events) {
+                for (event in novelEvents) {
                     val pTags = extractPTagPubkeys(event.tags)
                     if (pTags.isNotEmpty()) {
                         pTags.forEach { refAuthorPubkeys.add(it) }
@@ -213,10 +289,16 @@ class CardHydrator @Inject constructor(
                     .take(5)
 
                 if (cachedWriteRelays.isNotEmpty()) {
-                    for (id in afterSourceRelay) {
-                        relayPool.fetchEventById(id, cachedWriteRelays, bypassDedup = true)
+                    // Batch: ONE REQ per write relay with all afterSourceRelay
+                    // ids in `{"ids":[...]}`, instead of per-id REQs (which sent
+                    // up to 5 single-id REQs per missing ref). Same shape as
+                    // the hint-batch fix in ecf931e for hydrateRefs's primary
+                    // hint loop. With 4 missing refs × 5 cached write relays
+                    // that's 20 REQs collapsed to 5.
+                    for (relay in cachedWriteRelays) {
+                        relayPool.fetchEventsByIdsFromRelay(relay, afterSourceRelay, bypassDedup = true)
                     }
-                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays")
+                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays (batched)")
                 }
 
                 // Phase 2: for authors without cached relay lists, fetch kind-10002
@@ -240,10 +322,15 @@ class CardHydrator @Inject constructor(
                         // Re-check which refs are still missing
                         val stillMissingAfterPhase1 = afterSourceRelay
                             .filter { memoryEventStore.getEventEntity(it) == null }
-                        for (id in stillMissingAfterPhase1) {
-                            relayPool.fetchEventById(id, newWriteRelays, bypassDedup = true)
+                        if (stillMissingAfterPhase1.isNotEmpty()) {
+                            // Same batch-by-relay pattern as phase 1.
+                            for (relay in newWriteRelays) {
+                                relayPool.fetchEventsByIdsFromRelay(
+                                    relay, stillMissingAfterPhase1, bypassDedup = true,
+                                )
+                            }
+                            Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays (batched)")
                         }
-                        Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays")
                     }
                 }
 
@@ -276,7 +363,7 @@ class CardHydrator @Inject constructor(
         if (missingRefs.isNotEmpty()) {
             // Build refId → (referencedBy, referencedByKind) mapping
             val refToReferencer = mutableMapOf<String, Pair<String, Int>>()
-            for (event in events) {
+            for (event in novelEvents) {
                 if (event.kind == 6) {
                     extractRepostTargetId(event.tags)?.let { refToReferencer[it] = event.id to event.kind }
                 }
@@ -308,7 +395,8 @@ class CardHydrator @Inject constructor(
         }
 
         val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
-        Log.d(TAG, "Phase2 refs: ${events.size} cards → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
+        val skipped = events.size - novelEvents.size
+        Log.d(TAG, "Phase2 refs: ${novelEvents.size} novel cards (${skipped} skipped) → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
     }
 
     /**
@@ -320,10 +408,13 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
         if (events.isEmpty()) return
+        val novelEvents = filterNovel(events, mediaHydrated)
+        if (novelEvents.isEmpty()) return
+        markHydrated(novelEvents, mediaHydrated)
 
         // Image dimensions (always — lightweight header-only BitmapFactory decode)
         val imageUrls = mutableListOf<String>()
-        for (event in events) {
+        for (event in novelEvents) {
             if (event.kind == 30023) continue
             val content = event.content
             val afterVideos = VIDEO_URL_REGEX.replace(content, "")
@@ -338,7 +429,7 @@ class CardHydrator @Inject constructor(
         // Video thumbnails via MediaMetadataRetriever (REST-only, capped at 3)
         if (mmrAllowed) {
             var thumbnailCount = 0
-            for (event in events) {
+            for (event in novelEvents) {
                 if (thumbnailCount >= mmrCap) break
                 if (event.kind == 30023) continue
                 val models = buildVideoRenderModels(event)
@@ -365,14 +456,55 @@ class CardHydrator @Inject constructor(
     /**
      * Full hydration: profiles + refs + media. Used by IDLE state where
      * there's no urgency to split phases.
+     *
+     * Coalescing: when a previous pass fired <COALESCE_COOLDOWN_MS ago AND
+     * the current warm zone has only ≤COALESCE_NOVEL_THRESHOLD novel cards,
+     * skip this pass entirely. Field logs showed sustained 7+ hydrator
+     * firings per minute where each pass had only 1-2 novel events; each
+     * tiny pass still amplified into per-event relay fetches at the source-
+     * relay + hint-relay level. Holding a pass means those 1-2 events stay
+     * "novel" and merge into the next pass — same coverage, fewer one-shots,
+     * less radio churn. Cap is 2s so worst-case profile/ref delay is
+     * bounded; per-card avatar autofetch covers visible-but-unhydrated rows
+     * in the meantime.
+     *
+     * Bypass on big novel batches (cold start, fast scroll, feed swap):
+     * fires immediately so the first paint isn't delayed.
      */
+    @Volatile private var lastFullHydrationAt = 0L
+
     suspend fun hydrateVisibleCards(events: List<FeedRow>) {
         if (events.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        val sinceLast = now - lastFullHydrationAt
+        // Cheap novel-count probe — same lock + set-membership check that the
+        // phase entry filter would do, but no allocation of a filtered list.
+        val novelCount = synchronized(hydratedLock) {
+            events.count { it.id !in profilesHydrated }
+        }
+        if (sinceLast < COALESCE_COOLDOWN_MS && novelCount <= COALESCE_NOVEL_THRESHOLD) {
+            Log.d(TAG, "Coalesce: ${events.size} events, $novelCount novel, " +
+                "${sinceLast}ms since last — defer")
+            return
+        }
+        lastFullHydrationAt = now
+
         hydrateProfiles(events)
         hydrateRefs(events)
         hydrateMedia(events, mmrAllowed = false)
     }
 }
+
+/** Min interval between full hydration passes when novel count is small.
+ *  Picked so worst-case profile/ref latency on a slow trickle of new events
+ *  stays under ~2s — within the per-card avatar autofetch debounce window. */
+private const val COALESCE_COOLDOWN_MS = 2_000L
+
+/** Novel-event threshold below which a pass within COALESCE_COOLDOWN_MS is
+ *  deferred. 3 lets tiny live-tail batches (1-2 events) coalesce while still
+ *  firing immediately for fast scrolls / feed swaps where ≥4 cards are new. */
+private const val COALESCE_NOVEL_THRESHOLD = 3
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
 fun extractRepostTargetRelay(tagsJson: String): String? {
