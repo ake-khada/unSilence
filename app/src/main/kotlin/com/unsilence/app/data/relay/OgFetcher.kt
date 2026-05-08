@@ -7,8 +7,12 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -56,75 +60,74 @@ class OgFetcher @Inject constructor(
     }
 
     /**
-     * Execute an OkHttp call with coroutine cancellation propagation.
+     * Execute [call] asynchronously and parse the response inside the OkHttp
+     * callback, where `response.use { ... }` guarantees close on every exit
+     * path (success, exception, cancellation).
      *
-     * Race-safe handling: there's a window between `call.execute()` returning
-     * a Response and `cont.resume(response, ...)` being called where the
-     * coroutine can be cancelled (e.g. CardHydrator's `collectLatest` swaps
-     * to a newer warm zone). In that window, the Response is allocated with
-     * an open body but no .use{} block has been entered yet — and the
-     * `cont.resume(value, onCancellation)` contract for invoking the
-     * onCancellation lambda when the continuation is already cancelled
-     * has historically been brittle across kotlinx-coroutines versions.
+     * Why not the previous `executeWithCancellation` returning a Response and
+     * letting the caller `.use {}` it: that pattern hands a closeable across
+     * a coroutine resume boundary. Even with `cont.resume(value, onCancellation)`
+     * the cancellation contract is brittle when the continuation is cancelled
+     * after the dispatcher has scheduled the resume but before the consumer
+     * runs. Field logs showed sustained `A resource failed to call close` bursts
+     * after GC despite the prior fix. The canonical fix is to never leak the
+     * Response across the resume — consume it entirely inside the OkHttp callback.
      *
-     * Defense: explicitly check `cont.isCancelled` immediately after
-     * execute() returns and close the Response ourselves before bailing.
-     * This eliminates the documented leak path that surfaces in field
-     * logs as 'A resource failed to call close' bursts after GC during
-     * heavy cold-start OG-fetch traffic.
+     * The result we resume the continuation with is just an `OgMetadata?`
+     * (a value, no native resources), so the resume cancellation path is
+     * loss-tolerant.
      */
-    private suspend fun executeWithCancellation(call: okhttp3.Call): okhttp3.Response {
-        return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation { runCatching { call.cancel() } }
-            try {
-                val response = call.execute()
-                if (cont.isCancelled) {
-                    // Lost the cancellation race — close the response we
-                    // were about to hand off, and leave the coroutine
-                    // machinery to drop the resume on the floor.
-                    runCatching { response.close() }
-                    return@suspendCancellableCoroutine
-                }
-                cont.resume(response) { _, value, _ ->
-                    runCatching { value.close() }
-                }
-            } catch (e: Exception) {
-                if (!cont.isCancelled) cont.resumeWithException(e)
+    private suspend fun executeAndParse(
+        call: Call,
+        parse: (Response) -> OgMetadata?,
+    ): OgMetadata? = suspendCancellableCoroutine { cont ->
+        cont.invokeOnCancellation { runCatching { call.cancel() } }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
             }
-        }
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val result: OgMetadata? = try {
+                        parse(resp)
+                    } catch (t: Throwable) {
+                        if (cont.isActive) cont.resumeWithException(t)
+                        return
+                    }
+                    if (cont.isActive) cont.resume(result)
+                }
+            }
+        })
     }
 
     private suspend fun doFetch(url: String): OgMetadata? {
         // Skip HEAD — many sites block it or return wrong content-type.
         // Go straight to GET with body size limit.
-        return executeWithCancellation(
-            client.newCall(
-                Request.Builder()
-                    .url(url)
-                    .header("User-Agent", UA)
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Upgrade-Insecure-Requests", "1")
-                    .header("Sec-Fetch-Dest", "document")
-                    .header("Sec-Fetch-Mode", "navigate")
-                    .header("Sec-Fetch-Site", "none")
-                    .header("Sec-Fetch-User", "?1")
-                    .header("sec-ch-ua", "\"Google Chrome\";v=\"130\", \"Chromium\";v=\"130\", \"Not?A_Brand\";v=\"99\"")
-                    .header("sec-ch-ua-mobile", "?1")
-                    .header("sec-ch-ua-platform", "\"Android\"")
-                    .header("Cache-Control", "max-age=0")
-                    .build()
-            )
-        ).use { response ->
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", UA)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Upgrade-Insecure-Requests", "1")
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "none")
+            .header("Sec-Fetch-User", "?1")
+            .header("sec-ch-ua", "\"Google Chrome\";v=\"130\", \"Chromium\";v=\"130\", \"Not?A_Brand\";v=\"99\"")
+            .header("sec-ch-ua-mobile", "?1")
+            .header("sec-ch-ua-platform", "\"Android\"")
+            .header("Cache-Control", "max-age=0")
+            .build()
+        return executeAndParse(client.newCall(request)) { response ->
             if (!response.isSuccessful) {
                 Log.d(TAG, "og fetch: HTTP ${response.code} for $url")
-                return null
+                return@executeAndParse null
             }
             val ct = response.header("Content-Type") ?: ""
             if (ct.isNotBlank() && !ct.contains("text/html", ignoreCase = true)
                 && !ct.contains("application/xhtml", ignoreCase = true)) {
                 Log.d(TAG, "og fetch: bad content-type '$ct' for $url")
-                return null
+                return@executeAndParse null
             }
             // Read up to MAX_BODY_SIZE bytes. A single source.read() may return
             // less than requested on network sources (first TCP segment only),
