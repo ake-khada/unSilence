@@ -289,10 +289,16 @@ class CardHydrator @Inject constructor(
                     .take(5)
 
                 if (cachedWriteRelays.isNotEmpty()) {
-                    for (id in afterSourceRelay) {
-                        relayPool.fetchEventById(id, cachedWriteRelays, bypassDedup = true)
+                    // Batch: ONE REQ per write relay with all afterSourceRelay
+                    // ids in `{"ids":[...]}`, instead of per-id REQs (which sent
+                    // up to 5 single-id REQs per missing ref). Same shape as
+                    // the hint-batch fix in ecf931e for hydrateRefs's primary
+                    // hint loop. With 4 missing refs × 5 cached write relays
+                    // that's 20 REQs collapsed to 5.
+                    for (relay in cachedWriteRelays) {
+                        relayPool.fetchEventsByIdsFromRelay(relay, afterSourceRelay, bypassDedup = true)
                     }
-                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays")
+                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays (batched)")
                 }
 
                 // Phase 2: for authors without cached relay lists, fetch kind-10002
@@ -316,10 +322,15 @@ class CardHydrator @Inject constructor(
                         // Re-check which refs are still missing
                         val stillMissingAfterPhase1 = afterSourceRelay
                             .filter { memoryEventStore.getEventEntity(it) == null }
-                        for (id in stillMissingAfterPhase1) {
-                            relayPool.fetchEventById(id, newWriteRelays, bypassDedup = true)
+                        if (stillMissingAfterPhase1.isNotEmpty()) {
+                            // Same batch-by-relay pattern as phase 1.
+                            for (relay in newWriteRelays) {
+                                relayPool.fetchEventsByIdsFromRelay(
+                                    relay, stillMissingAfterPhase1, bypassDedup = true,
+                                )
+                            }
+                            Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays (batched)")
                         }
-                        Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays")
                     }
                 }
 
