@@ -316,7 +316,12 @@ class TimelineConsumer(
                     limit = 100,
                 )
                 if (older.isNotEmpty()) {
-                    _events.update { current -> mergeSorted(current, older) }
+                    // capTail=false — paging tailward is the explicit way for
+                    // the user to grow `_events` past EVENTS_CAP. The next
+                    // live-tail update will trim back to cap, so deep-paged
+                    // history is ephemeral; that matches user expectations
+                    // (Load More fetches on demand, doesn't persist forever).
+                    _events.update { current -> mergeSorted(current, older, capTail = false) }
                 }
             } finally {
                 _isLoadingMore.value = false
@@ -364,11 +369,16 @@ class TimelineConsumer(
      * relay batches respect createdAt-desc ordering, so this is true after
      * the initial subscribe() set.
      */
-    private fun mergeSorted(current: List<NostrEvent>, newEvents: List<NostrEvent>): List<NostrEvent> {
+    private fun mergeSorted(
+        current: List<NostrEvent>,
+        newEvents: List<NostrEvent>,
+        capTail: Boolean = true,
+    ): List<NostrEvent> {
         if (newEvents.isEmpty()) return current
         if (current.isEmpty()) {
             // First batch — sort once.
-            return newEvents.distinctBy { it.id }.sortedWith(EVENT_ORDER)
+            val sorted = newEvents.distinctBy { it.id }.sortedWith(EVENT_ORDER)
+            return if (capTail && sorted.size > EVENTS_CAP) sorted.subList(0, EVENTS_CAP) else sorted
         }
 
         // Build id set for dedup (cheaper than distinctBy on the merged list).
@@ -396,16 +406,36 @@ class TimelineConsumer(
         }
         while (i < current.size) { result.add(current[i]); i++ }
         while (j < novelSorted.size) { result.add(novelSorted[j]); j++ }
-        return result
+        // Tail-cap for live-tail callers (subscribe / addCachedEvents /
+        // applyArrival / flushPending). Keeps `_events` from growing
+        // unboundedly during long sessions — at 9 events/sec sustained the
+        // list previously hit 2600+ entries within a few minutes, blowing
+        // up every downstream operation that scans it. loadMore() is the
+        // only caller that opts out (capTail=false) since paging tailward
+        // explicitly extends the visible window.
+        return if (capTail && result.size > EVENTS_CAP) {
+            result.subList(0, EVENTS_CAP).toList()
+        } else {
+            result
+        }
     }
 
     private companion object {
+        /** Hard cap on `_events` for live-tail callers. mergeSorted trims to
+         *  this size when called with `capTail=true` (subscribe / cached /
+         *  arrival / pending). loadMore() bypasses to grow tailward, but
+         *  the next live-tail merge will re-trim — deep paging is
+         *  intentionally ephemeral, matching user expectations for
+         *  on-demand Load More. 1000 is generous enough that ~110 s of
+         *  9 ev/s sustained tail still fits before any eviction happens. */
+        const val EVENTS_CAP = 1000
+
         /** Hard cap on the number of FeedRows the UI sees at any moment.
-         *  `_events` itself is uncapped (loadMore extends it tailward), but
-         *  rendering scales with this constant — Compose's LazyColumn keys
-         *  diff and the per-emit work in feedRows both bound on it. 500 is
-         *  comfortably more than even the deepest practical scroll position
-         *  before the user pages further. */
+         *  `_events` is bounded by EVENTS_CAP above; FEED_DISPLAY_CAP is
+         *  the rendering bound — Compose's LazyColumn keys diff and the
+         *  per-emit work in feedRows both bound on it. 500 is comfortably
+         *  more than even the deepest practical scroll position before the
+         *  user pages further. */
         const val FEED_DISPLAY_CAP = 500
 
         /** Sampling window (ms) for feedRows emissions. Coalesces relay-event
