@@ -6,6 +6,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.ui.feed.FeedContentFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,9 +14,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -82,23 +83,44 @@ class TimelineConsumer(
      *     zapTotalSats) re-compose only the affected card via
      *     [MemoryEventStore.statsFlow(eventId)].
      *
-     * No more list-wide rebuilds on signal floods. _events and
-     * _contentFilter changes fire immediately so new posts tail in
-     * without delay.
-     *
      * matchesContentFilter is applied at the render boundary so that
      * Notes/Conversations tab switching doesn't require resubscribing.
+     *
+     * Bounded recompute work — `_events` is unbounded by design (loadMore
+     * continues to extend it), but feedRows hard-caps the per-emit work
+     * at FEED_DISPLAY_CAP rows by `take`-ing from the head (newest first).
+     * Field logs showed sustained 500-700ms Main-thread hangs with `_events`
+     * sitting at 2600+ entries: filter+map+sortedByDescending+toFeedRow on
+     * every relay tick was the dominant Default-pool consumer and the
+     * Compose recompose driver. With the cap the per-emit work is constant
+     * regardless of how deep the user has paged.
+     *
+     * Sampled emission window — at 9 events/sec sustained the prior
+     * `combine + distinctUntilChanged` was emitting on every relay tick
+     * (and `distinctUntilChanged` itself was scanning the whole 2600-element
+     * list element-wise to compare against the previous emission). `sample`
+     * collapses bursts into one emission per FEED_SAMPLE_MS window — Compose
+     * recomposes at most ~10×/sec instead of the full 9×/sec event rate
+     * times each upstream emission cycle. New posts still appear within
+     * one window (~100 ms), well below the user-perceived limit.
      */
+    @OptIn(FlowPreview::class)
     val feedRows: StateFlow<List<FeedRow>> =
         combine(_events, _contentFilter) { events, cf ->
             if (events.isEmpty()) return@combine emptyList()
-            val filtered = events.filter { matchesContentFilter(it, cf) }
-            if (filtered.isEmpty()) return@combine emptyList()
-            val ids = filtered.map { it.id }
+            // _events is already sorted newest-first by mergeSorted. Take
+            // first matches up to the display cap WITHOUT scanning the full
+            // tail — `asSequence` lets `take` short-circuit.
+            val displayed = events.asSequence()
+                .filter { matchesContentFilter(it, cf) }
+                .take(FEED_DISPLAY_CAP)
+                .toList()
+            if (displayed.isEmpty()) return@combine emptyList()
+            val ids = displayed.map { it.id }
             val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
             ids.mapNotNull { rowsById[it] }
         }
-            .distinctUntilChanged()
+            .sample(FEED_SAMPLE_MS)
             .flowOn(Dispatchers.Default)
             .stateIn(ownerScope, SharingStarted.Eagerly, emptyList())
 
@@ -378,6 +400,19 @@ class TimelineConsumer(
     }
 
     private companion object {
+        /** Hard cap on the number of FeedRows the UI sees at any moment.
+         *  `_events` itself is uncapped (loadMore extends it tailward), but
+         *  rendering scales with this constant — Compose's LazyColumn keys
+         *  diff and the per-emit work in feedRows both bound on it. 500 is
+         *  comfortably more than even the deepest practical scroll position
+         *  before the user pages further. */
+        const val FEED_DISPLAY_CAP = 500
+
+        /** Sampling window (ms) for feedRows emissions. Coalesces relay-event
+         *  bursts into one Compose recompose per window. 100 ms is below the
+         *  user-perceived "live update" threshold for new posts tailing in. */
+        const val FEED_SAMPLE_MS = 100L
+
         /** Minimum coalescing window (ms). Used at low arrival rates so live-
          *  tail posts appear with imperceptible delay. */
         const val ARRIVAL_WINDOW_MIN_MS = 100L
