@@ -250,6 +250,7 @@ class OutboxRelayResolver @Inject constructor(
                     since = config.since,
                     tags = if (config.onlyReplies) mapOf("e" to emptyList<String>()) else null,
                 ),
+                tier = SubTier.FAST,
                 onlyReplies = config.onlyReplies,
             )
         )

@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.EmptyState
@@ -97,13 +98,17 @@ fun FeedScreen(
     val zapFlash      by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar    = LocalShowSnackbar.current
-    val isLoadingV     by viewModel.isLoading.collectAsStateWithLifecycle()
-    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
-    val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
-    val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
-    val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
+    // Rendering-critical flows use CREATED so collection survives brief
+    // lifecycle dips during SurfaceView churn (video create/destroy cycles).
+    // Upstream flows are already SharingStarted.Eagerly, so this only
+    // affects when the collector is active, not upstream hot-ness.
+    val isLoadingV     by viewModel.isLoading.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
+    val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
+    val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
+    val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
 
-    val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
+    val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }

@@ -158,9 +158,7 @@ class TimelineService @Inject constructor(
         if (slowIndices.isNotEmpty()) {
             subScope.launch {
                 if (fastIndices.isEmpty()) {
-                    // No FAST tier to gate on — fall back to a fixed delay so
-                    // we never block the slow tier indefinitely.
-                    delay(SLOW_TIER_WATCHDOG_MS)
+                    // No FAST tier — nothing to gate on, launch SLOW immediately.
                 } else {
                     val deadline = System.currentTimeMillis() + SLOW_TIER_WATCHDOG_MS
                     while (fastEosedCount.get() < fastIndices.size &&
