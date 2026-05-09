@@ -14,20 +14,18 @@ local.properties
 node_modules/
 /build
 /app/build
-unsilence-sprint*.md
-unsilence-stabilization-sprint.md
+.kotlin/
 
-# Claude Code / Superpowers working files
+# Internal working files
 .claude/
 .superpowers/
 .worktrees/
 _audit_dump/
-
-# Kotlin build artifacts
-.kotlin/
-
-# Session notes
-unsilence-session-*.md
-
-# Validation artifacts — ephemeral diagnostic logs, not source
+docs/
+.github/
 validation_logs/
+CLAUDE.md
+VALIDATION_PROTOCOL.md
+unsilence-sprint*.md
+unsilence-stabilization-sprint.md
+unsilence-session-*.md
