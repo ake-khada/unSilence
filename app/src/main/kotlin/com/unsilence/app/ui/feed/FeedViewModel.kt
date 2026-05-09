@@ -325,6 +325,8 @@ class FeedViewModel @Inject constructor(
     }
 
     private val _refreshCounter = MutableStateFlow(0)
+    private var lastRefreshCounter = 0
+    private var lastSubRequests: List<SubRequest> = emptyList()
 
     // -- Init: cold-start + feedType subscription ------------------------------
 
@@ -410,8 +412,10 @@ class FeedViewModel @Inject constructor(
                     listOf(it.type, it.ver, it.refresh, it.filter, it.contentFilter)
                 }
                 .collectLatest { key ->
-                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} cf=${key.contentFilter}")
-                    resubscribe(key.type, key.contentFilter)
+                    val forceRefresh = key.refresh != lastRefreshCounter
+                    lastRefreshCounter = key.refresh
+                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} cf=${key.contentFilter} force=$forceRefresh")
+                    resubscribe(key.type, key.contentFilter, forceRefresh)
                 }
         }
 
@@ -428,8 +432,13 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private suspend fun resubscribe(type: FeedType, contentFilter: FeedContentFilter = FeedContentFilter.NOTES_ONLY) {
+    private suspend fun resubscribe(type: FeedType, contentFilter: FeedContentFilter = FeedContentFilter.NOTES_ONLY, forceRefresh: Boolean = false) {
         val subRequests = buildSubRequests(type, contentFilter)
+        if (!forceRefresh && subRequests == lastSubRequests) {
+            Log.d(TAG, "resubscribe: SubRequests unchanged, skipping")
+            return
+        }
+        lastSubRequests = subRequests
         val cachedEvents = loadCachedEvents(type)
         consumer.subscribe(subRequests, cachedEvents)
     }
