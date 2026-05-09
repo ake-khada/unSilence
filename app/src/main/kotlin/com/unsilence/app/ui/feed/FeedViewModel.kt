@@ -70,7 +70,7 @@ enum class FeedContentFilter(val value: Int) {
  *   - Subscription state: delegated to TimelineConsumer (feedRows,
  *     showDot, pendingCount, isLoading, isLoadingMore)
  *   - Actions: setFeedType, setContentFilter, addPinnedRelay,
- *     removePinnedRelay, nextFeed, previousFeed, updateFilter,
+ *     removePinnedRelay, updateFilter,
  *     onViewportChanged, onDotTapped, loadMore, refresh
  */
 @OptIn(FlowPreview::class)
@@ -267,43 +267,6 @@ class FeedViewModel @Inject constructor(
         is FeedType.Following -> "Following"
         is FeedType.RelaySet  -> t.name
         is FeedType.SingleRelay -> t.displayLabel
-    }
-
-    private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
-        a is FeedType.Global && b is FeedType.Global -> true
-        a is FeedType.Following && b is FeedType.Following -> true
-        a is FeedType.RelaySet && b is FeedType.RelaySet -> a.dTag == b.dTag
-        a is FeedType.SingleRelay && b is FeedType.SingleRelay -> a.url == b.url
-        else -> false
-    }
-
-    private fun buildFeedList(): List<FeedType> {
-        val list = mutableListOf<FeedType>()
-        if (_hasFollows.value) list.add(FeedType.Following)
-        list.add(FeedType.Global)
-        list.add(FeedType.Popular)
-        for (relay in pinnedRelays.value) {
-            if (relay.url == FeedType.Popular.url) continue
-            list.add(relay)
-        }
-        for (set in userSetsFlow.value) {
-            list.add(FeedType.RelaySet(set.dTag, set.title ?: set.dTag))
-        }
-        return list
-    }
-
-    fun nextFeed() {
-        val list = buildFeedList()
-        if (list.size <= 1) return
-        val idx = list.indexOfFirst { feedTypeMatches(it, _feedType.value) }.coerceAtLeast(0)
-        _feedType.value = list[(idx + 1) % list.size]
-    }
-
-    fun previousFeed() {
-        val list = buildFeedList()
-        if (list.size <= 1) return
-        val idx = list.indexOfFirst { feedTypeMatches(it, _feedType.value) }.coerceAtLeast(0)
-        _feedType.value = list[(idx - 1 + list.size) % list.size]
     }
 
     /** True when there are queued new posts (used by nav bar dot indicator). */

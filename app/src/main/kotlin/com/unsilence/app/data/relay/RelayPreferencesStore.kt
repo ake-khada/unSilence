@@ -101,11 +101,6 @@ class RelayPreferencesStore @Inject constructor(
             .map { prefs -> parsePinnedRelays(prefs, pubkey) }
             .distinctUntilChanged()
 
-    fun pinnedRelaysSnapshot(pubkey: String): List<PinnedRelay> {
-        // Best-effort from the StateFlow; may be slightly stale on first call
-        return emptyList() // Callers should prefer the Flow
-    }
-
     suspend fun upsertPinnedRelay(pubkey: String, url: String, displayLabel: String?) {
         val key = stringPreferencesKey("${PINNED_PREFIX}${pubkey}_$url")
         val value = "${displayLabel ?: ""}|${System.currentTimeMillis() / 1000}"

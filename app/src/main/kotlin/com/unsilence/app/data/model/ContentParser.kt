@@ -353,14 +353,10 @@ object ContentParser {
         val aspect = if (meta?.width != null && meta.height != null && meta.height > 0)
             meta.width.toFloat() / meta.height
         else 16f / 9f
-        val isHls = url.contains(".m3u8", ignoreCase = true) ||
-            meta?.mimeType?.equals("application/x-mpegURL", ignoreCase = true) == true
         return VideoRenderModel(
             videoUrl = url,
             aspectRatio = aspect,
             posterUrl = meta?.thumb,
-            contentType = meta?.mimeType,
-            isHls = isHls,
             widthPx = meta?.width,
             heightPx = meta?.height,
         )

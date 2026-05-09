@@ -28,6 +28,4 @@ enum class CardRole {
     /** Compact embedded card inside a quote or address reference. */
     Embedded,
 
-    /** Compact card inside a notification row. */
-    NotificationCompact,
 }

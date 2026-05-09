@@ -38,17 +38,6 @@
 # ExoPlayer / Media3
 -dontwarn androidx.media3.**
 
-# ZXing
--keep class com.google.zxing.** { *; }
-
-# kmp-tor
--keep class io.matthewnelson.kmp.tor.** { *; }
--dontwarn io.matthewnelson.kmp.tor.**
-
-# ML Kit
--keep class com.google.mlkit.** { *; }
--dontwarn com.google.mlkit.**
-
 # java.lang.management (not available on Android)
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean

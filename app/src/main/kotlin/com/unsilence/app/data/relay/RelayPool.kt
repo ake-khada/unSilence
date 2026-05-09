@@ -62,10 +62,7 @@ class RelayPool @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val processor: EventProcessor,
     private val relayPreferencesStore: dagger.Lazy<RelayPreferencesStore>,
-    private val subscriptionRegistry: dagger.Lazy<SubscriptionRegistry>,
-    private val coverageTracker: dagger.Lazy<com.unsilence.app.data.cache.CoverageTracker>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
-    private val syncTracker: dagger.Lazy<com.unsilence.app.data.cache.SyncTracker>,
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
 ) : RelayTransport {
@@ -539,17 +536,6 @@ class RelayPool @Inject constructor(
         return null
     }
 
-    private fun extractEventIdFromRaw(raw: String): String? {
-        val marker = "\"id\":\""
-        val markerIdx = raw.indexOf(marker)
-        if (markerIdx < 0) return null
-        val idStart = markerIdx + marker.length
-        if (idStart + 64 > raw.length) return null
-        val id = raw.substring(idStart, idStart + 64)
-        if (!id.all { it in '0'..'9' || it in 'a'..'f' }) return null
-        return id
-    }
-
     private fun updateConnectionStates() {
         _connectionStates.value = connections.mapValues { it.value.state.value }
     }
@@ -921,25 +907,6 @@ class RelayPool @Inject constructor(
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
         }
-        // Relay disconnected — mark all pending lanes for this relay as failed
-        handleRelayFailure(conn.url)
-    }
-
-    /**
-     * When a relay disconnects or errors, mark all its pending subscription
-     * lanes as failed so coverage handles can reach terminal state.
-     */
-    private fun handleRelayFailure(relayUrl: String) {
-        val registry = subscriptionRegistry.get()
-        for (lane in registry.subsForRelay(relayUrl)) {
-            val terminalHandle = registry.onLaneFailure(lane.subId, lane.relayUrl)
-            if (terminalHandle != null) {
-                scope.launch {
-                    coverageTracker.get().markFromHandle(terminalHandle)
-                    registry.cleanup(terminalHandle.handleId)
-                }
-            }
-        }
     }
 
     /**
@@ -973,37 +940,6 @@ class RelayPool @Inject constructor(
             }
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
-        // Update sync_state for persistent subs (foundation for background sync)
-        mapSubIdToSyncKey(subId)?.let { syncKey ->
-            scope.launch {
-                try {
-                    syncTracker.get().upsert(
-                        com.unsilence.app.data.memory.SyncStateEntity(
-                            subscriptionKey = syncKey,
-                            lastSyncAt = System.currentTimeMillis(),
-                            lastEventCount = 0,
-                            source = "foreground",
-                        )
-                    )
-                } catch (_: Exception) { }
-            }
-        }
-        // Notify coverage registry — returns handle only when ALL lanes resolved
-        val terminalHandle = subscriptionRegistry.get().onEose(subId, conn.url)
-        if (terminalHandle != null) {
-            scope.launch {
-                coverageTracker.get().markFromHandle(terminalHandle)
-                subscriptionRegistry.get().cleanup(terminalHandle.handleId)
-            }
-        }
-    }
-
-    /** Map persistent subscription IDs to sync_state keys. */
-    private fun mapSubIdToSyncKey(subId: String): String? = when {
-        subId.startsWith("feed-")     -> "following-feed"
-        subId.startsWith("notifs-")   -> "own-engagement"
-        subId.startsWith("follows-")  -> "follow-list"
-        else -> null
     }
 
     /**
@@ -2115,29 +2051,10 @@ class RelayPool @Inject constructor(
             connections.values.filter { it.url !in indexerUrls }.take(3)
         }
 
-        // Register coverage lanes: 1 sub × N relays (was 3 subs × N relays)
-        val lanes = mutableSetOf<Lane>()
-        for (conn in targets) {
-            lanes.add(Lane(subId, conn.url))
-        }
-        val scopeKeyHash = novel.sorted().joinToString(",")
-            .let {
-                java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(it.toByteArray())
-                    .joinToString("") { b -> "%02x".format(b) }
-                    .take(16)
-            }
-        val handle = CoverageHandle(
-            handleId = "engagement-$ts",
-            scopeType = "engagement", scopeKey = scopeKeyHash,
-            relaySetId = "global", expectedLanes = lanes,
-        )
-        subscriptionRegistry.get().register(handle)
-
         targets.forEach { conn ->
             sendOneShotToRelay(conn, req)
         }
-        Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s) (${lanes.size} lanes, ${eventIds.size - novel.size} deduped)")
+        Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s), ${eventIds.size - novel.size} deduped")
     }
 
     /**
