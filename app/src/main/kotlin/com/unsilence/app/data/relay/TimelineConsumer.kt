@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Generalized timeline state holder, modelled after Jumble's NoteList.
@@ -59,10 +61,17 @@ class TimelineConsumer(
 
     private val _events = MutableStateFlow<List<NostrEvent>>(emptyList())
     val events: StateFlow<List<NostrEvent>> = _events.asStateFlow()
+    /** Persistent id set maintained alongside _events — avoids allocating a
+     *  1000-element HashSet on every mergeSorted call. Cleared on subscribe(). */
+    private val seenIds = HashSet<String>(1024)
     private val _pendingNew = MutableStateFlow<List<NostrEvent>>(emptyList())
     private val _isAtTop = MutableStateFlow(true)
     private val _isLoading = MutableStateFlow(true)
     private val _isLoadingMore = MutableStateFlow(false)
+    /** True after loadMore() extends _events past EVENTS_CAP. While set,
+     *  live-tail merges skip tail trimming so paged items don't vanish.
+     *  Reset on subscribe() / refresh(). */
+    @Volatile private var pagedBeyondCap = false
 
     val pendingCount: StateFlow<Int> = _pendingNew
         .map { it.size }
@@ -104,20 +113,28 @@ class TimelineConsumer(
      * times each upstream emission cycle. New posts still appear within
      * one window (~100 ms), well below the user-perceived limit.
      */
+    /** Cached id list from the last feedRows emission — avoids re-calling
+     *  feedRowsByIds when only the drainer tick changed but _events didn't. */
+    private val lastFeedRowSnapshot = AtomicReference(emptyList<String>() to emptySet<String>())
+
     @OptIn(FlowPreview::class)
     val feedRows: StateFlow<List<FeedRow>> =
         combine(_events, _contentFilter) { events, cf ->
             if (events.isEmpty()) return@combine emptyList()
-            // _events is already sorted newest-first by mergeSorted. Take
-            // first matches up to the display cap WITHOUT scanning the full
-            // tail — `asSequence` lets `take` short-circuit.
             val displayed = events.asSequence()
                 .filter { matchesContentFilter(it, cf) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) return@combine emptyList()
             val ids = displayed.map { it.id }
-            val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
+            // Skip feedRowsByIds if the id list hasn't changed since last emit
+            val (cachedIds, cachedIdSet) = lastFeedRowSnapshot.get()
+            val idSet = if (ids.size == cachedIds.size && ids == cachedIds) {
+                cachedIdSet
+            } else {
+                ids.toSet().also { lastFeedRowSnapshot.set(ids to it) }
+            }
+            val rowsById = memoryEventStore.feedRowsByIds(idSet).associateBy { it.id }
             ids.mapNotNull { rowsById[it] }
         }
             .sample(FEED_SAMPLE_MS)
@@ -146,10 +163,13 @@ class TimelineConsumer(
     // latency is 100ms (imperceptible) and N batches arriving in 100ms
     // produce one Compose recompose instead of N.
     //
-    // Channel.UNLIMITED so trySend never drops. Drainer is bound to
-    // ownerScope and cancelled in close().
+    // Bounded channel (4096) with DROP_OLDEST backpressure — under true
+    // firehose load, oldest batches are dropped rather than OOMing.
+    // Drainer is bound to ownerScope and cancelled in close().
 
-    private val arrivalQueue = Channel<List<NostrEvent>>(Channel.UNLIMITED)
+    private val arrivalQueue = Channel<List<NostrEvent>>(
+        capacity = 4096, onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     private val arrivalDrainerJob: Job
 
     init {
@@ -217,6 +237,9 @@ class TimelineConsumer(
         while (arrivalQueue.tryReceive().isSuccess) { /* discard */ }
 
         currentSubRequests = subRequests
+        seenIds.clear()
+        pagedBeyondCap = false
+        for (e in initialCachedEvents) seenIds.add(e.id)
         _events.value = initialCachedEvents
         _pendingNew.value = emptyList()
         _isLoading.value = initialCachedEvents.isEmpty()
@@ -280,7 +303,9 @@ class TimelineConsumer(
     private fun applyArrival(newEvents: List<NostrEvent>) {
         if (newEvents.isEmpty()) return
         if (_isAtTop.value) {
-            _events.update { current -> mergeSorted(current, newEvents) }
+            // Skip tail trimming while user has paged deep — prevents items
+            // from vanishing out of the visible scroll window on live arrival.
+            _events.update { current -> mergeSorted(current, newEvents, capTail = !pagedBeyondCap) }
         } else {
             _pendingNew.update { current ->
                 (current + newEvents).distinctBy { it.id }
@@ -316,12 +341,8 @@ class TimelineConsumer(
                     limit = 100,
                 )
                 if (older.isNotEmpty()) {
-                    // capTail=false — paging tailward is the explicit way for
-                    // the user to grow `_events` past EVENTS_CAP. The next
-                    // live-tail update will trim back to cap, so deep-paged
-                    // history is ephemeral; that matches user expectations
-                    // (Load More fetches on demand, doesn't persist forever).
                     _events.update { current -> mergeSorted(current, older, capTail = false) }
+                    if (_events.value.size > EVENTS_CAP) pagedBeyondCap = true
                 }
             } finally {
                 _isLoadingMore.value = false
@@ -376,19 +397,16 @@ class TimelineConsumer(
     ): List<NostrEvent> {
         if (newEvents.isEmpty()) return current
         if (current.isEmpty()) {
-            // First batch — sort once.
+            // First batch — sort once, populate seenIds.
             val sorted = newEvents.distinctBy { it.id }.sortedWith(EVENT_ORDER)
+            for (e in sorted) seenIds.add(e.id)
             return if (capTail && sorted.size > EVENTS_CAP) sorted.subList(0, EVENTS_CAP) else sorted
         }
 
-        // Build id set for dedup (cheaper than distinctBy on the merged list).
-        val seen = HashSet<String>(current.size + newEvents.size)
-        for (e in current) seen.add(e.id)
-
-        // Filter out events we already have, then sort the new ones.
+        // Filter out events we already have via persistent seenIds, then sort.
         val novelSorted = newEvents
             .asSequence()
-            .filter { seen.add(it.id) }
+            .filter { seenIds.add(it.id) }
             .sortedWith(EVENT_ORDER)
             .toList()
         if (novelSorted.isEmpty()) return current
@@ -414,6 +432,8 @@ class TimelineConsumer(
         // only caller that opts out (capTail=false) since paging tailward
         // explicitly extends the visible window.
         return if (capTail && result.size > EVENTS_CAP) {
+            // Remove evicted ids from seenIds so they can re-enter if fetched again
+            for (i in EVENTS_CAP until result.size) seenIds.remove(result[i].id)
             result.subList(0, EVENTS_CAP).toList()
         } else {
             result
