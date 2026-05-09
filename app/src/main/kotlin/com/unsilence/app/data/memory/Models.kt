@@ -200,17 +200,6 @@ data class FeedRow(
 )
 
 /**
- * Session-scoped relay sync state. Formerly a Room @Entity; now a plain data class
- * used by SyncTracker (in-memory ConcurrentHashMap).
- */
-data class SyncStateEntity(
-    val subscriptionKey: String,
-    val lastSyncAt: Long,
-    val lastEventCount: Int,
-    val source: String,
-)
-
-/**
  * Relay trust score (kind 30385). Formerly a Room @Entity; now a plain data class.
  * Populated by MES handleTrustScore() from kind-30385 events fetched via
  * RelayPool.fetchTrustScores(). UI renders colored dots in Relay Settings.

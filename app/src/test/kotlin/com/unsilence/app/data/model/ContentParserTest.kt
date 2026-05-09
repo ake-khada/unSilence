@@ -111,11 +111,10 @@ class ContentParserTest {
     }
 
     @Test
-    fun `HLS m3u8 URL is parsed as Video with isHls flag`() {
+    fun `HLS m3u8 URL is parsed as Video`() {
         val model = parse("https://live.host/stream.m3u8")
         assertEquals(1, model.segments.size)
-        val video = model.segments[0] as Segment.Video
-        assertTrue(video.model.isHls)
+        assertTrue(model.segments[0] is Segment.Video)
     }
 
     @Test

@@ -17,8 +17,6 @@ data class VideoRenderModel(
     val videoUrl: String,
     val aspectRatio: Float,       // width / height, e.g. 1.778 for 16:9
     val posterUrl: String?,       // imeta thumb/image URL
-    val contentType: String?,     // "video/mp4", "application/x-mpegURL" etc.
-    val isHls: Boolean,           // derived from contentType or .m3u8 extension
     val widthPx: Int?,            // raw pixel width from imeta
     val heightPx: Int?,           // raw pixel height from imeta
 )
@@ -40,10 +38,6 @@ private fun isDirectVideoUrl(url: String): Boolean =
         url.contains(".m3u8", ignoreCase = true) ||
         url.contains(".m4v", ignoreCase = true) ||
         url.contains(".avi", ignoreCase = true)
-
-private fun isHlsUrl(url: String, mimeType: String?): Boolean =
-    url.contains(".m3u8", ignoreCase = true) ||
-        mimeType?.equals("application/x-mpegURL", ignoreCase = true) == true
 
 private const val DEFAULT_ASPECT_RATIO = 16f / 9f
 
@@ -125,14 +119,11 @@ private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRe
     val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null && it.height != 0 }
     val aspect = meta?.let { it.width!!.toFloat() / it.height!! } ?: DEFAULT_ASPECT_RATIO
     val poster = imetaMedia.firstOrNull { it.url == url }?.thumb
-    val mimeType = imetaMedia.firstOrNull { it.url == url }?.mimeType
 
     return VideoRenderModel(
         videoUrl = url,
         aspectRatio = aspect,
         posterUrl = poster,
-        contentType = mimeType,
-        isHls = isHlsUrl(url, mimeType),
         widthPx = meta?.width,
         heightPx = meta?.height,
     )
