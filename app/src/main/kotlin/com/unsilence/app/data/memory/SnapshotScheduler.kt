@@ -20,6 +20,7 @@ import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -174,18 +175,20 @@ class SnapshotScheduler @Inject constructor(
 
     private suspend fun doSave() {
         mutex.withLock {
-            val stream = snapshotFile.startWrite()
+            var stream: FileOutputStream? = null
             try {
-                // V3 binary writer is the only writer. V2 TSV writer remains
-                // in MES for restore-side migration but is no longer called.
-                DataOutputStream(BufferedOutputStream(stream)).use { out ->
-                    memoryEventStore.saveSnapshotBinary(out)
-                }
+                stream = snapshotFile.startWrite()
+                // Don't use .use{} — it closes the stream before finishWrite
+                // can fsync the FD. Instead: flush + explicit sync while open.
+                val out = DataOutputStream(BufferedOutputStream(stream))
+                memoryEventStore.saveSnapshotBinary(out)
+                out.flush()
+                stream.fd.sync()
                 snapshotFile.finishWrite(stream)
                 Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB, binary V3)")
             } catch (e: Exception) {
-                snapshotFile.failWrite(stream)
-                Log.e(TAG, "Snapshot save failed", e)
+                if (stream != null) snapshotFile.failWrite(stream)
+                Log.e(TAG, "Snapshot save FAILED", e)
             }
         }
     }
