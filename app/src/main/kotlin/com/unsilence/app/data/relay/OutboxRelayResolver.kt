@@ -55,7 +55,6 @@ class OutboxRelayResolver @Inject constructor(
         val limit: Int,
         val minTrustScore: Int = 30,
         val since: Long? = null,
-        val onlyReplies: Boolean = false,
     )
 
     /**
@@ -154,7 +153,6 @@ class OutboxRelayResolver @Inject constructor(
             writeRelayUrls.sortedWith(relayQuality)
         }
 
-        val replyTags = if (config.onlyReplies) mapOf("e" to emptyList<String>()) else null
         val subRequests = mutableListOf<SubRequest>()
 
         // Fallback relays: each gets all authors. Always FAST tier — these
@@ -167,10 +165,8 @@ class OutboxRelayResolver @Inject constructor(
                     authors = sortedAuthors,
                     limit = config.limit,
                     since = config.since,
-                    tags = replyTags,
                 ),
                 tier = SubTier.FAST,
-                onlyReplies = config.onlyReplies,
             ))
         }
 
@@ -190,10 +186,8 @@ class OutboxRelayResolver @Inject constructor(
                     authors = relayAuthors,
                     limit = config.limit,
                     since = config.since,
-                    tags = replyTags,
                 ),
                 tier = if (url in fastWriteRelays) SubTier.FAST else SubTier.SLOW,
-                onlyReplies = config.onlyReplies,
             ))
         }
 
@@ -226,9 +220,7 @@ class OutboxRelayResolver @Inject constructor(
                     kinds = config.kinds,
                     limit = config.limit,
                     since = config.since,
-                    tags = if (config.onlyReplies) mapOf("e" to emptyList<String>()) else null,
                 ),
-                onlyReplies = config.onlyReplies,
             )
         )
     }
@@ -248,10 +240,7 @@ class OutboxRelayResolver @Inject constructor(
                     kinds = config.kinds,
                     limit = config.limit,
                     since = config.since,
-                    tags = if (config.onlyReplies) mapOf("e" to emptyList<String>()) else null,
                 ),
-                tier = SubTier.FAST,
-                onlyReplies = config.onlyReplies,
             )
         )
     }

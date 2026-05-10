@@ -27,5 +27,4 @@ data class SubRequest(
     val urls: List<String>,
     val filter: NostrFilter,
     val tier: SubTier = SubTier.FAST,
-    val onlyReplies: Boolean = false,
 )
