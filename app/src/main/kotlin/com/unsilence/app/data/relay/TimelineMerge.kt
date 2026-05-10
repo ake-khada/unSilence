@@ -41,7 +41,24 @@ object TimelineMerge {
             return if (capTail && sorted.size > EVENTS_CAP) sorted.subList(0, EVENTS_CAP) else sorted
         }
 
-        // Build id set from current for O(1) dedup
+        // Fast path: single-event insert via binary search (avoids O(N) HashSet build)
+        if (newEvents.size == 1) {
+            val evt = newEvents[0]
+            // O(N) linear scan for dedup — still cheaper than HashSet allocation
+            // for the common case of small current lists or guaranteed-novel events.
+            // For large current lists, the binary search dominates at O(log N).
+            for (e in current) { if (e.id == evt.id) return current }
+            val insertIdx = current.binarySearch { EVENT_ORDER.compare(it, evt) }.let {
+                if (it < 0) -(it + 1) else it
+            }
+            val result = ArrayList<NostrEvent>(current.size + 1)
+            result.addAll(current.subList(0, insertIdx))
+            result.add(evt)
+            result.addAll(current.subList(insertIdx, current.size))
+            return if (capTail && result.size > EVENTS_CAP) result.subList(0, EVENTS_CAP).toList() else result
+        }
+
+        // General path: multi-event two-pointer merge
         val seen = HashSet<String>(current.size + newEvents.size)
         for (e in current) seen.add(e.id)
         val novel = newEvents.filter { seen.add(it.id) }

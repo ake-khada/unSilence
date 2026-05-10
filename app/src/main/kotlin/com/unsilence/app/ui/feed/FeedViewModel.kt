@@ -125,19 +125,54 @@ class FeedViewModel @Inject constructor(
     private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
     val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
 
-    // ── feedRows derivation ──────────────────────────────────────────────────
+    // ── feedRows derivation (incremental row cache) ────────────────────────────
+
+    /** Per-feed-type row cache. Only IDs not in cache trigger feedRowsByIds. */
+    private val feedRowCache = ConcurrentHashMap<String, FeedRow>()
 
     val feedRows: StateFlow<List<FeedRow>> =
         combine(_events, _contentFilter) { events, cf ->
-            if (events.isEmpty()) return@combine emptyList()
+            if (events.isEmpty()) {
+                feedRowCache.clear()
+                return@combine emptyList()
+            }
             val displayed = events.asSequence()
                 .filter { matchesContentFilter(it, cf) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
-            if (displayed.isEmpty()) return@combine emptyList()
-            val ids = displayed.map { it.id }.toSet()
-            val rowsById = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
-            displayed.map { evt -> rowsById[evt.id] ?: memoryEventStore.synthesizeFeedRow(evt) }
+            if (displayed.isEmpty()) {
+                feedRowCache.clear()
+                return@combine emptyList()
+            }
+
+            // Determine which IDs need fresh rows (not in cache)
+            val displayedIds = displayed.map { it.id }.toSet()
+            val missingIds = displayedIds.filter { !feedRowCache.containsKey(it) }
+            val hitCount = displayedIds.size - missingIds.size
+            Log.d(TAG, "feedRowCache hit=${hitCount} miss=${missingIds.size}")
+
+            // Fetch only missing rows from MES
+            if (missingIds.isNotEmpty()) {
+                val missingSet = missingIds.toSet()
+                val newRows = memoryEventStore.feedRowsByIds(missingSet)
+                for (row in newRows) {
+                    feedRowCache[row.id] = row
+                }
+                // Synthesize fallback for any still-missing (race with MES insert)
+                for (id in missingIds) {
+                    if (!feedRowCache.containsKey(id)) {
+                        val evt = displayed.first { it.id == id }
+                        feedRowCache[id] = memoryEventStore.synthesizeFeedRow(evt)
+                    }
+                }
+            }
+
+            // Evict cache entries no longer displayed
+            val evictKeys = feedRowCache.keys.filter { it !in displayedIds }
+            for (key in evictKeys) feedRowCache.remove(key)
+
+            // Build ordered result from cache
+            displayed.mapNotNull { evt -> feedRowCache[evt.id] }
         }
             .sample(FEED_SAMPLE_MS)
             .flowOn(Dispatchers.Default)
@@ -325,10 +360,6 @@ class FeedViewModel @Inject constructor(
                     val warmEvents = events.subList(zoneStart, zoneEnd)
                     val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
                     if (rows.isNotEmpty()) {
-                        // SingleRelay feed funneling guard: when viewing a single-relay feed,
-                        // every event's source relay is the same as the feed relay. Pass it
-                        // through so CardHydrator can skip src-profile / hint / outbox fetches
-                        // that would all target the same relay we're already streaming from.
                         val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
                         cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay)
                     }
@@ -355,6 +386,9 @@ class FeedViewModel @Inject constructor(
         // Close previous handle (= useEffect cleanup)
         currentHandle?.close()
         currentHandle = null
+
+        // Clear feed row cache on resubscribe (new feed = new rows)
+        feedRowCache.clear()
 
         // Pre-load MES cached events for instant render (mirrors Jumble's
         // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
