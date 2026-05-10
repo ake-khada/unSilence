@@ -149,8 +149,11 @@ class Subscription @Inject constructor(
 
         // Per-relay EOSE watchdog: if a relay accepts REQ but never sends
         // EOSE within 30s, synthesize one so callers don't hang.
+        // MUST iterate urlSet (normalized), NOT raw urls — eosedRelays uses
+        // normalized URLs from dispatchMessage. Raw URLs with trailing slashes
+        // never match, causing the watchdog to always fire as a false alarm.
         val watchdogScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        for (url in urls) {
+        for (url in urlSet) {
             watchdogScope.launch {
                 delay(30_000L)
                 val s = subs[subId] ?: return@launch

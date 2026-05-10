@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
@@ -13,7 +14,7 @@ import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.SubRequest
-import com.unsilence.app.data.relay.TimelineConsumer
+import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.repository.UserRepository
@@ -31,8 +32,11 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -67,8 +71,8 @@ enum class FeedContentFilter(val value: Int) {
  * Owns:
  *   - UI state: feedType, contentFilter, coldStart, splash, userAvatar,
  *     userSets, pinnedRelays, hasFollows, filter
- *   - Subscription state: delegated to TimelineConsumer (feedRows,
- *     showDot, pendingCount, isLoading, isLoadingMore)
+ *   - Timeline state: _events, _newEvents, feedRows, showDot, pendingCount,
+ *     isLoading, isLoadingMore (mirrors Jumble NoteList component state)
  *   - Actions: setFeedType, setContentFilter, addPinnedRelay,
  *     removePinnedRelay, updateFilter,
  *     onViewportChanged, onDotTapped, loadMore, refresh
@@ -85,22 +89,59 @@ class FeedViewModel @Inject constructor(
     private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
-    // -- TimelineConsumer (feed state) -----------------------------------------
+    // ── Timeline state (mirrors Jumble NoteList component state) ──────────────
 
-    private val consumer = TimelineConsumer(
-        timelineService = timelineService,
-        memoryEventStore = memoryEventStore,
-        ownerScope = viewModelScope,
-    )
+    /** Main timeline events, sorted by createdAt-DESC. */
+    private val _events = MutableStateFlow<List<NostrEvent>>(emptyList())
+    val events: StateFlow<List<NostrEvent>> = _events.asStateFlow()
 
-    val feedRows = consumer.feedRows
-    val showDot = consumer.showDot
-    val pendingCount = consumer.pendingCount
-    val isLoading = consumer.isLoading
-    val isLoadingMore = consumer.isLoadingMore
-    val rawEventCount: StateFlow<Int> = consumer.events
+    /** Pending events buffer — populated when user is scrolled away from top. */
+    private val _newEvents = MutableStateFlow<List<NostrEvent>>(emptyList())
+
+    private val _isAtTop = MutableStateFlow(true)
+    private val _isLoading = MutableStateFlow(false)
+    private val _isLoadingMore = MutableStateFlow(false)
+
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
+
+    val pendingCount: StateFlow<Int> = _newEvents
         .map { it.size }
         .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    val showDot: StateFlow<Boolean> = _newEvents
+        .map { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val rawEventCount: StateFlow<Int> = _events
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    private var currentHandle: TimelineService.TimelineHandle? = null
+    private var lastFeedType: FeedType? = null
+
+    // -- Content filter (must be before feedRows which references it) ----------
+
+    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
+    val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
+
+    // ── feedRows derivation ──────────────────────────────────────────────────
+
+    val feedRows: StateFlow<List<FeedRow>> =
+        combine(_events, _contentFilter) { events, cf ->
+            if (events.isEmpty()) return@combine emptyList()
+            val displayed = events.asSequence()
+                .filter { matchesContentFilter(it, cf) }
+                .take(FEED_DISPLAY_CAP)
+                .toList()
+            if (displayed.isEmpty()) return@combine emptyList()
+            val ids = displayed.map { it.id }.toSet()
+            val rowsById = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
+            displayed.map { evt -> rowsById[evt.id] ?: memoryEventStore.synthesizeFeedRow(evt) }
+        }
+            .sample(FEED_SAMPLE_MS)
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
 
@@ -151,20 +192,17 @@ class FeedViewModel @Inject constructor(
 
     // -- Content filter --------------------------------------------------------
 
-    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
-    val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
-
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
         _contentFilter.value = f
-        consumer.setContentFilter(f)
+        // No resubscribe — feedRows recomputes via combine(_events, _contentFilter)
 
         // If switching to Conversations and we have few replies, fetch a wider
         // batch to populate the tab. Replies are often older than top-level
         // notes — initial limit=300 may not include any.
         if (f == FeedContentFilter.REPLIES_ONLY) {
             viewModelScope.launch {
-                val current = consumer.events.value
+                val current = _events.value
                 val replyCount = current.count { it.replyToId != null || it.rootId != null }
                 if (replyCount < 30) {
                     Log.d(TAG, "Conversations tab has $replyCount replies, fetching more")
@@ -181,7 +219,6 @@ class FeedViewModel @Inject constructor(
 
     fun updateFilter(filter: com.unsilence.app.domain.model.FeedFilter) {
         _filter.value = filter
-        // Resubscribe collector picks up the change
     }
 
     // -- Cold-start ------------------------------------------------------------
@@ -216,11 +253,7 @@ class FeedViewModel @Inject constructor(
         }
 
     // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
-    //
-    // Each visible card observes its own statsFlow so engagement counts update
-    // reactively without going through TimelineConsumer.feedRows. A kind-7
-    // reaction on event A only recomposes the card for event A; other cards
-    // see their statsFlow filter the bump via distinctUntilChanged.
+
     private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
 
     fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
@@ -273,34 +306,16 @@ class FeedViewModel @Inject constructor(
     val hasNewTopPost: Boolean get() = showDot.value
 
     /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
-    fun clearNewTopPost() { consumer.onDotTapped() }
+    fun clearNewTopPost() { onDotTapped() }
 
     // -- Warm-zone hydration ---------------------------------------------------
-    //
-    // Architecture: the feed loads the most-recent ~300 notes (chronological,
-    // append-mode growth). For the user to perceive the feed as instant, the
-    // WARM ZONE around the viewport — 10 above + 30 below the first visible
-    // row — must have its skeleton data (profiles, quoted notes, OG previews,
-    // image dimensions) ready BEFORE rendering. Otherwise cards pop in with
-    // late avatars, dimension shifts, and missing quotes.
-    //
-    // We debounce viewport changes by 300ms so a fast scroll doesn't fire
-    // hydration for every intermediate position. CardHydrator de-duplicates
-    // requests internally, so re-firing for an overlapping zone is cheap.
 
     private val _viewportFirstVisible = MutableStateFlow(0)
 
     init {
-        // CRITICAL: launch on Default — viewModelScope defaults to
-        // Main.immediate, and `cardHydrator.hydrateVisibleCards` does NOT
-        // wrap its body in withContext(IO/Default). It calls into RelayPool,
-        // ProfileResolver, ImageDimensionCache.resolveAll, all of which
-        // block briefly on lookup work and emit Log.d lines on the calling
-        // thread. Running this on Main was the dominant cause of the
-        // 30-76 frame skips after every batch arrival in field logs.
         @OptIn(FlowPreview::class)
         viewModelScope.launch(Dispatchers.Default) {
-            combine(consumer.events, _viewportFirstVisible) { events, first -> events to first }
+            combine(events, _viewportFirstVisible) { events, first -> events to first }
                 .debounce(300L)
                 .collectLatest { (events, first) ->
                     if (events.isEmpty()) return@collectLatest
@@ -314,21 +329,145 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    // -- User actions delegated to consumer ------------------------------------
+    // ── Subscription lifecycle (mirrors Jumble NoteList useEffect) ────────────
+
+    /**
+     * Single resubscribe entry point. Called by the deps collector in init{}.
+     *
+     * Mirrors Jumble NoteList's useEffect on [subRequests, refreshCount, ...]:
+     *   1. Close prior handle (= effect cleanup)
+     *   2. Reset state ONLY on actual feed switch (= React component remount via key)
+     *   3. Capture `since` from existing events (= jumble's `const since = events[0]?.created_at`)
+     *   4. Subscribe; route batched events via handleBatch, live-tail via handleNew
+     */
+    private suspend fun setupSubscription(key: ResubKey) {
+        lastFeedType = key.type
+
+        Log.d(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
+
+        // Close previous handle (= useEffect cleanup)
+        currentHandle?.close()
+        currentHandle = null
+
+        // Pre-load MES cached events for instant render (mirrors Jumble's
+        // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
+        // Every resubscribe — feed switch, refresh, metaVer — reloads from MES.
+        val cachedEvents = loadCachedEvents(key.type)
+        _events.value = cachedEvents
+        _newEvents.value = emptyList()
+
+        // Build subRequests
+        val subRequests = buildSubRequests(key.type)
+        if (subRequests.isEmpty()) {
+            _isLoading.value = false
+            Log.d(TAG, "setupSubscription: no subRequests, idle")
+            return
+        }
+
+        _isLoading.value = cachedEvents.isEmpty()
+
+        // since from cached events head — relay data newer than this merges
+        // on top; null → bulk replace on first onEvents call.
+        val since: Long? = cachedEvents.firstOrNull()?.createdAt
+
+        currentHandle = timelineService.subscribeTimeline(
+            subRequests = subRequests,
+            onEvents = { batch, eosed -> handleBatch(batch, eosed, since) },
+            onNew    = { event -> handleNew(event) },
+        )
+        Log.d(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
+    }
+
+    /**
+     * Mirrors Jumble NoteList:onEvents:
+     *   if (events.length > 0) {
+     *     if (!since)  setEvents(events)              // bulk replace
+     *     else         handleNewEvents(filtered)      // refresh path
+     *   }
+     *   if (eosed)    setInitialLoading(false)
+     */
+    private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
+        if (batch.isNotEmpty()) {
+            if (since == null) {
+                // First load — bulk replace.
+                _events.value = TimelineMerge.sort(batch).take(TimelineMerge.EVENTS_CAP)
+            } else {
+                // Refresh / metaVer path — only newer events, route through live-tail handler.
+                val newer = batch.filter { it.createdAt >= since }
+                if (newer.isNotEmpty()) {
+                    handleNewBatch(newer)
+                }
+            }
+        }
+        if (eosed) {
+            _isLoading.value = false
+        }
+        // Also clear loading when we have events even without full EOSE
+        if (_events.value.isNotEmpty()) {
+            _isLoading.value = false
+        }
+    }
+
+    /**
+     * Mirrors Jumble NoteList:handleNewEvents for single live-tail events.
+     *   - At top: merge into events (visible immediately)
+     *   - Scrolled: buffer in newEvents (blue-dot)
+     */
+    private fun handleNew(event: NostrEvent) {
+        if (_isAtTop.value) {
+            _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
+        } else {
+            _newEvents.update { current -> TimelineMerge.merge(current, listOf(event)) }
+        }
+    }
+
+    /** Batch variant of handleNew for the since-filter path. */
+    private fun handleNewBatch(newEvents: List<NostrEvent>) {
+        if (_isAtTop.value) {
+            _events.update { current -> TimelineMerge.merge(current, newEvents) }
+        } else {
+            _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
+        }
+    }
+
+    // ── User actions ──────────────────────────────────────────────────────────
 
     fun onViewportChanged(idx: Int) {
         _viewportFirstVisible.value = idx
-        consumer.onViewportChanged(idx)
-    }
-    fun onDotTapped() = consumer.onDotTapped()
-    fun loadMore() = consumer.loadMore()
-    fun refresh() {
-        _refreshCounter.value = _refreshCounter.value + 1
+        val atTop = idx <= 0
+        if (_isAtTop.value == atTop) return
+        _isAtTop.value = atTop
+        if (atTop) flushPending()
     }
 
-    private companion object {
-        const val WARM_ZONE_ABOVE = 10
-        const val WARM_ZONE_BELOW = 30
+    fun onDotTapped() = flushPending()
+
+    private fun flushPending() {
+        val pending = _newEvents.value
+        if (pending.isEmpty()) return
+        _events.update { current -> TimelineMerge.merge(current, pending) }
+        _newEvents.value = emptyList()
+    }
+
+    fun loadMore() {
+        if (_isLoadingMore.value) return
+        val handle = currentHandle ?: return
+        val until = _events.value.lastOrNull()?.createdAt ?: return
+        viewModelScope.launch {
+            _isLoadingMore.value = true
+            try {
+                val older = timelineService.loadMoreTimeline(handle.timelineKey, until, 100)
+                if (older.isNotEmpty()) {
+                    _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
+                }
+            } finally {
+                _isLoadingMore.value = false
+            }
+        }
+    }
+
+    fun refresh() {
+        _refreshCounter.value = _refreshCounter.value + 1
     }
 
     private val _refreshCounter = MutableStateFlow(0)
@@ -389,10 +528,8 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        // Resubscribe collector — fires when feedType, relay-metadata-version,
-        // refreshCounter, or filter changes. Gated on coldStartState != LOADING.
-        // Debounce is on relayMetadataVersion only (kind-10002 burst coalescing)
-        // so user actions (feed switch, refresh, filter) fire immediately.
+        // Subscription deps collector — mirrors Jumble NoteList useEffect deps
+        // [subRequests-shape, refreshCount, active]
         viewModelScope.launch {
             combine(
                 _coldStartState,
@@ -408,28 +545,19 @@ class FeedViewModel @Inject constructor(
                     Triple(it.type, it.ver to it.refresh, it.filter)
                 }
                 .collectLatest { key ->
-                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} refresh=${key.refresh}")
-                    resubscribe(key.type)
+                    setupSubscription(key)
                 }
         }
 
         // One-shot: merge cached events when snapshot restore completes.
-        // Fires once — snapshot events merge into whatever the consumer already
-        // has from relay subscriptions, without disrupting active subs.
         viewModelScope.launch {
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
             val cached = loadCachedEvents(_feedType.value)
             if (cached.isNotEmpty()) {
                 Log.d(TAG, "snapshot restored: merging ${cached.size} cached events")
-                consumer.addCachedEvents(cached)
+                _events.update { current -> TimelineMerge.merge(current, cached) }
             }
         }
-    }
-
-    private suspend fun resubscribe(type: FeedType) {
-        val subRequests = buildSubRequests(type)
-        val cachedEvents = loadCachedEvents(type)
-        consumer.subscribe(subRequests, cachedEvents)
     }
 
     private fun loadCachedEvents(type: FeedType): List<NostrEvent> {
@@ -513,9 +641,18 @@ class FeedViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        consumer.close()
         super.onCleared()
+        currentHandle?.close()
+        currentHandle = null
     }
+
+    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean =
+        when (cf) {
+            FeedContentFilter.NOTES_ONLY ->
+                evt.kind == 6 || (evt.replyToId == null && evt.rootId == null)
+            FeedContentFilter.REPLIES_ONLY ->
+                evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
+        }
 
     private data class ResubKey(
         val state: ColdStartState,
@@ -524,4 +661,11 @@ class FeedViewModel @Inject constructor(
         val refresh: Int,
         val filter: com.unsilence.app.domain.model.FeedFilter,
     )
+
+    private companion object {
+        const val WARM_ZONE_ABOVE = 10
+        const val WARM_ZONE_BELOW = 30
+        const val FEED_DISPLAY_CAP = 500
+        const val FEED_SAMPLE_MS = 100L
+    }
 }
