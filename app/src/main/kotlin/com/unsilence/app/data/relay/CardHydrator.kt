@@ -179,7 +179,7 @@ class CardHydrator @Inject constructor(
      * 1500ms wait for relay responses. Also resolves ref-event author profiles.
      * Called from SLOW_SCROLL (after profiles) and IDLE.
      */
-    suspend fun hydrateRefs(events: List<FeedRow>) {
+    suspend fun hydrateRefs(events: List<FeedRow>, feedRelay: String? = null) {
         if (events.isEmpty()) return
         val novelEvents = filterNovel(events, refsHydrated)
         if (novelEvents.isEmpty()) return
@@ -243,6 +243,7 @@ class CardHydrator @Inject constructor(
                 hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
             }
             for ((hint, ids) in hintBatches) {
+                if (hint == feedRelay) continue
                 relayPool.fetchEventsByIdsFromRelay(hint, ids, bypassDedup = true)
             }
         }
@@ -286,6 +287,7 @@ class CardHydrator @Inject constructor(
                 val cachedWriteRelays = refAuthorPubkeys
                     .flatMap { pk -> memoryEventStore.writeRelaysForRanked(pk) }
                     .distinct()
+                    .filter { it != feedRelay }
                     .take(5)
 
                 if (cachedWriteRelays.isNotEmpty()) {
@@ -317,6 +319,7 @@ class CardHydrator @Inject constructor(
                     val newWriteRelays = authorsWithoutRelayList
                         .flatMap { memoryEventStore.writeRelaysForRanked(it) }
                         .distinct()
+                        .filter { it != feedRelay }
                         .take(5)
                     if (newWriteRelays.isNotEmpty()) {
                         // Re-check which refs are still missing
@@ -473,7 +476,7 @@ class CardHydrator @Inject constructor(
      */
     @Volatile private var lastFullHydrationAt = 0L
 
-    suspend fun hydrateVisibleCards(events: List<FeedRow>) {
+    suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null) {
         if (events.isEmpty()) return
 
         val now = System.currentTimeMillis()
@@ -490,8 +493,8 @@ class CardHydrator @Inject constructor(
         }
         lastFullHydrationAt = now
 
-        hydrateProfiles(events)
-        hydrateRefs(events)
+        hydrateProfiles(events, excludeSourceRelay = feedRelay)
+        hydrateRefs(events, feedRelay = feedRelay)
         hydrateMedia(events, mmrAllowed = false)
     }
 }
