@@ -1481,6 +1481,16 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             .sortedByDescending { it.createdAt }
             .map { toFeedRow(it) }
 
+    /**
+     * Synthesize a FeedRow from an event that may or may not be in this store.
+     * Used by FeedViewModel.feedRows when an event has arrived in the consumer's
+     * timeline state but the event-processor hasn't inserted it into MES yet.
+     *
+     * The returned FeedRow has un-hydrated metadata (no author profile fields,
+     * no parent reference data); CardHydrator fills these in once visible.
+     */
+    fun synthesizeFeedRow(event: NostrEvent): FeedRow = toFeedRow(event)
+
     // ─── Reactive flows ─────────────────────────────────────────────────────
 
     @OptIn(kotlinx.coroutines.FlowPreview::class)

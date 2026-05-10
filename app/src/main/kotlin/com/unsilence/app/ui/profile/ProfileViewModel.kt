@@ -1,10 +1,12 @@
 package com.unsilence.app.ui.profile
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.toEventJson
@@ -13,7 +15,7 @@ import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.SubRequest
-import com.unsilence.app.data.relay.TimelineConsumer
+import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -22,14 +24,20 @@ import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -37,6 +45,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
+
+private const val TAG = "ProfileVM"
 
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
@@ -58,16 +68,32 @@ class ProfileViewModel @Inject constructor(
     val userFlow: Flow<UserEntity?> =
         if (pubkeyHex != null) memoryEventStore.userEntityFlow(pubkeyHex) else emptyFlow()
 
-    // ── TimelineConsumer ─────────────────────────────────────────────────
+    // ── Timeline state (mirrors FeedViewModel pattern) ───────────────────────
 
-    private val consumer = TimelineConsumer(
-        timelineService = timelineService,
-        memoryEventStore = memoryEventStore,
-        ownerScope = viewModelScope,
-    )
+    private val _events = MutableStateFlow<List<NostrEvent>>(emptyList())
+    private val _isLoading = MutableStateFlow(false)
+    private val _isAtTop = MutableStateFlow(true)
+    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
+    private var currentHandle: TimelineService.TimelineHandle? = null
 
-    val tabPostsFlow: StateFlow<List<FeedRow>> = consumer.feedRows
-    val isLoadingPosts: StateFlow<Boolean> = consumer.isLoading
+    val isLoadingPosts: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    @OptIn(FlowPreview::class)
+    val tabPostsFlow: StateFlow<List<FeedRow>> =
+        combine(_events, _contentFilter) { events, cf ->
+            if (events.isEmpty()) return@combine emptyList()
+            val displayed = events.asSequence()
+                .filter { matchesContentFilter(it, cf) }
+                .take(FEED_DISPLAY_CAP)
+                .toList()
+            if (displayed.isEmpty()) return@combine emptyList()
+            val ids = displayed.map { it.id }.toSet()
+            val rowsById = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
+            displayed.map { evt -> rowsById[evt.id] ?: memoryEventStore.synthesizeFeedRow(evt) }
+        }
+            .sample(FEED_SAMPLE_MS)
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // ── Profile tabs ─────────────────────────────────────────────────────
 
@@ -145,11 +171,19 @@ class ProfileViewModel @Inject constructor(
     // ── User actions ─────────────────────────────────────────────────────
 
     fun onViewportChanged(first: Int, last: Int) {
-        consumer.onViewportChanged(first)
+        val atTop = first <= 0
+        if (_isAtTop.value != atTop) _isAtTop.value = atTop
     }
 
     fun loadMore(currentOldest: Long) {
-        consumer.loadMore()
+        val handle = currentHandle ?: return
+        val until = _events.value.lastOrNull()?.createdAt ?: return
+        viewModelScope.launch {
+            val older = timelineService.loadMoreTimeline(handle.timelineKey, until, 100)
+            if (older.isNotEmpty()) {
+                _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
+            }
+        }
     }
 
     // ── Tab → subscription logic ─────────────────────────────────────────
@@ -160,12 +194,16 @@ class ProfileViewModel @Inject constructor(
             ProfileTab.NOTES, ProfileTab.LONGFORM -> FeedContentFilter.NOTES_ONLY
             ProfileTab.REPLIES -> FeedContentFilter.REPLIES_ONLY
         }
-        consumer.setContentFilter(contentFilter)
+        _contentFilter.value = contentFilter
 
         // Notes↔Replies share the same kinds — skip resubscribe, just filter
         val group = subGroupFor(tab)
         if (lastSubGroup == group) return
         lastSubGroup = group
+
+        // Close previous handle
+        currentHandle?.close()
+        currentHandle = null
 
         val kinds = kindsForTab(tab)
         val cached = memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
@@ -173,17 +211,39 @@ class ProfileViewModel @Inject constructor(
             .ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
 
-        consumer.subscribe(
-            subRequests = listOf(SubRequest(
-                urls = writeRelays,
-                filter = NostrFilter(
-                    kinds = kinds,
-                    authors = listOf(pubkey),
-                    limit = limit,
-                ),
-            )),
-            initialCachedEvents = cached,
-        )
+        // Reset state for new subscription group
+        _events.value = emptyList()
+        _isLoading.value = true
+
+        val subRequests = listOf(SubRequest(
+            urls = writeRelays,
+            filter = NostrFilter(
+                kinds = kinds,
+                authors = listOf(pubkey),
+                limit = limit,
+            ),
+        ))
+
+        viewModelScope.launch {
+            val handle = timelineService.subscribeTimeline(
+                subRequests = subRequests,
+                onEvents = { batch, eosed ->
+                    if (batch.isNotEmpty()) {
+                        if (_events.value.isEmpty()) {
+                            _events.value = TimelineMerge.sort(batch).take(TimelineMerge.EVENTS_CAP)
+                        } else {
+                            _events.update { current -> TimelineMerge.merge(current, batch) }
+                        }
+                    }
+                    if (_events.value.isNotEmpty()) _isLoading.value = false
+                    if (eosed) _isLoading.value = false
+                },
+                onNew = { event ->
+                    _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
+                },
+            )
+            currentHandle = handle
+        }
     }
 
     // ── Save profile ─────────────────────────────────────────────────────
@@ -235,12 +295,24 @@ class ProfileViewModel @Inject constructor(
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
 
+    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean =
+        when (cf) {
+            FeedContentFilter.NOTES_ONLY ->
+                evt.kind == 6 || (evt.replyToId == null && evt.rootId == null)
+            FeedContentFilter.REPLIES_ONLY ->
+                evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
+        }
+
     override fun onCleared() {
-        consumer.close()
+        currentHandle?.close()
+        currentHandle = null
         super.onCleared()
     }
 
     private companion object {
+        const val FEED_DISPLAY_CAP = 500
+        const val FEED_SAMPLE_MS = 100L
+
         /** Subscription group: Notes+Replies share kinds [1,6], Longform is [30023]. */
         enum class SubGroup { NOTES_REPLIES, LONGFORM }
 
