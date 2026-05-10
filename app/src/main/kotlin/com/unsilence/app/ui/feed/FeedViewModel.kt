@@ -324,7 +324,14 @@ class FeedViewModel @Inject constructor(
                     if (zoneStart >= zoneEnd) return@collectLatest
                     val warmEvents = events.subList(zoneStart, zoneEnd)
                     val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
-                    if (rows.isNotEmpty()) cardHydrator.hydrateVisibleCards(rows)
+                    if (rows.isNotEmpty()) {
+                        // SingleRelay feed funneling guard: when viewing a single-relay feed,
+                        // every event's source relay is the same as the feed relay. Pass it
+                        // through so CardHydrator can skip src-profile / hint / outbox fetches
+                        // that would all target the same relay we're already streaming from.
+                        val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
+                        cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay)
+                    }
                 }
         }
     }
