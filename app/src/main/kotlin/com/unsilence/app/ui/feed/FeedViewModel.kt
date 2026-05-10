@@ -147,6 +147,11 @@ class FeedViewModel @Inject constructor(
 
             // Determine which IDs need fresh rows (not in cache)
             val displayedIds = displayed.map { it.id }.toSet()
+
+            // Protect displayed events from LRU eviction — events in the
+            // active timeline must stay in MES for EventModel resolution.
+            memoryEventStore.markTouched(displayedIds)
+
             val missingIds = displayedIds.filter { !feedRowCache.containsKey(it) }
             val hitCount = displayedIds.size - missingIds.size
             Log.d(TAG, "feedRowCache hit=${hitCount} miss=${missingIds.size}")
@@ -230,21 +235,9 @@ class FeedViewModel @Inject constructor(
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
         _contentFilter.value = f
-        // No resubscribe — feedRows recomputes via combine(_events, _contentFilter)
-
-        // If switching to Conversations and we have few replies, fetch a wider
-        // batch to populate the tab. Replies are often older than top-level
-        // notes — initial limit=300 may not include any.
-        if (f == FeedContentFilter.REPLIES_ONLY) {
-            viewModelScope.launch {
-                val current = _events.value
-                val replyCount = current.count { it.replyToId != null || it.rootId != null }
-                if (replyCount < 30) {
-                    Log.d(TAG, "Conversations tab has $replyCount replies, fetching more")
-                    _refreshCounter.value = _refreshCounter.value + 1
-                }
-            }
-        }
+        // Resubscribe fires via the 6-flow combiner (rule 48b/48c):
+        // Conversations → kinds=[1] + #e:[] relay-side filtering
+        // Notes → kinds=[1,6,20,21,30023], no tag filter
     }
 
     // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
@@ -387,9 +380,6 @@ class FeedViewModel @Inject constructor(
         currentHandle?.close()
         currentHandle = null
 
-        // Clear feed row cache on resubscribe (new feed = new rows)
-        feedRowCache.clear()
-
         // Pre-load MES cached events for instant render (mirrors Jumble's
         // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
         // Every resubscribe — feed switch, refresh, metaVer — reloads from MES.
@@ -398,7 +388,8 @@ class FeedViewModel @Inject constructor(
         _newEvents.value = emptyList()
 
         // Build subRequests
-        val subRequests = buildSubRequests(key.type)
+        val onlyReplies = key.contentFilter == FeedContentFilter.REPLIES_ONLY
+        val subRequests = buildSubRequests(key.type, onlyReplies)
         if (subRequests.isEmpty()) {
             _isLoading.value = false
             Log.d(TAG, "setupSubscription: no subRequests, idle")
@@ -570,7 +561,7 @@ class FeedViewModel @Inject constructor(
         }
 
         // Subscription deps collector — mirrors Jumble NoteList useEffect deps
-        // [subRequests-shape, refreshCount, active]
+        // 6-flow vararg combine per rule 48c
         viewModelScope.launch {
             combine(
                 _coldStartState,
@@ -578,12 +569,20 @@ class FeedViewModel @Inject constructor(
                 relayMetadataVersion,
                 _refreshCounter,
                 _filter,
-            ) { state, type, ver, refresh, filter ->
-                ResubKey(state, type, ver, refresh, filter)
+                _contentFilter,
+            ) { arr ->
+                ResubKey(
+                    state = arr[0] as ColdStartState,
+                    type = arr[1] as FeedType,
+                    ver = arr[2] as Int,
+                    refresh = arr[3] as Int,
+                    filter = arr[4] as com.unsilence.app.domain.model.FeedFilter,
+                    contentFilter = arr[5] as FeedContentFilter,
+                )
             }
                 .filter { it.state != ColdStartState.LOADING }
                 .distinctUntilChangedBy {
-                    Triple(it.type, it.ver to it.refresh, it.filter)
+                    Triple(it.type, it.ver to it.refresh, it.filter to it.contentFilter)
                 }
                 .collectLatest { key ->
                     setupSubscription(key)
@@ -629,7 +628,7 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun buildSubRequests(type: FeedType): List<SubRequest> {
+    private fun buildSubRequests(type: FeedType, onlyReplies: Boolean = false): List<SubRequest> {
         val ownPubkey = keyManager.getPublicKeyHex()
         val blockedRelays = ownPubkey
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
@@ -637,9 +636,14 @@ class FeedViewModel @Inject constructor(
         val readRelays = ownPubkey
             ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
             ?: emptyList()
+        // Conversations tab: relay-side reply scoping (rule 48b)
+        // kinds=[1] only (no reposts/articles), #e:[] tag filter
+        val kinds = if (onlyReplies) listOf(1) else listOf(1, 6, 20, 21, 30023)
+        val tags: Map<String, List<String>>? = if (onlyReplies) mapOf("e" to emptyList()) else null
         val config = OutboxRelayResolver.Config(
-            kinds = listOf(1, 6, 20, 21, 30023),
+            kinds = kinds,
             limit = 300,
+            tags = tags,
         )
         return when (type) {
             is FeedType.Following -> {
@@ -701,6 +705,7 @@ class FeedViewModel @Inject constructor(
         val ver: Int,
         val refresh: Int,
         val filter: com.unsilence.app.domain.model.FeedFilter,
+        val contentFilter: FeedContentFilter,
     )
 
     private companion object {

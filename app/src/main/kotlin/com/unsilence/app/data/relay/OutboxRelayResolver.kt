@@ -55,6 +55,7 @@ class OutboxRelayResolver @Inject constructor(
         val limit: Int,
         val minTrustScore: Int = 30,
         val since: Long? = null,
+        val tags: Map<String, List<String>>? = null,
     )
 
     /**
@@ -165,6 +166,7 @@ class OutboxRelayResolver @Inject constructor(
                     authors = sortedAuthors,
                     limit = config.limit,
                     since = config.since,
+                    tags = config.tags,
                 ),
                 tier = SubTier.FAST,
             ))
@@ -186,6 +188,7 @@ class OutboxRelayResolver @Inject constructor(
                     authors = relayAuthors,
                     limit = config.limit,
                     since = config.since,
+                    tags = config.tags,
                 ),
                 tier = if (url in fastWriteRelays) SubTier.FAST else SubTier.SLOW,
             ))
@@ -220,6 +223,7 @@ class OutboxRelayResolver @Inject constructor(
                     kinds = config.kinds,
                     limit = config.limit,
                     since = config.since,
+                    tags = config.tags,
                 ),
             )
         )
@@ -240,6 +244,7 @@ class OutboxRelayResolver @Inject constructor(
                     kinds = config.kinds,
                     limit = config.limit,
                     since = config.since,
+                    tags = config.tags,
                 ),
             )
         )
