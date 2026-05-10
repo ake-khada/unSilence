@@ -35,7 +35,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 private const val TAG = "FeedVM"
@@ -158,6 +158,20 @@ class FeedViewModel @Inject constructor(
         if (_contentFilter.value == f) return
         _contentFilter.value = f
         consumer.setContentFilter(f)
+
+        // If switching to Conversations and we have few replies, fetch a wider
+        // batch to populate the tab. Replies are often older than top-level
+        // notes — initial limit=300 may not include any.
+        if (f == FeedContentFilter.REPLIES_ONLY) {
+            viewModelScope.launch {
+                val current = consumer.events.value
+                val replyCount = current.count { it.replyToId != null || it.rootId != null }
+                if (replyCount < 30) {
+                    Log.d(TAG, "Conversations tab has $replyCount replies, fetching more")
+                    _refreshCounter.value = _refreshCounter.value + 1
+                }
+            }
+        }
     }
 
     // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
@@ -193,14 +207,7 @@ class FeedViewModel @Inject constructor(
 
     // -- Profile lookup for repost original authors ----------------------------
 
-    private fun <V> lruCache(cap: Int): MutableMap<String, V> =
-        Collections.synchronizedMap(
-            object : LinkedHashMap<String, V>(cap + 16, 0.75f, true) {
-                override fun removeEldestEntry(e: MutableMap.MutableEntry<String, V>?) = size > cap
-            }
-        )
-
-    private val profileCache = lruCache<StateFlow<UserEntity?>>(300)
+    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
         profileCache.getOrPut(pubkey) {
@@ -214,7 +221,7 @@ class FeedViewModel @Inject constructor(
     // reactively without going through TimelineConsumer.feedRows. A kind-7
     // reaction on event A only recomposes the card for event A; other cards
     // see their statsFlow filter the bump via distinctUntilChanged.
-    private val statsCache = lruCache<StateFlow<com.unsilence.app.data.memory.EventStats>>(500)
+    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
 
     fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
         statsCache.getOrPut(eventId) {
@@ -325,8 +332,6 @@ class FeedViewModel @Inject constructor(
     }
 
     private val _refreshCounter = MutableStateFlow(0)
-    private var lastRefreshCounter = 0
-    private var lastSubRequests: List<SubRequest> = emptyList()
 
     // -- Init: cold-start + feedType subscription ------------------------------
 
@@ -389,33 +394,22 @@ class FeedViewModel @Inject constructor(
         // Debounce is on relayMetadataVersion only (kind-10002 burst coalescing)
         // so user actions (feed switch, refresh, filter) fire immediately.
         viewModelScope.launch {
-            @Suppress("UNCHECKED_CAST")
             combine(
                 _coldStartState,
                 _feedType,
                 relayMetadataVersion,
                 _refreshCounter,
                 _filter,
-                _contentFilter,
-            ) { arr ->
-                ResubKey(
-                    state         = arr[0] as ColdStartState,
-                    type          = arr[1] as FeedType,
-                    ver           = arr[2] as Int,
-                    refresh       = arr[3] as Int,
-                    filter        = arr[4] as com.unsilence.app.domain.model.FeedFilter,
-                    contentFilter = arr[5] as FeedContentFilter,
-                )
+            ) { state, type, ver, refresh, filter ->
+                ResubKey(state, type, ver, refresh, filter)
             }
                 .filter { it.state != ColdStartState.LOADING }
                 .distinctUntilChangedBy {
-                    listOf(it.type, it.ver, it.refresh, it.filter, it.contentFilter)
+                    Triple(it.type, it.ver to it.refresh, it.filter)
                 }
                 .collectLatest { key ->
-                    val forceRefresh = key.refresh != lastRefreshCounter
-                    lastRefreshCounter = key.refresh
-                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} cf=${key.contentFilter} force=$forceRefresh")
-                    resubscribe(key.type, key.contentFilter, forceRefresh)
+                    Log.d(TAG, "resubscribe trigger: type=${key.type} metaVer=${key.ver} refresh=${key.refresh}")
+                    resubscribe(key.type)
                 }
         }
 
@@ -432,13 +426,8 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private suspend fun resubscribe(type: FeedType, contentFilter: FeedContentFilter = FeedContentFilter.NOTES_ONLY, forceRefresh: Boolean = false) {
-        val subRequests = buildSubRequests(type, contentFilter)
-        if (!forceRefresh && subRequests == lastSubRequests) {
-            Log.d(TAG, "resubscribe: SubRequests unchanged, skipping")
-            return
-        }
-        lastSubRequests = subRequests
+    private suspend fun resubscribe(type: FeedType) {
+        val subRequests = buildSubRequests(type)
         val cachedEvents = loadCachedEvents(type)
         consumer.subscribe(subRequests, cachedEvents)
     }
@@ -471,7 +460,7 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun buildSubRequests(type: FeedType, contentFilter: FeedContentFilter = FeedContentFilter.NOTES_ONLY): List<SubRequest> {
+    private fun buildSubRequests(type: FeedType): List<SubRequest> {
         val ownPubkey = keyManager.getPublicKeyHex()
         val blockedRelays = ownPubkey
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
@@ -479,15 +468,9 @@ class FeedViewModel @Inject constructor(
         val readRelays = ownPubkey
             ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
             ?: emptyList()
-        val kinds = if (contentFilter == FeedContentFilter.REPLIES_ONLY) {
-            listOf(1)
-        } else {
-            listOf(1, 6, 20, 21, 30023)
-        }
         val config = OutboxRelayResolver.Config(
-            kinds = kinds,
+            kinds = listOf(1, 6, 20, 21, 30023),
             limit = 300,
-            onlyReplies = contentFilter == FeedContentFilter.REPLIES_ONLY,
         )
         return when (type) {
             is FeedType.Following -> {
@@ -540,6 +523,5 @@ class FeedViewModel @Inject constructor(
         val ver: Int,
         val refresh: Int,
         val filter: com.unsilence.app.domain.model.FeedFilter,
-        val contentFilter: FeedContentFilter,
     )
 }

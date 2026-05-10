@@ -64,8 +64,6 @@ class Subscription @Inject constructor(
         val knownIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val eosedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val closedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
-        /** Relays that sent CLOSED auth-required — retryable once AUTH completes. */
-        val pendingAuthUrls: MutableSet<String> = ConcurrentHashMap.newKeySet(),
     )
 
     private val subs = ConcurrentHashMap<String, SubState>()
@@ -106,17 +104,15 @@ class Subscription @Inject constructor(
         )
         subs[subId] = state
 
-        val req: String
         try {
             // Connection establishment is the caller's responsibility for
             // PERSISTENT-purpose relays (browse / outbox / home feed). For
             // ad-hoc one-off subs we still call connectAndAwait — it's a no-op
-            // for already-connected relays. Single-relay gets a shorter cliff.
-            val timeout = if (urls.size == 1) 3_000L else 5_000L
-            transport.connectAndAwait(urls, timeoutMs = timeout)
+            // for already-connected relays.
+            transport.connectAndAwait(urls, timeoutMs = 5_000)
 
             // Build REQ once, send to each relay.
-            req = buildReqJson(subId, filter)
+            val req = buildReqJson(subId, filter)
             val failedUrls = mutableListOf<String>()
             for (url in urls) {
                 if (!transport.sendToRelay(url, req)) {
@@ -132,7 +128,7 @@ class Subscription @Inject constructor(
                 val retryDeadline = System.currentTimeMillis() + 10_000L
                 val remaining = failedUrls.toMutableList()
                 while (remaining.isNotEmpty() && System.currentTimeMillis() < retryDeadline) {
-                    delay(100)
+                    delay(500)
                     if (subs[subId] == null) return HandleImpl(subId) // closed during retry
                     val iter = remaining.iterator()
                     while (iter.hasNext()) {
@@ -160,31 +156,6 @@ class Subscription @Inject constructor(
                 val s = subs[subId] ?: return@launch
                 if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
                 Log.d(TAG, "EOSE watchdog: synthesizing for sub=$subId relay=$url")
-                handleRelayEose(subId, url)
-            }
-        }
-
-        // Auth-required retry — if any relay sent CLOSED auth-required after
-        // our REQ, re-send at 100ms intervals until AUTH completes and the
-        // relay accepts. Runs on watchdogScope so Handle.close() cancels it.
-        watchdogScope.launch {
-            // Brief wait for CLOSED auth-required to arrive from initial REQ
-            delay(150)
-            val s = subs[subId] ?: return@launch
-            if (s.pendingAuthUrls.isEmpty()) return@launch
-            Log.d(TAG, "subscribe $subId: ${s.pendingAuthUrls.size} relay(s) pending auth, retrying at 100ms")
-            val authDeadline = System.currentTimeMillis() + 5_000L
-            while (s.pendingAuthUrls.isNotEmpty() && System.currentTimeMillis() < authDeadline) {
-                for (url in s.pendingAuthUrls.toList()) {
-                    transport.sendToRelay(url, req)
-                }
-                delay(100)
-                if (subs[subId] == null) return@launch
-            }
-            // Timeout: synthesize EOSE for remaining auth-pending relays
-            for (url in s.pendingAuthUrls.toList()) {
-                Log.w(TAG, "subscribe $subId: auth timeout for $url — synthesizing EOSE")
-                s.pendingAuthUrls.remove(url)
                 handleRelayEose(subId, url)
             }
         }
@@ -249,7 +220,6 @@ class Subscription @Inject constructor(
 
     private fun handleRelayEose(subId: String, relayUrl: String) {
         val state = subs[subId] ?: return
-        state.pendingAuthUrls.remove(relayUrl)  // auth resolved if it was pending
         if (!state.eosedRelays.add(relayUrl)) return  // already EOSE'd this relay
         val allEosed = state.eosedRelays.size >= state.urls.size
         try {
@@ -261,12 +231,6 @@ class Subscription @Inject constructor(
 
     private fun handleRelayClosed(subId: String, relayUrl: String, reason: String) {
         val state = subs[subId] ?: return
-        // Auth-required — don't treat as terminal. Mark as pending-auth so
-        // the auth-retry coroutine re-sends REQ once AUTH completes.
-        if (reason.contains("auth-required", ignoreCase = true)) {
-            state.pendingAuthUrls.add(relayUrl)
-            return
-        }
         if (!state.closedRelays.add(relayUrl)) return
         try {
             state.onclose(relayUrl, reason)

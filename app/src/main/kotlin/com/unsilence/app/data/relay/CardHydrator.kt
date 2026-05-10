@@ -32,17 +32,20 @@ private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
 object Nip19FailureCache {
-    private const val MAX_SIZE = 10_000
-    private val failures: MutableSet<String> = java.util.Collections.newSetFromMap(
-        object : LinkedHashMap<String, Boolean>(256, 0.75f, false) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean =
-                size > MAX_SIZE
+    private val failures = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private const val MAX_SIZE = 10_000 // ~400KB at 40-byte avg string length
+
+    fun isKnownBad(uri: String): Boolean = failures.containsKey(uri)
+
+    fun markBad(uri: String) {
+        // Soft cap — remove one arbitrary entry instead of wiping the whole cache.
+        // Known-bad strings persist across the session.
+        if (failures.size >= MAX_SIZE) {
+            val victim = failures.keys.firstOrNull()
+            if (victim != null) failures.remove(victim)
         }
-    )
-
-    fun isKnownBad(uri: String): Boolean = synchronized(failures) { uri in failures }
-
-    fun markBad(uri: String) = synchronized(failures) { failures.add(uri) }
+        failures[uri] = true
+    }
 }
 
 /**
@@ -120,6 +123,11 @@ class CardHydrator @Inject constructor(
         if (events.isEmpty()) return
         val novelEvents = filterNovel(events, profilesHydrated)
         if (novelEvents.isEmpty()) return
+        // Mark up front: profile hints come from the event's content/tags
+        // which are fixed at insert, so seeing the event once is enough.
+        // Cancellation / fetch failure isn't fatal — per-card avatar autofetch
+        // and other entry points retry on demand.
+        markHydrated(novelEvents, profilesHydrated)
 
         val pubkeys = mutableSetOf<String>()
         val profileHints = mutableMapOf<String, MutableList<String>>()
@@ -145,30 +153,21 @@ class CardHydrator @Inject constructor(
         val unresolved = profileResolver.filterUnresolved(pubkeys)
         if (unresolved.isEmpty()) return
 
-        try {
-            userRepository.fetchMissingProfiles(unresolved.toList())
+        userRepository.fetchMissingProfiles(unresolved.toList())
 
-            if (fanOut) {
-                val sourceRelays = novelEvents.map { it.relayUrl }.distinct()
-                    .filter { it != excludeSourceRelay }
-                if (sourceRelays.isNotEmpty()) {
-                    relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
-                }
-                if (profileHints.isNotEmpty()) {
-                    val unresolvedHints = profileHints.filterKeys { it in unresolved }
-                    if (unresolvedHints.isNotEmpty()) {
-                        relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
-                    }
+        if (fanOut) {
+            val sourceRelays = novelEvents.map { it.relayUrl }.distinct()
+                .filter { it != excludeSourceRelay }
+            if (sourceRelays.isNotEmpty()) {
+                relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
+            }
+            if (profileHints.isNotEmpty()) {
+                // Only fan out hints for unresolved pubkeys
+                val unresolvedHints = profileHints.filterKeys { it in unresolved }
+                if (unresolvedHints.isNotEmpty()) {
+                    relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
                 }
             }
-
-            // Mark hydrated AFTER successful fetch — if fetch throws or is cancelled,
-            // these events remain eligible for retry on the next hydration pass.
-            markHydrated(novelEvents, profilesHydrated)
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Phase1 profiles failed, will retry: ${e.message}")
         }
 
         val skipped = events.size - novelEvents.size
