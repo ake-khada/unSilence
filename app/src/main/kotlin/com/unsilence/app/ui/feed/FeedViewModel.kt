@@ -12,6 +12,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
@@ -87,6 +88,7 @@ class FeedViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
+    private val relayPool: RelayPool,
 ) : ViewModel() {
 
     // ── Timeline state (mirrors Jumble NoteList component state) ──────────────
@@ -373,6 +375,8 @@ class FeedViewModel @Inject constructor(
      */
     private suspend fun setupSubscription(key: ResubKey) {
         lastFeedType = key.type
+        relayPool.activeSingleRelayFeedUrl =
+            (key.type as? FeedType.SingleRelay)?.url?.let { normalizeRelayUrl(it) }
 
         Log.d(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
 
@@ -689,6 +693,7 @@ class FeedViewModel @Inject constructor(
         super.onCleared()
         currentHandle?.close()
         currentHandle = null
+        relayPool.activeSingleRelayFeedUrl = null
     }
 
     private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean =

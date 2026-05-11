@@ -76,6 +76,18 @@ class RelayPool @Inject constructor(
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
+    /**
+     * Set by FeedViewModel when the user is viewing a SingleRelay feed.
+     * One-shot dispatch paths exclude this URL from their relay sets to prevent
+     * funneling auxiliary work back to the relay already hosting the persistent
+     * feed subscription.
+     *
+     * Null when the active feed is Following / Global / RelaySet — in those
+     * cases auxiliary fanout across multiple relays is desirable and the
+     * funneling concern doesn't apply.
+     */
+    @Volatile var activeSingleRelayFeedUrl: String? = null
+
     // ── Connection purpose tracking ────────────────────────────────────────
     // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
     // Persistent sub replay is only skipped when a relay is browse-only.
@@ -627,9 +639,15 @@ class RelayPool @Inject constructor(
         subIds: List<String>,
         timeoutMs: Long = 8_000,
     ) {
+        val excluded = activeSingleRelayFeedUrl
         val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-            .filter { it !in blockedUrls }
-        if (normalized.isEmpty() || reqs.isEmpty()) return
+            .filter { it !in blockedUrls && it != excluded }
+        if (normalized.isEmpty() || reqs.isEmpty()) {
+            if (excluded != null && urls.any { normalizeRelayUrl(it) == excluded }) {
+                Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            }
+            return
+        }
 
         val reused = mutableListOf<String>()
         val ephemeral = mutableListOf<String>()
@@ -1687,9 +1705,14 @@ class RelayPool @Inject constructor(
         // events on less-replicated relays.
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
-        val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
-        val indexer = connections.values.filter { it.url in indexerUrls }
+        val excluded = activeSingleRelayFeedUrl
+        val nonIndexer = connections.values.filter { it.url !in indexerUrls && it.url != excluded }.shuffled()
+        val indexer = connections.values.filter { it.url in indexerUrls && it.url != excluded }
         val targets = (nonIndexer + indexer).take(6)
+        if (targets.isEmpty()) {
+            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            return
+        }
         targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${targets.size} relay(s)")
     }
@@ -1726,6 +1749,10 @@ class RelayPool @Inject constructor(
         if (eventIds.isEmpty()) return
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
+        if (normalized == activeSingleRelayFeedUrl) {
+            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            return
+        }
         if (connections[normalized] == null) {
             connectAndAwait(listOf(normalized), timeoutMs = 2_000)
         }
@@ -1808,13 +1835,14 @@ class RelayPool @Inject constructor(
 
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val excluded = activeSingleRelayFeedUrl
 
         if (relayHints.isNotEmpty()) {
             // Hints-first: connect and wait for WebSocket readiness, then send REQ
             // only to hint relays. No broadcast fallback — if all hints fail, the
             // event stays unfetched until the next hydration pass retries.
             val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
-                .filter { it !in indexerUrls && it !in blockedUrls }
+                .filter { it !in indexerUrls && it !in blockedUrls && it != excluded }
             if (hintTargets.isNotEmpty()) {
                 connectAndAwait(hintTargets, timeoutMs = 2_000)
                 var sent = 0
@@ -1829,10 +1857,14 @@ class RelayPool @Inject constructor(
             }
         }
 
-        // No hints (or all hints were indexer/blocked) — broadened fallback.
-        val nonIndexer = connections.values.filter { it.url !in indexerUrls }.shuffled()
-        val indexer = connections.values.filter { it.url in indexerUrls }
+        // No hints (or all hints were indexer/blocked/feedRelay) — broadened fallback.
+        val nonIndexer = connections.values.filter { it.url !in indexerUrls && it.url != excluded }.shuffled()
+        val indexer = connections.values.filter { it.url in indexerUrls && it.url != excluded }
         val fallbackTargets = (nonIndexer + indexer).take(6)
+        if (fallbackTargets.isEmpty()) {
+            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            return
+        }
         fallbackTargets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "fetchEventById: $eventId → ${fallbackTargets.size} fallback relay(s) (no hints)")
     }
