@@ -5,13 +5,17 @@ import android.util.Log
 // FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.sample
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -246,6 +250,18 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
     /** Bumps when engagement aggregates (kinds 7/9734/9735) change. Consumers re-render counts. */
     val statsSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _statsSignal
+
+    /** Targeted invalidation for per-event-id stats observation. */
+    sealed class StatsInvalidation {
+        data class Targeted(val ids: Set<String>) : StatsInvalidation()
+        data object Broadcast : StatsInvalidation()
+    }
+
+    private val _statsInvalidations = MutableSharedFlow<StatsInvalidation>(
+        replay = 0,
+        extraBufferCapacity = 128,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
@@ -276,6 +292,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         var trustScore = false
         var relayMonitor = false
         var relaySet = false
+        val invalidatedStatsIds: MutableSet<String> = mutableSetOf()
     }
 
     private fun flushDirty(d: InsertDirty) {
@@ -289,6 +306,11 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         if (d.trustScore) _trustScoreSignal.value = now
         if (d.relayMonitor) _relayMonitorSignal.value = now
         if (d.relaySet) _relaySetSignal.value = now
+        if (d.invalidatedStatsIds.isNotEmpty()) {
+            _statsInvalidations.tryEmit(
+                StatsInvalidation.Targeted(d.invalidatedStatsIds.toSet())
+            )
+        }
     }
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
@@ -369,7 +391,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         when (kind) {
             0 -> d.profile = true
             3 -> d.follows = true
-            1, 6, 30023 -> d.feed = true
+            1, 6, 20, 21, 30023 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
         if (kind == 7 || kind == 6 || kind == 9734) d.action = true
@@ -415,12 +437,12 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         // 3. Update derived aggregates based on kind
         when (event.kind) {
             0 -> handleProfile(event)
-            1 -> handleNote(event)
+            1 -> handleNote(event, dirty)
             3 -> handleFollows(event, dirty)
-            6 -> handleRepost(event)
-            7 -> handleReaction(event)
+            6 -> handleRepost(event, dirty)
+            7 -> handleReaction(event, dirty)
             9734 -> handleZapRequest(event)
-            9735 -> handleZapReceipt(event)
+            9735 -> handleZapReceipt(event, dirty)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event, dirty)
             10006 -> handleBlocked(event, dirty)
@@ -503,16 +525,18 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleNote(event: NostrEvent) {
+    private fun handleNote(event: NostrEvent, dirty: InsertDirty) {
         // Increment reply counts for targets
         event.replyToId?.let { targetId ->
             replyCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
             statsUpdatedAt[targetId] = System.currentTimeMillis()
+            dirty.invalidatedStatsIds.add(targetId)
         }
         // If rootId differs from replyToId, root also gets a reply count
         if (event.rootId != null && event.rootId != event.replyToId) {
             replyCounts.compute(event.rootId) { _, v -> (v ?: 0) + 1 }
             statsUpdatedAt[event.rootId] = System.currentTimeMillis()
+            dirty.invalidatedStatsIds.add(event.rootId)
         }
     }
 
@@ -524,21 +548,23 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         updateFollowsInternal(event.pubkey, pubkeys, event.createdAt, dirty)
     }
 
-    private fun handleRepost(event: NostrEvent) {
+    private fun handleRepost(event: NostrEvent, dirty: InsertDirty) {
         val targetId = event.rootId ?: return
         repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reposted
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
     }
 
-    private fun handleReaction(event: NostrEvent) {
+    private fun handleReaction(event: NostrEvent, dirty: InsertDirty) {
         // Last e-tag is the target
         val targetId = event.tags
             .lastOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reacted to
         addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
     }
@@ -597,7 +623,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         }
     }
 
-    private fun handleZapReceipt(event: NostrEvent) {
+    private fun handleZapReceipt(event: NostrEvent, dirty: InsertDirty) {
         val targetId = event.tags
             .firstOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
@@ -608,6 +634,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
+        dirty.invalidatedStatsIds.add(targetId)
     }
 
     /**
@@ -1422,6 +1449,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[eventId] = System.currentTimeMillis()
+        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(eventId)))
     }
 
     /**
@@ -1435,6 +1463,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             feedRowAccessedAt.remove(id)
         }
         _statsSignal.value = System.nanoTime()
+        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(eventIds.toSet()))
     }
 
     // ─── A.5.1 T3: Search flows ────────────────────────────────────────────
@@ -1608,19 +1637,28 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
      * recompose 100 visible cards, only the affected card.
      */
     fun statsFlow(eventId: String): Flow<EventStats> =
-        combine(_feedSignal, _statsSignal, _actionSignal) { _, _, _ -> }
-            .map {
-                val zap = zapStats(eventId)
-                EventStats(
-                    replyCount = replyCount(eventId),
-                    repostCount = repostCount(eventId),
-                    reactionCount = reactionCount(eventId),
-                    zapCount = zap.count,
-                    zapTotalSats = zap.totalSats,
-                )
+        _statsInvalidations
+            .filter { inv ->
+                when (inv) {
+                    is StatsInvalidation.Targeted -> eventId in inv.ids
+                    StatsInvalidation.Broadcast -> true
+                }
             }
+            .map { currentStats(eventId) }
+            .onStart { emit(currentStats(eventId)) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
+
+    private fun currentStats(eventId: String): EventStats {
+        val zap = zapStats(eventId)
+        return EventStats(
+            replyCount = replyCount(eventId),
+            repostCount = repostCount(eventId),
+            reactionCount = reactionCount(eventId),
+            zapCount = zap.count,
+            zapTotalSats = zap.totalSats,
+        )
+    }
 
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
@@ -2293,6 +2331,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         _snapshotRestoredSignal.value = now
+        _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
         // Evict old content events from snapshot (may contain stale data)
         evictOldContentEvents()
@@ -2599,6 +2638,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         _snapshotRestoredSignal.value = now
+        _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
         evictOldContentEvents()
 
@@ -2989,6 +3029,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _relaySetSignal.value++
         _trustScoreSignal.value++
         _relayMonitorSignal.value++
+        _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
     }
 
     fun clear() {
@@ -3042,6 +3083,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         _relaySetSignal.value = 0L
         _trustScoreSignal.value = 0L
         _relayMonitorSignal.value = 0L
+        _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
     }
 }
 
