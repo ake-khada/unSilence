@@ -14,6 +14,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
 
@@ -45,7 +46,7 @@ internal fun YouTubeCard(
         contentAlignment = Alignment.Center,
     ) {
         AsyncImage(
-            model              = "https://img.youtube.com/vi/${segment.videoId}/hqdefault.jpg",
+            model              = rememberFullWidthImageRequest("https://img.youtube.com/vi/${segment.videoId}/hqdefault.jpg", aspectRatio = 16f / 9f),
             contentDescription = null,
             contentScale       = ContentScale.Crop,
             modifier           = Modifier.matchParentSize(),
