@@ -43,6 +43,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -138,7 +139,7 @@ fun ComposeScreen(
                     }
                     if (!userAvatarUrl.isNullOrBlank()) {
                         AsyncImage(
-                            model              = userAvatarUrl,
+                            model              = rememberAvatarImageRequest(userAvatarUrl, Sizing.avatar),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier.fillMaxSize(),

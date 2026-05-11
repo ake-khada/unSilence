@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -62,7 +63,7 @@ fun MinimalLinkCard(
     ) {
         if (iconUrl != null) {
             AsyncImage(
-                model = iconUrl,
+                model = rememberAvatarImageRequest(iconUrl, 40.dp),
                 contentDescription = null,
                 modifier = Modifier
                     .size(40.dp)

@@ -39,6 +39,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
@@ -63,7 +64,7 @@ internal fun VideoThumbnailImage(
 ) {
     if (!model.posterUrl.isNullOrBlank()) {
         AsyncImage(
-            model = model.posterUrl,
+            model = rememberFullWidthImageRequest(model.posterUrl),
             contentDescription = null,
             contentScale = ContentScale.Fit,
             modifier = modifier,

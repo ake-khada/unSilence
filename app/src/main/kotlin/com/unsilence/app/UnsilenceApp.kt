@@ -13,6 +13,9 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.bitmapFactoryMaxParallelism
+import coil3.request.allowHardware
+import coil3.request.allowRgb565
 import coil3.request.crossfade
 import com.unsilence.app.data.memory.MesMetricsLogger
 import com.unsilence.app.data.memory.SnapshotScheduler
@@ -85,10 +88,13 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         return ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizeBytes(64L * 1024 * 1024)  // 64MB cap — was unbounded (25% of app heap default)
+                    .maxSizeBytes(48L * 1024 * 1024)  // 48MB hard cap
                     .build()
             }
-            .crossfade(true)
+            .bitmapFactoryMaxParallelism(3)
+            .allowHardware(true)
+            .allowRgb565(true)
+            .crossfade(false)
             .components {
                 add(
                     OkHttpNetworkFetcherFactory(

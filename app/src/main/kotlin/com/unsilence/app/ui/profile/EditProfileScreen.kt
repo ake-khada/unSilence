@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Cyan
 import com.unsilence.app.ui.theme.Sizing
@@ -166,7 +168,7 @@ fun EditProfileScreen(
                     if (picture.isNotBlank()) {
                         // Show picture URL as banner preview for now; banner editing is v1.1
                         AsyncImage(
-                            model              = picture,
+                            model              = rememberFullWidthImageRequest(picture),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier.fillMaxSize(),
@@ -193,7 +195,7 @@ fun EditProfileScreen(
                     }
                     if (picture.isNotBlank()) {
                         AsyncImage(
-                            model              = picture,
+                            model              = rememberAvatarImageRequest(picture, EDIT_AVATAR_SIZE),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier.fillMaxSize(),
