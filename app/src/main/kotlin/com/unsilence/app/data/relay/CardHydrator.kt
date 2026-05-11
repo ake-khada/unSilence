@@ -479,22 +479,11 @@ class CardHydrator @Inject constructor(
     suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null) {
         if (events.isEmpty()) return
 
-        val now = System.currentTimeMillis()
-        val sinceLast = now - lastFullHydrationAt
-        // Cheap novel-count probe — same lock + set-membership check that the
-        // phase entry filter would do, but no allocation of a filtered list.
-        val novelCount = synchronized(hydratedLock) {
-            events.count { it.id !in profilesHydrated }
-        }
-        if (sinceLast < COALESCE_COOLDOWN_MS && novelCount <= COALESCE_NOVEL_THRESHOLD) {
-            Log.d(TAG, "Coalesce: ${events.size} events, $novelCount novel, " +
-                "${sinceLast}ms since last — defer")
-            return
-        }
-        lastFullHydrationAt = now
-
-        hydrateProfiles(events, excludeSourceRelay = feedRelay)
-        hydrateRefs(events, feedRelay = feedRelay)
+        // Profile + ref hydration removed — per-card self-fetch paths handle
+        // these (AvatarImage 800ms autofetch for profiles, QuoteCard/EmptyRepostBody
+        // produceState for refs). Warm-zone batch dispatch was the burst source
+        // causing Choreographer frame skips (30-69 frames) on relay-heavy feeds.
+        // hydrateMedia remains load-bearing for layout stability (image dims).
         hydrateMedia(events, mmrAllowed = false)
     }
 }
