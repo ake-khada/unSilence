@@ -164,15 +164,18 @@ class VideoThumbnailCache @Inject constructor(
     private fun evictIfNeeded() {
         if (cache.size <= MAX_ENTRIES && bitmapBytes <= MAX_BITMAP_BYTES) return
 
-        // Build sorted eviction candidates — oldest access first, skip visible
-        val candidates = lastAccessedAt.entries
-            .filter { it.key !in visibleUrls }
-            .sortedBy { it.value }
+        // Build sorted eviction candidates — oldest access first, skip visible.
+        // Snapshot accessed-at values before sorting; lastAccessedAt is
+        // concurrently mutated by the touch path. Same TimSort contract bug
+        // as MES eviction sites — see CLAUDE.md rule #24.
+        val candidateUrls = lastAccessedAt.keys.filter { it !in visibleUrls }
+        val accessSnapshot = HashMap<String, Long>(candidateUrls.size)
+        for (u in candidateUrls) accessSnapshot[u] = lastAccessedAt[u] ?: 0L
+        val candidates = candidateUrls.sortedBy { accessSnapshot[it] ?: 0L }
 
         var evicted = 0
-        for (entry in candidates) {
+        for (url in candidates) {
             if (cache.size <= MAX_ENTRIES * 4 / 5 && bitmapBytes <= MAX_BITMAP_BYTES * 4 / 5) break
-            val url = entry.key
             val thumb = cache.remove(url)
             lastAccessedAt.remove(url)
             // Don't remove from resolvedAspectRatios — lightweight floats, needed for layout stability
