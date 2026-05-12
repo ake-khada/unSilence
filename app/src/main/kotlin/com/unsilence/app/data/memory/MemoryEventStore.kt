@@ -505,14 +505,18 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
             }
         }
 
-        val candidates = profileAccessedAt.entries
-            .filter { it.key !in anchors }
-            .sortedBy { it.value }
+        // Snapshot profileAccessedAt values before sorting — same TimSort
+        // contract bug as evictOldContentEvents. profileAccessedAt is mutated
+        // concurrently by handleProfile and cachedProfileFields. See CLAUDE.md
+        // rule #24.
+        val candidateKeys = profileAccessedAt.keys.filter { it !in anchors }
+        val accessSnapshot = HashMap<String, Long>(candidateKeys.size)
+        for (k in candidateKeys) accessSnapshot[k] = profileAccessedAt[k] ?: 0L
+        val candidates = candidateKeys.sortedBy { accessSnapshot[it] ?: 0L }
 
         var removed = 0
-        for (entry in candidates) {
+        for (pubkey in candidates) {
             if (profilesByPubkey.size <= PROFILE_CAP * 4 / 5) break
-            val pubkey = entry.key
             profilesByPubkey.remove(pubkey)
             profileUpdatedAt.remove(pubkey)
             profileFieldsCache.remove(pubkey)
