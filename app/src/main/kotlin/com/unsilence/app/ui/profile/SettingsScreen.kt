@@ -52,6 +52,7 @@ import com.unsilence.app.ui.theme.Spacing
 fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
+    var showFilters by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -90,7 +91,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
                 SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {}, enabled = false, subtitle = "Coming soon")
-                SettingsItem(icon = Icons.Filled.Security,     label = "Safety",       onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.Security,     label = "Filters",      onClick = { showFilters = true })
                 SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {}, enabled = false, subtitle = "Coming soon")
@@ -119,6 +120,9 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
 
     if (showRelays) {
         RelayManagementScreen(onDismiss = { showRelays = false })
+    }
+    if (showFilters) {
+        FiltersScreen(onDismiss = { showFilters = false })
     }
 }
 
