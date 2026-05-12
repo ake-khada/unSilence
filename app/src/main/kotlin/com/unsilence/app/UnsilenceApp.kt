@@ -19,6 +19,7 @@ import coil3.request.allowRgb565
 import coil3.request.crossfade
 import com.unsilence.app.data.memory.MesMetricsLogger
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
@@ -31,6 +32,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
     @Inject lateinit var snapshotScheduler: SnapshotScheduler
     @Inject lateinit var mesMetricsLogger: MesMetricsLogger
     @Inject lateinit var sharedPlayerHolder: SharedPlayerHolder
+    @Inject lateinit var subscription: Subscription
 
     override fun onCreate() {
         super.onCreate()
@@ -61,7 +63,11 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         // app background or memory pressure.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) {
+                subscription.pauseAll()
                 sharedPlayerHolder.releaseForLifecycle("app backgrounded")
+            }
+            override fun onStart(owner: LifecycleOwner) {
+                subscription.resumeAll()
             }
         })
         registerComponentCallbacks(object : ComponentCallbacks2 {
