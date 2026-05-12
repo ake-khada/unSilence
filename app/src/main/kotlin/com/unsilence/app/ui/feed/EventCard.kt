@@ -3,9 +3,7 @@ package com.unsilence.app.ui.feed
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +24,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -187,14 +190,37 @@ fun EventCard(
     }
 
     // Standard note layout
-    @OptIn(ExperimentalFoundationApi::class)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(Color.White.copy(alpha = flashAlpha.value * 0.05f))
-            .combinedClickable(
-                onClick = { onNoteClick(model.navigateId) },
-                onLongClick = onLongPress,
+            .then(
+                if (onLongPress != null) Modifier.pointerInput(onLongPress) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        // Wait for the long-press timeout. If the user lifts or drags
+                        // before it expires, withTimeoutOrNull returns the result;
+                        // if the timeout fires first, it returns null → long press.
+                        val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val ch = event.changes.firstOrNull { it.id == down.id }
+                                if (ch == null || ch.changedToUp()) return@withTimeoutOrNull true
+                                val dist = (ch.position - down.position).getDistance()
+                                if (dist > viewConfiguration.touchSlop) return@withTimeoutOrNull true
+                            }
+                            @Suppress("UNREACHABLE_CODE") true
+                        }
+                        if (cancelled == null) {
+                            onLongPress()
+                            // Consume remaining events so child onClick doesn't fire
+                            do {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                ev.changes.forEach { it.consume() }
+                            } while (ev.changes.any { it.pressed })
+                        }
+                    }
+                } else Modifier,
             ),
     ) {
         // Repost header (kind 6 only)

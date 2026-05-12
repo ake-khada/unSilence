@@ -62,6 +62,7 @@ fun PostActionsBottomSheet(
                 AvatarImage(
                     pubkey = authorPubkey,
                     picture = authorProfile?.picture,
+                    modifier = Modifier.size(36.dp),
                     sizeDp = 36.dp,
                 )
                 Spacer(Modifier.width(12.dp))
