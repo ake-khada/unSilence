@@ -425,8 +425,13 @@ class FeedViewModel @Inject constructor(
     private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
         if (batch.isNotEmpty()) {
             if (since == null) {
-                // First load — bulk replace.
-                _events.value = TimelineMerge.sort(batch).take(TimelineMerge.EVENTS_CAP)
+                // First load — merge into current (which may be empty or
+                // populated by a prior relay batch). The direct-assign path
+                // `_events.value = sort(batch)` replaced whatever the previous
+                // relay batch deposited, and when current was non-empty it
+                // bypassed dedup — producing duplicate cards. merge() handles
+                // dedup, sort, and cap uniformly.
+                _events.update { current -> TimelineMerge.merge(current, batch) }
             } else {
                 // Refresh / metaVer path — only newer events, route through live-tail handler.
                 val newer = batch.filter { it.createdAt >= since }
