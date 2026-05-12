@@ -42,6 +42,17 @@
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean
 
+# Jackson Kotlin module (transitive via Quartz) uses kotlin-reflect to
+# introspect stdlib types. R8 strips serialVersionUID from EmptyList /
+# EmptyMap and metadata Jackson needs, causing crash on Amber NIP-55 login.
+-keep class com.fasterxml.jackson.** { *; }
+-keep class kotlin.Metadata { *; }
+-keepclassmembers class kotlin.collections.** {
+    private static final long serialVersionUID;
+}
+-dontwarn java.beans.ConstructorProperties
+-dontwarn java.beans.Transient
+
 # Strip verbose and debug logs in release builds. R8 evaluates these
 # assumenosideeffects rules and removes the call sites entirely — string
 # formatting, varargs allocation, and logcat I/O all vanish. Keeps Log.i,
