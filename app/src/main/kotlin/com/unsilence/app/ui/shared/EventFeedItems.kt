@@ -78,6 +78,7 @@ data class EventActionCallbacks(
      *  update reactively without going through a list-wide signal trigger.
      *  Falls back to the snapshot in FeedRow when null. */
     val statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
+    val onLongPress: ((FeedRow) -> Unit)? = null,
 )
 
 /**
@@ -412,6 +413,7 @@ private fun EventFeedItem(
         onNewPostAnimated   = onNewPostAnimatedCb,
         parentEvent         = parentEvent,
         parentAuthor        = parentAuthor,
+        onLongPress         = callbacks.onLongPress?.let { lp -> { lp(row) } },
         sensitiveBlur       = sensitiveBlur && row.hasContentWarning,
         contentWarningReason = row.contentWarningReason,
     )

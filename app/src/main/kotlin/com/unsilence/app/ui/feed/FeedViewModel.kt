@@ -20,6 +20,9 @@ import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.model.ReportType
+import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +94,8 @@ class FeedViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
     private val relayPool: RelayPool,
+    private val muteListRepository: MuteListRepository,
+    private val reportRepository: ReportRepository,
 ) : ViewModel() {
 
     // ── Timeline state (mirrors Jumble NoteList component state) ──────────────
@@ -723,6 +728,13 @@ class FeedViewModel @Inject constructor(
             FeedContentFilter.REPLIES_ONLY ->
                 evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
         }
+
+    // ── Mute / Report actions ──────────────────────────────────────────────
+
+    fun muteUser(pubkey: String) = muteListRepository.muteUser(pubkey)
+
+    fun reportEvent(eventId: String, authorPubkey: String, type: ReportType) =
+        reportRepository.reportEvent(eventId, authorPubkey, type)
 
     private fun isMuted(evt: NostrEvent, muteList: MuteList?): Boolean {
         if (muteList == null) return false

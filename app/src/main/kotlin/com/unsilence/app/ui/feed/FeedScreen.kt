@@ -46,8 +46,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Intent
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.data.memory.UserEntity
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -109,6 +118,13 @@ fun FeedScreen(
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+
+    // ── Long-press bottom sheet state ────────────────────────────────────────
+    var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
+    var reportRow by remember { mutableStateOf<FeedRow?>(null) }
+    val haptics = LocalHapticFeedback.current
+    val clipboard = LocalClipboardManager.current
+    val ctx = LocalContext.current
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -173,6 +189,10 @@ fun FeedScreen(
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
+            onLongPress = { row ->
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                actionsRow = row
+            },
         )
     }
 
@@ -395,6 +415,48 @@ fun FeedScreen(
         FullScreenVideoDialog(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
+        )
+    }
+
+    // ── Long-press actions bottom sheet ──────────────────────────────────────
+    actionsRow?.let { row ->
+        val authorProfile: UserEntity? = viewModel.profileFlow(row.pubkey)
+            .collectAsStateWithLifecycle().value
+        PostActionsBottomSheet(
+            authorPubkey = row.pubkey,
+            authorProfile = authorProfile,
+            onDismiss = { actionsRow = null },
+            onCopyText = { clipboard.setText(AnnotatedString(row.content)) },
+            onCopyLink = {
+                val nevent = NEvent.create(row.id, null, null, null as NormalizedRelayUrl?)
+                clipboard.setText(AnnotatedString("nostr:$nevent"))
+                showSnackbar("Link copied")
+            },
+            onShare = {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, row.content)
+                }
+                ctx.startActivity(Intent.createChooser(shareIntent, "Share note"))
+            },
+            onMuteUser = {
+                viewModel.muteUser(row.pubkey)
+                showSnackbar("Muted")
+            },
+            onReport = {
+                reportRow = row
+                actionsRow = null
+            },
+        )
+    }
+
+    reportRow?.let { row ->
+        ReportTypeSheet(
+            onDismiss = { reportRow = null },
+            onTypeSelected = { type ->
+                viewModel.reportEvent(row.id, row.pubkey, type)
+                showSnackbar("Reported")
+            },
         )
     }
 }
