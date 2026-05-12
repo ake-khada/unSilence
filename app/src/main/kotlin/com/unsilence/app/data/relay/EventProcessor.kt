@@ -405,7 +405,7 @@ class EventProcessor @Inject constructor(
         // in burst — capacity-2000 channel handles the largest observed burst).
         // The drainer flushes via insertBatch so per-event signal bumps coalesce.
         // Kind-10012 relay set refs are resolved inside flushControlBatch.
-        if (dto.kind in setOf(10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
+        if (dto.kind in setOf(10000, 10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
             controlChannel.trySend(nostrEvent)
         }
 

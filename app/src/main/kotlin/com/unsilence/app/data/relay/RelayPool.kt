@@ -1158,6 +1158,33 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * One-shot fetch for NIP-51 mute list (kind 10000).
+     * Sent to indexer + connected write relays, same pattern as fetchRelayEcosystem.
+     */
+    fun fetchMuteList(pubkeyHex: String, rawIndexerRelayUrls: List<String>) {
+        val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val subId = "mute-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(10000)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+        val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in indexerRelayUrls && connections.containsKey(it) }
+        val allTargets = indexerRelayUrls + writeRelayUrls
+        for (url in allTargets) {
+            connections[url]?.let { sendOneShotToRelay(it, req) }
+        }
+        Log.d(TAG, "Fetching NIP-51 mute list for ${pubkeyHex.take(8)}… from ${indexerRelayUrls.size} indexers + ${writeRelayUrls.size} write relays")
+    }
+
+    /**
      * Fetch kind-30002 relay sets by coordinate (author + d-tags) from hint relays.
      * Used to resolve ["a", "30002:pubkey:dtag", "hint-relay"] references in kind-10012.
      * Connects to hint relays if not already connected, sends a single REQ with

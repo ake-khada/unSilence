@@ -17,16 +17,22 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.sample
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
+import com.vitorpamplona.quartz.nip44Encryption.Nip44
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListSet
 import java.util.concurrent.atomic.AtomicLong
@@ -55,7 +61,9 @@ private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
-class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.RelayMetadataSource {
+class MemoryEventStore @Inject constructor(
+    private val keyManager: KeyManager,
+) : com.unsilence.app.data.relay.RelayMetadataSource {
 
     companion object {
         const val FOLLOWER_COUNT_TTL_SECONDS = 86_400L
@@ -262,6 +270,7 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
         extraBufferCapacity = 128,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+    private val _muteListSignal = MutableStateFlow(0L)
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
@@ -697,16 +706,51 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     }
 
     private fun handleMuteList(event: NostrEvent) {
-        val pubkeys = event.tags
-            .filter { it.size >= 2 && it[0] == "p" }
-            .map { it[1] }
-            .toSet()
-        val words = event.tags
-            .filter { it.size >= 2 && it[0] == "word" }
-            .map { it[1] }
-            .toSet()
+        val pubkeys = mutableSetOf<String>()
+        val hashtags = mutableSetOf<String>()
+        val words = mutableSetOf<String>()
+        val eventIds = mutableSetOf<String>()
+        for (tag in event.tags) {
+            if (tag.size < 2) continue
+            when (tag[0]) {
+                "p" -> pubkeys.add(tag[1])
+                "t" -> hashtags.add(tag[1].lowercase())
+                "word" -> words.add(tag[1].lowercase())
+                "e" -> eventIds.add(tag[1])
+            }
+        }
+
+        // Decrypt private mute entries from .content (NIP-44, NIP-04 fallback).
+        // Only possible for our own mute list when we have the private key.
+        var privPubkeys = emptySet<String>()
+        var privHashtags = emptySet<String>()
+        var privWords = emptySet<String>()
+        var privEventIds = emptySet<String>()
+        if (event.pubkey == ownPubkey && event.content.isNotEmpty() && !keyManager.isAmberMode) {
+            val decryptedTags = decryptMuteContent(event.content, event.pubkey)
+            if (decryptedTags != null) {
+                val pp = mutableSetOf<String>()
+                val ph = mutableSetOf<String>()
+                val pw = mutableSetOf<String>()
+                val pe = mutableSetOf<String>()
+                for (tag in decryptedTags) {
+                    if (tag.size < 2) continue
+                    when (tag[0]) {
+                        "p" -> pp.add(tag[1])
+                        "t" -> ph.add(tag[1].lowercase())
+                        "word" -> pw.add(tag[1].lowercase())
+                        "e" -> pe.add(tag[1])
+                    }
+                }
+                privPubkeys = pp
+                privHashtags = ph
+                privWords = pw
+                privEventIds = pe
+                Log.i("MES", "MuteList: decrypted ${pp.size}p ${ph.size}t ${pw.size}word ${pe.size}e private entries")
+            }
+        }
+
         muteListsByPubkey.compute(event.pubkey) { _, existing ->
-            // Check if we already have a newer mute list
             if (existing != null) {
                 val existingEvent = eventsById.values.firstOrNull {
                     it.pubkey == event.pubkey && it.kind == 10000 && it.id != event.id
@@ -715,7 +759,51 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
                     return@compute existing
                 }
             }
-            MuteList(pubkeys, words)
+            MuteList(
+                pubkeys, hashtags, words, eventIds,
+                privPubkeys, privHashtags, privWords, privEventIds,
+            )
+        }
+        Log.i("MES", "MuteList import: pub=${pubkeys.size}p ${hashtags.size}t ${words.size}word ${eventIds.size}e | priv=${privPubkeys.size}p ${privHashtags.size}t ${privWords.size}word ${privEventIds.size}e | owner=${event.pubkey.take(8)}…")
+        if (event.pubkey == ownPubkey) _muteListSignal.value = System.nanoTime()
+    }
+
+    /**
+     * Decrypt kind-10000 .content (private mute tags encrypted to self).
+     * Tries NIP-44 first, falls back to NIP-04 for legacy clients.
+     * Returns parsed tag arrays, or null on failure.
+     */
+    private fun decryptMuteContent(content: String, pubkeyHex: String): List<List<String>>? {
+        val privKeyHex = keyManager.getPrivateKeyHex()
+        if (privKeyHex == null) {
+            Log.i("MES", "MuteList: Amber mode — skipping private mute decrypt")
+            return null
+        }
+        val privKeyBytes = privKeyHex.hexToByteArray()
+        val pubKeyBytes = pubkeyHex.hexToByteArray()
+
+        // Try NIP-44 first (modern clients)
+        val plaintext: String? = runCatching {
+            Nip44.decrypt(content, privKeyBytes, pubKeyBytes)
+        }.getOrNull() ?: runCatching {
+            // Fallback to NIP-04 (legacy clients like older Amethyst)
+            Nip04.decrypt(content, privKeyBytes, pubKeyBytes)
+        }.getOrNull()
+
+        if (plaintext == null) {
+            Log.w("MES", "MuteList: failed to decrypt private entries (NIP-44 + NIP-04)")
+            return null
+        }
+
+        return runCatching {
+            val arr = NostrJson.parseToJsonElement(plaintext) as? JsonArray
+                ?: return null
+            arr.map { tagArr ->
+                (tagArr as JsonArray).map { it.jsonPrimitive.content }
+            }
+        }.getOrElse { e ->
+            Log.w("MES", "MuteList: failed to parse decrypted tags: ${e.message}")
+            null
         }
     }
 
@@ -1311,6 +1399,47 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
     }
     fun getRelayList(pubkey: String): RelayList? = relayListsByPubkey[pubkey]
     fun getMuteList(pubkey: String): MuteList? = muteListsByPubkey[pubkey]
+
+    /**
+     * Flow that emits the current user's MuteList whenever it changes.
+     * Driven by _muteListSignal, bumped in handleMuteList and updateMuteListPrivateTags.
+     */
+    fun ownMuteListFlow(): Flow<MuteList?> =
+        _muteListSignal.map { muteListsByPubkey[ownPubkey] }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    /**
+     * Update the private (decrypted) portion of an existing MuteList.
+     * Called from bootstrap after Amber/signer-based decrypt completes.
+     */
+    fun updateMuteListPrivateTags(
+        pubkey: String,
+        privatePubkeys: Set<String>,
+        privateHashtags: Set<String>,
+        privateWords: Set<String>,
+        privateEventIds: Set<String>,
+    ) {
+        muteListsByPubkey.computeIfPresent(pubkey) { _, existing ->
+            existing.copy(
+                privatePubkeys = privatePubkeys,
+                privateHashtags = privateHashtags,
+                privateWords = privateWords,
+                privateEventIds = privateEventIds,
+            )
+        }
+        Log.i("MES", "MuteList private update: ${privatePubkeys.size}p ${privateHashtags.size}t ${privateWords.size}word ${privateEventIds.size}e | owner=${pubkey.take(8)}…")
+        if (pubkey == ownPubkey) _muteListSignal.value = System.nanoTime()
+    }
+
+    /**
+     * Find the kind-10000 event content for a pubkey (for external decrypt).
+     */
+    fun getMuteListContent(pubkey: String): String? {
+        return eventsById.values.firstOrNull {
+            it.pubkey == pubkey && it.kind == 10000 && it.content.isNotEmpty()
+        }?.content
+    }
 
     // ─── O(1) stat reads ────────────────────────────────────────────────────
 
