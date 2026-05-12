@@ -62,6 +62,16 @@ class SigningManager @Inject constructor(
             ?: runCatching { s.nip04Decrypt(ciphertext, peerPubkeyHex) }.getOrNull()
     }
 
+    /**
+     * Encrypt plaintext via NIP-44 v2. Self-encrypt pattern: peerPubkey == own pubkey.
+     * Internal signer: sync Nip44 crypto. External (Amber): NIP-55 intent.
+     * Always NIP-44 v2 — no NIP-04 fallback for new data.
+     */
+    suspend fun encrypt(plaintext: String, peerPubkeyHex: String): String? {
+        val s = getOrCreateSigner() ?: return null
+        return runCatching { s.nip44Encrypt(peerPubkeyHex, plaintext) }.getOrNull()
+    }
+
     fun registerLauncher(launcher: (Intent) -> Unit) {
         if (keyManager.isAmberMode) {
             val s = getOrCreateSigner()
