@@ -645,14 +645,15 @@ class FeedViewModel @Inject constructor(
         val readRelays = ownPubkey
             ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
             ?: emptyList()
-        // Conversations tab: relay-side reply scoping (rule 48b)
-        // kinds=[1] only (no reposts/articles), #e:[] tag filter
+        // Conversations tab: kinds=[1] only (no reposts/articles in conversations).
+        // Reply filtering is client-side via matchesContentFilter in feedRows
+        // (FeedContentFilter.REPLIES_ONLY matches on replyToId != null || rootId != null).
+        // The relay-level "#e: []" filter was invalid NIP-01 — strfry, damus relay,
+        // and other strict implementations return zero events for empty-list tag filters.
         val kinds = if (onlyReplies) listOf(1) else listOf(1, 6, 20, 21, 30023)
-        val tags: Map<String, List<String>>? = if (onlyReplies) mapOf("e" to emptyList()) else null
         val config = OutboxRelayResolver.Config(
             kinds = kinds,
             limit = 300,
-            tags = tags,
         )
         return when (type) {
             is FeedType.Following -> {
