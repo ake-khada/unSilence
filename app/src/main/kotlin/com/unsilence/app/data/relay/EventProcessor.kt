@@ -79,6 +79,7 @@ private const val DEDUP_TRIM = 2_000
 @Singleton
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
+    private val signatureVerifier: com.unsilence.app.data.auth.SignatureVerifier,
 ) : TapRegistration {
     // CPU-bound work (JSON parse, MES insert, kind handlers).
     // Belongs on Default not IO. limitedParallelism(2) keeps this from
@@ -139,6 +140,21 @@ class EventProcessor @Inject constructor(
             flushControlBatch(buffer)
         }
     }
+
+    /**
+     * Test-only: replace SignatureVerifier with a stub. Tests that exercise
+     * the state machine (dedup, batching, eviction) use synthetic events
+     * with fake sigs; real signature verification is covered by
+     * SignatureVerifierTest separately.
+     */
+    @Volatile private var signatureVerifierTestOverride: com.unsilence.app.data.auth.SignatureVerifier? = null
+
+    internal fun setTestVerifier(verifier: com.unsilence.app.data.auth.SignatureVerifier) {
+        this.signatureVerifierTestOverride = verifier
+    }
+
+    private fun verifySig(event: NostrEvent): Boolean =
+        (signatureVerifierTestOverride ?: signatureVerifier).verify(event)
 
     /** Set by RelayPool — resolves kind-30002 relay set references from kind-10012 hint tags. */
     internal var relaySetRefFetcher: RelaySetRefFetcher? = null
@@ -221,6 +237,16 @@ class EventProcessor @Inject constructor(
         drainerScope.launch { drainHot() }
         drainerScope.launch { drainCold() }
         drainerScope.launch { drainControl() }
+        // Periodic verification stats — 60s interval, only logs if there's been activity.
+        drainerScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60_000L)
+                val s = signatureVerifier.stats()
+                if (s.ok > 0 || s.bad > 0 || s.errors > 0) {
+                    Log.d(TAG, "SigVerify: ok=${s.ok} bad=${s.bad} errors=${s.errors}")
+                }
+            }
+        }
         Log.d(TAG, "Drainers started")
     }
 
@@ -355,6 +381,12 @@ class EventProcessor @Inject constructor(
             firstSeenAt = System.currentTimeMillis(),
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
         )
+
+        // Signature verification — Schnorr sig + id-hash check.
+        // After seenIds dedup so we verify each unique event exactly once.
+        // Before tap fire / channel send so unverified events never reach
+        // subscriptions or MES.
+        if (!verifySig(nostrEvent)) return
 
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES

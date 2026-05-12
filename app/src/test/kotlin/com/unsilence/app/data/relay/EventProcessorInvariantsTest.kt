@@ -1,6 +1,8 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,10 +28,17 @@ class EventProcessorInvariantsTest {
     private lateinit var store: MemoryEventStore
     private lateinit var processor: EventProcessor
 
+    /** Always-pass stub — tests verify state machine behavior, not crypto.
+     *  Real signature verification is covered by SignatureVerifierTest. */
+    private val passVerifier = object : SignatureVerifier() {
+        override fun verify(event: NostrEvent): Boolean = true
+    }
+
     @Before
     fun setUp() {
         store = MemoryEventStore()
-        processor = EventProcessor(store)
+        processor = EventProcessor(store, SignatureVerifier())
+        processor.setTestVerifier(passVerifier)
         // Stop drainers — tests use drainForTest() for synchronous channel drain.
         processor.setTestScope(CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher()))
     }
