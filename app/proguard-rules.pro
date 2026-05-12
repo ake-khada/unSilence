@@ -41,3 +41,12 @@
 # java.lang.management (not available on Android)
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean
+
+# Strip verbose and debug logs in release builds. R8 evaluates these
+# assumenosideeffects rules and removes the call sites entirely — string
+# formatting, varargs allocation, and logcat I/O all vanish. Keeps Log.i,
+# Log.w, Log.e for production observability.
+-assumenosideeffects class android.util.Log {
+    public static *** v(...);
+    public static *** d(...);
+}
