@@ -24,6 +24,9 @@ android {
             isMinifyEnabled   = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Sign with debug key for local testing — replace with real
+            // release signing config before publishing to F-Droid / Zapstore.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
