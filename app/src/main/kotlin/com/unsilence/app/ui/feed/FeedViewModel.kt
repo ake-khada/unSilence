@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
@@ -133,13 +134,18 @@ class FeedViewModel @Inject constructor(
     private val feedRowCache = ConcurrentHashMap<String, FeedRow>()
 
     val feedRows: StateFlow<List<FeedRow>> =
-        combine(_events, _contentFilter) { events, cf ->
+        combine(
+            _events,
+            _contentFilter,
+            memoryEventStore.ownMuteListFlow(),
+        ) { events, cf, muteList ->
             if (events.isEmpty()) {
                 feedRowCache.clear()
                 return@combine emptyList()
             }
             val displayed = events.asSequence()
                 .filter { matchesContentFilter(it, cf) }
+                .filter { !isMuted(it, muteList) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) {
@@ -709,6 +715,28 @@ class FeedViewModel @Inject constructor(
             FeedContentFilter.REPLIES_ONLY ->
                 evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
         }
+
+    private fun isMuted(evt: NostrEvent, muteList: MuteList?): Boolean {
+        if (muteList == null) return false
+        // Pubkey mute (public + private)
+        if (evt.pubkey in muteList.pubkeys || evt.pubkey in muteList.privatePubkeys) return true
+        // Event ID mute (public + private)
+        if (evt.id in muteList.eventIds || evt.id in muteList.privateEventIds) return true
+        // Word mute (public + private) — check against lowercased content
+        val lowerContent by lazy(LazyThreadSafetyMode.NONE) { evt.content.lowercase() }
+        for (word in muteList.words) { if (lowerContent.contains(word)) return true }
+        for (word in muteList.privateWords) { if (lowerContent.contains(word)) return true }
+        // Hashtag mute (public + private) — check t-tags on the event
+        if (muteList.hashtags.isNotEmpty() || muteList.privateHashtags.isNotEmpty()) {
+            for (tag in evt.tags) {
+                if (tag.size >= 2 && tag[0] == "t") {
+                    val ht = tag[1].lowercase()
+                    if (ht in muteList.hashtags || ht in muteList.privateHashtags) return true
+                }
+            }
+        }
+        return false
+    }
 
     private data class ResubKey(
         val state: ColdStartState,
