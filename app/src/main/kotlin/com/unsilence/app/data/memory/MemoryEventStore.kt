@@ -1054,11 +1054,20 @@ class MemoryEventStore @Inject constructor() : com.unsilence.app.data.relay.Rela
 
         // Pass 2: for each kind over its cap, sort candidates by lastTouchedAt
         // ascending and evict the least-recently-touched excess.
+        //
+        // CRITICAL: snapshot lastTouchedAt values before sorting. The map is
+        // concurrently mutated by the hot drainer (insertCore), CardHydrator
+        // (lookupEvent), and other insert paths. Reading from it inside the
+        // sort comparator triggers TimSort's contract violation check:
+        //   IllegalArgumentException: Comparison method violates its general contract!
+        // See CLAUDE.md rule #24.
         for ((kind, candidates) in candidatesByKind) {
             val cap = kindCaps[kind] ?: continue
             if (candidates.size <= cap) continue
             val excess = candidates.size - cap
-            candidates.sortBy { lastTouchedAt[it.id] ?: 0L }
+            val touchSnapshot = HashMap<String, Long>(candidates.size)
+            for (c in candidates) touchSnapshot[c.id] = lastTouchedAt[c.id] ?: 0L
+            candidates.sortBy { touchSnapshot[it.id] ?: 0L }
             for (i in 0 until excess) {
                 toEvict.add(candidates[i])
             }
