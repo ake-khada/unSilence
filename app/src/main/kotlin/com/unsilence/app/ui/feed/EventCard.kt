@@ -3,7 +3,9 @@ package com.unsilence.app.ui.feed
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -94,6 +96,8 @@ fun EventCard(
     // Thread parent (Conversations tab)
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
+    // Long-press actions
+    onLongPress: (() -> Unit)? = null,
     // NIP-36 content warning
     sensitiveBlur: Boolean = false,
     contentWarningReason: String? = null,
@@ -183,11 +187,15 @@ fun EventCard(
     }
 
     // Standard note layout
+    @OptIn(ExperimentalFoundationApi::class)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(Color.White.copy(alpha = flashAlpha.value * 0.05f))
-            .clickable { onNoteClick(model.navigateId) },
+            .combinedClickable(
+                onClick = { onNoteClick(model.navigateId) },
+                onLongClick = onLongPress,
+            ),
     ) {
         // Repost header (kind 6 only)
         if (model.repost != null) {
