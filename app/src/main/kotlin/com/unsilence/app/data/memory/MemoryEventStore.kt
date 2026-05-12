@@ -150,6 +150,10 @@ class MemoryEventStore @Inject constructor(
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
+    /** Epoch-seconds floor: reject own kind-10000 relay events older than this.
+     *  Set by addPrivateMute/removePrivateMute; cleared when a relay event
+     *  with createdAt >= floor is accepted (our publish echo arrived). */
+    @Volatile private var muteListOptimisticFloor: Long = 0L
 
     // ─── Trust scores (kind 30385) ────────────────────────────────────────────
     private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
@@ -747,6 +751,21 @@ class MemoryEventStore @Inject constructor(
                 privWords = pw
                 privEventIds = pe
                 Log.i("MES", "MuteList: decrypted ${pp.size}p ${ph.size}t ${pw.size}word ${pe.size}e private entries")
+            }
+        }
+
+        // Guard: reject relay events older than an in-flight optimistic update.
+        // addPrivateMute/removePrivateMute set the floor; it clears when the
+        // published event echoes back with createdAt >= floor.
+        if (event.pubkey == ownPubkey) {
+            val floor = muteListOptimisticFloor
+            if (floor > 0L && event.createdAt < floor) {
+                Log.d("MES", "MuteList: skipping stale relay event (createdAt=${event.createdAt} < optimistic=$floor)")
+                return
+            }
+            if (floor > 0L) {
+                // Relay event caught up — clear the floor
+                muteListOptimisticFloor = 0L
             }
         }
 
@@ -1441,9 +1460,11 @@ class MemoryEventStore @Inject constructor(
         }?.content
     }
 
-    /** Optimistic local mute — feed refilters via _muteListSignal. */
+    /** Optimistic local mute — feed refilters via _muteListSignal.
+     *  Sets muteListOptimisticFloor so relay events don't overwrite. */
     fun addPrivateMute(targetPubkey: String) {
         val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
         muteListsByPubkey.compute(ownPk) { _, existing ->
             if (existing == null) MuteList(
                 pubkeys = emptySet(), hashtags = emptySet(),
@@ -1454,9 +1475,11 @@ class MemoryEventStore @Inject constructor(
         _muteListSignal.value = System.nanoTime()
     }
 
-    /** Optimistic local unmute — removes from both public and private sets. */
+    /** Optimistic local unmute — removes from both public and private sets.
+     *  Sets muteListOptimisticFloor so relay events don't overwrite. */
     fun removePrivateMute(targetPubkey: String) {
         val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
         muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
             existing.copy(
                 pubkeys = existing.pubkeys - targetPubkey,
@@ -1464,6 +1487,12 @@ class MemoryEventStore @Inject constructor(
             )
         }
         _muteListSignal.value = System.nanoTime()
+    }
+
+    /** Clear the optimistic floor — called when publish fails to avoid
+     *  permanently blocking relay mute list updates. */
+    fun clearMuteListOptimisticFloor() {
+        muteListOptimisticFloor = 0L
     }
 
     // ─── O(1) stat reads ────────────────────────────────────────────────────
