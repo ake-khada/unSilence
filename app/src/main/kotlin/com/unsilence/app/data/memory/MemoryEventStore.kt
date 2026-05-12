@@ -28,7 +28,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
-import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
@@ -62,7 +62,7 @@ private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
 @Singleton
 class MemoryEventStore @Inject constructor(
-    private val keyManager: KeyManager,
+    private val keyProvider: MuteKeyProvider,
 ) : com.unsilence.app.data.relay.RelayMetadataSource {
 
     companion object {
@@ -726,7 +726,7 @@ class MemoryEventStore @Inject constructor(
         var privHashtags = emptySet<String>()
         var privWords = emptySet<String>()
         var privEventIds = emptySet<String>()
-        if (event.pubkey == ownPubkey && event.content.isNotEmpty() && !keyManager.isAmberMode) {
+        if (event.pubkey == ownPubkey && event.content.isNotEmpty() && !keyProvider.isAmberMode) {
             val decryptedTags = decryptMuteContent(event.content, event.pubkey)
             if (decryptedTags != null) {
                 val pp = mutableSetOf<String>()
@@ -774,7 +774,7 @@ class MemoryEventStore @Inject constructor(
      * Returns parsed tag arrays, or null on failure.
      */
     private fun decryptMuteContent(content: String, pubkeyHex: String): List<List<String>>? {
-        val privKeyHex = keyManager.getPrivateKeyHex()
+        val privKeyHex = keyProvider.getPrivateKeyHex()
         if (privKeyHex == null) {
             Log.i("MES", "MuteList: Amber mode — skipping private mute decrypt")
             return null

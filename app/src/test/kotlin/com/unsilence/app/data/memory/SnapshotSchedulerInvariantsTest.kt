@@ -1,5 +1,6 @@
 package com.unsilence.app.data.memory
 
+import com.unsilence.app.data.auth.MuteKeyProvider
 import androidx.core.util.AtomicFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -36,7 +37,7 @@ class SnapshotSchedulerInvariantsTest {
     fun setUp() {
         tmpDir = File(System.getProperty("java.io.tmpdir"), "snapshot-test-${System.nanoTime()}")
         tmpDir.mkdirs()
-        store = MemoryEventStore()
+        store = MemoryEventStore(object : MuteKeyProvider {})
         scheduler = SnapshotScheduler(store, AtomicFile(File(tmpDir, "test.snapshot")))
     }
 
@@ -111,7 +112,7 @@ class SnapshotSchedulerInvariantsTest {
         scheduler.saveNow()
 
         // Restore into fresh store + scheduler
-        val restoredStore = MemoryEventStore()
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -187,7 +188,7 @@ class SnapshotSchedulerInvariantsTest {
         jobs.forEach { it.join() }
 
         // Restore and verify — must be a valid snapshot regardless of ordering
-        val restoredStore = MemoryEventStore()
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -215,7 +216,7 @@ class SnapshotSchedulerInvariantsTest {
         atomicFile.failWrite(stream)
 
         // Restore — should get the original valid snapshot, not the partial write
-        val restoredStore = MemoryEventStore()
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -301,7 +302,7 @@ class SnapshotSchedulerInvariantsTest {
             // Restore from the bytes produced during the race. With the fix,
             // this must always succeed — the snapshot is internally
             // consistent regardless of what was added during the save.
-            val restored = MemoryEventStore()
+            val restored = MemoryEventStore(object : MuteKeyProvider {})
             withContext(Dispatchers.IO) {
                 DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use { input ->
                     restored.restoreSnapshotBinary(input)

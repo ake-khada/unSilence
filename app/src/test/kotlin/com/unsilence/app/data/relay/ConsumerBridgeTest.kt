@@ -3,6 +3,7 @@ package com.unsilence.app.data.relay
 import app.cash.turbine.test
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.FeedFilter
+import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.flow.Flow
@@ -32,7 +33,7 @@ class ConsumerBridgeTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore()
+        store = MemoryEventStore(object : MuteKeyProvider {})
     }
 
     private fun event(

@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -36,7 +37,7 @@ class EventProcessorInvariantsTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore()
+        store = MemoryEventStore(object : MuteKeyProvider {})
         processor = EventProcessor(store, SignatureVerifier())
         processor.setTestVerifier(passVerifier)
         // Stop drainers — tests use drainForTest() for synchronous channel drain.

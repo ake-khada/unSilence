@@ -1,5 +1,7 @@
 package com.unsilence.app.di
 
+import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.MesEventLoader
@@ -16,6 +18,9 @@ import dagger.hilt.components.SingletonComponent
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class RelayBindingsModule {
+    @Binds
+    abstract fun bindMuteKeyProvider(impl: KeyManager): MuteKeyProvider
+
     @Binds
     abstract fun bindRelayMetadataSource(impl: MemoryEventStore): RelayMetadataSource
 

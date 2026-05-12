@@ -9,6 +9,7 @@ package com.unsilence.app.data.memory
 // ─────────────────────────────────────────────────────────────────────────────
 
 import app.cash.turbine.test
+import com.unsilence.app.data.auth.MuteKeyProvider
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -28,7 +29,7 @@ class MemoryEventStoreInvariantsTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore()
+        store = MemoryEventStore(object : MuteKeyProvider {})
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -569,7 +570,7 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Restore into fresh store
-            val restored = MemoryEventStore()
+            val restored = MemoryEventStore(object : MuteKeyProvider {})
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Verify events (kind-3 is persisted in ---FOLLOWS--- section, not eventsById)
@@ -616,7 +617,7 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Fresh store — subscribe to flows BEFORE restore
-            val restored = MemoryEventStore()
+            val restored = MemoryEventStore(object : MuteKeyProvider {})
 
             // Before restore, feedEvents should be empty
             assertTrue(restored.feedEvents(defaultFilter).isEmpty())
@@ -797,7 +798,7 @@ class MemoryEventStoreInvariantsTest {
             val fileSizeKB = tmpFile.length() / 1024.0
 
             // Measure restore
-            val restored = MemoryEventStore()
+            val restored = MemoryEventStore(object : MuteKeyProvider {})
             val restoreStart = System.nanoTime()
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
             val restoreMs = (System.nanoTime() - restoreStart) / 1_000_000.0
@@ -827,7 +828,7 @@ class MemoryEventStoreInvariantsTest {
         try {
             tmpFile.writeText("SNAPSHOT_V99\nsome garbage data\n")
 
-            val restored = MemoryEventStore()
+            val restored = MemoryEventStore(object : MuteKeyProvider {})
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Store should remain completely empty — no crash, no partial load
@@ -858,7 +859,7 @@ class MemoryEventStoreInvariantsTest {
     @Test
     fun `restoreSnapshotFrom is idempotent across multiple calls`() = runTest {
         // Populate a source store with events + engagement that produces aggregates
-        val source = MemoryEventStore()
+        val source = MemoryEventStore(object : MuteKeyProvider {})
         source.insert(event(id = "e1", kind = 1))
         source.insert(event(id = "e2", kind = 1, replyToId = "e1", tags = listOf(listOf("e", "e1"))))
         source.insert(event(id = "r1", kind = 7, tags = listOf(listOf("e", "e1"))))
@@ -868,7 +869,7 @@ class MemoryEventStoreInvariantsTest {
         val snapshotData = snapshot.toString()
 
         // Restore once
-        val target = MemoryEventStore()
+        val target = MemoryEventStore(object : MuteKeyProvider {})
         target.restoreSnapshotFrom(StringReader(snapshotData).buffered())
         val firstReplyCount = target.replyCount("e1")
         val firstReactionCount = target.reactionCount("e1")
@@ -3384,7 +3385,7 @@ class MemoryEventStoreInvariantsTest {
         sw.buffered().use { store.saveSnapshotTo(it) }
         val snapshotData = sw.toString()
 
-        val restored = MemoryEventStore()
+        val restored = MemoryEventStore(object : MuteKeyProvider {})
         restored.restoreSnapshotFrom(StringReader(snapshotData).buffered())
 
         // Verify kind-6 JSON content survived intact

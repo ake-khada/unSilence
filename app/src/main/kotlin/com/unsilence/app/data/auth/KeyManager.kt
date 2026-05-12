@@ -19,10 +19,16 @@ private const val KEY_PUB_HEX     = "pub_hex"
 private const val KEY_SIGNER_TYPE = "signer_type"
 private const val SIGNER_AMBER    = "AMBER"
 
+/** Minimal interface for mute-list decrypt — allows test construction without Android Context. */
+interface MuteKeyProvider {
+    val isAmberMode: Boolean get() = false
+    fun getPrivateKeyHex(): String? = null
+}
+
 @Singleton
 class KeyManager @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : MuteKeyProvider {
     /** Cached derived pubkey — avoids secp256k1 math on every getPublicKeyHex() call. */
     @Volatile private var cachedPubKeyHex: String? = null
 
@@ -40,14 +46,14 @@ class KeyManager @Inject constructor(
     }
 
     /** True when logged in via Amber (pubkey only — no private key stored). */
-    val isAmberMode: Boolean
+    override val isAmberMode: Boolean
         get() = prefs.getString(KEY_SIGNER_TYPE, null) == SIGNER_AMBER
 
     /** Returns true if the user is logged in (either internal key or Amber). */
     fun hasKey(): Boolean = prefs.contains(KEY_PRIV_HEX) || prefs.contains(KEY_PUB_HEX)
 
     /** Returns the stored private key as a 64-char lowercase hex string, or null. Null in Amber mode. */
-    fun getPrivateKeyHex(): String? = prefs.getString(KEY_PRIV_HEX, null)
+    override fun getPrivateKeyHex(): String? = prefs.getString(KEY_PRIV_HEX, null)
 
     /** Returns the public key hex: derived from privkey for internal mode, or stored directly for Amber. */
     fun getPublicKeyHex(): String? {
