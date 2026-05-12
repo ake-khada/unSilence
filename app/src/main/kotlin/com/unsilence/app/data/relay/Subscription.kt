@@ -41,6 +41,9 @@ private const val TAG = "Subscription"
  *      what to do (NIP-42 auth handling lives in callers, not here).
  *   5. Handle.close() sends CLOSE to each relay and unregisters the
  *      subscription. Subsequent messages for this subId are dropped.
+ *   6. pauseAll() sends CLOSE to every relay for all active subs without
+ *      removing them. resumeAll() re-sends stored REQ payloads. Used by
+ *      ProcessLifecycleOwner to stop event flow when backgrounded.
  *
  * Reconnect handling is NOT in this primitive. If a relay drops mid-sub,
  * onclose fires once and that relay is done. Higher layers (TimelineService,
@@ -58,16 +61,19 @@ class Subscription @Inject constructor(
     /** Active subscription state, keyed by subId. */
     private data class SubState(
         val urls: Set<String>,
+        val reqPayload: String,
         val onevent: (NostrEvent) -> Unit,
         val oneose: (allEosed: Boolean) -> Unit,
         val onclose: (url: String, reason: String) -> Unit,
         val knownIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val eosedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val closedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
+        @Volatile var isPaused: Boolean = false,
     )
 
     private val subs = ConcurrentHashMap<String, SubState>()
     private val seqCounter = AtomicLong(0)
+    private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
 
     /**
      * The single tap registered with [TapRegistration]. Demuxes by subId,
@@ -96,8 +102,10 @@ class Subscription @Inject constructor(
 
         val urlSet = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val subId = generateSubId(urls)
+        val req = buildReqJson(subId, filter)
         val state = SubState(
             urls = urlSet,
+            reqPayload = req,
             onevent = onevent,
             oneose = oneose,
             onclose = onclose,
@@ -111,8 +119,7 @@ class Subscription @Inject constructor(
             // for already-connected relays.
             transport.connectAndAwait(urls, timeoutMs = 5_000)
 
-            // Build REQ once, send to each relay.
-            val req = buildReqJson(subId, filter)
+            // Send REQ to each relay.
             val failedUrls = mutableListOf<String>()
             for (url in urls) {
                 if (!transport.sendToRelay(url, req)) {
@@ -129,7 +136,8 @@ class Subscription @Inject constructor(
                 val remaining = failedUrls.toMutableList()
                 while (remaining.isNotEmpty() && System.currentTimeMillis() < retryDeadline) {
                     delay(500)
-                    if (subs[subId] == null) return HandleImpl(subId) // closed during retry
+                    val s = subs[subId]
+                    if (s == null || s.isPaused) return HandleImpl(subId) // closed or paused during retry
                     val iter = remaining.iterator()
                     while (iter.hasNext()) {
                         if (transport.sendToRelay(iter.next(), req)) iter.remove()
@@ -152,21 +160,56 @@ class Subscription @Inject constructor(
         // MUST iterate urlSet (normalized), NOT raw urls — eosedRelays uses
         // normalized URLs from dispatchMessage. Raw URLs with trailing slashes
         // never match, causing the watchdog to always fire as a false alarm.
-        val watchdogScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        for (url in urlSet) {
-            watchdogScope.launch {
-                delay(30_000L)
-                val s = subs[subId] ?: return@launch
-                if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
-                Log.d(TAG, "EOSE watchdog: synthesizing for sub=$subId relay=$url")
-                handleRelayEose(subId, url)
-            }
-        }
+        startEoseWatchdog(subId, urlSet)
 
-        val handle = HandleImpl(subId)
-        handle.watchdogScope = watchdogScope
-        return handle
+        return HandleImpl(subId)
     }
+
+    // ── Lifecycle pause / resume ────────────────────────────────────────────
+
+    /**
+     * Pause all active subscriptions by sending CLOSE to every relay.
+     * Subscriptions stay in the [subs] map with [SubState.isPaused] = true;
+     * in-flight events are dropped by the dispatch guard. Called from
+     * ProcessLifecycleOwner.onStop when app is backgrounded.
+     */
+    fun pauseAll() {
+        var count = 0
+        for ((subId, state) in subs) {
+            if (state.isPaused) continue
+            state.isPaused = true
+            val closeMsg = buildCloseJson(subId)
+            for (url in state.urls) {
+                transport.sendToRelay(url, closeMsg)
+            }
+            count++
+        }
+        if (count > 0) Log.d(TAG, "pauseAll: paused $count subs")
+    }
+
+    /**
+     * Resume all paused subscriptions by re-sending stored REQ payloads.
+     * Resets EOSE/CLOSED tracking for a fresh cycle. [SubState.knownIds]
+     * preserved for cross-relay dedup continuity. Called from
+     * ProcessLifecycleOwner.onStart when app is foregrounded.
+     */
+    fun resumeAll() {
+        var count = 0
+        for ((subId, state) in subs) {
+            if (!state.isPaused) continue
+            state.isPaused = false
+            state.eosedRelays.clear()
+            state.closedRelays.clear()
+            for (url in state.urls) {
+                transport.sendToRelay(url, state.reqPayload)
+            }
+            startEoseWatchdog(subId, state.urls)
+            count++
+        }
+        if (count > 0) Log.d(TAG, "resumeAll: resumed $count subs")
+    }
+
+    // ── Internals ───────────────────────────────────────────────────────────
 
     private fun ensureTapRegistered() {
         synchronized(tapLock) {
@@ -206,6 +249,7 @@ class Subscription @Inject constructor(
         // for other subscriptions.
         val subId = extractSubId(raw) ?: return
         val state = subs[subId] ?: return  // not our sub, or already closed
+        if (state.isPaused) return  // drop in-flight events during lifecycle pause
 
         // Extract event id without parsing — Nostr event ids are 64-char
         // lowercase hex right after the `"id":"` marker. Cross-relay dedup
@@ -223,6 +267,7 @@ class Subscription @Inject constructor(
 
     private fun handleRelayEose(subId: String, relayUrl: String) {
         val state = subs[subId] ?: return
+        if (state.isPaused) return  // ignore EOSE during lifecycle pause
         if (!state.eosedRelays.add(relayUrl)) return  // already EOSE'd this relay
         val allEosed = state.eosedRelays.size >= state.urls.size
         try {
@@ -234,6 +279,7 @@ class Subscription @Inject constructor(
 
     private fun handleRelayClosed(subId: String, relayUrl: String, reason: String) {
         val state = subs[subId] ?: return
+        if (state.isPaused) return  // ignore CLOSED during lifecycle pause
         if (!state.closedRelays.add(relayUrl)) return
         try {
             state.onclose(relayUrl, reason)
@@ -301,6 +347,33 @@ class Subscription @Inject constructor(
             add(filter.toJsonObject())
         }.toString()
 
+    private fun buildCloseJson(subId: String): String =
+        buildJsonArray {
+            add(JsonPrimitive("CLOSE"))
+            add(JsonPrimitive(subId))
+        }.toString()
+
+    /**
+     * Start per-relay EOSE watchdog timers. If a relay accepts REQ but never
+     * sends EOSE within 30s, synthesize one so callers don't hang. Cancels
+     * any prior watchdog for the same subId. Self-terminates if sub is paused.
+     */
+    private fun startEoseWatchdog(subId: String, urlSet: Set<String>) {
+        watchdogScopes.remove(subId)?.cancel()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        watchdogScopes[subId] = scope
+        for (url in urlSet) {
+            scope.launch {
+                delay(30_000L)
+                val s = subs[subId] ?: return@launch
+                if (s.isPaused) return@launch
+                if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
+                Log.d(TAG, "EOSE watchdog: synthesizing for sub=$subId relay=$url")
+                handleRelayEose(subId, url)
+            }
+        }
+    }
+
     private fun extractSubId(raw: String): String? {
         // ["EOSE","sub-id"] or ["CLOSED","sub-id","reason"]
         val firstComma = raw.indexOf(',')
@@ -328,6 +401,8 @@ class Subscription @Inject constructor(
     /** Test-only: drop all subs and unregister tap. */
     internal fun resetForTest() {
         subs.clear()
+        watchdogScopes.values.forEach { it.cancel() }
+        watchdogScopes.clear()
         synchronized(tapLock) {
             if (tapRegistered) {
                 tapRegistration.unregisterTap(tap)
@@ -342,17 +417,13 @@ class Subscription @Inject constructor(
 
     private inner class HandleImpl(private val subId: String) : Handle {
         @Volatile private var closed = false
-        var watchdogScope: CoroutineScope? = null
 
         override fun close() {
             if (closed) return
             closed = true
-            watchdogScope?.cancel()
+            watchdogScopes.remove(subId)?.cancel()
             val state = subs.remove(subId) ?: return
-            val closeMsg = buildJsonArray {
-                add(JsonPrimitive("CLOSE"))
-                add(JsonPrimitive(subId))
-            }.toString()
+            val closeMsg = buildCloseJson(subId)
             for (url in state.urls) {
                 transport.sendToRelay(url, closeMsg)
             }
