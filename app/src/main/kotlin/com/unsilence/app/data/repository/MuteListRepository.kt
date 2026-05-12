@@ -56,10 +56,14 @@ class MuteListRepository @Inject constructor(
 
     private suspend fun publishCurrentMuteList() {
         val ownPubkey = keyManager.getPublicKeyHex() ?: run {
-            Log.w(TAG, "No own pubkey — abort publish"); return
+            Log.w(TAG, "No own pubkey — abort publish")
+            memoryEventStore.clearMuteListOptimisticFloor()
+            return
         }
         val muteList = memoryEventStore.getMuteList(ownPubkey) ?: run {
-            Log.w(TAG, "No mute list to publish"); return
+            Log.w(TAG, "No mute list to publish")
+            memoryEventStore.clearMuteListOptimisticFloor()
+            return
         }
 
         // Public tags — unchanged by add/remove of private mutes
@@ -73,6 +77,7 @@ class MuteListRepository @Inject constructor(
         val privateTagsJson = buildPrivateTagsJson(muteList)
         val encryptedContent = signingManager.encrypt(privateTagsJson, ownPubkey) ?: run {
             Log.w(TAG, "NIP-44 encrypt failed; aborting publish (local mute stays)")
+            memoryEventStore.clearMuteListOptimisticFloor()
             return
         }
 
@@ -84,12 +89,14 @@ class MuteListRepository @Inject constructor(
         )
         val signed = signingManager.sign(template) ?: run {
             Log.w(TAG, "Sign failed; aborting publish")
+            memoryEventStore.clearMuteListOptimisticFloor()
             return
         }
 
         val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
         if (writeRelays.isEmpty()) {
             Log.w(TAG, "No write relays — publish abandoned")
+            memoryEventStore.clearMuteListOptimisticFloor()
             return
         }
         relayPool.publishToRelays(toEventJson(signed), writeRelays)
