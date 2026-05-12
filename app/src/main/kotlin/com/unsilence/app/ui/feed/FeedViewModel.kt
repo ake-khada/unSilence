@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
@@ -133,19 +134,26 @@ class FeedViewModel @Inject constructor(
     /** Per-feed-type row cache. Only IDs not in cache trigger feedRowsByIds. */
     private val feedRowCache = ConcurrentHashMap<String, FeedRow>()
 
+    val sensitiveContentMode: StateFlow<SensitiveContentMode> =
+        relayPreferencesStore.sensitiveContentModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, SensitiveContentMode.BLUR)
+
     val feedRows: StateFlow<List<FeedRow>> =
         combine(
             _events,
             _contentFilter,
             memoryEventStore.ownMuteListFlow(),
-        ) { events, cf, muteList ->
+            relayPreferencesStore.sensitiveContentModeFlow(),
+        ) { events, cf, muteList, scm ->
             if (events.isEmpty()) {
                 feedRowCache.clear()
                 return@combine emptyList()
             }
+            val hideSensitive = scm == SensitiveContentMode.HIDE
             val displayed = events.asSequence()
                 .filter { matchesContentFilter(it, cf) }
                 .filter { !isMuted(it, muteList) }
+                .filter { !hideSensitive || !it.hasContentWarning }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) {

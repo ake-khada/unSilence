@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.unsilence.app.data.memory.PinnedRelay
+import com.unsilence.app.data.memory.SensitiveContentMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
 private const val LAST_SEEN_PREFIX = "notif_last_seen_"
 private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
+private val KEY_SENSITIVE_CONTENT_MODE = stringPreferencesKey("sensitive_content_mode")
 
 @Singleton
 class RelayPreferencesStore @Inject constructor(
@@ -144,5 +146,20 @@ class RelayPreferencesStore @Inject constructor(
         dataStore.edit { prefs ->
             prefs[longPreferencesKey("$LAST_SEEN_PREFIX$pubkey")] = timestamp
         }
+    }
+
+    // ─── Sensitive Content Mode ────────────────────────────────────────────
+
+    fun sensitiveContentModeFlow(): Flow<SensitiveContentMode> =
+        dataStore.data
+            .map { prefs ->
+                val raw = prefs[KEY_SENSITIVE_CONTENT_MODE]
+                SensitiveContentMode.entries.firstOrNull { it.name == raw }
+                    ?: SensitiveContentMode.BLUR
+            }
+            .distinctUntilChanged()
+
+    suspend fun setSensitiveContentMode(mode: SensitiveContentMode) {
+        dataStore.edit { prefs -> prefs[KEY_SENSITIVE_CONTENT_MODE] = mode.name }
     }
 }

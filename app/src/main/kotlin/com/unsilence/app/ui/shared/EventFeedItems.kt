@@ -114,6 +114,7 @@ fun LazyListScope.eventFeedItems(
     imageDimensionCache: ImageDimensionCache? = null,
     showThreadParents: Boolean = false,
     eventModelProvider: ((String) -> EventModel?)? = null,
+    sensitiveBlur: Boolean = false,
 ) {
     items(
         items = events,
@@ -136,6 +137,7 @@ fun LazyListScope.eventFeedItems(
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
                 eventModelProvider = eventModelProvider,
+                sensitiveBlur = sensitiveBlur,
             )
         } else {
             EventFeedItem(
@@ -149,6 +151,7 @@ fun LazyListScope.eventFeedItems(
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
                 eventModelProvider = eventModelProvider,
+                sensitiveBlur = sensitiveBlur,
             )
         }
     }
@@ -171,6 +174,7 @@ private fun ThreadedReplyItem(
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
     eventModelProvider: ((String) -> EventModel?)? = null,
+    sensitiveBlur: Boolean = false,
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -213,6 +217,7 @@ private fun ThreadedReplyItem(
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
         eventModelProvider = eventModelProvider,
+        sensitiveBlur = sensitiveBlur,
     )
 }
 
@@ -346,6 +351,7 @@ private fun EventFeedItem(
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
     eventModelProvider: ((String) -> EventModel?)? = null,
+    sensitiveBlur: Boolean = false,
 ) {
     val model = eventModelProvider?.invoke(row.id)
     if (model == null) {
@@ -406,5 +412,7 @@ private fun EventFeedItem(
         onNewPostAnimated   = onNewPostAnimatedCb,
         parentEvent         = parentEvent,
         parentAuthor        = parentAuthor,
+        sensitiveBlur       = sensitiveBlur && row.hasContentWarning,
+        contentWarningReason = row.contentWarningReason,
     )
 }

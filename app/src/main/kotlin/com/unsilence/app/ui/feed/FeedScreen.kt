@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -104,6 +105,7 @@ fun FeedScreen(
     val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
+    val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -275,6 +277,7 @@ fun FeedScreen(
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                         eventModelProvider = actionsViewModel::getEventModel,
+                        sensitiveBlur = sensitiveMode == SensitiveContentMode.BLUR,
                     )
 
                     // "Load more" button at the end of the current batch.
