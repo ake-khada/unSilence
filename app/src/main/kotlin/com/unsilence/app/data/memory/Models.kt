@@ -75,7 +75,11 @@ data class MuteList(
     val privateHashtags: Set<String> = emptySet(),
     val privateWords: Set<String> = emptySet(),
     val privateEventIds: Set<String> = emptySet(),
-)
+) {
+    val totalCount: Int get() =
+        pubkeys.size + hashtags.size + words.size + eventIds.size +
+        privatePubkeys.size + privateHashtags.size + privateWords.size + privateEventIds.size
+}
 
 /** Kind-10002 relay config with marker info (read/write/both). */
 data class RelayConfig(val url: String, val marker: String?)

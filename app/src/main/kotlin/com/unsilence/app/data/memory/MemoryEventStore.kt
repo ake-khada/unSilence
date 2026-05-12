@@ -1441,6 +1441,31 @@ class MemoryEventStore @Inject constructor(
         }?.content
     }
 
+    /** Optimistic local mute — feed refilters via _muteListSignal. */
+    fun addPrivateMute(targetPubkey: String) {
+        val ownPk = ownPubkey ?: return
+        muteListsByPubkey.compute(ownPk) { _, existing ->
+            if (existing == null) MuteList(
+                pubkeys = emptySet(), hashtags = emptySet(),
+                words = emptySet(), eventIds = emptySet(),
+                privatePubkeys = setOf(targetPubkey),
+            ) else existing.copy(privatePubkeys = existing.privatePubkeys + targetPubkey)
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
+    /** Optimistic local unmute — removes from both public and private sets. */
+    fun removePrivateMute(targetPubkey: String) {
+        val ownPk = ownPubkey ?: return
+        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
+            existing.copy(
+                pubkeys = existing.pubkeys - targetPubkey,
+                privatePubkeys = existing.privatePubkeys - targetPubkey,
+            )
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
     // ─── O(1) stat reads ────────────────────────────────────────────────────
 
     fun replyCount(eventId: String): Int = replyCounts[eventId] ?: 0
