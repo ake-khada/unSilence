@@ -39,6 +39,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -259,6 +260,9 @@ class AppBootstrapper @Inject constructor(
         relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
 
+        relayPool.fetchMuteList(pubkeyHex, indexerUrls)
+        Log.d(TAG, "Phase2: NIP-51 mute list (kind 10000) requested")
+
         // Fetch kind-10002 (relay lists) for ALL follows. Outbox routing in
         // OutboxRelayResolver requires writeRelaysFor(author) to return real data
         // for each followed author. Without this, every author falls back to
@@ -277,6 +281,30 @@ class AppBootstrapper @Inject constructor(
                 relayPool.fetchRelayLists(staleAuthors)
             } else {
                 Log.d(TAG, "Phase2: kind-10002 cached for all ${followsToFetchRelayLists.size} follows")
+            }
+        }
+
+        // Decrypt private mute entries if in Amber mode.
+        // By this point, kind-10000 should have arrived from indexers/write relays.
+        // nsec mode decrypts inline in handleMuteList; Amber needs suspend decrypt.
+        if (keyManager.isAmberMode) {
+            val muteContent = memoryEventStore.getMuteListContent(pubkeyHex)
+            if (muteContent != null) {
+                val plaintext = signingManager.decrypt(muteContent, pubkeyHex)
+                if (plaintext != null) {
+                    val privateTags = parseMuteTags(plaintext)
+                    if (privateTags != null) {
+                        memoryEventStore.updateMuteListPrivateTags(
+                            pubkeyHex,
+                            privateTags.pubkeys,
+                            privateTags.hashtags,
+                            privateTags.words,
+                            privateTags.eventIds,
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "Phase2: Amber mute list decrypt failed")
+                }
             }
         }
 
@@ -399,5 +427,38 @@ class AppBootstrapper @Inject constructor(
         // and relayPool.disconnectAll() (connections map)
 
         Log.d(TAG, "Teardown complete")
+    }
+
+    private data class ParsedMuteTags(
+        val pubkeys: Set<String>,
+        val hashtags: Set<String>,
+        val words: Set<String>,
+        val eventIds: Set<String>,
+    )
+
+    private fun parseMuteTags(plaintext: String): ParsedMuteTags? {
+        return runCatching {
+            val arr = kotlinx.serialization.json.Json.parseToJsonElement(plaintext)
+            if (arr !is kotlinx.serialization.json.JsonArray) return null
+            val pubkeys = mutableSetOf<String>()
+            val hashtags = mutableSetOf<String>()
+            val words = mutableSetOf<String>()
+            val eventIds = mutableSetOf<String>()
+            for (tagArr in arr) {
+                val tag = (tagArr as kotlinx.serialization.json.JsonArray)
+                    .map { it.jsonPrimitive.content }
+                if (tag.size < 2) continue
+                when (tag[0]) {
+                    "p" -> pubkeys.add(tag[1])
+                    "t" -> hashtags.add(tag[1].lowercase())
+                    "word" -> words.add(tag[1].lowercase())
+                    "e" -> eventIds.add(tag[1])
+                }
+            }
+            ParsedMuteTags(pubkeys, hashtags, words, eventIds)
+        }.getOrElse { e ->
+            Log.w(TAG, "parseMuteTags: ${e.message}")
+            null
+        }
     }
 }

@@ -52,6 +52,16 @@ class SigningManager @Inject constructor(
         }
     }
 
+    /**
+     * Decrypt ciphertext via the active signer (NIP-44 first, NIP-04 fallback).
+     * Works for both internal (direct crypto) and external (Amber intent) signers.
+     */
+    suspend fun decrypt(ciphertext: String, peerPubkeyHex: String): String? {
+        val s = getOrCreateSigner() ?: return null
+        return runCatching { s.nip44Decrypt(ciphertext, peerPubkeyHex) }.getOrNull()
+            ?: runCatching { s.nip04Decrypt(ciphertext, peerPubkeyHex) }.getOrNull()
+    }
+
     fun registerLauncher(launcher: (Intent) -> Unit) {
         if (keyManager.isAmberMode) {
             val s = getOrCreateSigner()

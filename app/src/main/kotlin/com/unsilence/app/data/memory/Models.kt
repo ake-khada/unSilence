@@ -56,7 +56,26 @@ data class EventStats(
 
 data class RelayList(val read: List<String>, val write: List<String>)
 
-data class MuteList(val pubkeys: Set<String>, val words: Set<String>)
+/** NIP-36 content-warning display mode. Persisted in DataStore. */
+enum class SensitiveContentMode {
+    /** Hide sensitive posts entirely (filtered out of feed). */
+    HIDE,
+    /** Show blurred preview with tap-to-reveal. Default. */
+    BLUR,
+    /** Show sensitive posts without any overlay. */
+    SHOW,
+}
+
+data class MuteList(
+    val pubkeys: Set<String>,
+    val hashtags: Set<String>,
+    val words: Set<String>,
+    val eventIds: Set<String>,
+    val privatePubkeys: Set<String> = emptySet(),
+    val privateHashtags: Set<String> = emptySet(),
+    val privateWords: Set<String> = emptySet(),
+    val privateEventIds: Set<String> = emptySet(),
+)
 
 /** Kind-10002 relay config with marker info (read/write/both). */
 data class RelayConfig(val url: String, val marker: String?)
