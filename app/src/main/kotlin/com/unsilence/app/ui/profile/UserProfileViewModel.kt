@@ -273,11 +273,9 @@ class UserProfileViewModel @Inject constructor(
                 subRequests = subRequests,
                 onEvents = { batch, eosed ->
                     if (batch.isNotEmpty()) {
-                        if (_events.value.isEmpty()) {
-                            _events.value = TimelineMerge.sort(batch).take(TimelineMerge.EVENTS_CAP)
-                        } else {
-                            _events.update { current -> TimelineMerge.merge(current, batch) }
-                        }
+                        // Always route through merge — handles dedup, sort, and
+                        // cap uniformly whether _events is empty or populated.
+                        _events.update { current -> TimelineMerge.merge(current, batch) }
                     }
                     if (_events.value.isNotEmpty()) _isLoading.value = false
                     if (eosed) _isLoading.value = false
