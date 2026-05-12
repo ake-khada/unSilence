@@ -19,8 +19,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -90,6 +94,9 @@ fun EventCard(
     // Thread parent (Conversations tab)
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
+    // NIP-36 content warning
+    sensitiveBlur: Boolean = false,
+    contentWarningReason: String? = null,
     modifier: Modifier = Modifier,
 ) {
     // New-post flash animation
@@ -101,6 +108,10 @@ fun EventCard(
             onNewPostAnimated()
         }
     }
+
+    // NIP-36 blur state — tap to reveal, per-card
+    var revealed by remember { mutableStateOf(false) }
+    val showBlur = sensitiveBlur && !revealed
 
     // Resolve source profile for repost header (kind-6 wrapper author).
     val sourceProfile = if (model.repost != null && profileFlow != null) {
@@ -221,46 +232,77 @@ fun EventCard(
             )
         }
 
-        // Content flow — walks segments and renders primitives
-        ContentFlow(
-            model               = model,
-            role                = role,
-            onNoteClick         = onNoteClick,
-            onAuthorClick       = onAuthorClick,
-            lookupProfile       = lookupProfile,
-            lookupEvent         = lookupEvent,
-            lookupModel         = lookupModel,
-            fetchOgMetadata     = fetchOgMetadata,
-            imageDimensionCache = imageDimensionCache,
-            isActiveVideo       = isActiveVideo,
-            isFullscreen        = isFullscreen,
-            onOpenFullscreen    = onOpenFullscreen,
-            exoPlayer           = exoPlayer,
-            isMuted             = isMuted,
-            onToggleMute        = onToggleMute,
-            thumbnailCache      = thumbnailCache,
-        )
+        // NIP-36 content warning blur overlay
+        Box {
+            Column(modifier = if (showBlur) Modifier.blur(24.dp) else Modifier) {
+                // Content flow — walks segments and renders primitives
+                ContentFlow(
+                    model               = model,
+                    role                = role,
+                    onNoteClick         = onNoteClick,
+                    onAuthorClick       = onAuthorClick,
+                    lookupProfile       = lookupProfile,
+                    lookupEvent         = lookupEvent,
+                    lookupModel         = lookupModel,
+                    fetchOgMetadata     = fetchOgMetadata,
+                    imageDimensionCache = imageDimensionCache,
+                    isActiveVideo       = isActiveVideo,
+                    isFullscreen        = isFullscreen,
+                    onOpenFullscreen    = onOpenFullscreen,
+                    exoPlayer           = exoPlayer,
+                    isMuted             = isMuted,
+                    onToggleMute        = onToggleMute,
+                    thumbnailCache      = thumbnailCache,
+                )
 
-        // Empty-content repost fallback (mostr.pub bridge style):
-        // kind-6 with empty wrapper content + targetId — render the target inline.
-        // Routes via target author's outbox relays for bridge content.
-        if (model.repost != null &&
-            model.repost.embeddedJson == null &&
-            model.repost.targetId != null &&
-            lookupEventWithAuthor != null
-        ) {
-            EmptyRepostBody(
-                targetId = model.repost.targetId,
-                relayHints = listOfNotNull(model.repost.relayHint),
-                targetAuthorPubkey = model.repost.targetAuthorPubkey,
-                lookupEventWithAuthor = lookupEventWithAuthor,
-                lookupProfile = lookupProfile,
-                lookupModel = lookupModel,
-                fetchOgMetadata = fetchOgMetadata,
-                imageDimensionCache = imageDimensionCache,
-                onNoteClick = onNoteClick,
-                onAuthorClick = onAuthorClick,
-            )
+                // Empty-content repost fallback (mostr.pub bridge style):
+                // kind-6 with empty wrapper content + targetId — render the target inline.
+                // Routes via target author's outbox relays for bridge content.
+                if (model.repost != null &&
+                    model.repost.embeddedJson == null &&
+                    model.repost.targetId != null &&
+                    lookupEventWithAuthor != null
+                ) {
+                    EmptyRepostBody(
+                        targetId = model.repost.targetId,
+                        relayHints = listOfNotNull(model.repost.relayHint),
+                        targetAuthorPubkey = model.repost.targetAuthorPubkey,
+                        lookupEventWithAuthor = lookupEventWithAuthor,
+                        lookupProfile = lookupProfile,
+                        lookupModel = lookupModel,
+                        fetchOgMetadata = fetchOgMetadata,
+                        imageDimensionCache = imageDimensionCache,
+                        onNoteClick = onNoteClick,
+                        onAuthorClick = onAuthorClick,
+                    )
+                }
+            }
+
+            // Tap-to-reveal overlay
+            if (showBlur) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { revealed = true }
+                        .padding(vertical = Spacing.xl)
+                        .align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text = contentWarningReason?.takeIf { it.isNotBlank() }
+                            ?: "Sensitive content",
+                        fontSize = AppType.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = TextSecondary,
+                    )
+                    Spacer(Modifier.height(Spacing.small))
+                    Text(
+                        text = "Tap to reveal",
+                        fontSize = AppType.caption,
+                        color = TextSecondary.copy(alpha = 0.6f),
+                    )
+                }
+            }
         }
 
         // Action bar
