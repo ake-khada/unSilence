@@ -1,7 +1,6 @@
 package com.unsilence.app.work
 
 import android.content.Context
-import android.util.Log
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -15,7 +14,6 @@ class BackgroundSyncWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        Log.d("BackgroundSyncWorker", "Heartbeat — no network IO this sprint")
         return Result.success()
     }
 
