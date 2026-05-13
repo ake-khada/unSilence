@@ -24,6 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,6 +57,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.ZapAmber
 
 private enum class MuteTab { USERS, WORDS, HASHTAGS }
 
@@ -66,6 +69,7 @@ fun FiltersScreen(
     BackHandler(onBack = onDismiss)
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val publishSafe by viewModel.publishSafe.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableStateOf(MuteTab.USERS) }
     var searchQuery by remember { mutableStateOf("") }
@@ -132,6 +136,20 @@ fun FiltersScreen(
                                 fontSize = AppType.caption,
                             )
                         }
+                    }
+                }
+
+                // ── Mute sync warning ────────────────────────────────
+                if (!publishSafe) {
+                    item {
+                        MuteSyncBanner(
+                            isAmberMode = viewModel.isAmberMode,
+                            onRetry = { viewModel.retryAmberPermissions() },
+                            modifier = Modifier.padding(
+                                horizontal = Spacing.large,
+                                vertical = Spacing.small,
+                            ),
+                        )
                     }
                 }
 
@@ -439,4 +457,51 @@ private fun EmptyLabel(text: String) {
         fontSize = AppType.body,
         modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.large),
     )
+}
+
+// ── Mute sync warning banner ────────────────────────────────────────────
+
+@Composable
+private fun MuteSyncBanner(
+    isAmberMode: Boolean,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Spacing.small))
+            .background(ZapAmber.copy(alpha = 0.12f))
+            .padding(Spacing.medium),
+    ) {
+        Text(
+            text = if (isAmberMode) {
+                "Mute sync disabled \u2014 Amber denied permission to encrypt your mute list. " +
+                    "Mutes work locally but won\u2019t sync."
+            } else {
+                "Mute sync disabled \u2014 encryption check failed. " +
+                    "Mutes work locally but won\u2019t sync to relays or other clients."
+            },
+            color = ZapAmber,
+            fontSize = AppType.caption,
+        )
+        if (isAmberMode) {
+            Spacer(Modifier.height(Spacing.small))
+            Button(
+                onClick = onRetry,
+                shape = RoundedCornerShape(Spacing.small),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ZapAmber,
+                    contentColor = Black,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = "Retry permission request",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = AppType.body,
+                )
+            }
+        }
+    }
 }

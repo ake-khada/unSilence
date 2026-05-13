@@ -2,6 +2,7 @@ package com.unsilence.app
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -10,10 +11,16 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.unsilence.app.data.AppBootstrapper
+import com.unsilence.app.data.auth.AmberSigner
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.repository.MuteListRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -28,6 +35,42 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var relayPool: RelayPool
     @Inject lateinit var signingManager: SigningManager
     @Inject lateinit var relayPreferencesStore: RelayPreferencesStore
+    @Inject lateinit var muteListRepository: MuteListRepository
+    @Inject lateinit var appBootstrapper: AppBootstrapper
+    @Inject lateinit var keyManager: KeyManager
+
+    // Launcher for automatic Amber re-authorize when bootstrap detects
+    // missing NIP-44 permissions. Runs round-trip self-test on success.
+    private val amberReauthorizeLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val pubkey = AmberSigner.parseLoginResult(result.data)
+        if (pubkey != null) {
+            lifecycleScope.launch {
+                val ok = signingManager.encryptRoundTrip()
+                if (ok) {
+                    muteListRepository.markPublishSafe()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Amber permissions granted \u2014 mute sync enabled",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Amber denied NIP-44 permissions \u2014 mutes will stay local only",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        } else {
+            Toast.makeText(
+                this@MainActivity,
+                "Amber authorization cancelled \u2014 mutes stay local",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +97,20 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             result.data?.let { signingManager.onAmberResult(it) }
+        }
+
+        // Observe Amber re-authorize requests from bootstrap.
+        // repeatOnLifecycle(STARTED) ensures we only launch when the activity
+        // is in foreground. If bootstrap emits before STARTED, the buffer holds it.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                appBootstrapper.amberReauthorizeRequiredFlow.collect {
+                    val pubkey = keyManager.getPublicKeyHex() ?: return@collect
+                    amberReauthorizeLauncher.launch(
+                        AmberSigner.createReauthorizeIntent(pubkey),
+                    )
+                }
+            }
         }
 
         setContent {

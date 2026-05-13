@@ -3412,4 +3412,157 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(listOf("r", "wss://relay.example.com/path?a=1;b=2"), tags[1])
         assertEquals(listOf("blurhash", "data\\with\\backslashes"), tags[2])
     }
+
+    // ── Mute safety: private field preservation ─────────────────────────────
+
+    @Test
+    fun `handleMuteList preserves private fields when Amber cannot decrypt inline`() {
+        val pk = "mute-amber-pk"
+        store.ownPubkey = pk
+
+        // Simulate Amber mode: bootstrap pre-populates private mutes via updateMuteListPrivateTags
+        store.insert(
+            event(
+                id = "mute-initial", pubkey = pk, kind = 10000, createdAt = 100,
+                tags = listOf(listOf("p", "public-A")),
+                content = "encrypted-blob", // Non-empty content that can't be decrypted inline
+            ),
+        )
+        // Manually inject private tags as if bootstrap Amber decrypt completed
+        store.updateMuteListPrivateTags(
+            pk,
+            privatePubkeys = setOf("private-X", "private-Y"),
+            privateHashtags = setOf("spam"),
+            privateWords = emptySet(),
+            privateEventIds = emptySet(),
+        )
+
+        val before = store.getMuteList(pk)!!
+        assertEquals(setOf("public-A"), before.pubkeys)
+        assertEquals(setOf("private-X", "private-Y"), before.privatePubkeys)
+        assertEquals(setOf("spam"), before.privateHashtags)
+
+        // Now a relay echo arrives (same content, newer createdAt) — in Amber mode,
+        // inline decrypt won't work, so private fields should be PRESERVED
+        store.insert(
+            event(
+                id = "mute-echo", pubkey = pk, kind = 10000, createdAt = 200,
+                tags = listOf(listOf("p", "public-A"), listOf("p", "public-B")),
+                content = "encrypted-blob-2",
+            ),
+        )
+
+        val after = store.getMuteList(pk)!!
+        // Public fields should update from the new event
+        assertEquals(setOf("public-A", "public-B"), after.pubkeys)
+        // Private fields should be preserved from prior state — NOT wiped
+        assertEquals(setOf("private-X", "private-Y"), after.privatePubkeys)
+        assertEquals(setOf("spam"), after.privateHashtags)
+    }
+
+    @Test
+    fun `handleMuteList skips self-published echoes via isSelfPublishedCheck`() {
+        val pk = "mute-self-pk"
+        store.ownPubkey = pk
+
+        // Wire up the self-publish check to recognize "self-published-id"
+        store.isSelfPublishedCheck = { eventId -> eventId == "self-published-id" }
+
+        // Pre-populate mute list with known state
+        store.insert(
+            event(
+                id = "mute-existing", pubkey = pk, kind = 10000, createdAt = 100,
+                tags = listOf(listOf("p", "A")),
+            ),
+        )
+        store.updateMuteListPrivateTags(
+            pk,
+            privatePubkeys = setOf("priv-Z"),
+            privateHashtags = emptySet(),
+            privateWords = emptySet(),
+            privateEventIds = emptySet(),
+        )
+
+        val before = store.getMuteList(pk)!!
+        assertEquals(setOf("A"), before.pubkeys)
+        assertEquals(setOf("priv-Z"), before.privatePubkeys)
+
+        // Self-published echo arrives — should be SKIPPED entirely
+        store.insert(
+            event(
+                id = "self-published-id", pubkey = pk, kind = 10000, createdAt = 200,
+                tags = listOf(listOf("p", "A"), listOf("p", "new-from-echo")),
+                content = "encrypted",
+            ),
+        )
+
+        val after = store.getMuteList(pk)!!
+        // Should remain unchanged — echo was skipped
+        assertEquals(setOf("A"), after.pubkeys)
+        assertEquals(setOf("priv-Z"), after.privatePubkeys)
+    }
+
+    @Test
+    fun `updateMuteListPrivateTags does not clobber public fields`() {
+        val pk = "mute-noclobber-pk"
+
+        // Insert a mute list with public fields
+        store.insert(
+            event(
+                id = "mute-pub", pubkey = pk, kind = 10000, createdAt = 100,
+                tags = listOf(
+                    listOf("p", "pub-A"),
+                    listOf("t", "hashtag-X"),
+                    listOf("word", "badword"),
+                    listOf("e", "evt-123"),
+                ),
+            ),
+        )
+
+        val before = store.getMuteList(pk)!!
+        assertEquals(setOf("pub-A"), before.pubkeys)
+        assertEquals(setOf("hashtag-x"), before.hashtags)  // lowercase
+        assertEquals(setOf("badword"), before.words)
+        assertEquals(setOf("evt-123"), before.eventIds)
+        assertTrue(before.privatePubkeys.isEmpty())
+
+        // Now update only private fields
+        store.updateMuteListPrivateTags(
+            pk,
+            privatePubkeys = setOf("priv-1", "priv-2"),
+            privateHashtags = setOf("priv-tag"),
+            privateWords = setOf("priv-word"),
+            privateEventIds = setOf("priv-evt"),
+        )
+
+        val after = store.getMuteList(pk)!!
+        // Public fields must be untouched
+        assertEquals(setOf("pub-A"), after.pubkeys)
+        assertEquals(setOf("hashtag-x"), after.hashtags)
+        assertEquals(setOf("badword"), after.words)
+        assertEquals(setOf("evt-123"), after.eventIds)
+        // Private fields must be updated
+        assertEquals(setOf("priv-1", "priv-2"), after.privatePubkeys)
+        assertEquals(setOf("priv-tag"), after.privateHashtags)
+        assertEquals(setOf("priv-word"), after.privateWords)
+        assertEquals(setOf("priv-evt"), after.privateEventIds)
+    }
+
+    @Test
+    fun `updateMuteListPrivateTags creates entry when none exists`() {
+        val pk = "mute-create-pk"
+        assertNull(store.getMuteList(pk))
+
+        store.updateMuteListPrivateTags(
+            pk,
+            privatePubkeys = setOf("new-priv"),
+            privateHashtags = emptySet(),
+            privateWords = emptySet(),
+            privateEventIds = emptySet(),
+        )
+
+        val result = store.getMuteList(pk)!!
+        assertEquals(setOf("new-priv"), result.privatePubkeys)
+        assertTrue(result.pubkeys.isEmpty())
+    }
 }

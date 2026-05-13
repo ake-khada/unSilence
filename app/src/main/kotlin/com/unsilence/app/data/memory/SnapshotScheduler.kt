@@ -54,6 +54,7 @@ class SnapshotScheduler @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + snapshotDispatcher)
     private val mutex = Mutex()
     internal var periodicJob: Job? = null
+    private var immediateJob: Job? = null
 
     // Guard: save() must not run before restoreIfPresent completes.
     // Without this, a lifecycle-triggered save can overwrite the valid
@@ -152,6 +153,19 @@ class SnapshotScheduler @Inject constructor(
      */
     suspend fun saveNow() {
         doSave()
+    }
+
+    /**
+     * Schedule a near-immediate save. 50ms coalesce window so a batch of mute
+     * operations (e.g. muting 5 users quickly) writes once, but still fast enough
+     * that the user can't background the app before the save fires.
+     */
+    fun scheduleImmediate() {
+        immediateJob?.cancel()
+        immediateJob = scope.launch {
+            delay(50L)
+            save()
+        }
     }
 
     /**

@@ -440,8 +440,12 @@ fun FeedScreen(
                 ctx.startActivity(Intent.createChooser(shareIntent, "Share note"))
             },
             onMuteUser = {
-                viewModel.muteUser(row.pubkey)
-                showSnackbar("Muted")
+                when (viewModel.muteUser(row.pubkey)) {
+                    com.unsilence.app.data.repository.MuteResult.Queued ->
+                        showSnackbar("Muted")
+                    com.unsilence.app.data.repository.MuteResult.LocalOnly ->
+                        showSnackbar("Muted locally — grant NIP-44 decrypt in Amber to sync")
+                }
             },
             onReport = {
                 reportRow = row
