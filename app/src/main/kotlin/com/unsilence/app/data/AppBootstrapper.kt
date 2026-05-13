@@ -352,7 +352,6 @@ class AppBootstrapper @Inject constructor(
                 relayPool.addPurpose(url, ConnectionPurpose.PERSISTENT)
             }
             relayPool.connectAndAwait(ownWriteUrls, timeoutMs = 5_000)
-            Log.d(TAG, "Phase2: ensured ${ownWriteUrls.size} own write relays connected before live mute sub")
         }
 
         // Open persistent subscription for own kind-10000 on write relays.
