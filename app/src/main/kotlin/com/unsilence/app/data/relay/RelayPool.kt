@@ -166,6 +166,12 @@ class RelayPool @Inject constructor(
 
     /** Active one-shot subscriptions in flight (tracked by unique sub-ID, not per-relay). */
     private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
+
+    // ── Persistent own-mute-list subscription ─────────────────────────
+    // Keeps a live tail on own kind-10000 so cross-client mute changes
+    // arrive without needing a cold-start re-fetch.
+    @Volatile private var liveMuteSubReq: String? = null
+    private val liveMuteSubRelays = ConcurrentHashMap.newKeySet<String>()
     private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
     // ── Paginated fetch state ─────────────────────────────────────────
@@ -1185,6 +1191,46 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Open a persistent subscription for own kind-10000 on the user's write relays.
+     * No limit, no closeOnEose — this is a live tail for the app session.
+     * When another client (Amethyst, etc.) publishes an updated mute list, the
+     * relay pushes it to us in real time via this subscription.
+     */
+    fun subscribeOwnMuteList(pubkeyHex: String) {
+        val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { connections.containsKey(it) }
+        if (writeRelayUrls.isEmpty()) return
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("own-mute-live"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(10000)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+            })
+        }.toString()
+        liveMuteSubReq = req
+        liveMuteSubRelays.clear()
+        liveMuteSubRelays.addAll(writeRelayUrls)
+        for (url in writeRelayUrls) {
+            connections[url]?.send(req)
+        }
+    }
+
+    /** Close the persistent own-mute-list subscription (teardown). */
+    fun closeLiveMuteSub() {
+        val urls = liveMuteSubRelays.toList()
+        liveMuteSubReq = null
+        liveMuteSubRelays.clear()
+        if (urls.isNotEmpty()) {
+            val close = """["CLOSE","own-mute-live"]"""
+            for (url in urls) {
+                connections[url]?.send(close)
+            }
+        }
+    }
+
+    /**
      * Fetch kind-30002 relay sets by coordinate (author + d-tags) from hint relays.
      * Used to resolve ["a", "30002:pubkey:dtag", "hint-relay"] references in kind-10012.
      * Connects to hint relays if not already connected, sends a single REQ with
@@ -2201,6 +2247,10 @@ class RelayPool @Inject constructor(
                     guard.set(false)
                     updateConnectionStates()
                     onRelayReconnected?.invoke(url)
+                    // Resend persistent own-mute-live subscription if this relay carries it
+                    if (url in liveMuteSubRelays) {
+                        liveMuteSubReq?.let { conn.send(it) }
+                    }
                     scope.launch { listenForEvents(conn) }
                     Log.d(TAG, "Reconnected $url")
                 } else {

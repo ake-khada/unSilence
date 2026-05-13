@@ -22,6 +22,7 @@ import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -731,7 +732,7 @@ class FeedViewModel @Inject constructor(
 
     // ── Mute / Report actions ──────────────────────────────────────────────
 
-    fun muteUser(pubkey: String) = muteListRepository.muteUser(pubkey)
+    fun muteUser(pubkey: String): MuteResult = muteListRepository.muteUser(pubkey)
 
     fun reportEvent(eventId: String, authorPubkey: String, type: ReportType) =
         reportRepository.reportEvent(eventId, authorPubkey, type)

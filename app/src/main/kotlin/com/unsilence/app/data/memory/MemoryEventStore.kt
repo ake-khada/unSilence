@@ -155,6 +155,14 @@ class MemoryEventStore @Inject constructor(
      *  with createdAt >= floor is accepted (our publish echo arrived). */
     @Volatile private var muteListOptimisticFloor: Long = 0L
 
+    /** Callback fired when a kind-10000 with encrypted content arrives in Amber mode.
+     *  Set by AppBootstrapper to trigger async decrypt via SigningManager. */
+    @Volatile internal var muteListDecryptCallback: ((NostrEvent) -> Unit)? = null
+
+    /** Checks if an event was self-published by MuteListRepository.
+     *  Wired by AppBootstrapper to avoid re-processing our own echoes. */
+    @Volatile internal var isSelfPublishedCheck: ((String) -> Boolean) = { false }
+
     // ─── Trust scores (kind 30385) ────────────────────────────────────────────
     private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
 
@@ -710,6 +718,32 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleMuteList(event: NostrEvent) {
+        val isOwn = event.pubkey == ownPubkey
+
+        // Skip our own published events — we already have canonical local state.
+        // The echo would clobber private fields (Amber can't decrypt inline).
+        if (isOwn && isSelfPublishedCheck(event.id)) {
+            // Still update floor timestamp so subsequent relay events are accepted
+            val floor = muteListOptimisticFloor
+            if (floor > 0L && event.createdAt >= floor) muteListOptimisticFloor = 0L
+            return
+        }
+
+        // Guard: reject relay events older than an in-flight optimistic update.
+        // addPrivateMute/removePrivateMute set the floor; it clears when a relay
+        // event with createdAt >= floor is accepted (our publish echo arrived).
+        if (isOwn) {
+            val floor = muteListOptimisticFloor
+            if (floor > 0L && event.createdAt < floor) {
+                return
+            }
+            if (floor > 0L) {
+                // Relay event caught up — clear the floor
+                muteListOptimisticFloor = 0L
+            }
+        }
+
+        // Parse public tags from this event
         val pubkeys = mutableSetOf<String>()
         val hashtags = mutableSetOf<String>()
         val words = mutableSetOf<String>()
@@ -724,13 +758,12 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        // Decrypt private mute entries from .content (NIP-44, NIP-04 fallback).
-        // Only possible for our own mute list when we have the private key.
-        var privPubkeys = emptySet<String>()
-        var privHashtags = emptySet<String>()
-        var privWords = emptySet<String>()
-        var privEventIds = emptySet<String>()
-        if (event.pubkey == ownPubkey && event.content.isNotEmpty() && !keyProvider.isAmberMode) {
+        // For nsec mode ONLY: decrypt inline (Amber needs async decrypt via callback)
+        var inlinePrivPubkeys: Set<String>? = null
+        var inlinePrivHashtags: Set<String>? = null
+        var inlinePrivWords: Set<String>? = null
+        var inlinePrivEventIds: Set<String>? = null
+        if (isOwn && event.content.isNotEmpty() && !keyProvider.isAmberMode) {
             val decryptedTags = decryptMuteContent(event.content, event.pubkey)
             if (decryptedTags != null) {
                 val pp = mutableSetOf<String>()
@@ -746,26 +779,11 @@ class MemoryEventStore @Inject constructor(
                         "e" -> pe.add(tag[1])
                     }
                 }
-                privPubkeys = pp
-                privHashtags = ph
-                privWords = pw
-                privEventIds = pe
+                inlinePrivPubkeys = pp
+                inlinePrivHashtags = ph
+                inlinePrivWords = pw
+                inlinePrivEventIds = pe
                 Log.i("MES", "MuteList: decrypted ${pp.size}p ${ph.size}t ${pw.size}word ${pe.size}e private entries")
-            }
-        }
-
-        // Guard: reject relay events older than an in-flight optimistic update.
-        // addPrivateMute/removePrivateMute set the floor; it clears when the
-        // published event echoes back with createdAt >= floor.
-        if (event.pubkey == ownPubkey) {
-            val floor = muteListOptimisticFloor
-            if (floor > 0L && event.createdAt < floor) {
-                Log.d("MES", "MuteList: skipping stale relay event (createdAt=${event.createdAt} < optimistic=$floor)")
-                return
-            }
-            if (floor > 0L) {
-                // Relay event caught up — clear the floor
-                muteListOptimisticFloor = 0L
             }
         }
 
@@ -778,13 +796,27 @@ class MemoryEventStore @Inject constructor(
                     return@compute existing
                 }
             }
+            // Always replace public fields from the new event.
+            // Replace private fields ONLY if we have new decrypted ones (nsec inline).
+            // Otherwise PRESERVE existing private fields — the async decryptor will
+            // update them later via updateMuteListPrivateTags.
             MuteList(
-                pubkeys, hashtags, words, eventIds,
-                privPubkeys, privHashtags, privWords, privEventIds,
+                pubkeys = pubkeys,
+                hashtags = hashtags,
+                words = words,
+                eventIds = eventIds,
+                privatePubkeys = inlinePrivPubkeys ?: existing?.privatePubkeys ?: emptySet(),
+                privateHashtags = inlinePrivHashtags ?: existing?.privateHashtags ?: emptySet(),
+                privateWords = inlinePrivWords ?: existing?.privateWords ?: emptySet(),
+                privateEventIds = inlinePrivEventIds ?: existing?.privateEventIds ?: emptySet(),
             )
         }
-        Log.i("MES", "MuteList import: pub=${pubkeys.size}p ${hashtags.size}t ${words.size}word ${eventIds.size}e | priv=${privPubkeys.size}p ${privHashtags.size}t ${privWords.size}word ${privEventIds.size}e | owner=${event.pubkey.take(8)}…")
-        if (event.pubkey == ownPubkey) _muteListSignal.value = System.nanoTime()
+        if (isOwn) _muteListSignal.value = System.nanoTime()
+
+        // For Amber mode + own pubkey + non-empty content: fire async decrypt callback
+        if (isOwn && event.content.isNotEmpty() && keyProvider.isAmberMode) {
+            muteListDecryptCallback?.invoke(event)
+        }
     }
 
     /**
@@ -1432,6 +1464,10 @@ class MemoryEventStore @Inject constructor(
      * Update the private (decrypted) portion of an existing MuteList.
      * Called from bootstrap after Amber/signer-based decrypt completes.
      */
+    /**
+     * Update ONLY private fields. Called by async decryptor when Amber returns plaintext.
+     * Preserves all public fields untouched.
+     */
     fun updateMuteListPrivateTags(
         pubkey: String,
         privatePubkeys: Set<String>,
@@ -1439,13 +1475,24 @@ class MemoryEventStore @Inject constructor(
         privateWords: Set<String>,
         privateEventIds: Set<String>,
     ) {
-        muteListsByPubkey.computeIfPresent(pubkey) { _, existing ->
-            existing.copy(
-                privatePubkeys = privatePubkeys,
-                privateHashtags = privateHashtags,
-                privateWords = privateWords,
-                privateEventIds = privateEventIds,
-            )
+        muteListsByPubkey.compute(pubkey) { _, existing ->
+            if (existing == null) {
+                MuteList(
+                    pubkeys = emptySet(), hashtags = emptySet(),
+                    words = emptySet(), eventIds = emptySet(),
+                    privatePubkeys = privatePubkeys,
+                    privateHashtags = privateHashtags,
+                    privateWords = privateWords,
+                    privateEventIds = privateEventIds,
+                )
+            } else {
+                existing.copy(
+                    privatePubkeys = privatePubkeys,
+                    privateHashtags = privateHashtags,
+                    privateWords = privateWords,
+                    privateEventIds = privateEventIds,
+                )
+            }
         }
         Log.i("MES", "MuteList private update: ${privatePubkeys.size}p ${privateHashtags.size}t ${privateWords.size}word ${privateEventIds.size}e | owner=${pubkey.take(8)}…")
         if (pubkey == ownPubkey) _muteListSignal.value = System.nanoTime()
@@ -1493,6 +1540,22 @@ class MemoryEventStore @Inject constructor(
      *  permanently blocking relay mute list updates. */
     fun clearMuteListOptimisticFloor() {
         muteListOptimisticFloor = 0L
+    }
+
+    /**
+     * Store a locally-signed event in eventsById without triggering kind handlers.
+     * Used by MuteListRepository to ensure the latest kind-10000 event reaches the
+     * snapshot before the relay echo arrives — prevents data loss if the user
+     * backgrounds between local mute and echo.
+     *
+     * When the relay echo arrives, [insertCore] sees the existing event via
+     * putIfAbsent and merges relaysSeen only (no double-processing).
+     */
+    fun storeLocalEvent(event: NostrEvent) {
+        val existing = eventsById.putIfAbsent(event.id, event)
+        if (existing != null) return // already stored
+        idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
+        idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
     }
 
     // ─── O(1) stat reads ────────────────────────────────────────────────────

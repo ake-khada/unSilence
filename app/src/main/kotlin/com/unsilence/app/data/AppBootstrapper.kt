@@ -25,12 +25,17 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -83,10 +88,29 @@ class AppBootstrapper @Inject constructor(
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
     private val initGate: InitGate,
+    private val muteListRepository: MuteListRepository,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
     private var bootstrapJob: Job? = null
+
+    /**
+     * Emitted when bootstrap detects Amber NIP-44 permissions are missing
+     * (AmberDecryptFailed or EncryptRoundTripFailed). MainActivity collects
+     * this and launches Amber's consent screen automatically.
+     */
+    private val _amberReauthorizeRequiredFlow = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val amberReauthorizeRequiredFlow: SharedFlow<Unit> =
+        _amberReauthorizeRequiredFlow.asSharedFlow()
+
+    /** Public trigger for FiltersScreen "Retry" button. */
+    suspend fun requestAmberReauthorize() {
+        _amberReauthorizeRequiredFlow.emit(Unit)
+    }
 
     /**
      * Sequential bootstrap for the logged-in user.
@@ -250,6 +274,19 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         delay(1000L)
 
+        // Wire MES → self-publish check BEFORE any events arrive
+        memoryEventStore.isSelfPublishedCheck = { eventId ->
+            muteListRepository.isSelfPublished(eventId)
+        }
+
+        // Wire MES → async Amber decrypt callback
+        memoryEventStore.muteListDecryptCallback = { event ->
+            scope.launch { handleAmberMuteDecrypt(event, pubkeyHex) }
+        }
+
+        // Start with publish-unsafe — no mute attempts until we settle
+        muteListRepository.markPublishUnsafe("bootstrap in progress")
+
         val followPubkeys = (follows?.toList().orEmpty()) + pubkeyHex
         val staleFollows = profileResolver.filterUnresolved(followPubkeys.distinct().toSet())
         if (staleFollows.isNotEmpty()) {
@@ -284,29 +321,32 @@ class AppBootstrapper @Inject constructor(
             }
         }
 
-        // Decrypt private mute entries if in Amber mode.
-        // By this point, kind-10000 should have arrived from indexers/write relays.
-        // nsec mode decrypts inline in handleMuteList; Amber needs suspend decrypt.
-        if (keyManager.isAmberMode) {
-            val muteContent = memoryEventStore.getMuteListContent(pubkeyHex)
-            if (muteContent != null) {
-                val plaintext = signingManager.decrypt(muteContent, pubkeyHex)
-                if (plaintext != null) {
-                    val privateTags = parseMuteTags(plaintext)
-                    if (privateTags != null) {
-                        memoryEventStore.updateMuteListPrivateTags(
-                            pubkeyHex,
-                            privateTags.pubkeys,
-                            privateTags.hashtags,
-                            privateTags.words,
-                            privateTags.eventIds,
-                        )
-                    }
-                } else {
-                    Log.w(TAG, "Phase2: Amber mute list decrypt failed")
+        // Settle the mute list: wait for the relay fetch to complete (or timeout)
+        // before allowing any publish. The safety gate prevents premature publish
+        // from replacing the user's complete relay-side mute list with a stub.
+        val settleResult = settleMuteList(pubkeyHex)
+        when (settleResult) {
+            MuteSettleResult.NsecDecrypted,
+            MuteSettleResult.AmberDecrypted,
+            MuteSettleResult.NoPrivateContent,
+            MuteSettleResult.NoEventFound -> {
+                muteListRepository.markPublishSafe()
+            }
+            MuteSettleResult.AmberDecryptFailed,
+            MuteSettleResult.Timeout,
+            MuteSettleResult.EncryptRoundTripFailed -> {
+                muteListRepository.markPublishUnsafe("settle incomplete: $settleResult")
+                // Auto-launch Amber consent screen for crypto-related failures
+                // (not Timeout — that's a network issue, not a permissions issue)
+                if (keyManager.isAmberMode && settleResult != MuteSettleResult.Timeout) {
+                    _amberReauthorizeRequiredFlow.tryEmit(Unit)
                 }
             }
         }
+
+        // Open persistent subscription for own kind-10000 on write relays.
+        // Cross-client mute changes (Amethyst, etc.) arrive in real time.
+        relayPool.subscribeOwnMuteList(pubkeyHex)
 
         // Seed kind 10007 search relays in MES if none exist after fetch
         val existingSearch = memoryEventStore.getSearchRelayUrls(pubkeyHex)
@@ -394,7 +434,8 @@ class AppBootstrapper @Inject constructor(
         bootstrapJob?.cancel()
         bootstrapJob = null
 
-        // 1. Clear relay pool caches
+        // 1. Close persistent subscriptions + clear relay pool caches
+        relayPool.closeLiveMuteSub()
         relayPool.clearCaches()
 
         // 2. Disconnect all WebSockets
@@ -427,6 +468,109 @@ class AppBootstrapper @Inject constructor(
         // and relayPool.disconnectAll() (connections map)
 
         Log.d(TAG, "Teardown complete")
+    }
+
+    /**
+     * Determine whether the local mute-list state is safe to publish from.
+     * Runs the inner settle logic, then — if the base result would be safe —
+     * runs an encrypt→decrypt round-trip self-test to verify the crypto path
+     * actually works before allowing any publish.
+     */
+    private suspend fun settleMuteList(pubkeyHex: String): MuteSettleResult {
+        val baseResult = settleMuteListInner(pubkeyHex)
+
+        // Only run round-trip if we'd otherwise mark safe
+        val wouldBeSafe = baseResult in setOf(
+            MuteSettleResult.NsecDecrypted,
+            MuteSettleResult.AmberDecrypted,
+            MuteSettleResult.NoPrivateContent,
+            MuteSettleResult.NoEventFound,
+        )
+        if (!wouldBeSafe) return baseResult
+
+        // Round-trip self-test: encrypt a canary, decrypt it, verify equality.
+        val roundTripOk = runEncryptRoundTrip(pubkeyHex)
+        if (!roundTripOk) return MuteSettleResult.EncryptRoundTripFailed
+        return baseResult
+    }
+
+    private suspend fun settleMuteListInner(pubkeyHex: String): MuteSettleResult {
+        // nsec mode decrypts inline in handleMuteList — always safe immediately
+        if (!keyManager.isAmberMode) {
+            // Wait briefly for the kind-10000 to arrive from relays
+            delay(2_000L)
+            return MuteSettleResult.NsecDecrypted
+        }
+
+        // Amber mode: wait for the kind-10000 event + async decrypt
+        val settled = withTimeoutOrNull(10_000L) {
+            // First: wait for ANY mute list to appear in MES
+            val muteList = withTimeoutOrNull(5_000L) {
+                memoryEventStore.ownMuteListFlow()
+                    .filter { it != null }
+                    .first()
+            }
+            if (muteList == null) {
+                val content = memoryEventStore.getMuteListContent(pubkeyHex)
+                if (content == null) {
+                    return@withTimeoutOrNull MuteSettleResult.NoEventFound
+                }
+            }
+
+            val content = memoryEventStore.getMuteListContent(pubkeyHex)
+            if (content.isNullOrEmpty()) {
+                return@withTimeoutOrNull MuteSettleResult.NoPrivateContent
+            }
+
+            // Content exists — try decrypt
+            val plaintext = signingManager.decrypt(content, pubkeyHex)
+            if (plaintext != null) {
+                val privateTags = parseMuteTags(plaintext)
+                if (privateTags != null) {
+                    memoryEventStore.updateMuteListPrivateTags(
+                        pubkeyHex,
+                        privateTags.pubkeys,
+                        privateTags.hashtags,
+                        privateTags.words,
+                        privateTags.eventIds,
+                    )
+                    return@withTimeoutOrNull MuteSettleResult.AmberDecrypted
+                }
+            }
+
+            MuteSettleResult.AmberDecryptFailed
+        }
+
+        return settled ?: MuteSettleResult.Timeout
+    }
+
+    /**
+     * Encrypt→decrypt round-trip self-test. Delegates to [SigningManager.encryptRoundTrip]
+     * so the same canary logic is reused by the post-reauthorize path in FiltersViewModel.
+     */
+    private suspend fun runEncryptRoundTrip(ownPubkey: String): Boolean =
+        signingManager.encryptRoundTrip()
+
+    /**
+     * Async Amber decrypt callback — fired by MES when a kind-10000 with
+     * encrypted content arrives. Updates only private fields in MES.
+     */
+    private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent, ownPubkeyHex: String) {
+        val plaintext = signingManager.decrypt(event.content, event.pubkey) ?: return
+        val parsed = parseMuteTags(plaintext) ?: return
+        memoryEventStore.updateMuteListPrivateTags(
+            event.pubkey,
+            parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,
+        )
+        // If this was the bootstrap-time decrypt for own key, mark publish safe
+        if (event.pubkey == ownPubkeyHex) {
+            muteListRepository.markPublishSafe()
+        }
+    }
+
+    private enum class MuteSettleResult {
+        NsecDecrypted, AmberDecrypted, NoPrivateContent, NoEventFound,
+        AmberDecryptFailed, Timeout, EncryptRoundTripFailed,
     }
 
     private data class ParsedMuteTags(
