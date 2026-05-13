@@ -2,6 +2,7 @@ package com.unsilence.app.data.auth
 
 import android.content.ContentResolver
 import android.content.Intent
+import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
@@ -11,9 +12,11 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip55AndroidSigner.client.NostrSignerExternal
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.concurrent.CopyOnWriteArraySet
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val TAG = "SigningManager"
 private const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
 
 @Singleton
@@ -23,6 +26,9 @@ class SigningManager @Inject constructor(
 ) {
     @Volatile
     private var signer: NostrSigner? = null
+
+    /** Launcher registrations that survive signer rebuilds (logout/relogin). */
+    private val registeredLaunchers = CopyOnWriteArraySet<(Intent) -> Unit>()
 
     @Synchronized
     private fun getOrCreateSigner(): NostrSigner? {
@@ -40,6 +46,13 @@ class SigningManager @Inject constructor(
         } else {
             val privKeyHex = keyManager.getPrivateKeyHex() ?: return null
             NostrSignerInternal(KeyPair(privKey = privKeyHex.hexToByteArray()))
+        }
+
+        if (newSigner is NostrSignerExternal && registeredLaunchers.isNotEmpty()) {
+            for (l in registeredLaunchers) {
+                newSigner.registerForegroundLauncher(l)
+            }
+            Log.d(TAG, "Re-applied ${registeredLaunchers.size} launcher(s) to new external signer")
         }
 
         signer = newSigner
@@ -119,13 +132,12 @@ class SigningManager @Inject constructor(
     }
 
     fun registerLauncher(launcher: (Intent) -> Unit) {
-        if (keyManager.isAmberMode) {
-            val s = getOrCreateSigner()
-            (s as? NostrSignerExternal)?.registerForegroundLauncher(launcher)
-        }
+        registeredLaunchers.add(launcher)
+        (signer as? NostrSignerExternal)?.registerForegroundLauncher(launcher)
     }
 
     fun unregisterLauncher(launcher: (Intent) -> Unit) {
+        registeredLaunchers.remove(launcher)
         (signer as? NostrSignerExternal)?.unregisterForegroundLauncher(launcher)
     }
 
@@ -134,6 +146,9 @@ class SigningManager @Inject constructor(
     }
 
     fun clear() {
+        // Intentionally keep registeredLaunchers — the Activity composition
+        // stays alive across logout/relogin, so DisposableEffect won't re-fire.
+        // getOrCreateSigner() re-applies them to the next external signer.
         signer = null
     }
 
