@@ -341,6 +341,20 @@ class AppBootstrapper @Inject constructor(
             }
         }
 
+        // Ensure own write relays are connected so subscribeOwnMuteList can attach
+        // to all of them. Without this, write relays not in Phase 1's set are
+        // silently skipped and Amethyst-side mute updates published only to those
+        // relays never reach us.
+        val ownWriteUrls = memoryEventStore.writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+        if (ownWriteUrls.isNotEmpty()) {
+            for (url in ownWriteUrls) {
+                relayPool.addPurpose(url, ConnectionPurpose.PERSISTENT)
+            }
+            relayPool.connectAndAwait(ownWriteUrls, timeoutMs = 5_000)
+            Log.d(TAG, "Phase2: ensured ${ownWriteUrls.size} own write relays connected before live mute sub")
+        }
+
         // Open persistent subscription for own kind-10000 on write relays.
         // Cross-client mute changes (Amethyst, etc.) arrive in real time.
         relayPool.subscribeOwnMuteList(pubkeyHex)

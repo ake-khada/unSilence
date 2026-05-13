@@ -1,5 +1,6 @@
 package com.unsilence.app.data.repository
 
+import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -26,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val TAG = "MuteListRepo"
 private const val COALESCE_WINDOW_MS = 500L
 
 enum class MuteResult {
@@ -79,7 +81,11 @@ class MuteListRepository @Inject constructor(
      */
     fun muteUser(targetPubkey: String): MuteResult {
         memoryEventStore.addPrivateMute(targetPubkey)
-        if (!_publishSafe.value) return MuteResult.LocalOnly
+        snapshotScheduler.scheduleImmediate()   // persist optimistic state — survives hard kill mid-debounce
+        if (!_publishSafe.value) {
+            Log.w(TAG, "muteUser: local-only (network state not confirmed, publish skipped to prevent data loss)")
+            return MuteResult.LocalOnly
+        }
         schedulePublish()
         return MuteResult.Queued
     }
@@ -90,7 +96,11 @@ class MuteListRepository @Inject constructor(
      */
     fun unmuteUser(targetPubkey: String): MuteResult {
         memoryEventStore.removePrivateMute(targetPubkey)
-        if (!_publishSafe.value) return MuteResult.LocalOnly
+        snapshotScheduler.scheduleImmediate()   // persist optimistic state — survives hard kill mid-debounce
+        if (!_publishSafe.value) {
+            Log.w(TAG, "unmuteUser: local-only (network state not confirmed, publish skipped to prevent data loss)")
+            return MuteResult.LocalOnly
+        }
         schedulePublish()
         return MuteResult.Queued
     }
