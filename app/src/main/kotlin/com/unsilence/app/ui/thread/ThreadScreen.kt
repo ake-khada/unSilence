@@ -102,6 +102,10 @@ fun ThreadScreen(
         val flash = zapFlash ?: return@LaunchedEffect
         if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
     }
+    // ── React/repost failure snackbar ────────────────────────────────────────
+    LaunchedEffect(Unit) {
+        actionsViewModel.actionError.collect { showSnackbar(it) }
+    }
 
     Box(
         modifier = Modifier
