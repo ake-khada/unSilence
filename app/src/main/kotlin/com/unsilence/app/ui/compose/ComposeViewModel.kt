@@ -23,6 +23,7 @@ import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -54,38 +55,39 @@ class ComposeViewModel @Inject constructor(
 
     fun publishNote(content: String) {
         publishError = null
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch {
             val template = TextNoteEvent.build(note = content)
             val signed   = signingManager.sign(template) ?: run {
                 publishError = "Signing failed — check your key or Amber connection"
                 return@launch
             }
 
-            // Publish wire command to all connected relays
-            relayPool.publish(toEventJson(signed))
+            // Publish + optimistic MES insert off Main
+            withContext(Dispatchers.IO) {
+                relayPool.publish(toEventJson(signed))
 
-            // Optimistic insert into MES → appears in feed immediately
-            val nowMs = System.currentTimeMillis()
-            val parsedTags = signed.tags.map { it.toList() }
-            memoryEventStore.insert(
-                NostrEvent(
-                    id = signed.id,
-                    pubkey = signed.pubKey,
-                    kind = signed.kind,
-                    content = signed.content,
-                    createdAt = signed.createdAt,
-                    tags = parsedTags,
-                    tagsJson = tagsToJson(parsedTags),
-                    sig = signed.sig,
-                    relayUrl = "local",
-                    replyToId = null,
-                    rootId = null,
-                    hasContentWarning = false,
-                    contentWarningReason = null,
-                    firstSeenAt = nowMs / 1000L,
-                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                val nowMs = System.currentTimeMillis()
+                val parsedTags = signed.tags.map { it.toList() }
+                memoryEventStore.insert(
+                    NostrEvent(
+                        id = signed.id,
+                        pubkey = signed.pubKey,
+                        kind = signed.kind,
+                        content = signed.content,
+                        createdAt = signed.createdAt,
+                        tags = parsedTags,
+                        tagsJson = tagsToJson(parsedTags),
+                        sig = signed.sig,
+                        relayUrl = "local",
+                        replyToId = null,
+                        rootId = null,
+                        hasContentWarning = false,
+                        contentWarningReason = null,
+                        firstSeenAt = nowMs / 1000L,
+                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                    )
                 )
-            )
+            }
 
             published = true
         }
