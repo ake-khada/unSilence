@@ -1,6 +1,5 @@
 package com.unsilence.app.data.media
 
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -8,8 +7,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 
 object MediaPreconnect {
-    private const val TAG = "MediaPreconnect"
-
     /** Common Nostr media CDN hosts. HEAD request warms up DNS + TLS. */
     private val MEDIA_HOSTS = listOf(
         "https://nostr.build",
@@ -30,7 +27,6 @@ object MediaPreconnect {
                         .head()
                         .build()
                     client.newCall(request).execute().use { /* discard */ }
-                    Log.d(TAG, "Preconnected to $url")
                 } catch (_: Exception) {
                     // Best effort — ignore failures
                 }
