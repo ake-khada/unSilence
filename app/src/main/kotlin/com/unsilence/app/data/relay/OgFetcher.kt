@@ -4,6 +4,7 @@ import android.util.Log
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -39,6 +40,7 @@ class OgFetcher @Inject constructor(
 
     private val cache = ConcurrentHashMap<String, OgMetadata>()
     private val attempted = ConcurrentHashMap<String, Boolean>()
+    private val inFlight = ConcurrentHashMap<String, CompletableDeferred<OgMetadata?>>()
 
     /** True if the URL has already been fetched (or attempted). */
     fun hasCached(url: String): Boolean = cache.containsKey(url) || attempted.containsKey(url)
@@ -47,16 +49,28 @@ class OgFetcher @Inject constructor(
         cache[url]?.let { return it }
         if (attempted.containsKey(url)) return null
 
-        return withContext(Dispatchers.IO) {
-            try {
-                doFetch(url)
-            } catch (e: CancellationException) {
-                throw e          // let coroutine cancellation propagate
-            } catch (e: Exception) {
-                Log.d(TAG, "og fetch: exception for $url: ${e.javaClass.simpleName}: ${e.message}")
-                null
+        val deferred = CompletableDeferred<OgMetadata?>()
+        val existing = inFlight.putIfAbsent(url, deferred)
+        if (existing != null) return existing.await()
+
+        val result = try {
+            withContext(Dispatchers.IO) {
+                try {
+                    doFetch(url)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.d(TAG, "og fetch: exception for $url: ${e.javaClass.simpleName}: ${e.message}")
+                    null
+                }
             }
-        }.also { attempted[url] = true; if (it != null) cache[url] = it }
+        } finally {
+            inFlight.remove(url)
+        }
+        attempted[url] = true
+        if (result != null) cache[url] = result
+        deferred.complete(result)
+        return result
     }
 
     /**
