@@ -10,6 +10,8 @@ import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import javax.inject.Inject
@@ -131,22 +133,27 @@ class ZapRepository @Inject constructor(
     }
 
     /** GET the LNURL metadata JSON (contains callback URL, min/maxSendable, etc.). */
-    private fun fetchLnurlMeta(url: String) = runCatching {
-        val req  = Request.Builder().url(url).build()
-        val body = okHttpClient.newCall(req).execute().use { it.body?.string() ?: return null }
-        NostrJson.parseToJsonElement(body).jsonObject
-    }.getOrNull()
+    private suspend fun fetchLnurlMeta(url: String) = withContext(Dispatchers.IO) {
+        runCatching {
+            val req  = Request.Builder().url(url).build()
+            val body = okHttpClient.newCall(req).execute().use { it.body?.string() }
+                ?: return@withContext null
+            NostrJson.parseToJsonElement(body).jsonObject
+        }.getOrNull()
+    }
 
     /** GET the bolt11 invoice from the LNURL callback. */
-    private fun fetchBolt11(callback: String, msats: Long, zapRequestJson: String): String? =
-        runCatching {
-            val encoded  = URLEncoder.encode(zapRequestJson, "UTF-8")
-            val url      = "$callback?amount=$msats&nostr=$encoded"
-            val req      = Request.Builder().url(url).build()
-            val body     = okHttpClient.newCall(req).execute()
-                .use { it.body?.string() ?: return null }
-            val obj      = NostrJson.parseToJsonElement(body).jsonObject
-            obj["pr"]?.jsonPrimitive?.content
-        }.getOrNull()
+    private suspend fun fetchBolt11(callback: String, msats: Long, zapRequestJson: String): String? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val encoded  = URLEncoder.encode(zapRequestJson, "UTF-8")
+                val url      = "$callback?amount=$msats&nostr=$encoded"
+                val req      = Request.Builder().url(url).build()
+                val body     = okHttpClient.newCall(req).execute().use { it.body?.string() }
+                    ?: return@withContext null
+                val obj      = NostrJson.parseToJsonElement(body).jsonObject
+                obj["pr"]?.jsonPrimitive?.content
+            }.getOrNull()
+        }
 
 }
