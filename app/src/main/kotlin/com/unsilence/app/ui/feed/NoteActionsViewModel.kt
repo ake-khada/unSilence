@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -100,6 +102,10 @@ class NoteActionsViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
         } ?: MutableStateFlow(emptySet())
 
+    /** Emitted when react / repost signing fails — screens collect and show a snackbar. */
+    private val _actionError = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val actionError: SharedFlow<String> = _actionError.asSharedFlow()
+
     /** Optimistic sats: per-event amount to add on top of Room's zapTotalSats. */
     private val _optimisticZapSats = MutableStateFlow<Map<String, Long>>(emptyMap())
     val optimisticZapSats: StateFlow<Map<String, Long>> = _optimisticZapSats.asStateFlow()
@@ -159,7 +165,10 @@ class NoteActionsViewModel @Inject constructor(
                 ),
                 content   = "+",
             )
-            val signed = signingManager.sign(template) ?: return@launch
+            val signed = signingManager.sign(template) ?: run {
+                _actionError.tryEmit("React failed — signing error")
+                return@launch
+            }
 
             relayPool.publish(toEventJson(signed))
 
@@ -184,7 +193,10 @@ class NoteActionsViewModel @Inject constructor(
                 ),
                 content   = originalJson,
             )
-            val signed = signingManager.sign(template) ?: return@launch
+            val signed = signingManager.sign(template) ?: run {
+                _actionError.tryEmit("Repost failed — signing error")
+                return@launch
+            }
 
             relayPool.publish(toEventJson(signed))
 

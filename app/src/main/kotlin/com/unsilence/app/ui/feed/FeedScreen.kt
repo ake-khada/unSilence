@@ -21,8 +21,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -130,6 +128,10 @@ fun FeedScreen(
     LaunchedEffect(zapFlash) {
         val flash = zapFlash ?: return@LaunchedEffect
         if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
+    }
+    // ── React/repost failure snackbar ────────────────────────────────────────
+    LaunchedEffect(Unit) {
+        actionsViewModel.actionError.collect { showSnackbar(it) }
     }
 
     // ── New-post flash animation tracking ──────────────────────────────────────
@@ -267,15 +269,6 @@ fun FeedScreen(
                         "No conversations yet" else "No notes match",
                     hint    = "Loading more...",
                     modifier = Modifier,
-                )
-            }
-
-            "failed" -> {
-                EmptyState(
-                    icon    = Icons.Filled.CloudOff,
-                    message = "All relays failed",
-                    hint    = "Tap to retry",
-                    modifier = Modifier.clickable { viewModel.refresh() },
                 )
             }
 
