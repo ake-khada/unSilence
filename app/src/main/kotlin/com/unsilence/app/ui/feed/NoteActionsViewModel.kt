@@ -166,7 +166,7 @@ class NoteActionsViewModel @Inject constructor(
                 content   = "+",
             )
             val signed = signingManager.sign(template) ?: run {
-                _actionError.tryEmit("React failed — signing error")
+                _actionError.tryEmit("React failed — signing rejected (check Amber permissions)")
                 return@launch
             }
 
@@ -180,7 +180,11 @@ class NoteActionsViewModel @Inject constructor(
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val nowSeconds  = System.currentTimeMillis() / 1000L
-            val original   = memoryEventStore.getEventEntity(eventId) ?: return@launch
+            val original   = memoryEventStore.getEventEntity(eventId)
+            if (original == null) {
+                _actionError.tryEmit("Repost failed — original note not found")
+                return@launch
+            }
             val originalJson = entityToJson(original)
 
             val template = EventTemplate<RepostEvent>(
@@ -194,7 +198,7 @@ class NoteActionsViewModel @Inject constructor(
                 content   = originalJson,
             )
             val signed = signingManager.sign(template) ?: run {
-                _actionError.tryEmit("Repost failed — signing error")
+                _actionError.tryEmit("Repost failed — signing rejected (check Amber permissions)")
                 return@launch
             }
 
