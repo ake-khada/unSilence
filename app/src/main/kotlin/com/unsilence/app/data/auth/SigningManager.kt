@@ -2,7 +2,6 @@ package com.unsilence.app.data.auth
 
 import android.content.ContentResolver
 import android.content.Intent
-import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
@@ -16,7 +15,6 @@ import java.util.concurrent.CopyOnWriteArraySet
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val TAG = "SigningManager"
 private const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
 
 @Singleton
@@ -52,7 +50,6 @@ class SigningManager @Inject constructor(
             for (l in registeredLaunchers) {
                 newSigner.registerForegroundLauncher(l)
             }
-            Log.d(TAG, "Re-applied ${registeredLaunchers.size} launcher(s) to new external signer")
         }
 
         signer = newSigner
