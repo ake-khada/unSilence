@@ -80,25 +80,20 @@ class CardHydrator @Inject constructor(
     private val mediaHydrated = LinkedHashSet<String>()
     private val hydratedLock = Any()
 
-    private fun filterNovel(
+    private fun filterAndMarkNovel(
         events: List<FeedRow>,
         set: LinkedHashSet<String>,
     ): List<FeedRow> {
         if (events.isEmpty()) return events
         return synchronized(hydratedLock) {
-            events.filter { it.id !in set }
-        }
-    }
-
-    private fun markHydrated(events: List<FeedRow>, set: LinkedHashSet<String>) {
-        if (events.isEmpty()) return
-        synchronized(hydratedLock) {
-            for (e in events) {
+            val novel = events.filter { it.id !in set }
+            for (e in novel) {
                 if (set.add(e.id) && set.size > HYDRATED_CAP) {
                     val iter = set.iterator()
                     if (iter.hasNext()) { iter.next(); iter.remove() }
                 }
             }
+            novel
         }
     }
 
@@ -121,13 +116,8 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
         if (events.isEmpty()) return
-        val novelEvents = filterNovel(events, profilesHydrated)
+        val novelEvents = filterAndMarkNovel(events, profilesHydrated)
         if (novelEvents.isEmpty()) return
-        // Mark up front: profile hints come from the event's content/tags
-        // which are fixed at insert, so seeing the event once is enough.
-        // Cancellation / fetch failure isn't fatal — per-card avatar autofetch
-        // and other entry points retry on demand.
-        markHydrated(novelEvents, profilesHydrated)
 
         val pubkeys = mutableSetOf<String>()
         val profileHints = mutableMapOf<String, MutableList<String>>()
@@ -181,12 +171,8 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateRefs(events: List<FeedRow>, feedRelay: String? = null) {
         if (events.isEmpty()) return
-        val novelEvents = filterNovel(events, refsHydrated)
+        val novelEvents = filterAndMarkNovel(events, refsHydrated)
         if (novelEvents.isEmpty()) return
-        // Mark up front: refs are derived from tags/content fixed at insert.
-        // RelayPool.eventFetchInFlight + isEventUnresolved already dedup the
-        // actual fetches; this just spares the regex / map orchestration.
-        markHydrated(novelEvents, refsHydrated)
 
         val referencedIds = mutableSetOf<String>()
         val relayHints = mutableMapOf<String, String>()
@@ -411,9 +397,8 @@ class CardHydrator @Inject constructor(
      */
     suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
         if (events.isEmpty()) return
-        val novelEvents = filterNovel(events, mediaHydrated)
+        val novelEvents = filterAndMarkNovel(events, mediaHydrated)
         if (novelEvents.isEmpty()) return
-        markHydrated(novelEvents, mediaHydrated)
 
         // Image dimensions (always — lightweight header-only BitmapFactory decode)
         val imageUrls = mutableListOf<String>()

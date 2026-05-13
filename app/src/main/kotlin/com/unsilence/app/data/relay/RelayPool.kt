@@ -580,14 +580,14 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
-            if (connections.containsKey(url)) continue
             if (!canOpenNewConnection()) continue
-            val conn = RelayConnection(url, okHttpClient)
-            connections[url] = conn
+            val candidate = RelayConnection(url, okHttpClient)
+            val existing = connections.putIfAbsent(url, candidate)
+            if (existing != null) continue
             connectionLastActivity[url] = System.currentTimeMillis()
-            conn.connect()
-            scope.launch { listenForEvents(conn) }
-            newConns.add(conn)
+            candidate.connect()
+            scope.launch { listenForEvents(candidate) }
+            newConns.add(candidate)
         }
         if (newConns.isEmpty()) {
             // All URLs already in pool — wait for at least one to be connected.
@@ -794,25 +794,19 @@ class RelayPool @Inject constructor(
 
     fun connect(relayUrls: List<String>) {
         val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
-        // Collect URLs that will actually be connected
-        val newUrls = mutableListOf<String>()
         for (url in normalizedUrls) {
             if (url in blockedUrls) {
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
-            if (connections.containsKey(url)) continue
             if (!canOpenNewConnection()) continue
-            newUrls.add(url)
-        }
-
-        for (url in newUrls) {
-            val conn = RelayConnection(url, okHttpClient)
-            connections[url] = conn
+            val candidate = RelayConnection(url, okHttpClient)
+            val existing = connections.putIfAbsent(url, candidate)
+            if (existing != null) continue
             connectionLastActivity[url] = System.currentTimeMillis()
             scope.launch {
-                conn.connect()
-                listenForEvents(conn)
+                candidate.connect()
+                listenForEvents(candidate)
             }
         }
         Log.d(TAG, "Pool has ${connections.size} connections")
