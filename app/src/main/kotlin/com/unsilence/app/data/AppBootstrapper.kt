@@ -267,25 +267,22 @@ class AppBootstrapper @Inject constructor(
         }
         relayPool.connectAndAwait(globalUrls, timeoutMs = 5_000)
         initGate.signalFeedConnectionsReady()
+
+        // Wire MES callbacks BEFORE any kind-10000 REQ (fetchMuteList / subscribeOwnMuteList) goes out.
+        memoryEventStore.isSelfPublishedCheck = { eventId ->
+            muteListRepository.isSelfPublished(eventId)
+        }
+        memoryEventStore.muteListDecryptCallback = { event ->
+            scope.launch { handleAmberMuteDecrypt(event) }
+        }
+        muteListRepository.markPublishUnsafe("bootstrap in progress")
+
         Log.d(TAG, "Phase1 complete: relay connections active (${globalUrls.size} relays)")
 
         // ═══════════════════════════════════════════════════════════════════
         // Phase 2 (1000ms): Profile resolution + relay ecosystem
         // ═══════════════════════════════════════════════════════════════════
         delay(1000L)
-
-        // Wire MES → self-publish check BEFORE any events arrive
-        memoryEventStore.isSelfPublishedCheck = { eventId ->
-            muteListRepository.isSelfPublished(eventId)
-        }
-
-        // Wire MES → async Amber decrypt callback
-        memoryEventStore.muteListDecryptCallback = { event ->
-            scope.launch { handleAmberMuteDecrypt(event, pubkeyHex) }
-        }
-
-        // Start with publish-unsafe — no mute attempts until we settle
-        muteListRepository.markPublishUnsafe("bootstrap in progress")
 
         val followPubkeys = (follows?.toList().orEmpty()) + pubkeyHex
         val staleFollows = profileResolver.filterUnresolved(followPubkeys.distinct().toSet())
@@ -489,7 +486,7 @@ class AppBootstrapper @Inject constructor(
         if (!wouldBeSafe) return baseResult
 
         // Round-trip self-test: encrypt a canary, decrypt it, verify equality.
-        val roundTripOk = runEncryptRoundTrip(pubkeyHex)
+        val roundTripOk = signingManager.encryptRoundTrip()
         if (!roundTripOk) return MuteSettleResult.EncryptRoundTripFailed
         return baseResult
     }
@@ -545,27 +542,18 @@ class AppBootstrapper @Inject constructor(
     }
 
     /**
-     * Encrypt→decrypt round-trip self-test. Delegates to [SigningManager.encryptRoundTrip]
-     * so the same canary logic is reused by the post-reauthorize path in FiltersViewModel.
-     */
-    private suspend fun runEncryptRoundTrip(ownPubkey: String): Boolean =
-        signingManager.encryptRoundTrip()
-
-    /**
      * Async Amber decrypt callback — fired by MES when a kind-10000 with
      * encrypted content arrives. Updates only private fields in MES.
+     * MES contract: muteListDecryptCallback only fires when isOwn && content.isNotEmpty() && isAmberMode.
      */
-    private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent, ownPubkeyHex: String) {
+    private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent) {
         val plaintext = signingManager.decrypt(event.content, event.pubkey) ?: return
         val parsed = parseMuteTags(plaintext) ?: return
         memoryEventStore.updateMuteListPrivateTags(
             event.pubkey,
             parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,
         )
-        // If this was the bootstrap-time decrypt for own key, mark publish safe
-        if (event.pubkey == ownPubkeyHex) {
-            muteListRepository.markPublishSafe()
-        }
+        muteListRepository.markPublishSafe()
     }
 
     private enum class MuteSettleResult {
