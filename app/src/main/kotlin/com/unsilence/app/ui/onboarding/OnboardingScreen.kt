@@ -5,13 +5,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Key
@@ -22,6 +26,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,21 +36,27 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.common.LogoMark
+import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderDefault
 import com.unsilence.app.ui.theme.Brand
-import com.unsilence.app.ui.theme.Sizing
+import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 
-private val ButtonShape    = RoundedCornerShape(Sizing.mediaCornerRadius)  // 8.dp
-private val NeutralBorder  = BorderStroke(1.dp, BorderDefault)
+private val ButtonShape  = RoundedCornerShape(16.dp)
+private val NeutralBorder = BorderStroke(1.dp, BorderDefault)
+private val ButtonPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)
 
 @Composable
 fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
@@ -55,7 +66,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
     var importText      by remember { mutableStateOf("") }
     var importError     by remember { mutableStateOf<String?>(null) }
 
-    // ── Amber login launcher ──────────────────────────────────────────────────
+    // Amber login launcher
     val amberLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -72,94 +83,128 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(Black)
-            .padding(horizontal = 32.dp),
-        verticalArrangement   = Arrangement.Center,
-        horizontalAlignment   = Alignment.CenterHorizontally,
+            .padding(horizontal = 28.dp),
     ) {
-        // ── Brand ─────────────────────────────────────────────────────────────
-        LogoMark(sizeDp = 88.dp)
+        // 1. Status bar inset
+        Spacer(Modifier.statusBarsPadding())
+
+        // 2. Top weighted spacer
+        Spacer(Modifier.weight(1f))
+
+        // 3. Animated waveform mark
+        LogoMark(sizeDp = 80.dp, color = Brand)
+
+        // 4. Logo → headline
+        Spacer(Modifier.height(Spacing.xxl))
+
+        // 5. Headline
         Text(
-            text     = "A RELAY BROWSER",
-            color    = TextSecondary,
-            fontSize = 11.sp,
-            letterSpacing = 2.5.sp,
-            modifier = Modifier.padding(top = 8.dp),
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = White)) {
+                    append("Find your\npeople. Speak\n")
+                }
+                withStyle(SpanStyle(color = Brand)) {
+                    append("freely.")
+                }
+            },
+            fontSize      = 44.sp,
+            fontWeight    = FontWeight.Bold,
+            lineHeight    = 48.sp,
+            letterSpacing = (-0.9).sp,
         )
 
-        Spacer(Modifier.height(48.dp))
+        // 6. Headline → subtitle
+        Spacer(Modifier.height(Spacing.large))
 
-        // ── Create new account ────────────────────────────────────────────────
+        // 7. Subtitle
+        Text(
+            text       = "unSilence is a Nostr client. Your identity lives on a key, not a server \u2014 and goes with you everywhere.",
+            color      = TextSecondary,
+            fontSize   = AppType.bodyLarge,
+            lineHeight = 21.sp,
+            modifier   = Modifier.widthIn(max = 320.dp),
+        )
+
+        // 8. Subtitle → buttons
+        Spacer(Modifier.height(Spacing.xxl))
+
+        // 9. PRIMARY — Create new identity
         Button(
             onClick = {
                 keyManager.generateNewKey()
                 onComplete()
             },
-            shape    = ButtonShape,
-            colors   = ButtonDefaults.buttonColors(
+            shape          = ButtonShape,
+            contentPadding = ButtonPadding,
+            colors         = ButtonDefaults.buttonColors(
                 containerColor = Brand,
-                contentColor   = Black,
+                contentColor   = Color(0xFF001012),
             ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(Sizing.topBarHeight),  // 52.dp
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            Text(text = "Create New Account", fontWeight = FontWeight.SemiBold)
+            Text("Create new identity", fontSize = AppType.bodyLarge, fontWeight = FontWeight.SemiBold)
         }
 
-        Spacer(Modifier.height(12.dp))
+        // 10.
+        Spacer(Modifier.height(Spacing.small))
 
-        // ── Import key ────────────────────────────────────────────────────────
+        // 11. SECONDARY — I already have keys
         OutlinedButton(
-            onClick  = { showImportField = !showImportField; importError = null },
-            shape    = ButtonShape,
-            border   = NeutralBorder,
-            colors   = ButtonDefaults.outlinedButtonColors(contentColor = White),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(Sizing.topBarHeight),
+            onClick        = { showImportField = !showImportField; importError = null },
+            shape          = ButtonShape,
+            border         = NeutralBorder,
+            contentPadding = ButtonPadding,
+            colors         = ButtonDefaults.outlinedButtonColors(contentColor = White),
+            modifier       = Modifier.fillMaxWidth(),
         ) {
-            Text(text = "Import Key")
+            Text("I already have keys", fontSize = AppType.bodyLarge)
         }
 
+        // Import key expansion
         if (showImportField) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(Spacing.small))
             OutlinedTextField(
-                value         = importText,
-                onValueChange = { importText = it; importError = null },
-                placeholder   = { Text("nsec1… or hex private key", color = TextSecondary, fontSize = 13.sp) },
-                singleLine    = true,
-                isError       = importError != null,
+                value          = importText,
+                onValueChange  = { importText = it; importError = null },
+                placeholder    = { Text("nsec1\u2026 or hex private key", color = TextSecondary, fontSize = AppType.body) },
+                singleLine     = true,
+                isError        = importError != null,
                 supportingText = importError?.let { { Text(it, color = Color(0xFFCF6679)) } },
-                colors        = OutlinedTextFieldDefaults.colors(
+                colors         = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor   = Brand,
                     unfocusedBorderColor = TextSecondary,
                     cursorColor          = Brand,
-                    focusedTextColor     = Color.White,
-                    unfocusedTextColor   = Color.White,
+                    focusedTextColor     = White,
+                    unfocusedTextColor   = White,
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(Spacing.small))
             Button(
                 onClick = {
                     if (keyManager.importKey(importText)) {
                         onComplete()
                     } else {
-                        importError = "Invalid key — paste an nsec1… or 64-char hex key"
+                        importError = "Invalid key \u2014 paste an nsec1\u2026 or 64-char hex key"
                     }
                 },
-                shape  = ButtonShape,
-                colors = ButtonDefaults.buttonColors(containerColor = Brand, contentColor = Black),
+                shape          = ButtonShape,
+                contentPadding = ButtonPadding,
+                colors         = ButtonDefaults.buttonColors(
+                    containerColor = Brand,
+                    contentColor   = Color(0xFF001012),
+                ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Confirm", fontWeight = FontWeight.SemiBold)
+                Text("Confirm", fontSize = AppType.bodyLarge, fontWeight = FontWeight.SemiBold)
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        // 12.
+        Spacer(Modifier.height(Spacing.small))
 
-        // ── Sign in with Amber ────────────────────────────────────────────────
-        OutlinedButton(
+        // 13. TERTIARY — Sign in with Amber
+        TextButton(
             onClick = {
                 if (!AmberSigner.isInstalled(context)) {
                     Toast.makeText(context, "Amber app not installed", Toast.LENGTH_SHORT).show()
@@ -167,19 +212,43 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     amberLauncher.launch(AmberSigner.createLoginIntent())
                 }
             },
-            shape    = ButtonShape,
-            border   = NeutralBorder,
-            colors   = ButtonDefaults.outlinedButtonColors(contentColor = White),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(Sizing.topBarHeight),
+            colors   = ButtonDefaults.textButtonColors(contentColor = TextSecondary),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Icon(
                 imageVector        = Icons.Filled.Key,
                 contentDescription = null,
-                modifier           = Modifier.padding(end = 8.dp),
+                modifier           = Modifier.padding(end = Spacing.medium).size(16.dp),
             )
-            Text(text = "Sign in with Amber")
+            Text("Sign in with Amber", fontSize = AppType.body)
         }
+
+        // 14. Buttons → footer
+        Spacer(Modifier.height(Spacing.xl))
+
+        // 15. Footer block, centered
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier            = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text          = "YOUR KEYS  \u00B7  YOUR VOICE  \u00B7  NO RECOVERY",
+                color         = Text3,
+                fontSize      = AppType.footnote,
+                letterSpacing = 1.5.sp,
+            )
+            TextButton(
+                onClick = { /* TODO: "What is Nostr?" bottom sheet */ },
+                colors  = ButtonDefaults.textButtonColors(contentColor = TextSecondary),
+            ) {
+                Text("What is Nostr?", fontSize = AppType.bodyLarge)
+            }
+        }
+
+        // 16. Bottom weighted spacer
+        Spacer(Modifier.weight(0.5f))
+
+        // 17. System navigation inset
+        Spacer(Modifier.navigationBarsPadding())
     }
 }

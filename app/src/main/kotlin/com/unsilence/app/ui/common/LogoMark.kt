@@ -33,8 +33,11 @@ private val AccentDim = Color(0xFF14A3A3)
 fun LogoMark(
     modifier: Modifier = Modifier,
     sizeDp: Dp = 88.dp,
+    color: Color? = null,
     static: Boolean = false,
 ) {
+    val barColor = color ?: AccentCyan
+    val dimColor = color?.copy(alpha = 0.5f) ?: AccentDim
     val cursorAlpha: Float = if (static) {
         1f
     } else {
@@ -63,7 +66,7 @@ fun LogoMark(
 
         // Muted "silence" line
         drawLine(
-            color = AccentDim,
+            color = dimColor,
             start = Offset(32f * s, 100f * s),
             end = Offset(68f * s, 100f * s),
             strokeWidth = 4f * s,
@@ -82,7 +85,7 @@ fun LogoMark(
         )
         for (bar in bars) {
             drawRect(
-                color = AccentCyan,
+                color = barColor,
                 topLeft = Offset(bar[0] * s, bar[1] * s),
                 size = Size(bar[2] * s, bar[3] * s),
             )
@@ -90,7 +93,7 @@ fun LogoMark(
 
         // Terminal cursor (blinks)
         drawRect(
-            color = AccentCyan.copy(alpha = cursorAlpha),
+            color = barColor.copy(alpha = cursorAlpha),
             topLeft = Offset(172f * s, 94f * s),
             size = Size(4f * s, 12f * s),
         )
