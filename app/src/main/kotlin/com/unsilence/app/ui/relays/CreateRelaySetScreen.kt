@@ -42,7 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -97,7 +97,7 @@ fun CreateRelaySetScreen(
                 ) {
                     Text(
                         text  = "Create",
-                        color = if (name.isNotBlank() && relayUrls.isNotEmpty()) Cyan else TextSecondary,
+                        color = if (name.isNotBlank() && relayUrls.isNotEmpty()) Brand else TextSecondary,
                     )
                 }
             }
@@ -113,7 +113,7 @@ fun CreateRelaySetScreen(
                     value         = name,
                     onValueChange = { name = it },
                     textStyle     = TextStyle(color = Color.White, fontSize = 15.sp),
-                    cursorBrush   = SolidColor(Cyan),
+                    cursorBrush   = SolidColor(Brand),
                     singleLine    = true,
                     decorationBox = { inner ->
                         Box {
@@ -140,7 +140,7 @@ fun CreateRelaySetScreen(
                     value         = newRelayUrl,
                     onValueChange = { newRelayUrl = it },
                     textStyle     = TextStyle(color = Color.White, fontSize = 14.sp),
-                    cursorBrush   = SolidColor(Cyan),
+                    cursorBrush   = SolidColor(Brand),
                     singleLine    = true,
                     decorationBox = { inner ->
                         Box(modifier = Modifier.weight(1f)) {
@@ -166,7 +166,7 @@ fun CreateRelaySetScreen(
                     Icon(
                         imageVector        = Icons.Filled.Add,
                         contentDescription = "Add relay",
-                        tint               = Cyan,
+                        tint               = Brand,
                     )
                 }
             }

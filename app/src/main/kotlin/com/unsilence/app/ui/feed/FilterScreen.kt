@@ -41,7 +41,8 @@ import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Surface1
 
 // ── Zap slider breakpoints (sats) ───────────────────────────────────────────
@@ -220,7 +221,7 @@ fun FilterBottomSheet(
                     onApply(buildFilter())
                     onDismiss()
                 }) {
-                    Text("Apply", color = Cyan, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
+                    Text("Apply", color = Brand, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -231,7 +232,7 @@ fun FilterBottomSheet(
 private fun SectionLabel(text: String) {
     Text(
         text       = text,
-        color      = Color(0xFF555555),
+        color      = Text3,
         fontSize   = AppType.caption,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
@@ -265,8 +266,8 @@ private fun EngagementSlider(
             steps         = steps,
             modifier      = Modifier.weight(1f),
             colors        = SliderDefaults.colors(
-                thumbColor            = Cyan,
-                activeTrackColor      = Cyan,
+                thumbColor            = Brand,
+                activeTrackColor      = Brand,
                 inactiveTrackColor    = Color(0xFF333333),
                 activeTickColor       = Color.Transparent,
                 inactiveTickColor     = Color.Transparent,
@@ -274,7 +275,7 @@ private fun EngagementSlider(
         )
         Text(
             text  = displayValue,
-            color = if (value > 0f) Cyan else Color(0xFF666666),
+            color = if (value > 0f) Brand else Text3,
             fontSize = AppType.bodySmall,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.width(48.dp),
@@ -288,8 +289,8 @@ private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
-            .background(if (selected) Cyan else Color.Transparent)
-            .border(1.dp, if (selected) Cyan else Color(0xFF444444), RoundedCornerShape(20.dp))
+            .background(if (selected) Brand else Color.Transparent)
+            .border(1.dp, if (selected) Brand else Color(0xFF444444), RoundedCornerShape(20.dp))
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,

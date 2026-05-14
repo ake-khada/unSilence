@@ -17,7 +17,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.BorderSubtle
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Surface1
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 
@@ -50,13 +51,13 @@ internal fun InlineMention(
         modifier = modifier
             .clip(RoundedCornerShape(20.dp))
             .background(Surface1)
-            .border(1.dp, Color(0xFF1A1A1A), RoundedCornerShape(20.dp))
+            .border(1.dp, BorderSubtle, RoundedCornerShape(20.dp))
             .clickable { onAuthorClick(pubkeyHex) }
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
         Text(
             text     = if (displayText.startsWith("@")) displayText else "@$displayText",
-            color    = Cyan,
+            color    = Brand,
             fontSize = AppType.footnote,
         )
     }

@@ -64,7 +64,8 @@ import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -298,7 +299,7 @@ fun ThreadScreen(
                         imageVector        = Icons.Filled.Favorite,
                         contentDescription = "Like",
                         tint               = if (focused != null && focused.engagementId in reactedIds)
-                                                 Color(0xFFE91E63) else TextSecondary,
+                                                 Like else TextSecondary,
                         modifier           = Modifier.size(20.dp),
                     )
                 }
@@ -309,7 +310,7 @@ fun ThreadScreen(
                     value         = replyText,
                     onValueChange = { replyText = it },
                     textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
-                    cursorBrush   = SolidColor(Cyan),
+                    cursorBrush   = SolidColor(Brand),
                     modifier      = Modifier.weight(1f),
                     decorationBox = { inner ->
                         if (replyText.isEmpty()) {
@@ -340,7 +341,7 @@ fun ThreadScreen(
                     Icon(
                         imageVector        = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Send reply",
-                        tint               = if (replyText.isNotBlank()) Cyan else TextSecondary,
+                        tint               = if (replyText.isNotBlank()) Brand else TextSecondary,
                         modifier           = Modifier.size(20.dp),
                     )
                 }

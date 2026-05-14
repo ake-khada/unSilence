@@ -19,7 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -84,7 +84,7 @@ internal fun AuthorHeader(
                     Icon(
                         imageVector        = Icons.Filled.Verified,
                         contentDescription = "NIP-05 verified",
-                        tint               = Cyan,
+                        tint               = Brand,
                         modifier           = Modifier.size(14.dp),
                     )
                     Spacer(Modifier.width(3.dp))

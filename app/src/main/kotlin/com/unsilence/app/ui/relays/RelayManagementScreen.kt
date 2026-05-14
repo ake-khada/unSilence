@@ -73,7 +73,9 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Mint
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
@@ -149,13 +151,13 @@ fun RelayManagementScreen(
             ScrollableTabRow(
                 selectedTabIndex = pagerState.currentPage,
                 containerColor = Black,
-                contentColor = Cyan,
+                contentColor = Brand,
                 edgePadding = Spacing.medium,
                 indicator = { tabPositions ->
                     if (pagerState.currentPage < tabPositions.size) {
                         TabRowDefaults.SecondaryIndicator(
                             modifier = Modifier.tabIndicatorOffset(tabPositions[pagerState.currentPage]),
-                            color = Cyan,
+                            color = Brand,
                         )
                     }
                 },
@@ -168,7 +170,7 @@ fun RelayManagementScreen(
                         text = {
                             Text(
                                 text = label,
-                                color = if (pagerState.currentPage == index) Cyan else TextSecondary,
+                                color = if (pagerState.currentPage == index) Brand else TextSecondary,
                                 fontSize = 13.sp,
                                 fontWeight = if (pagerState.currentPage == index) FontWeight.SemiBold else FontWeight.Normal,
                             )
@@ -255,9 +257,9 @@ fun RelayManagementScreen(
                                 onClick = { showCreateRelaySet = true },
                                 modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                             ) {
-                                Icon(Icons.Filled.Add, contentDescription = null, tint = Cyan, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.Add, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("New Relay Set", color = Cyan, fontSize = 14.sp)
+                                Text("New Relay Set", color = Brand, fontSize = 14.sp)
                             }
                         }
                         items(relaySets, key = { it.dTag }) { set ->
@@ -340,7 +342,7 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
             value         = input,
             onValueChange = { input = it },
             textStyle     = TextStyle(color = Color.White, fontSize = 14.sp),
-            cursorBrush   = SolidColor(Cyan),
+            cursorBrush   = SolidColor(Brand),
             singleLine    = true,
             decorationBox = { inner ->
                 Box(modifier = Modifier.weight(1f)) {
@@ -362,7 +364,7 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
             },
             modifier = Modifier.size(36.dp),
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Cyan)
+            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand)
         }
     }
 }
@@ -444,12 +446,12 @@ private fun ReadWriteRelayRow(
         }
         Text(
             text     = markerLabel,
-            color    = Cyan,
+            color    = Brand,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .clip(RoundedCornerShape(4.dp))
-                .background(Cyan.copy(alpha = 0.15f))
+                .background(Brand.copy(alpha = 0.15f))
                 .clickable { onToggleMarker() }
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )
@@ -511,7 +513,7 @@ private fun FavoriteRelayRow(
                 Icon(
                     if (justAdded) Icons.Filled.Check else Icons.Filled.Add,
                     contentDescription = "Add to Feed",
-                    tint = if (justAdded) Color(0xFF4CAF50) else Cyan,
+                    tint = if (justAdded) Mint else Brand,
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -595,10 +597,10 @@ private fun RelaySetRow(
 
 // ── Relay health components ─────────────────────────────────────────────────
 
-private val HealthGreen  = Color(0xFF4CAF50)
+private val HealthGreen  = Mint
 private val HealthYellow = Color(0xFFFFC107)
 private val HealthRed    = Color(0xFFFF5252)
-private val HealthGray   = Color(0xFF666666)
+private val HealthGray   = Text3
 
 private fun trustColor(score: Int?): Color = when {
     score == null -> HealthGray

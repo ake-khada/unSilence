@@ -112,7 +112,9 @@ import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Mint
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -124,7 +126,7 @@ import kotlin.math.absoluteValue
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-private val NavUnselected = Color(0xFF555555)
+private val NavUnselected = Text3
 
 private data class NavTab(val icon: ImageVector, val contentDescription: String)
 
@@ -351,7 +353,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             Icon(
                                 imageVector        = Icons.Filled.Tune,
                                 contentDescription = "Filter",
-                                tint               = if (currentFilter.isNonDefault) Cyan else Color.White.copy(alpha = 0.7f),
+                                tint               = if (currentFilter.isNonDefault) Brand else Color.White.copy(alpha = 0.7f),
                                 modifier           = Modifier
                                     .size(Sizing.navIcon)
                                     .clickable { showFilter = true },
@@ -425,7 +427,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                                     modifier = Modifier
                                         .size(6.dp)
                                         .align(Alignment.TopEnd)
-                                        .background(Cyan, CircleShape),
+                                        .background(Brand, CircleShape),
                                 )
                             }
                             if (index == 2 && hasNewNotifications) {
@@ -433,7 +435,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                                     modifier = Modifier
                                         .size(6.dp)
                                         .align(Alignment.TopEnd)
-                                        .background(Cyan, CircleShape),
+                                        .background(Brand, CircleShape),
                                 )
                             }
                         }
@@ -621,7 +623,7 @@ private fun FeedCarousel(
             .height(pageHeightDp * 1.7f)
             .widthIn(min = 80.dp, max = 150.dp)
             .clip(RoundedCornerShape(10.dp))
-            .background(if (engaged) Cyan.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
+            .background(if (engaged) Brand.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
             .pointerInput(pagerState) {
                 val longPressTimeout = viewConfiguration.longPressTimeoutMillis
                 awaitEachGesture {
@@ -829,7 +831,7 @@ private fun FeedSelectorSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 2.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(if (selected) Cyan.copy(alpha = 0.08f) else Color.Transparent)
+                .background(if (selected) Brand.copy(alpha = 0.08f) else Color.Transparent)
                 .combinedClickable(
                     onClick = { onFeedChanged(type) },
                     onLongClick = { if (dTag != null) confirmDeleteDTag = dTag },
@@ -840,12 +842,12 @@ private fun FeedSelectorSheet(
             Box(
                 modifier = Modifier
                     .size(6.dp)
-                    .background(if (selected) Cyan else Color(0xFF333333), CircleShape),
+                    .background(if (selected) Brand else Color(0xFF333333), CircleShape),
             )
             Spacer(Modifier.width(14.dp))
             Text(
                 text       = label,
-                color      = if (selected) Cyan else Color(0xFFDDDDDD),
+                color      = if (selected) Brand else Color(0xFFDDDDDD),
                 fontSize   = 15.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 modifier   = Modifier.weight(1f),
@@ -857,7 +859,7 @@ private fun FeedSelectorSheet(
     fun SectionLabel(text: String) {
         Text(
             text = text.uppercase(),
-            color = Color(0xFF555555),
+            color = Text3,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 1.sp,
@@ -894,8 +896,8 @@ private fun FeedSelectorSheet(
                     val selected = isSelected(relay)
                     val healthScore = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.score
                     val dotColor = when {
-                        healthScore == null -> Color(0xFF666666)
-                        healthScore >= 70   -> Color(0xFF4CAF50)
+                        healthScore == null -> Text3
+                        healthScore >= 70   -> Mint
                         healthScore >= 40   -> Color(0xFFFFC107)
                         else                -> Color(0xFFFF5252)
                     }
@@ -904,7 +906,7 @@ private fun FeedSelectorSheet(
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 2.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) Cyan.copy(alpha = 0.08f) else Color.Transparent)
+                            .background(if (selected) Brand.copy(alpha = 0.08f) else Color.Transparent)
                             .clickable { onFeedChanged(relay) }
                             .padding(horizontal = 16.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -915,7 +917,7 @@ private fun FeedSelectorSheet(
                         Spacer(Modifier.width(14.dp))
                         Text(
                             text       = relay.displayLabel,
-                            color      = if (selected) Cyan else Color(0xFFDDDDDD),
+                            color      = if (selected) Brand else Color(0xFFDDDDDD),
                             fontSize   = 15.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             modifier   = Modifier.weight(1f),
@@ -923,7 +925,7 @@ private fun FeedSelectorSheet(
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Remove favorite",
-                            tint = Color(0xFF555555),
+                            tint = Text3,
                             modifier = Modifier
                                 .size(18.dp)
                                 .clickable { onRemoveFavorite(relay.url) },
@@ -958,9 +960,9 @@ private fun FeedSelectorSheet(
                     .padding(horizontal = 16.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("+", color = Cyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("+", color = Brand, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(14.dp))
-                Text("New Relay Set", color = Cyan, fontSize = 14.sp)
+                Text("New Relay Set", color = Brand, fontSize = 14.sp)
             }
 
             Row(
@@ -972,7 +974,7 @@ private fun FeedSelectorSheet(
                     .padding(horizontal = 16.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("\u2699", color = Color(0xFF666666), fontSize = 14.sp)
+                Text("\u2699", color = Text3, fontSize = 14.sp)
                 Spacer(Modifier.width(14.dp))
                 Text("Manage Relays", color = Color(0xFF999999), fontSize = 14.sp)
             }
@@ -993,7 +995,7 @@ private fun FeedSelectorSheet(
             },
             dismissButton = {
                 TextButton(onClick = { confirmDeleteDTag = null }) {
-                    Text("Cancel", color = Cyan)
+                    Text("Cancel", color = Brand)
                 }
             },
             containerColor = Surface1,

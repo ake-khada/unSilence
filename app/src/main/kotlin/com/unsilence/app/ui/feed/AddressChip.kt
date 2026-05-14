@@ -26,7 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
 
 /**
@@ -85,7 +85,7 @@ internal fun AddressChip(
             Spacer(Modifier.height(4.dp))
             Text(
                 text       = kindLabel,
-                color      = Cyan,
+                color      = Brand,
                 fontSize   = AppType.footnote,
                 fontWeight = FontWeight.Medium,
             )

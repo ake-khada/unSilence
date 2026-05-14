@@ -83,7 +83,7 @@ import androidx.compose.material.icons.outlined.Chat
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -332,7 +332,7 @@ fun ProfileScreen(
                         Icon(
                             imageVector        = Icons.Filled.Verified,
                             contentDescription = "NIP-05 verified",
-                            tint               = Cyan,
+                            tint               = Brand,
                             modifier           = Modifier.size(14.dp),
                         )
                         Spacer(Modifier.width(4.dp))
@@ -474,7 +474,7 @@ fun ProfileScreen(
                 TextButton(onClick = { showEditProfile = true }) {
                     Text(
                         text     = "Edit Profile",
-                        color    = Cyan,
+                        color    = Brand,
                         fontSize = AppType.body,
                     )
                 }

@@ -39,13 +39,14 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.NotificationItem
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -203,10 +204,10 @@ private data class NotifMeta(
 )
 
 private fun notifMeta(notifType: String): NotifMeta = when (notifType) {
-    "reaction" -> NotifMeta(Icons.Filled.Favorite, Color(0xFFE91E63), "liked your note")
-    "reply" -> NotifMeta(Icons.AutoMirrored.Filled.Chat, Cyan, "replied to your note")
-    "repost" -> NotifMeta(Icons.Filled.Repeat, Cyan, "boosted your note")
-    "zap" -> NotifMeta(Icons.Filled.ElectricBolt, ZapAmber, "zapped your note")
+    "reaction" -> NotifMeta(Icons.Filled.Favorite, Like, "liked your note")
+    "reply" -> NotifMeta(Icons.AutoMirrored.Filled.Chat, Brand, "replied to your note")
+    "repost" -> NotifMeta(Icons.Filled.Repeat, Brand, "boosted your note")
+    "zap" -> NotifMeta(Icons.Filled.ElectricBolt, Zap, "zapped your note")
     else -> NotifMeta(Icons.Filled.AlternateEmail, TextSecondary, "mentioned you")
 }
 

@@ -47,6 +47,7 @@ import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Text3
 
 @Composable
 fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
@@ -159,7 +160,7 @@ private fun SettingsItem(
             if (subtitle != null) {
                 Text(
                     text     = subtitle,
-                    color    = Color(0xFF666666),
+                    color    = Text3,
                     fontSize = 12.sp,
                 )
             }

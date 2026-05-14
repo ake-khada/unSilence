@@ -84,7 +84,7 @@ import androidx.compose.material.icons.outlined.Chat
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -378,7 +378,7 @@ fun UserProfileScreen(
                         Icon(
                             imageVector        = Icons.Filled.Verified,
                             contentDescription = "NIP-05 verified",
-                            tint               = Cyan,
+                            tint               = Brand,
                             modifier           = Modifier.size(14.dp),
                         )
                         Spacer(Modifier.width(4.dp))
@@ -416,7 +416,7 @@ fun UserProfileScreen(
                 ) {
                     if (followLoading) {
                         CircularProgressIndicator(
-                            color    = Cyan,
+                            color    = Brand,
                             modifier = Modifier.size(24.dp),
                             strokeWidth = 2.dp,
                         )
@@ -424,16 +424,16 @@ fun UserProfileScreen(
                         OutlinedButton(
                             onClick = { viewModel.toggleFollow(); showSnackbar("Unfollowed") },
                             border  = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
-                                brush = androidx.compose.ui.graphics.SolidColor(Cyan),
+                                brush = androidx.compose.ui.graphics.SolidColor(Brand),
                             ),
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
-                            Text("Following", color = Cyan, fontSize = AppType.body)
+                            Text("Following", color = Brand, fontSize = AppType.body)
                         }
                     } else {
                         Button(
                             onClick  = { viewModel.toggleFollow(); showSnackbar("Following") },
-                            colors   = ButtonDefaults.buttonColors(containerColor = Cyan),
+                            colors   = ButtonDefaults.buttonColors(containerColor = Brand),
                             modifier = Modifier.widthIn(min = 120.dp),
                         ) {
                             Text("Follow", color = Black, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)

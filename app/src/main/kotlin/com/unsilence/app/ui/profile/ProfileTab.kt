@@ -9,7 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.TextSecondary
 
 enum class ProfileTab { NOTES, REPLIES, LONGFORM }
@@ -27,7 +27,7 @@ fun ProfileTabRow(
             if (selectedTab.ordinal < tabPositions.size) {
                 TabRowDefaults.SecondaryIndicator(
                     modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab.ordinal]),
-                    color    = Cyan,
+                    color    = Brand,
                 )
             }
         },

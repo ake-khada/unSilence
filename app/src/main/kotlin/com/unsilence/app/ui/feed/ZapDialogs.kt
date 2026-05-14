@@ -34,11 +34,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 
 private val PRESET_AMOUNTS = listOf(21L, 100L, 500L, 1_000L, 5_000L, 10_000L, 50_000L, 100_000L)
 
@@ -71,7 +71,7 @@ fun ConnectWalletDialog(
                     value         = uri,
                     onValueChange = { uri = it },
                     textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodySmall),
-                    cursorBrush   = SolidColor(Cyan),
+                    cursorBrush   = SolidColor(Brand),
                     modifier      = Modifier
                         .fillMaxWidth()
                         .background(Black, RoundedCornerShape(8.dp))
@@ -91,7 +91,7 @@ fun ConnectWalletDialog(
                 onClick  = { onConnect(uri) },
                 enabled  = uri.isNotBlank(),
             ) {
-                Text("Connect", color = Cyan)
+                Text("Connect", color = Brand)
             }
         },
         dismissButton = {
@@ -137,13 +137,13 @@ fun ZapAmountDialog(
                         val isSelected = selected == amount && custom.isBlank()
                         Text(
                             text      = formatPreset(amount),
-                            color     = if (isSelected) Black else ZapAmber,
+                            color     = if (isSelected) Black else Zap,
                             fontSize  = AppType.bodySmall,
                             textAlign = TextAlign.Center,
                             modifier  = Modifier
                                 .weight(1f)
                                 .background(
-                                    color = if (isSelected) ZapAmber else Surface1,
+                                    color = if (isSelected) Zap else Surface1,
                                     shape = RoundedCornerShape(8.dp),
                                 )
                                 .clickable { selected = amount; custom = "" }
@@ -161,7 +161,7 @@ fun ZapAmountDialog(
                         fontSize  = AppType.body,
                         textAlign = TextAlign.Start,
                     ),
-                    cursorBrush  = SolidColor(ZapAmber),
+                    cursorBrush  = SolidColor(Zap),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier     = Modifier
                         .fillMaxWidth()
@@ -179,7 +179,7 @@ fun ZapAmountDialog(
                 effectiveAmount?.let { amt ->
                     Text(
                         text     = "⚡ $amt sats",
-                        color    = ZapAmber,
+                        color    = Zap,
                         fontSize = AppType.bodySmall,
                         modifier = Modifier.align(Alignment.CenterHorizontally),
                     )
@@ -191,7 +191,7 @@ fun ZapAmountDialog(
                 onClick  = { effectiveAmount?.let { onZap(it) } },
                 enabled  = effectiveAmount != null,
             ) {
-                Text("Zap ⚡", color = ZapAmber)
+                Text("Zap ⚡", color = Zap)
             }
         },
         dismissButton = {
