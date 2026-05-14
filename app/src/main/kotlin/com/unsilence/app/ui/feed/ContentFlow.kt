@@ -20,7 +20,7 @@ import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 
@@ -237,7 +237,7 @@ internal fun ContentFlow(
         if (isLong) {
             Text(
                 text     = if (expanded) "Show less" else "Show more",
-                color    = Cyan,
+                color    = Brand,
                 fontSize = AppType.bodySmall,
                 modifier = Modifier
                     .padding(horizontal = Spacing.medium)

@@ -52,12 +52,12 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 
 private enum class MuteTab { USERS, WORDS, HASHTAGS }
 
@@ -279,14 +279,14 @@ private fun SegmentedToggle(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .background(if (selected) Cyan.copy(alpha = 0.15f) else Color.Transparent)
+                    .background(if (selected) Brand.copy(alpha = 0.15f) else Color.Transparent)
                     .clickable { onSelect(mode) }
                     .padding(vertical = Spacing.small),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = label,
-                    color = if (selected) Cyan else TextSecondary,
+                    color = if (selected) Brand else TextSecondary,
                     fontSize = AppType.body,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 )
@@ -323,7 +323,7 @@ private fun TabLabel(label: String, count: Int, selected: Boolean, onClick: () -
     ) {
         Text(
             text = "$label $count",
-            color = if (selected) Cyan else TextSecondary,
+            color = if (selected) Brand else TextSecondary,
             fontSize = AppType.body,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
@@ -333,7 +333,7 @@ private fun TabLabel(label: String, count: Int, selected: Boolean, onClick: () -
                 modifier = Modifier
                     .height(2.dp)
                     .width(32.dp)
-                    .background(Cyan, RoundedCornerShape(1.dp)),
+                    .background(Brand, RoundedCornerShape(1.dp)),
             )
         }
     }
@@ -363,7 +363,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
             value = query,
             onValueChange = onQueryChange,
             textStyle = TextStyle(color = Color.White, fontSize = AppType.body),
-            cursorBrush = SolidColor(Cyan),
+            cursorBrush = SolidColor(Brand),
             singleLine = true,
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
@@ -471,7 +471,7 @@ private fun MuteSyncBanner(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Spacing.small))
-            .background(ZapAmber.copy(alpha = 0.12f))
+            .background(Zap.copy(alpha = 0.12f))
             .padding(Spacing.medium),
     ) {
         Text(
@@ -482,7 +482,7 @@ private fun MuteSyncBanner(
                 "Mute sync disabled \u2014 encryption check failed. " +
                     "Mutes work locally but won\u2019t sync to relays or other clients."
             },
-            color = ZapAmber,
+            color = Zap,
             fontSize = AppType.caption,
         )
         if (isAmberMode) {
@@ -491,7 +491,7 @@ private fun MuteSyncBanner(
                 onClick = onRetry,
                 shape = RoundedCornerShape(Spacing.small),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = ZapAmber,
+                    containerColor = Zap,
                     contentColor = Black,
                 ),
                 modifier = Modifier.fillMaxWidth(),

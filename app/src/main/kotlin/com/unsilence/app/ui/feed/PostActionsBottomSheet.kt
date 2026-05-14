@@ -31,7 +31,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,10 +91,10 @@ fun PostActionsBottomSheet(
                 modifier = Modifier.padding(vertical = 4.dp),
             )
 
-            SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", ZapAmber) {
+            SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", Zap) {
                 onMuteUser(); onDismiss()
             }
-            SheetActionRow(Icons.Default.Flag, "Report", ZapAmber) {
+            SheetActionRow(Icons.Default.Flag, "Report", Zap) {
                 onReport()
             }
         }

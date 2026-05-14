@@ -74,7 +74,7 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -144,7 +144,7 @@ fun SearchScreen(
                     pendingSearch = it.length >= 3
                 },
                 textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
-                cursorBrush   = SolidColor(Cyan),
+                cursorBrush   = SolidColor(Brand),
                 singleLine    = true,
                 modifier      = Modifier.weight(1f).focusRequester(focusRequester),
                 decorationBox = { inner ->
@@ -179,7 +179,7 @@ fun SearchScreen(
         if (pendingSearch || state.loading) {
             LinearProgressIndicator(
                 modifier   = Modifier.fillMaxWidth().height(2.dp),
-                color      = Cyan,
+                color      = Brand,
                 trackColor = Color.Transparent,
             )
         } else {
@@ -196,7 +196,7 @@ fun SearchScreen(
                 TextButton(onClick = { selectedTab = index }) {
                     Text(
                         text       = label,
-                        color      = if (selectedTab == index) Cyan else TextSecondary,
+                        color      = if (selectedTab == index) Brand else TextSecondary,
                         fontSize   = AppType.body,
                         fontWeight = if (selectedTab == index) FontWeight.SemiBold else FontWeight.Normal,
                     )
@@ -234,7 +234,7 @@ fun SearchScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             CircularProgressIndicator(
-                                color       = Cyan,
+                                color       = Brand,
                                 modifier    = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
                             )

@@ -81,13 +81,15 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.BorderFaint
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -107,7 +109,7 @@ import java.util.concurrent.TimeUnit
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-internal val ActionTint = Color(0xFF555555)
+internal val ActionTint = Text3
 private val MediaPlaceholder = Surface1
 
 // Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
@@ -315,7 +317,7 @@ internal fun NostrRichText(
                         tag = pubkeyHex,
                         styles = TextLinkStyles(
                             style = SpanStyle(
-                                color          = Cyan,
+                                color          = Brand,
                                 fontWeight     = FontWeight.Medium,
                                 textDecoration = TextDecoration.None,
                             ),
@@ -375,7 +377,7 @@ internal fun LinkPreviewCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
-                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
@@ -446,7 +448,7 @@ internal fun LinkPreviewCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
-                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MediaPlaceholder))
@@ -478,7 +480,7 @@ private fun LinkChip(url: String) {
     ) {
         Text(
             text     = domain,
-            color    = Cyan,
+            color    = Brand,
             fontSize = AppType.footnote,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -488,7 +490,7 @@ private fun LinkChip(url: String) {
 
 // ── Action bar primitives (used by ArticleReaderScreen) ─────────────────────
 
-/** Single action bar button: vector icon + optional count. Turns Cyan when [highlighted]. */
+/** Single action bar button: vector icon + optional count. Turns Brand when [highlighted]. */
 @Composable
 internal fun ActionButton(
     icon: ImageVector,
@@ -497,7 +499,7 @@ internal fun ActionButton(
     highlighted: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
-    val tint = if (highlighted) Cyan else ActionTint
+    val tint = if (highlighted) Brand else ActionTint
     val rowModifier = if (onClick != null)
         Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).clickable(onClick = onClick)
     else
@@ -560,7 +562,7 @@ internal fun ZapButton(
         }
     }
 
-    val baseTint = if (hasZapped) ZapAmber else ActionTint
+    val baseTint = if (hasZapped) Zap else ActionTint
     val tint = if (flashAlpha.value > 0f) {
         lerp(baseTint, Color.White, flashAlpha.value)
     } else baseTint
@@ -578,7 +580,7 @@ internal fun ZapButton(
         ) {
             if (isLoading) {
                 CircularProgressIndicator(
-                    color       = Cyan,
+                    color       = Brand,
                     modifier    = Modifier.size(12.dp),
                     strokeWidth = 2.dp,
                 )

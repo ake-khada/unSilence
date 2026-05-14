@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -119,7 +119,7 @@ internal fun InlineText(
                                 tag = segment.pubkeyHex,
                                 styles = TextLinkStyles(
                                     style = SpanStyle(
-                                        color          = Cyan,
+                                        color          = Brand,
                                         fontWeight     = FontWeight.Medium,
                                         textDecoration = TextDecoration.None,
                                     ),
@@ -136,7 +136,7 @@ internal fun InlineText(
                                 url = segment.url,
                                 styles = TextLinkStyles(
                                     style = SpanStyle(
-                                        color          = Cyan,
+                                        color          = Brand,
                                         textDecoration = TextDecoration.None,
                                     ),
                                 ),

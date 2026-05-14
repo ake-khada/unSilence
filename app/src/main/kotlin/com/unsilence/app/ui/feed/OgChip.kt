@@ -36,6 +36,7 @@ import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
@@ -76,7 +77,7 @@ internal fun OgPreviewCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
-                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
@@ -139,7 +140,7 @@ internal fun OgPreviewCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
-                .border(0.5.dp, Color(0xFF1A1A1A), RoundedCornerShape(Sizing.mediaCornerRadius))
+                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Surface1))

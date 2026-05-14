@@ -47,10 +47,10 @@ import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.ZapAmber
+import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
@@ -194,7 +194,7 @@ internal fun EventActionBar(
     }
 }
 
-/** Single action bar button: vector icon + optional count. Turns Cyan when [highlighted]. */
+/** Single action bar button: vector icon + optional count. Turns Brand when [highlighted]. */
 @Composable
 internal fun EventActionButton(
     icon: ImageVector,
@@ -203,7 +203,7 @@ internal fun EventActionButton(
     highlighted: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
-    val tint = if (highlighted) Cyan else ActionTint
+    val tint = if (highlighted) Brand else ActionTint
     val rowModifier = if (onClick != null)
         Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).clickable(onClick = onClick)
     else
@@ -266,7 +266,7 @@ internal fun EventZapButton(
         }
     }
 
-    val baseTint = if (hasZapped) ZapAmber else ActionTint
+    val baseTint = if (hasZapped) Zap else ActionTint
     val tint = if (flashAlpha.value > 0f) {
         lerp(baseTint, Color.White, flashAlpha.value)
     } else baseTint
@@ -284,7 +284,7 @@ internal fun EventZapButton(
         ) {
             if (isLoading) {
                 CircularProgressIndicator(
-                    color       = Cyan,
+                    color       = Brand,
                     modifier    = Modifier.size(12.dp),
                     strokeWidth = 2.dp,
                 )

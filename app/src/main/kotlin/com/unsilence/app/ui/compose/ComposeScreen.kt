@@ -45,7 +45,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -92,7 +92,7 @@ fun ComposeScreen(
                 TextButton(onClick = onDismiss) {
                     Text(
                         text     = "Cancel",
-                        color    = Cyan,
+                        color    = Brand,
                         fontSize = 15.sp,
                     )
                 }
@@ -159,7 +159,7 @@ fun ComposeScreen(
                         color    = Color.White,
                         fontSize = 16.sp,
                     ),
-                    cursorBrush   = SolidColor(Cyan),
+                    cursorBrush   = SolidColor(Brand),
                     decorationBox = { inner ->
                         if (textValue.text.isEmpty()) {
                             Text(

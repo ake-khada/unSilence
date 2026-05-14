@@ -40,10 +40,10 @@ object Sizing {
 }
 
 private val UnsilenceColorScheme = darkColorScheme(
-    primary          = Cyan,
+    primary          = Brand,
     onPrimary        = Black,
-    primaryContainer = CyanDark,
-    secondary        = CyanDark,
+    primaryContainer = BrandDeep,
+    secondary        = BrandDeep,
     onSecondary      = Black,
     background       = Black,
     onBackground     = White,

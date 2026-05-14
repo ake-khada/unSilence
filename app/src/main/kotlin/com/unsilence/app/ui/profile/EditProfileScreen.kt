@@ -44,7 +44,9 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.BorderSubtle
+import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -138,7 +140,7 @@ fun EditProfileScreen(
                 ) {
                     Text(
                         text  = "Save",
-                        color = if (hasChanges) Cyan else TextSecondary,
+                        color = if (hasChanges) Brand else TextSecondary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -188,7 +190,7 @@ fun EditProfileScreen(
                     modifier = Modifier
                         .size(EDIT_AVATAR_SIZE)
                         .clip(CircleShape)
-                        .border(2.dp, Color(0xFF1A1A1A), CircleShape),
+                        .border(2.dp, BorderSubtle, CircleShape),
                 ) {
                     viewModel.pubkeyHex?.let {
                         IdentIcon(pubkey = it, modifier = Modifier.fillMaxSize())
@@ -289,13 +291,13 @@ private fun ProfileField(
             value         = value,
             onValueChange = onChange,
             textStyle     = TextStyle(color = Color.White, fontSize = 15.sp),
-            cursorBrush   = SolidColor(Cyan),
+            cursorBrush   = SolidColor(Brand),
             singleLine    = !multiline,
             maxLines      = if (multiline) 6 else 1,
             decorationBox = { inner ->
                 Box {
                     if (value.isEmpty() && hint.isNotBlank()) {
-                        Text(hint, color = Color(0xFF555555), fontSize = 15.sp)
+                        Text(hint, color = Text3, fontSize = 15.sp)
                     }
                     inner()
                 }

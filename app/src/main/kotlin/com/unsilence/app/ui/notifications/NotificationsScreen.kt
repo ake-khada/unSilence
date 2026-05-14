@@ -25,7 +25,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.ui.shared.NotificationEventRow
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.TextSecondary
 
 /**
@@ -51,7 +51,7 @@ fun NotificationsScreen(
         when {
             state.loading -> {
                 CircularProgressIndicator(
-                    color    = Cyan,
+                    color    = Brand,
                     modifier = Modifier.align(Alignment.Center),
                 )
             }

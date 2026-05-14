@@ -38,12 +38,14 @@ import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.common.LogoMark
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Cyan
+import com.unsilence.app.ui.theme.BorderDefault
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.White
 
-private val ButtonShape = RoundedCornerShape(Sizing.mediaCornerRadius)  // 8.dp
-private val CyanBorder  = BorderStroke(1.dp, Cyan)
+private val ButtonShape    = RoundedCornerShape(Sizing.mediaCornerRadius)  // 8.dp
+private val NeutralBorder  = BorderStroke(1.dp, BorderDefault)
 
 @Composable
 fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
@@ -94,7 +96,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             },
             shape    = ButtonShape,
             colors   = ButtonDefaults.buttonColors(
-                containerColor = Cyan,
+                containerColor = Brand,
                 contentColor   = Black,
             ),
             modifier = Modifier
@@ -110,8 +112,8 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         OutlinedButton(
             onClick  = { showImportField = !showImportField; importError = null },
             shape    = ButtonShape,
-            border   = CyanBorder,
-            colors   = ButtonDefaults.outlinedButtonColors(contentColor = Cyan),
+            border   = NeutralBorder,
+            colors   = ButtonDefaults.outlinedButtonColors(contentColor = White),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(Sizing.topBarHeight),
@@ -129,9 +131,9 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                 isError       = importError != null,
                 supportingText = importError?.let { { Text(it, color = Color(0xFFCF6679)) } },
                 colors        = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor   = Cyan,
+                    focusedBorderColor   = Brand,
                     unfocusedBorderColor = TextSecondary,
-                    cursorColor          = Cyan,
+                    cursorColor          = Brand,
                     focusedTextColor     = Color.White,
                     unfocusedTextColor   = Color.White,
                 ),
@@ -147,7 +149,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     }
                 },
                 shape  = ButtonShape,
-                colors = ButtonDefaults.buttonColors(containerColor = Cyan, contentColor = Black),
+                colors = ButtonDefaults.buttonColors(containerColor = Brand, contentColor = Black),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Confirm", fontWeight = FontWeight.SemiBold)
@@ -166,8 +168,8 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                 }
             },
             shape    = ButtonShape,
-            border   = CyanBorder,
-            colors   = ButtonDefaults.outlinedButtonColors(contentColor = Cyan),
+            border   = NeutralBorder,
+            colors   = ButtonDefaults.outlinedButtonColors(contentColor = White),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(Sizing.topBarHeight),
