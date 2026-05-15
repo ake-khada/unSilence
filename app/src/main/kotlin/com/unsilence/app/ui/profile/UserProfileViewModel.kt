@@ -255,9 +255,10 @@ class UserProfileViewModel @Inject constructor(
             .ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
 
-        // Reset state for new subscription group
-        _events.value = emptyList()
-        _isLoading.value = true
+        // Pre-seed with MES-cached events for instant tab switching;
+        // relay subscription merges on top as batches arrive.
+        _events.value = cached
+        _isLoading.value = cached.isEmpty()
 
         val subRequests = listOf(SubRequest(
             urls = writeRelays,
