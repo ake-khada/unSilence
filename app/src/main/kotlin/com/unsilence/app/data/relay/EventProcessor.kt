@@ -563,48 +563,49 @@ class EventProcessor @Inject constructor(
         }
     }
 
-    // ── NIP-10: threading ─────────────────────────────────────────────────────
+}
 
-    /**
-     * Returns (replyToId, rootId) parsed from `e` tags.
-     *
-     * Priority: explicit "root"/"reply" markers. Fallback: positional
-     * (first e = root, last e = reply-to). If only one e tag, it is the root.
-     */
-    internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String?> {
-        val eTags = tags.filter { it.size >= 2 && it[0] == "e" }
-        if (eTags.isEmpty()) return Pair(null, null)
+// ── NIP-10: threading (top-level — shared by EventProcessor + Subscription) ──
 
-        // If ANY e-tag carries a NIP-10 marker, use marker-based parsing
-        // exclusively. "mention" markers reference events without replying —
-        // they must NOT participate in positional fallback.
-        val hasMarkers = eTags.any { tag ->
-            val m = tag.getOrNull(3)
-            m == "root" || m == "reply" || m == "mention"
-        }
+/**
+ * Returns (replyToId, rootId) parsed from `e` tags.
+ *
+ * Priority: explicit "root"/"reply" markers. Fallback: positional
+ * (first e = root, last e = reply-to). If only one e tag, it is the root.
+ */
+internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String?> {
+    val eTags = tags.filter { it.size >= 2 && it[0] == "e" }
+    if (eTags.isEmpty()) return Pair(null, null)
 
-        if (hasMarkers) {
-            val rootId    = eTags.firstOrNull { it.getOrNull(3) == "root" }?.getOrNull(1)
-            val replyToId = eTags.firstOrNull { it.getOrNull(3) == "reply" }?.getOrNull(1)
-            // If root but no reply marker → direct reply to root
-            return Pair(replyToId ?: rootId, rootId)
-        }
-
-        // Positional fallback (no markers at all — legacy NIP-10)
-        val ids = eTags.mapNotNull { it.getOrNull(1) }
-        return when (ids.size) {
-            0    -> Pair(null, null)
-            1    -> Pair(ids[0], ids[0])   // single e = both root and reply-to
-            else -> Pair(ids.last(), ids.first())
-        }
+    // If ANY e-tag carries a NIP-10 marker, use marker-based parsing
+    // exclusively. "mention" markers reference events without replying —
+    // they must NOT participate in positional fallback.
+    val hasMarkers = eTags.any { tag ->
+        val m = tag.getOrNull(3)
+        m == "root" || m == "reply" || m == "mention"
     }
 
-    // ── NIP-36: content-warning ───────────────────────────────────────────────
-
-    private fun parseContentWarning(tags: List<List<String>>): Pair<Boolean, String?> {
-        val cwTag = tags.firstOrNull { it.isNotEmpty() && it[0] == "content-warning" }
-            ?: return Pair(false, null)
-        val reason = cwTag.getOrNull(1)?.takeIf { it.isNotBlank() }
-        return Pair(true, reason)
+    if (hasMarkers) {
+        val rootId    = eTags.firstOrNull { it.getOrNull(3) == "root" }?.getOrNull(1)
+        val replyToId = eTags.firstOrNull { it.getOrNull(3) == "reply" }?.getOrNull(1)
+        // If root but no reply marker → direct reply to root
+        return Pair(replyToId ?: rootId, rootId)
     }
+
+    // Positional fallback (no markers at all — legacy NIP-10)
+    val ids = eTags.mapNotNull { it.getOrNull(1) }
+    return when (ids.size) {
+        0    -> Pair(null, null)
+        1    -> Pair(ids[0], ids[0])   // single e = both root and reply-to
+        else -> Pair(ids.last(), ids.first())
+    }
+}
+
+// ── NIP-36: content-warning (top-level — shared by EventProcessor + Subscription) ──
+
+internal fun parseContentWarning(tags: List<List<String>>): Pair<Boolean, String?> {
+    val cwTag = tags.firstOrNull { it.isNotEmpty() && it[0] == "content-warning" }
+        ?: return Pair(false, null)
+    val reason = cwTag.getOrNull(1)?.takeIf { it.isNotBlank() }
+    return Pair(true, reason)
 }

@@ -296,9 +296,8 @@ class Subscription @Inject constructor(
      * Slice the inner event object out of [raw] and stream-decode straight
      * into [EventDto], then map to [NostrEvent]. Mirrors the EventProcessor
      * fast path — no JsonObject / JsonArray tree, no per-field JsonPrimitive
-     * allocation. NIP-10 threading and NIP-36 content-warning fields are
-     * left null/false here (preserving prior dispatchEvent semantics —
-     * EventProcessor populates those on its own write path into MES).
+     * allocation. NIP-10 threading and NIP-36 content-warning are parsed
+     * here so FeedViewModel can filter Notes vs Conversations immediately.
      */
     private fun parseEvent(raw: String, expectedId: String, relayUrl: String): NostrEvent? {
         val objStart = findEventObjectStart(raw)
@@ -315,6 +314,13 @@ class Subscription @Inject constructor(
         // returning a tampered or mis-aligned message gets refused here —
         // same defense EventProcessor.process applies.
         if (dto.id != expectedId) return null
+
+        val (replyToId, rootId) = when (dto.kind) {
+            1, 6, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
+            else -> Pair(null, null)
+        }
+        val (hasCw, cwReason) = parseContentWarning(dto.tags)
+
         return NostrEvent(
             id = dto.id,
             pubkey = dto.pubkey,
@@ -325,10 +331,10 @@ class Subscription @Inject constructor(
             tagsJson = tagsToJson(dto.tags),
             sig = dto.sig,
             relayUrl = relayUrl,
-            replyToId = null,
-            rootId = null,
-            hasContentWarning = false,
-            contentWarningReason = null,
+            replyToId = replyToId,
+            rootId = rootId,
+            hasContentWarning = hasCw,
+            contentWarningReason = cwReason,
             firstSeenAt = System.currentTimeMillis(),
             relaysSeen = ConcurrentHashMap.newKeySet<String>().also { it.add(relayUrl) },
         )
