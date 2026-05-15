@@ -76,6 +76,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.lazy.items
 
 /** Auto-page when the last visible item is within this distance of the
@@ -85,6 +87,7 @@ import androidx.compose.foundation.lazy.items
  *  while the user is mid-feed. */
 private const val AUTO_PAGE_TRIGGER_DISTANCE = 5
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeedScreen(
     scrollToTopTrigger: Int = 0,
@@ -273,6 +276,12 @@ fun FeedScreen(
             }
 
             else -> {
+                val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing,
+                    onRefresh    = { viewModel.triggerRefresh() },
+                    modifier     = Modifier.fillMaxSize(),
+                ) {
                 LazyColumn(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
@@ -330,6 +339,7 @@ fun FeedScreen(
                         }
                     }
                 }
+                } // PullToRefreshBox
 
                 // Viewport tracking — used for at-top detection AND auto-paging.
                 //
