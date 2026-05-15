@@ -84,6 +84,7 @@ private val TAB_LABELS = listOf("People", "Notes")
 @Composable
 fun SearchScreen(
     onNoteClick: (String) -> Unit = {},
+    onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: SearchViewModel = hiltViewModel(),
@@ -286,6 +287,7 @@ fun SearchScreen(
                         )
                         val callbacks = EventActionCallbacks(
                             onNoteClick = onNoteClick,
+                            onComment = onComment,
                             onAuthorClick = onAuthorClick,
                             onQuote = onQuote,
                             onArticleClick = { articleRow = it },

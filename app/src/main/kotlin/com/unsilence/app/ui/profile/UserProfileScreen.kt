@@ -102,6 +102,7 @@ fun UserProfileScreen(
     pubkey: String,
     onDismiss: () -> Unit,
     onNoteClick: (String) -> Unit = {},
+    onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: UserProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -175,6 +176,7 @@ fun UserProfileScreen(
     val callbacks = remember(viewModel, actionsViewModel, pubkey) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
+            onComment = onComment,
             onAuthorClick = interceptedAuthorClick,
             onArticleClick = { articleRow = it },
             react = { id, pk -> actionsViewModel.react(id, pk) },

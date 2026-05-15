@@ -97,6 +97,7 @@ fun FeedScreen(
     topBarShown: Boolean = true,
     staticTopPadding: Dp = 0.dp,
     onNoteClick: (String) -> Unit = {},
+    onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onQuote: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
@@ -184,6 +185,7 @@ fun FeedScreen(
     val callbacks = remember(viewModel, actionsViewModel) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
+            onComment = onComment,
             onAuthorClick = onAuthorClick,
             onQuote = onQuote,
             onArticleClick = { articleRow = it },

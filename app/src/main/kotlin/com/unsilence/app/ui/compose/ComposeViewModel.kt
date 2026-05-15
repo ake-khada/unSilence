@@ -45,6 +45,12 @@ class ComposeViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
+    /** Signed-in user's profile for the compose header. */
+    val userEntity: StateFlow<com.unsilence.app.data.memory.UserEntity?> = pubkeyHex?.let { pk ->
+        userRepository.userFlow(pk)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    } ?: MutableStateFlow(null)
+
     /** True once the note has been signed, published, and inserted into MES. */
     var published by mutableStateOf(false)
         private set
@@ -52,6 +58,75 @@ class ComposeViewModel @Inject constructor(
     /** Non-null when signing or publishing failed — shown to the user. */
     var publishError by mutableStateOf<String?>(null)
         private set
+
+    /** Reset state for reuse — ViewModel is activity-scoped, survives recomposition. */
+    fun reset() {
+        published = false
+        publishError = null
+        replyToRow = null
+    }
+
+    // ── Reply mode ──────────────────────────────────────────────────────────
+
+    /** Parent note for reply mode, looked up from MES. */
+    var replyToRow by mutableStateOf<com.unsilence.app.data.memory.FeedRow?>(null)
+        private set
+
+    fun loadReplyTo(eventId: String) {
+        val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
+        replyToRow = rows.firstOrNull()
+    }
+
+    fun publishReply(content: String) {
+        val parent = replyToRow ?: return
+        publishError = null
+        viewModelScope.launch {
+            // NIP-10: compute root and reply markers
+            val threadRootId = parent.rootId ?: parent.id
+            val replyToId = parent.id
+            val replyToPubkey = parent.pubkey
+
+            val template = TextNoteEvent.build(note = content, createdAt = System.currentTimeMillis() / 1000L) {
+                add(arrayOf("e", threadRootId, "", "root"))
+                if (replyToId != threadRootId) {
+                    add(arrayOf("e", replyToId, "", "reply"))
+                }
+                add(arrayOf("p", replyToPubkey))
+            }
+            val signed = signingManager.sign(template) ?: run {
+                publishError = "Signing failed — check your key or Amber connection"
+                return@launch
+            }
+
+            withContext(Dispatchers.IO) {
+                relayPool.publish(toEventJson(signed))
+
+                val nowMs = System.currentTimeMillis()
+                val parsedTags = signed.tags.map { it.toList() }
+                memoryEventStore.insert(
+                    NostrEvent(
+                        id = signed.id,
+                        pubkey = signed.pubKey,
+                        kind = signed.kind,
+                        content = signed.content,
+                        createdAt = signed.createdAt,
+                        tags = parsedTags,
+                        tagsJson = tagsToJson(parsedTags),
+                        sig = signed.sig,
+                        relayUrl = "local",
+                        replyToId = replyToId,
+                        rootId = threadRootId,
+                        hasContentWarning = false,
+                        contentWarningReason = null,
+                        firstSeenAt = nowMs / 1000L,
+                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                    )
+                )
+            }
+
+            published = true
+        }
+    }
 
     fun publishNote(content: String) {
         publishError = null
