@@ -75,6 +75,7 @@ internal fun EventActionBar(
     extraZapSats: Long,
     zapFlash: NoteActionsViewModel.ZapFlashState?,
     onNoteClick: () -> Unit,
+    onComment: () -> Unit = {},
     onReact: () -> Unit,
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
@@ -107,6 +108,7 @@ internal fun EventActionBar(
                 icon               = Icons.AutoMirrored.Filled.Chat,
                 count              = replyCount,
                 contentDescription = "Replies",
+                onClick            = onComment,
             )
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {

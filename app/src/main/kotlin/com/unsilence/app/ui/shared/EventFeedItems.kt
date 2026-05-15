@@ -62,6 +62,7 @@ import kotlinx.coroutines.flow.StateFlow
 @androidx.compose.runtime.Stable
 data class EventActionCallbacks(
     val onNoteClick: (String) -> Unit = {},
+    val onComment: (eventId: String) -> Unit = {},
     val onAuthorClick: (pubkey: String) -> Unit = {},
     val onQuote: (String) -> Unit = {},
     val onArticleClick: (FeedRow) -> Unit = {},
@@ -362,14 +363,16 @@ private fun EventFeedItem(
     }
 
     // ── Remembered lambdas — stable across recompositions ─────────────────
-    val onReact = remember(row.id, row.pubkey) {
-        { callbacks.react(row.id, row.pubkey) }
+    // Use model.engagementId / model.pubkey so kind-6 reposts target
+    // the ORIGINAL event, not the repost wrapper.
+    val onReact = remember(model.engagementId, model.pubkey) {
+        { callbacks.react(model.engagementId, model.pubkey) }
     }
-    val onRepost = remember(row.id, row.pubkey, row.relayUrl) {
-        { callbacks.repost(row.id, row.pubkey, row.relayUrl) }
+    val onRepost = remember(model.engagementId, model.pubkey, row.relayUrl) {
+        { callbacks.repost(model.engagementId, model.pubkey, row.relayUrl) }
     }
-    val onZap: (Long) -> Unit = remember(row.id, row.pubkey, row.relayUrl) {
-        { amt: Long -> callbacks.zap(row.id, row.pubkey, row.relayUrl, amt) }
+    val onZap: (Long) -> Unit = remember(model.engagementId, model.pubkey, row.relayUrl) {
+        { amt: Long -> callbacks.zap(model.engagementId, model.pubkey, row.relayUrl, amt) }
     }
     val onToggleMute = remember(videoScope) {
         { videoScope?.toggleMute(); Unit }
@@ -380,6 +383,9 @@ private fun EventFeedItem(
     val onNewPostAnimatedCb = remember(row.id) {
         { onNewPostAnimated() }
     }
+    val onComment = remember(model.navigateId) {
+        { callbacks.onComment(model.navigateId) }
+    }
 
     EventCard(
         model               = model,
@@ -387,6 +393,7 @@ private fun EventFeedItem(
         role                = role,
         engagement          = engagement,
         onNoteClick         = callbacks.onNoteClick,
+        onComment           = onComment,
         onAuthorClick       = callbacks.onAuthorClick,
         onQuote             = callbacks.onQuote,
         onArticleClick      = callbacks.onArticleClick,

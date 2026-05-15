@@ -97,6 +97,7 @@ fun ProfileScreen(
     onLogout: () -> Unit = {},
     onBack: () -> Unit = {},
     onNoteClick: (String) -> Unit = {},
+    onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: ProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -163,6 +164,7 @@ fun ProfileScreen(
     )
     val callbacks = EventActionCallbacks(
         onNoteClick = onNoteClick,
+        onComment = onComment,
         onAuthorClick = interceptedAuthorClick,
         onArticleClick = { articleRow = it },
         react = { id, pk -> actionsViewModel.react(id, pk) },

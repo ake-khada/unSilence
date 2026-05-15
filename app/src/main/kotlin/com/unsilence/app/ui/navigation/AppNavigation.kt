@@ -164,6 +164,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var showRelaySettings    by remember { mutableStateOf(false) }
     var threadEventId        by remember { mutableStateOf<String?>(null) }
+    var replyToEventId       by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
@@ -282,6 +283,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         topBarShown        = topBarShown,
                         staticTopPadding   = staticTopPadding,
                         onNoteClick        = { eventId -> threadEventId = eventId },
+                        onComment          = { eventId -> replyToEventId = eventId },
                         onAuthorClick      = onAuthorClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                         viewModel          = feedViewModel,
@@ -289,6 +291,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     1    -> Box(Modifier.padding(top = staticTopPadding)) {
                         SearchScreen(
                             onNoteClick   = { eventId -> threadEventId = eventId },
+                            onComment     = { eventId -> replyToEventId = eventId },
                             onAuthorClick = onAuthorClick,
                             onQuote       = { noteId  -> quoteNoteId   = noteId  },
                         )
@@ -298,7 +301,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onAuthorClick = onAuthorClick, viewModel = hiltViewModel(key = "profile-$userPubkey"))
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, viewModel = hiltViewModel(key = "profile-$userPubkey"))
                     else -> PlaceholderScreen()
                 }
             }
@@ -503,6 +506,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     pubkey        = pubkey,
                     onDismiss     = { userProfilePubkey = null },
                     onNoteClick   = { eventId -> threadEventId = eventId },
+                    onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
                 )
             }
@@ -515,12 +519,21 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         eventId       = eventId,
                         onDismiss     = { threadEventId = null },
                         onQuote       = { noteId -> quoteNoteId = noteId },
+                        onComment     = { replyEventId -> replyToEventId = replyEventId },
                         onAuthorClick = { pubkey ->
                             threadEventId = null      // dismiss thread so profile is visible
                             userProfilePubkey = pubkey
                         },
                     )
                 }
+            }
+
+            // ── Reply-compose overlay ─────────────────────────────────────────
+            replyToEventId?.let { eventId ->
+                ComposeScreen(
+                    replyToEventId = eventId,
+                    onDismiss      = { replyToEventId = null },
+                )
             }
 
             // ── Quote-compose overlay ─────────────────────────────────────────

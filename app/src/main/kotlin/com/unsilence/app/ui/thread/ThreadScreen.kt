@@ -22,7 +22,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -65,7 +64,6 @@ import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
-import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -75,6 +73,7 @@ fun ThreadScreen(
     eventId: String,
     onDismiss: () -> Unit,
     onQuote: (String) -> Unit = {},
+    onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     viewModel: ThreadViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
@@ -174,6 +173,7 @@ fun ThreadScreen(
                                         role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
                                         engagement          = focusedEngagement,
                                         onNoteClick         = { /* already on thread */ },
+                                        onComment           = { onComment(note.id) },
                                         onAuthorClick       = onAuthorClick,
                                         onQuote             = onQuote,
                                         onArticleClick      = { articleRow = it },
@@ -249,6 +249,7 @@ fun ThreadScreen(
                                             role                = CardRole.Reply,
                                             engagement          = replyEngagement,
                                             onNoteClick         = { /* already viewing thread */ },
+                                            onComment           = { onComment(reply.id) },
                                             onAuthorClick       = onAuthorClick,
                                             onQuote             = onQuote,
                                             onArticleClick      = { articleRow = it },
@@ -258,7 +259,7 @@ fun ThreadScreen(
                                             onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
                                             lookupProfile       = actionsViewModel::lookupProfile,
                                             lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+                                            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
                                             lookupModel         = actionsViewModel::getEventModel,
                                             fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
                                             profileFlow         = null,
@@ -288,23 +289,6 @@ fun ThreadScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val focused = state.focusedNote
-
-                // Like button for focused note
-                IconButton(
-                    onClick  = { focused?.let { actionsViewModel.react(it.id, it.pubkey) } },
-                    modifier = Modifier.size(36.dp),
-                    enabled  = focused != null,
-                ) {
-                    Icon(
-                        imageVector        = Icons.Filled.Favorite,
-                        contentDescription = "Like",
-                        tint               = if (focused != null && focused.engagementId in reactedIds)
-                                                 Like else TextSecondary,
-                        modifier           = Modifier.size(20.dp),
-                    )
-                }
-
-                Spacer(Modifier.width(Spacing.small))
 
                 BasicTextField(
                     value         = replyText,
