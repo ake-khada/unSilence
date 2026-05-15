@@ -5,8 +5,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,13 +21,14 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,7 +39,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -61,6 +67,8 @@ private val ButtonPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)
 @Composable
 fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val clipboardManager = LocalClipboardManager.current
 
     var showImportField by remember { mutableStateOf(false) }
     var importText      by remember { mutableStateOf("") }
@@ -88,11 +96,11 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         // 1. Status bar inset
         Spacer(Modifier.statusBarsPadding())
 
-        // 2. Top weighted spacer
-        Spacer(Modifier.weight(1f))
+        // 2. Top weighted spacer (golden ratio: 1.618 above, 1.0 below)
+        Spacer(Modifier.weight(1.618f))
 
         // 3. Animated waveform mark
-        LogoMark(sizeDp = 80.dp, color = Brand)
+        LogoMark(sizeDp = 112.dp, color = Brand)
 
         // 4. Logo → headline
         Spacer(Modifier.height(Spacing.xxl))
@@ -163,40 +171,76 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         // Import key expansion
         if (showImportField) {
             Spacer(Modifier.height(Spacing.small))
-            OutlinedTextField(
-                value          = importText,
-                onValueChange  = { importText = it; importError = null },
-                placeholder    = { Text("nsec1\u2026 or hex private key", color = TextSecondary, fontSize = AppType.body) },
-                singleLine     = true,
-                isError        = importError != null,
-                supportingText = importError?.let { { Text(it, color = Color(0xFFCF6679)) } },
-                colors         = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor   = Brand,
-                    unfocusedBorderColor = TextSecondary,
-                    cursorColor          = Brand,
-                    focusedTextColor     = White,
-                    unfocusedTextColor   = White,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(Spacing.small))
-            Button(
-                onClick = {
-                    if (keyManager.importKey(importText)) {
-                        onComplete()
-                    } else {
-                        importError = "Invalid key \u2014 paste an nsec1\u2026 or 64-char hex key"
+
+            if (importText.isBlank()) {
+                // Paste from clipboard button
+                OutlinedButton(
+                    onClick = {
+                        val clip = clipboardManager.getText()?.text?.trim().orEmpty()
+                        if (clip.isNotBlank()) {
+                            importText = clip
+                            importError = null
+                        } else {
+                            importError = "Clipboard is empty \u2014 copy your nsec1\u2026 key first"
+                        }
+                    },
+                    shape          = ButtonShape,
+                    border         = NeutralBorder,
+                    contentPadding = ButtonPadding,
+                    colors         = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                    modifier       = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        imageVector        = Icons.Filled.ContentPaste,
+                        contentDescription = null,
+                        modifier           = Modifier.padding(end = Spacing.small).size(16.dp),
+                    )
+                    Text("Paste from clipboard", fontSize = AppType.body)
+                }
+            } else {
+                // Show pasted key with send icon
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, TextSecondary, ButtonShape)
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text       = importText,
+                        color      = White,
+                        fontSize   = AppType.body,
+                        maxLines   = 1,
+                        modifier   = Modifier.weight(1f).padding(end = Spacing.small),
+                        overflow   = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                    IconButton(onClick = {
+                        if (keyManager.importKey(importText)) {
+                            onComplete()
+                        } else {
+                            importText = ""
+                            importError = "Invalid key \u2014 copy an nsec1\u2026 or 64-char hex key"
+                        }
+                    }) {
+                        Icon(
+                            imageVector        = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Submit key",
+                            tint               = Brand.copy(alpha = 0.55f),
+                            modifier           = Modifier.size(20.dp),
+                        )
                     }
-                },
-                shape          = ButtonShape,
-                contentPadding = ButtonPadding,
-                colors         = ButtonDefaults.buttonColors(
-                    containerColor = Brand,
-                    contentColor   = Color(0xFF001012),
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Confirm", fontSize = AppType.bodyLarge, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            // Error message
+            if (importError != null) {
+                Text(
+                    text     = importError!!,
+                    color    = Color(0xFFCF6679),
+                    fontSize = AppType.caption,
+                    modifier = Modifier.padding(top = Spacing.micro),
+                )
             }
         }
 
@@ -238,15 +282,15 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                 letterSpacing = 1.5.sp,
             )
             TextButton(
-                onClick = { /* TODO: "What is Nostr?" bottom sheet */ },
+                onClick = { uriHandler.openUri("https://nostr.com") },
                 colors  = ButtonDefaults.textButtonColors(contentColor = TextSecondary),
             ) {
-                Text("What is Nostr?", fontSize = AppType.bodyLarge)
+                Text("What is Nostr? \u2197", fontSize = AppType.bodyLarge)
             }
         }
 
         // 16. Bottom weighted spacer
-        Spacer(Modifier.weight(0.5f))
+        Spacer(Modifier.weight(1f))
 
         // 17. System navigation inset
         Spacer(Modifier.navigationBarsPadding())

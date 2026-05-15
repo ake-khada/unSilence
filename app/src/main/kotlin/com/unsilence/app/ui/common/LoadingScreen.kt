@@ -19,8 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
-private val AccentCyan = Color(0xFF22D3D3)
+import com.unsilence.app.ui.theme.Brand
 
 @Composable
 fun LoadingScreen() {
@@ -36,10 +35,10 @@ fun LoadingScreen() {
             Column {
                 Text(
                     text = buildAnnotatedString {
-                        withStyle(SpanStyle(fontWeight = FontWeight.Light, color = AccentCyan.copy(alpha = 0.55f))) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Light, color = Brand.copy(alpha = 0.55f))) {
                             append("un")
                         }
-                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = AccentCyan)) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Brand)) {
                             append("Silence")
                         }
                     },
@@ -48,7 +47,7 @@ fun LoadingScreen() {
                 )
                 Text(
                     text = "A RELAY BROWSER",
-                    color = AccentCyan.copy(alpha = 0.55f),
+                    color = Brand.copy(alpha = 0.55f),
                     fontSize = 11.sp,
                     letterSpacing = 2.5.sp,
                     modifier = Modifier.padding(top = 4.dp),
