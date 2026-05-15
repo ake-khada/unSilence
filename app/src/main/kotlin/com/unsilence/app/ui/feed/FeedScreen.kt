@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -65,6 +66,7 @@ import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -78,6 +80,7 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.foundation.lazy.items
 
 /** Auto-page when the last visible item is within this distance of the
@@ -277,10 +280,34 @@ fun FeedScreen(
 
             else -> {
                 val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+                val pullState = rememberPullToRefreshState()
                 PullToRefreshBox(
                     isRefreshing = isRefreshing,
                     onRefresh    = { viewModel.triggerRefresh() },
+                    state        = pullState,
                     modifier     = Modifier.fillMaxSize(),
+                    indicator    = {
+                        if (isRefreshing) {
+                            val progress = remember { Animatable(0f) }
+                            LaunchedEffect(Unit) {
+                                progress.animateTo(
+                                    targetValue = 1f,
+                                    animationSpec = tween(
+                                        durationMillis = 3000,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .fillMaxWidth(progress.value)
+                                    .offset(y = totalTopPadding)
+                                    .height(1.5.dp)
+                                    .background(BrandDeep),
+                            )
+                        }
+                    },
                 ) {
                 LazyColumn(
                     state    = listState,
