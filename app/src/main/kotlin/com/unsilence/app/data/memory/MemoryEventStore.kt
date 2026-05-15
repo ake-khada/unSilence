@@ -2367,7 +2367,6 @@ class MemoryEventStore @Inject constructor(
             rootId = event.rootId,
             hasContentWarning = event.hasContentWarning,
             contentWarningReason = event.contentWarningReason,
-            cachedAt = event.firstSeenAt,
             zapTotalSats = zap.totalSats,
             authorName = fields["name"],
             authorDisplayName = fields["display_name"],
@@ -3370,7 +3369,6 @@ internal fun NostrEvent.toEventEntity(): EventEntity = EventEntity(
     rootId = rootId,
     hasContentWarning = hasContentWarning,
     contentWarningReason = contentWarningReason,
-    cachedAt = firstSeenAt,
     firstSeenAt = firstSeenAt,
 )
 
