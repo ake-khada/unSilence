@@ -572,19 +572,25 @@ class EventProcessor @Inject constructor(
      * (first e = root, last e = reply-to). If only one e tag, it is the root.
      */
     internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String?> {
-        val eTags = tags.filter { it.isNotEmpty() && it[0] == "e" }
+        val eTags = tags.filter { it.size >= 2 && it[0] == "e" }
         if (eTags.isEmpty()) return Pair(null, null)
 
-        // Marker-based (NIP-10 recommended)
-        val rootId    = eTags.firstOrNull { it.getOrNull(3) == "root" }?.getOrNull(1)
-        val replyToId = eTags.firstOrNull { it.getOrNull(3) == "reply" }?.getOrNull(1)
+        // If ANY e-tag carries a NIP-10 marker, use marker-based parsing
+        // exclusively. "mention" markers reference events without replying —
+        // they must NOT participate in positional fallback.
+        val hasMarkers = eTags.any { tag ->
+            val m = tag.getOrNull(3)
+            m == "root" || m == "reply" || m == "mention"
+        }
 
-        if (rootId != null || replyToId != null) {
-            // If root marker exists but no reply marker, the reply target IS the root
+        if (hasMarkers) {
+            val rootId    = eTags.firstOrNull { it.getOrNull(3) == "root" }?.getOrNull(1)
+            val replyToId = eTags.firstOrNull { it.getOrNull(3) == "reply" }?.getOrNull(1)
+            // If root but no reply marker → direct reply to root
             return Pair(replyToId ?: rootId, rootId)
         }
 
-        // Positional fallback
+        // Positional fallback (no markers at all — legacy NIP-10)
         val ids = eTags.mapNotNull { it.getOrNull(1) }
         return when (ids.size) {
             0    -> Pair(null, null)
