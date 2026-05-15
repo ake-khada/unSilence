@@ -170,7 +170,6 @@ data class EventEntity(
     val rootId: String? = null,
     val hasContentWarning: Boolean = false,
     val contentWarningReason: String? = null,
-    val cachedAt: Long = 0,
     val zapTotalSats: Long = 0,
     val firstSeenAt: Long = 0,
 )
@@ -211,7 +210,6 @@ data class FeedRow(
     val rootId: String?,
     val hasContentWarning: Boolean,
     val contentWarningReason: String?,
-    val cachedAt: Long,
     val zapTotalSats: Long,
     val authorName: String?,
     val authorDisplayName: String?,
