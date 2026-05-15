@@ -24,6 +24,7 @@ data class NostrEvent(
     val rootId: String?,
     val hasContentWarning: Boolean,
     val contentWarningReason: String?,
+    /** Wall-clock when this event was first inserted, in epoch milliseconds. */
     val firstSeenAt: Long,
     val relaysSeen: MutableSet<String>,
 )

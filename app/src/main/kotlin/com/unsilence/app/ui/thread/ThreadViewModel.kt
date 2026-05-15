@@ -133,7 +133,8 @@ class ThreadViewModel @Inject constructor(
 
     fun publishReply(content: String, rootId: String, replyToId: String, replyToPubkey: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val nowSeconds   = System.currentTimeMillis() / 1000L
+            val nowMs        = System.currentTimeMillis()
+            val nowSeconds   = nowMs / 1000L
 
             val template = TextNoteEvent.build(note = content, createdAt = nowSeconds) {
                 add(arrayOf("e", rootId, "", "root"))
@@ -161,7 +162,7 @@ class ThreadViewModel @Inject constructor(
                     rootId = rootId,
                     hasContentWarning = false,
                     contentWarningReason = null,
-                    firstSeenAt = nowSeconds,
+                    firstSeenAt = nowMs,
                     relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                 )
             )

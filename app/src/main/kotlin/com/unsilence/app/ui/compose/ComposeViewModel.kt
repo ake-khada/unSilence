@@ -118,7 +118,7 @@ class ComposeViewModel @Inject constructor(
                         rootId = threadRootId,
                         hasContentWarning = false,
                         contentWarningReason = null,
-                        firstSeenAt = nowMs / 1000L,
+                        firstSeenAt = nowMs,
                         relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                     )
                 )
@@ -158,7 +158,7 @@ class ComposeViewModel @Inject constructor(
                         rootId = null,
                         hasContentWarning = false,
                         contentWarningReason = null,
-                        firstSeenAt = nowMs / 1000L,
+                        firstSeenAt = nowMs,
                         relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                     )
                 )
