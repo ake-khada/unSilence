@@ -28,6 +28,8 @@ import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -394,6 +396,7 @@ class FeedViewModel @Inject constructor(
      *   4. Subscribe; route batched events via handleBatch, live-tail via handleNew
      */
     private suspend fun setupSubscription(key: ResubKey) {
+        refreshTimeoutJob?.cancel()
         lastFeedType = key.type
         relayPool.activeSingleRelayFeedUrl =
             (key.type as? FeedType.SingleRelay)?.url?.let { normalizeRelayUrl(it) }
@@ -428,10 +431,23 @@ class FeedViewModel @Inject constructor(
 
         currentHandle = timelineService.subscribeTimeline(
             subRequests = subRequests,
-            onEvents = { batch, eosed -> handleBatch(batch, eosed, since) },
+            onEvents = { batch, eosed ->
+                if (_isRefreshing.value && (batch.isNotEmpty() || eosed)) {
+                    _isRefreshing.value = false
+                    refreshTimeoutJob?.cancel()
+                }
+                handleBatch(batch, eosed, since)
+            },
             onNew    = { event -> handleNew(event) },
         )
         Log.d(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
+
+        if (_isRefreshing.value) {
+            refreshTimeoutJob = viewModelScope.launch {
+                delay(4_000)
+                _isRefreshing.value = false
+            }
+        }
     }
 
     /**
@@ -532,6 +548,17 @@ class FeedViewModel @Inject constructor(
     }
 
     private val _refreshCounter = MutableStateFlow(0)
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+    private var refreshTimeoutJob: Job? = null
+
+    /** Pull-to-refresh gesture entry point. */
+    fun triggerRefresh() {
+        if (_isRefreshing.value) return
+        _isRefreshing.value = true
+        _refreshCounter.value = _refreshCounter.value + 1
+    }
 
     // -- Init: cold-start + feedType subscription ------------------------------
 
