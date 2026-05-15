@@ -259,9 +259,8 @@ class FeedViewModel @Inject constructor(
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
         _contentFilter.value = f
-        // Resubscribe fires via the 6-flow combiner (rule 48b/48c):
-        // Conversations → kinds=[1] + #e:[] relay-side filtering
-        // Notes → kinds=[1,6,20,21,30023], no tag filter
+        // Pure client-side projection — feedRows recomposes via its own
+        // combine on _contentFilter. NO subscription restart. See CG-R1.
     }
 
     // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
@@ -414,9 +413,8 @@ class FeedViewModel @Inject constructor(
         _events.value = cachedEvents
         _newEvents.value = emptyList()
 
-        // Build subRequests
-        val onlyReplies = key.contentFilter == FeedContentFilter.REPLIES_ONLY
-        val subRequests = buildSubRequests(key.type, onlyReplies)
+        // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
+        val subRequests = buildSubRequests(key.type)
         if (subRequests.isEmpty()) {
             _isLoading.value = false
             Log.d(TAG, "setupSubscription: no subRequests, idle")
@@ -616,8 +614,12 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        // Subscription deps collector — mirrors Jumble NoteList useEffect deps
-        // 6-flow vararg combine per rule 48c
+        // Subscription deps collector. contentFilter is intentionally NOT a
+        // dep: Notes↔Conversations is a pure client-side projection in
+        // feedRows via matchesContentFilter. Adding it would force a full
+        // WS REQ/CLOSE round across all relays on every tab flip
+        // (audit finding CG-R1). Pull-to-refresh (triggerRefresh) is the
+        // explicit refresh mechanism.
         viewModelScope.launch {
             combine(
                 _coldStartState,
@@ -625,20 +627,18 @@ class FeedViewModel @Inject constructor(
                 relayMetadataVersion,
                 _refreshCounter,
                 _filter,
-                _contentFilter,
-            ) { arr ->
+            ) { state, type, ver, refresh, filter ->
                 ResubKey(
-                    state = arr[0] as ColdStartState,
-                    type = arr[1] as FeedType,
-                    ver = arr[2] as Int,
-                    refresh = arr[3] as Int,
-                    filter = arr[4] as com.unsilence.app.domain.model.FeedFilter,
-                    contentFilter = arr[5] as FeedContentFilter,
+                    state = state,
+                    type = type,
+                    ver = ver,
+                    refresh = refresh,
+                    filter = filter,
                 )
             }
                 .filter { it.state != ColdStartState.LOADING }
                 .distinctUntilChangedBy {
-                    Triple(it.type, it.ver to it.refresh, it.filter to it.contentFilter)
+                    Triple(it.type, it.ver to it.refresh, it.filter)
                 }
                 .collectLatest { key ->
                     setupSubscription(key)
@@ -684,7 +684,7 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun buildSubRequests(type: FeedType, onlyReplies: Boolean = false): List<SubRequest> {
+    private fun buildSubRequests(type: FeedType): List<SubRequest> {
         val ownPubkey = keyManager.getPublicKeyHex()
         val blockedRelays = ownPubkey
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
@@ -692,12 +692,12 @@ class FeedViewModel @Inject constructor(
         val readRelays = ownPubkey
             ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
             ?: emptyList()
-        // Conversations tab: kinds=[1] only (no reposts/articles in conversations).
-        // Reply filtering is client-side via matchesContentFilter in feedRows
-        // (FeedContentFilter.REPLIES_ONLY matches on replyToId != null || rootId != null).
-        // The relay-level "#e: []" filter was invalid NIP-01 — strfry, damus relay,
-        // and other strict implementations return zero events for empty-list tag filters.
-        val kinds = if (onlyReplies) listOf(1) else listOf(1, 6, 20, 21, 30023)
+        // Always REQ the full feed kind set. Notes↔Conversations is a
+        // client-side projection in feedRows via matchesContentFilter
+        // (audit finding CG-R1). The bandwidth cost of fetching reposts/
+        // articles/imeta-pictures the Conversations tab doesn't display
+        // is bounded by the 300-event limit.
+        val kinds = listOf(1, 6, 20, 21, 30023)
         val config = OutboxRelayResolver.Config(
             kinds = kinds,
             limit = 300,
@@ -792,7 +792,6 @@ class FeedViewModel @Inject constructor(
         val ver: Int,
         val refresh: Int,
         val filter: com.unsilence.app.domain.model.FeedFilter,
-        val contentFilter: FeedContentFilter,
     )
 
     private companion object {
