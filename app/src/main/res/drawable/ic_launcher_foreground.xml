@@ -9,48 +9,48 @@
     <!-- Muted "silence" line -->
     <path
         android:pathData="M18,54 L36,54"
-        android:strokeColor="#FF14A3A3"
+        android:strokeColor="#FF00B8D4"
         android:strokeWidth="2"
         android:fillColor="#00000000" />
 
     <!-- Signal bar 1 -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M40,48 h4 v12 h-4 z" />
 
     <!-- Signal bar 2 -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M47,40 h4 v28 h-4 z" />
 
     <!-- Signal bar 3 -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M54,44 h4 v20 h-4 z" />
 
     <!-- Signal bar 4 (tallest) -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M61,32 h4 v44 h-4 z" />
 
     <!-- Signal bar 5 -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M68,38 h4 v32 h-4 z" />
 
     <!-- Signal bar 6 -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M75,45 h4 v18 h-4 z" />
 
     <!-- Signal bar 7 (last wave stroke) -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M82,49 h4 v10 h-4 z" />
 
     <!-- Terminal cursor -->
     <path
-        android:fillColor="#FF22D3D3"
+        android:fillColor="#FF00E5FF"
         android:pathData="M88,51 h2 v6 h-2 z" />
 
 </vector>

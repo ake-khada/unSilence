@@ -16,9 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-
-private val AccentCyan = Color(0xFF22D3D3)
-private val AccentDim = Color(0xFF14A3A3)
+import com.unsilence.app.ui.theme.Brand
 
 /**
  * unSilence waveform logo mark.
@@ -33,11 +31,11 @@ private val AccentDim = Color(0xFF14A3A3)
 fun LogoMark(
     modifier: Modifier = Modifier,
     sizeDp: Dp = 88.dp,
-    color: Color? = null,
+    color: Color = Brand,
     static: Boolean = false,
 ) {
-    val barColor = color ?: AccentCyan
-    val dimColor = color?.copy(alpha = 0.5f) ?: AccentDim
+    val barColor = color
+    val dimColor = color.copy(alpha = 0.5f)
     val cursorAlpha: Float = if (static) {
         1f
     } else {
