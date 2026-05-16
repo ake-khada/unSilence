@@ -342,6 +342,9 @@ fun EventCard(
         }
 
         // Action bar
+        // Optimistic: enabled while profile not yet resolved (null).
+        // Disabled only when we know the author has no Lightning address.
+        val zapEnabled = authorProfile == null || !authorProfile.lud16.isNullOrBlank()
         EventActionBar(
             noteId          = row.id,
             replyCount      = liveReplyCount,
@@ -355,6 +358,7 @@ fun EventCard(
             isZapLoading    = row.id in engagement.zapLoadingIds,
             extraZapSats    = engagement.optimisticZapSats[row.id] ?: 0L,
             zapFlash        = engagement.zapFlash,
+            zapEnabled      = zapEnabled,
             onNoteClick     = { onNoteClick(model.navigateId) },
             onComment       = onComment,
             onReact         = onReact,

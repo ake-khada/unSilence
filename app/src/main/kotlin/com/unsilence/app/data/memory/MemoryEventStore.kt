@@ -57,6 +57,7 @@ private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
 private const val PROFILE_CAP = 2_000
 private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
+private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 
@@ -371,6 +372,9 @@ class MemoryEventStore @Inject constructor(
      * use [insertBatch].
      */
     fun insert(event: NostrEvent): Boolean {
+        val nowSec = System.currentTimeMillis() / 1000L
+        if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return false
+
         val dirty = InsertDirty()
         val inserted = insertCore(event, dirty)
         if (inserted) {
@@ -393,10 +397,12 @@ class MemoryEventStore @Inject constructor(
      */
     fun insertBatch(events: List<NostrEvent>): Int {
         if (events.isEmpty()) return 0
+        val nowSec = System.currentTimeMillis() / 1000L
         val dirty = InsertDirty()
         var inserted = 0
 
         for (event in events) {
+            if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) continue
             if (!insertCore(event, dirty)) continue
             inserted++
             markKindDirty(event.kind, dirty)
@@ -3028,6 +3034,9 @@ class MemoryEventStore @Inject constructor(
         if (readBoolean()) readInt() else null
 
     private fun insertFromSnapshot(event: NostrEvent) {
+        val nowSec = System.currentTimeMillis() / 1000L
+        if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return
+
         eventsById[event.id] = event
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)

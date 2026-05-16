@@ -38,6 +38,7 @@ data class ThreadUiState(
     val focusedNote: FeedRow? = null,
     val replies: List<DepthRow> = emptyList(),
     val loading: Boolean = true,
+    val focusedReplyId: String? = null,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -54,6 +55,7 @@ class ThreadViewModel @Inject constructor(
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
+    @Volatile private var tappedId: String? = null
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
@@ -95,9 +97,10 @@ class ThreadViewModel @Inject constructor(
                     walk(focusedId, 1)
 
                     _uiState.value = ThreadUiState(
-                        focusedNote = focused,
-                        replies     = flatList,
-                        loading     = false,
+                        focusedNote    = focused,
+                        replies        = flatList,
+                        loading        = false,
+                        focusedReplyId = tappedId.takeIf { it != focusedId },
                     )
                 }
         }
@@ -106,11 +109,13 @@ class ThreadViewModel @Inject constructor(
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
         eventIdFlow.value = null
+        tappedId = null
         _uiState.value = ThreadUiState()
     }
 
     fun loadThread(eventId: String) {
         published = false  // Always reset so LaunchedEffect won't auto-dismiss
+        tappedId = eventId
         // Clear stale state immediately — prevents flash of old thread content
         _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {

@@ -74,6 +74,7 @@ internal fun EventActionBar(
     isZapLoading: Boolean,
     extraZapSats: Long,
     zapFlash: NoteActionsViewModel.ZapFlashState?,
+    zapEnabled: Boolean = true,
     onNoteClick: () -> Unit,
     onComment: () -> Unit = {},
     onReact: () -> Unit,
@@ -151,10 +152,13 @@ internal fun EventActionBar(
                 hasZapped    = hasZapped,
                 isLoading    = isZapLoading,
                 flashTrigger = zapFlashTrigger,
+                enabled      = zapEnabled,
                 onTap        = {
+                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
                     if (isNwcConfigured) onZap(21L) else showConnectWallet = true
                 },
                 onLongPress  = {
+                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
                     if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
                 },
             )
@@ -241,6 +245,7 @@ internal fun EventZapButton(
     hasZapped: Boolean,
     isLoading: Boolean = false,
     flashTrigger: Int = 0,
+    enabled: Boolean = true,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -268,7 +273,8 @@ internal fun EventZapButton(
         }
     }
 
-    val baseTint = if (hasZapped) Zap else ActionTint
+    val baseTint = if (!enabled) ActionTint.copy(alpha = 0.38f)
+        else if (hasZapped) Zap else ActionTint
     val tint = if (flashAlpha.value > 0f) {
         lerp(baseTint, Color.White, flashAlpha.value)
     } else baseTint
