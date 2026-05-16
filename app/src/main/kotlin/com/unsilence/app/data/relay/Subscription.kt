@@ -315,6 +315,12 @@ class Subscription @Inject constructor(
         // same defense EventProcessor.process applies.
         if (dto.id != expectedId) return null
 
+        // Reject future-dated events — prevents poisoned-since cursor.
+        val nowSec = System.currentTimeMillis() / 1000L
+        if (dto.createdAt > nowSec + 60L) {
+            return null
+        }
+
         val (replyToId, rootId) = when (dto.kind) {
             1, 6, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
             else -> Pair(null, null)

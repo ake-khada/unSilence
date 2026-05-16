@@ -212,7 +212,8 @@ class TimelineService @Inject constructor(
             cachedEvents = eventLoader.getEvents(cached.refs.map { it.id })
             if (cachedEvents.isNotEmpty()) {
                 onPerSubEvents(cachedEvents, false)
-                since = cachedEvents[0].createdAt + 1
+                since = (cachedEvents[0].createdAt + 1)
+                    .coerceAtMost(System.currentTimeMillis() / 1000L)
             }
         }
 

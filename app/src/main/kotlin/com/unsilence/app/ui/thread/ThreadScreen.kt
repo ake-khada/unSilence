@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -97,6 +98,8 @@ fun ThreadScreen(
     val showSnackbar = LocalShowSnackbar.current
     var replyText by remember { mutableStateOf("") }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    val listState = rememberLazyListState()
+    var didScrollToFocus by remember { mutableStateOf(false) }
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -106,6 +109,18 @@ fun ThreadScreen(
     // ── React/repost failure snackbar ────────────────────────────────────────
     LaunchedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
+    }
+
+    // ── Scroll to focused reply (when thread opened via a deep reply) ────
+    LaunchedEffect(state.focusedReplyId, state.replies) {
+        val focusId = state.focusedReplyId ?: return@LaunchedEffect
+        if (didScrollToFocus) return@LaunchedEffect
+        val replyIdx = state.replies.indexOfFirst { it.row.id == focusId }
+        if (replyIdx >= 0) {
+            // Leading items: focused note (1) + reply count header (1) = 2
+            listState.scrollToItem(2 + replyIdx)
+            didScrollToFocus = true
+        }
     }
 
     Box(
@@ -151,7 +166,7 @@ fun ThreadScreen(
                 }
 
                 else -> {
-                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {

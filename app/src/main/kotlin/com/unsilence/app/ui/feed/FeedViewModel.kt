@@ -425,7 +425,9 @@ class FeedViewModel @Inject constructor(
 
         // since from cached events head — relay data newer than this merges
         // on top; null → bulk replace on first onEvents call.
+        // Clamped to now — defense against poisoned future-dated events in snapshot.
         val since: Long? = cachedEvents.firstOrNull()?.createdAt
+            ?.coerceAtMost(System.currentTimeMillis() / 1000L)
 
         currentHandle = timelineService.subscribeTimeline(
             subRequests = subRequests,
@@ -649,7 +651,7 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch {
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
             val cached = loadCachedEvents(_feedType.value)
-            if (cached.isNotEmpty()) {
+            if (cached.isNotEmpty() && _events.value.size < SNAPSHOT_MERGE_CEILING) {
                 Log.d(TAG, "snapshot restored: merging ${cached.size} cached events")
                 _events.update { current -> TimelineMerge.merge(current, cached) }
             }
@@ -799,5 +801,6 @@ class FeedViewModel @Inject constructor(
         const val WARM_ZONE_BELOW = 30
         const val FEED_DISPLAY_CAP = 500
         const val FEED_SAMPLE_MS = 100L
+        const val SNAPSHOT_MERGE_CEILING = 20
     }
 }
