@@ -1,13 +1,6 @@
 package com.unsilence.app.ui.feed
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -43,19 +36,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
-import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 
 private val MediaPlaceholder = Surface1
@@ -211,20 +203,40 @@ internal fun EventMediaGrid(
 
 /**
  * Single image cell — aspect ratio from imeta (pre-parsed in [Segment.Image.imetaAspect])
- * or pre-fetched [ImageDimensionCache], updated on load. Crop fills the container.
+ * or pre-fetched [ImageDimensionCache], resolves once from the decoded bitmap and locks.
+ * ContentScale.Fit within the true-ratio container — no crop, no letterbox (except during
+ * the brief pre-resolve window when the default 4:3 container may not match).
  */
 @Composable
-private fun EventMediaImage(
+internal fun EventMediaImage(
     image: Segment.Image,
     onImageClick: () -> Unit,
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
     imageDimensionCache: ImageDimensionCache? = null,
 ) {
-    val initialAspect = image.imetaAspect ?: imageDimensionCache?.getCached(image.url)
+    val imetaKnown = image.imetaAspect != null
+    val cachedRatio = imageDimensionCache?.getCached(image.url)
+    val initialAspect = image.imetaAspect ?: cachedRatio
     var displayAspect by remember(image.url, forceSquare) {
         mutableStateOf(feedImageAspectRatio(initialAspect, forceSquare))
     }
+    var hasBeenResolved by remember(image.url, forceSquare) {
+        mutableStateOf(imetaKnown || cachedRatio != null)
+    }
+
+    // Active resolution: lightweight header fetch (~100-300ms) settles the container
+    // while shimmer is still showing — far faster than waiting for the full bitmap decode.
+    LaunchedEffect(image.url) {
+        if (forceSquare || hasBeenResolved) return@LaunchedEffect
+        val ratio = imageDimensionCache?.resolve(image.url) ?: return@LaunchedEffect
+        if (!hasBeenResolved) {
+            displayAspect = feedImageAspectRatio(ratio, false)
+            hasBeenResolved = true
+        }
+    }
+
+    var hasError by remember(image.url) { mutableStateOf(false) }
 
     val imageModifier = modifier
         .fillMaxWidth()
@@ -233,58 +245,34 @@ private fun EventMediaImage(
         .background(MediaPlaceholder)
         .clickable { onImageClick() }
 
-    SubcomposeAsyncImage(
-        model              = rememberFullWidthImageRequest(image.url, aspectRatio = displayAspect),
-        contentDescription = null,
-        loading            = { ShimmerPlaceholder(modifier = Modifier.fillMaxSize()) },
-        error              = {
-            Box(
-                modifier         = Modifier.fillMaxSize().background(MediaPlaceholder),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector        = Icons.Filled.BrokenImage,
-                    contentDescription = "Image failed to load",
-                    tint               = TextSecondary,
-                    modifier           = Modifier.size(32.dp),
-                )
-            }
-        },
-        success = {
-            val size = painter.intrinsicSize
-            if (!forceSquare && size.width > 0f && size.height > 0f) {
-                LaunchedEffect(Unit) {
-                    imageDimensionCache?.put(image.url, size.width / size.height)
+    Box(modifier = imageModifier, contentAlignment = Alignment.Center) {
+        AsyncImage(
+            model              = rememberFullWidthImageRequest(image.url, aspectRatio = displayAspect),
+            contentDescription = null,
+            contentScale       = ContentScale.Fit,
+            modifier           = Modifier.fillMaxSize(),
+            onSuccess          = { state ->
+                val w = state.result.image.width
+                val h = state.result.image.height
+                if (!forceSquare && w > 0 && h > 0) {
+                    imageDimensionCache?.put(image.url, w.toFloat() / h)
+                    if (!hasBeenResolved) {
+                        displayAspect = feedImageAspectRatio(w.toFloat() / h, false)
+                        hasBeenResolved = true
+                    }
                 }
-            }
-            Image(
-                painter            = painter,
-                contentDescription = null,
-                contentScale       = ContentScale.Crop,
-                modifier           = Modifier.fillMaxSize(),
+            },
+            onError = { hasError = true },
+        )
+        if (hasError) {
+            Icon(
+                imageVector        = Icons.Filled.BrokenImage,
+                contentDescription = "Image failed to load",
+                tint               = TextSecondary,
+                modifier           = Modifier.size(32.dp),
             )
-        },
-        modifier = imageModifier,
-    )
-}
-
-/** Animated gradient placeholder shown while an image is loading. */
-@Composable
-internal fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "shimmer")
-    val progress by transition.animateFloat(
-        initialValue  = 0f,
-        targetValue   = 1f,
-        animationSpec = infiniteRepeatable(
-            animation  = tween(durationMillis = 800, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "shimmer-progress",
-    )
-    Box(modifier = modifier
-        .height(200.dp)
-        .background(lerp(Surface1, Surface2, progress))
-    )
+        }
+    }
 }
 
 /** Full-screen image viewer dialog with horizontal pager and dot indicators. */

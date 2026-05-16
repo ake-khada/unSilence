@@ -810,7 +810,7 @@ class FeedViewModel @Inject constructor(
 
     private companion object {
         const val WARM_ZONE_ABOVE = 10
-        const val WARM_ZONE_BELOW = 30
+        const val WARM_ZONE_BELOW = 50
         const val FEED_DISPLAY_CAP = 500
         const val FEED_SAMPLE_MS = 100L
         const val SNAPSHOT_MERGE_CEILING = 20
