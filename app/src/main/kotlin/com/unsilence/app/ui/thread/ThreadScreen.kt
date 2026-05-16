@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
@@ -165,34 +166,32 @@ fun ThreadScreen(
                                         zapFlash        = zapFlash,
                                     )
                                 }
-                                val focusedModel = actionsViewModel.getEventModel(note.id)
-                                if (focusedModel != null) {
-                                    EventCard(
-                                        model               = focusedModel,
-                                        row                 = note,
-                                        role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
-                                        engagement          = focusedEngagement,
-                                        onNoteClick         = { /* already on thread */ },
-                                        onComment           = { onComment(note.id) },
-                                        onAuthorClick       = onAuthorClick,
-                                        onQuote             = onQuote,
-                                        onArticleClick      = { articleRow = it },
-                                        onReact             = { actionsViewModel.react(note.id, note.pubkey) },
-                                        onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                        onZap               = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
-                                        onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        lookupProfile       = actionsViewModel::lookupProfile,
-                                        lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                        lookupModel         = actionsViewModel::getEventModel,
-                                        fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                        profileFlow         = null,
-                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                        thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                    )
-                                } else {
-                                    ShimmerNoteCard(showMedia = true)
+                                val focusedModel = remember(note.id) {
+                                    actionsViewModel.getEventModel(note.id) ?: note.toEventModel()
                                 }
+                                EventCard(
+                                    model               = focusedModel,
+                                    row                 = note,
+                                    role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
+                                    engagement          = focusedEngagement,
+                                    onNoteClick         = { /* already on thread */ },
+                                    onComment           = { onComment(note.id) },
+                                    onAuthorClick       = onAuthorClick,
+                                    onQuote             = onQuote,
+                                    onArticleClick      = { articleRow = it },
+                                    onReact             = { actionsViewModel.react(note.id, note.pubkey) },
+                                    onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
+                                    onZap               = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                    onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                    lookupProfile       = actionsViewModel::lookupProfile,
+                                    lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                    lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+                                    lookupModel         = actionsViewModel::getEventModel,
+                                    fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                    profileFlow         = null,
+                                    imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                    thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                )
                             }
                         }
 
@@ -241,34 +240,32 @@ fun ThreadScreen(
                                             zapFlash        = zapFlash,
                                         )
                                     }
-                                    val replyModel = actionsViewModel.getEventModel(reply.id)
-                                    if (replyModel != null) {
-                                        EventCard(
-                                            model               = replyModel,
-                                            row                 = reply,
-                                            role                = CardRole.Reply,
-                                            engagement          = replyEngagement,
-                                            onNoteClick         = { /* already viewing thread */ },
-                                            onComment           = { onComment(reply.id) },
-                                            onAuthorClick       = onAuthorClick,
-                                            onQuote             = onQuote,
-                                            onArticleClick      = { articleRow = it },
-                                            onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                            onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                            onZap               = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
-                                            onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                            lookupProfile       = actionsViewModel::lookupProfile,
-                                            lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                            lookupModel         = actionsViewModel::getEventModel,
-                                            fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                            profileFlow         = null,
-                                            imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                            thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                        )
-                                    } else {
-                                        ShimmerNoteCard(showMedia = false)
+                                    val replyModel = remember(reply.id) {
+                                        actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
                                     }
+                                    EventCard(
+                                        model               = replyModel,
+                                        row                 = reply,
+                                        role                = CardRole.Reply,
+                                        engagement          = replyEngagement,
+                                        onNoteClick         = { /* already viewing thread */ },
+                                        onComment           = { onComment(reply.id) },
+                                        onAuthorClick       = onAuthorClick,
+                                        onQuote             = onQuote,
+                                        onArticleClick      = { articleRow = it },
+                                        onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                        onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                        onZap               = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+                                        onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                        lookupProfile       = actionsViewModel::lookupProfile,
+                                        lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+                                        lookupModel         = actionsViewModel::getEventModel,
+                                        fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                        profileFlow         = null,
+                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                        thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                    )
                                 }
                             }
                         }

@@ -33,6 +33,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
@@ -355,11 +356,8 @@ private fun EventFeedItem(
     eventModelProvider: ((String) -> EventModel?)? = null,
     sensitiveBlur: Boolean = false,
 ) {
-    val model = eventModelProvider?.invoke(row.id)
-    if (model == null) {
-        // EventModel not yet available (rare transient state). Show shimmer placeholder.
-        ShimmerNoteCard(showMedia = false)
-        return
+    val model = remember(row.id) {
+        eventModelProvider?.invoke(row.id) ?: row.toEventModel()
     }
 
     // ── Remembered lambdas — stable across recompositions ─────────────────
