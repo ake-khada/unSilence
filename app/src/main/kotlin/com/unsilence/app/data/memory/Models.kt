@@ -282,3 +282,14 @@ data class PaginatedFetchResult(
     val oldestCreatedAt: Long,
     val relay: String,
 )
+
+/** Parse an [EventModel] from a [FeedRow]'s fields. Pure function — equivalent to MES-parsed model. */
+fun FeedRow.toEventModel(): com.unsilence.app.data.model.EventModel =
+    com.unsilence.app.data.model.ContentParser.parse(
+        id = id, pubkey = pubkey, kind = kind,
+        content = content, tagsJson = tags,
+        createdAt = createdAt, relayUrl = relayUrl,
+        replyToId = replyToId, rootId = rootId,
+        hasContentWarning = hasContentWarning,
+        contentWarningReason = contentWarningReason,
+    )

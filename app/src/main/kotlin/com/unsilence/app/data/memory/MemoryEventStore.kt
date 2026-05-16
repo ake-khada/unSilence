@@ -3032,7 +3032,10 @@ class MemoryEventStore @Inject constructor(
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
         recentByCreatedAt.add(EventEntry(event.id, event.createdAt))
-        lastTouchedAt[event.id] = System.currentTimeMillis()
+        // Restored ≠ recently used. Use firstSeenAt (epoch millis, same unit as
+        // lastTouchedAt) so eviction's LRU correctly targets cold restored data
+        // rather than live relay events the user is currently viewing.
+        lastTouchedAt[event.id] = event.firstSeenAt
 
         if (event.replyToId != null) {
             idsByReplyTarget.getOrPut(event.replyToId) { ConcurrentHashMap.newKeySet() }.add(event.id)
