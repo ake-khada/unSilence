@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,34 +24,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.Image
-import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.relay.OgMetadata
-import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
+import com.unsilence.app.ui.feed.ContentFlow
 import com.unsilence.app.ui.feed.EventCard
-import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
-import com.unsilence.app.ui.feed.LINK_URL_REGEX
-import com.unsilence.app.ui.feed.LinkPreviewCard
-import com.unsilence.app.ui.feed.NostrRichText
-import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
-import com.unsilence.app.ui.feed.feedImageAspectRatio
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.TextSecondary
@@ -232,10 +222,9 @@ private fun ThreadedReplyItem(
 }
 
 /**
- * Compact parent note card — shows author, timestamp, content with media.
- * Extracts image URLs and link previews from content so they render
- * instead of showing as raw text. No action bar.
- * Clickable to navigate to the parent note.
+ * Compact parent note card — shows author, timestamp, content via ContentFlow.
+ * Uses [CardRole.Embedded] (6-line cap, no expand toggle) for compact rendering.
+ * No action bar. Clickable to navigate to the parent note.
  */
 @Composable
 internal fun ThreadParentCard(
@@ -243,23 +232,25 @@ internal fun ThreadParentCard(
     author: UserEntity?,
     onNoteClick: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    lookupModel: ((String) -> EventModel?)? = null,
+    lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     onAuthorClick: (String) -> Unit = {},
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
     modifier: Modifier = Modifier,
 ) {
-    // Extract media URLs from content
-    val content = event.content.trim()
-    val mediaExtraction = remember(event.id) {
-        val imageUrls = IMAGE_URL_REGEX.findAll(content).map { it.value }.distinct().toList()
-        val afterImages = IMAGE_URL_REGEX.replace(content, "")
-        val videoUrls = VIDEO_URL_REGEX.findAll(afterImages).map { it.value }.distinct().toList()
-        val afterVideos = VIDEO_URL_REGEX.replace(afterImages, "")
-        val linkUrls = LINK_URL_REGEX.findAll(afterVideos).map { it.value }.distinct().take(1).toList()
-        val textContent = LINK_URL_REGEX.replace(afterVideos, "").trim()
-        Triple(imageUrls, linkUrls, textContent)
+    val model = remember(event.id) {
+        lookupModel?.invoke(event.id) ?: runCatching {
+            ContentParser.parse(
+                id = event.id, pubkey = event.pubkey, kind = event.kind,
+                content = event.content, tagsJson = event.tags,
+                createdAt = event.createdAt, relayUrl = event.relayUrl,
+                replyToId = event.replyToId, rootId = event.rootId,
+                hasContentWarning = event.hasContentWarning,
+                contentWarningReason = event.contentWarningReason,
+            )
+        }.getOrNull()
     }
-    val (imageUrls, linkUrls, textContent) = mediaExtraction
 
     Column(
         modifier = modifier
@@ -301,48 +292,21 @@ internal fun ThreadParentCard(
                 fontSize = AppType.bodySmall,
             )
         }
-        if (textContent.isNotBlank()) {
+
+        if (model != null) {
             Spacer(Modifier.height(4.dp))
-            NostrRichText(
-                content       = textContent,
-                lookupProfile = lookupProfile,
-                onAuthorClick = onAuthorClick,
-                onTextClick   = { onNoteClick(event.id) },
-                maxLines      = 3,
-                overflow      = TextOverflow.Ellipsis,
+            ContentFlow(
+                model               = model,
+                role                = CardRole.Embedded,
+                onNoteClick         = onNoteClick,
+                onAuthorClick       = onAuthorClick,
+                lookupProfile       = lookupProfile,
+                lookupEvent         = lookupEvent,
+                lookupModel         = lookupModel,
+                fetchOgMetadata     = fetchOgMetadata,
+                imageDimensionCache = imageDimensionCache,
+                nestDepth           = 1,
             )
-        }
-        // Render images extracted from content — collapse on error (no gap)
-        if (imageUrls.isNotEmpty()) {
-            Spacer(Modifier.height(Spacing.small))
-            imageUrls.take(2).forEach { url ->
-                val cachedAspect = imageDimensionCache?.getCached(url)
-                val aspect = feedImageAspectRatio(cachedAspect)
-                SubcomposeAsyncImage(
-                    model = rememberFullWidthImageRequest(url, aspectRatio = aspect),
-                    contentDescription = null,
-                    error = { /* collapse — no gap */ },
-                    success = {
-                        Image(
-                            painter = painter,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(aspect, matchHeightConstraintsFirst = false)
-                                .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-                        )
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(aspect, matchHeightConstraintsFirst = false),
-                )
-            }
-        }
-        // OG link preview for first non-media URL
-        if (linkUrls.isNotEmpty()) {
-            Spacer(Modifier.height(Spacing.small))
-            LinkPreviewCard(url = linkUrls.first(), fetchOgMetadata = fetchOgMetadata)
         }
     }
 }

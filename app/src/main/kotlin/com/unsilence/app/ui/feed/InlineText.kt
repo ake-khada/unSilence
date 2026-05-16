@@ -15,6 +15,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +51,7 @@ internal fun InlineText(
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     textAlign: TextAlign? = null,
+    onTextLayoutResult: ((TextLayoutResult) -> Unit)? = null,
 ) {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
@@ -152,13 +154,14 @@ internal fun InlineText(
     }
 
     Text(
-        text      = annotatedText,
-        color     = MaterialTheme.colorScheme.onSurface,
-        fontSize  = AppType.bodyLarge,
-        lineHeight = 22.sp,
-        maxLines  = maxLines,
-        overflow  = overflow,
-        textAlign = textAlign,
-        modifier  = modifier.clickable { onTextClick() },
+        text         = annotatedText,
+        color        = MaterialTheme.colorScheme.onSurface,
+        fontSize     = AppType.bodyLarge,
+        lineHeight   = 22.sp,
+        maxLines     = maxLines,
+        overflow     = overflow,
+        textAlign    = textAlign,
+        onTextLayout = onTextLayoutResult ?: {},
+        modifier     = modifier.clickable { onTextClick() },
     )
 }
