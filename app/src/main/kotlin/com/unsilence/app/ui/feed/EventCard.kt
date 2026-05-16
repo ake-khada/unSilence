@@ -97,6 +97,8 @@ fun EventCard(
     // New-post animation
     isNewPost: Boolean = false,
     onNewPostAnimated: () -> Unit = {},
+    // Thread focus flash
+    isFocused: Boolean = false,
     // Thread parent (Conversations tab)
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
@@ -107,13 +109,19 @@ fun EventCard(
     contentWarningReason: String? = null,
     modifier: Modifier = Modifier,
 ) {
-    // New-post flash animation
-    val flashAlpha = remember { Animatable(if (isNewPost) 1f else 0f) }
+    // Card flash animation — new-post arrival or thread focus highlight
+    val flashAlpha = remember { Animatable(if (isNewPost || isFocused) 1f else 0f) }
     LaunchedEffect(isNewPost) {
         if (isNewPost) {
             flashAlpha.snapTo(1f)
             flashAlpha.animateTo(0f, tween(durationMillis = 1000))
             onNewPostAnimated()
+        }
+    }
+    LaunchedEffect(isFocused) {
+        if (isFocused) {
+            flashAlpha.snapTo(1f)
+            flashAlpha.animateTo(0f, tween(durationMillis = 1000))
         }
     }
 

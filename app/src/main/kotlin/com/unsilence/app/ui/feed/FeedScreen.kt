@@ -29,11 +29,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -141,25 +139,9 @@ fun FeedScreen(
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
 
-    // ── New-post flash animation tracking ──────────────────────────────────────
+    // ── New-post flash — only live-tail arrivals, not batch/snapshot/Load More ──
     val events = feedEvents
-    val currentEvents by rememberUpdatedState(events)
-    val newEventIds = remember { mutableStateMapOf<String, Boolean>() }
-    var previousEventIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(events) {
-        val currentIds = events.map { it.id }.toSet()
-        if (previousEventIds.isNotEmpty()) {
-            val freshIds = currentIds - previousEventIds
-            for (id in freshIds) newEventIds[id] = true
-            if (freshIds.isNotEmpty() && !feedShowDot) {
-                val firstFreshIdx = events.indexOfFirst { it.id in freshIds }
-                if (firstFreshIdx == 0) {
-                    listState.scrollToItem(0)
-                }
-            }
-        }
-        previousEventIds = currentIds
-    }
+    val liveArrivalIds by viewModel.liveArrivalIds.collectAsStateWithLifecycle()
 
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
@@ -322,8 +304,8 @@ fun FeedScreen(
                         callbacks = callbacks,
                         videoScope = videoScope,
                         role = CardRole.Feed,
-                        newEventIds = newEventIds.keys,
-                        onNewPostAnimated = { newEventIds.remove(it) },
+                        newEventIds = liveArrivalIds,
+                        onNewPostAnimated = { viewModel.clearLiveArrival(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
