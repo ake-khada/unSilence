@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +54,7 @@ import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
@@ -157,6 +159,11 @@ fun LazyListScope.eventFeedItems(
                 sensitiveBlur = sensitiveBlur,
             )
         }
+        HorizontalDivider(
+            color = BorderFaint,
+            thickness = 1.dp,
+            modifier = Modifier.padding(horizontal = Spacing.medium),
+        )
     }
 }
 

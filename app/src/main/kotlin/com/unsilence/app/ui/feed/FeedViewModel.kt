@@ -129,6 +129,14 @@ class FeedViewModel @Inject constructor(
         .map { it.size }
         .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
+    /** IDs of events that arrived via live-tail (not initial load, snapshot, or Load More). */
+    private val _liveArrivalIds = MutableStateFlow<Set<String>>(emptySet())
+    val liveArrivalIds: StateFlow<Set<String>> = _liveArrivalIds.asStateFlow()
+
+    fun clearLiveArrival(id: String) {
+        _liveArrivalIds.update { it - id }
+    }
+
     private var currentHandle: TimelineService.TimelineHandle? = null
     private var lastFeedType: FeedType? = null
 
@@ -412,6 +420,7 @@ class FeedViewModel @Inject constructor(
         val cachedEvents = loadCachedEvents(key.type)
         _events.value = cachedEvents
         _newEvents.value = emptyList()
+        _liveArrivalIds.value = emptySet()
 
         // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
         val subRequests = buildSubRequests(key.type)
@@ -492,6 +501,7 @@ class FeedViewModel @Inject constructor(
      */
     private fun handleNew(event: NostrEvent) {
         if (_isAtTop.value) {
+            _liveArrivalIds.update { it + event.id }
             _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, listOf(event)) }
@@ -501,6 +511,7 @@ class FeedViewModel @Inject constructor(
     /** Batch variant of handleNew for the since-filter path. */
     private fun handleNewBatch(newEvents: List<NostrEvent>) {
         if (_isAtTop.value) {
+            _liveArrivalIds.update { it + newEvents.map { e -> e.id }.toSet() }
             _events.update { current -> TimelineMerge.merge(current, newEvents) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
@@ -522,6 +533,7 @@ class FeedViewModel @Inject constructor(
     private fun flushPending() {
         val pending = _newEvents.value
         if (pending.isEmpty()) return
+        _liveArrivalIds.update { it + pending.map { e -> e.id }.toSet() }
         _events.update { current -> TimelineMerge.merge(current, pending) }
         _newEvents.value = emptyList()
     }
