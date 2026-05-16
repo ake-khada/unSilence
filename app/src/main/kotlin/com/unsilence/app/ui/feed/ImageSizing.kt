@@ -10,9 +10,7 @@ package com.unsilence.app.ui.feed
  */
 internal fun feedImageAspectRatio(
     rawAspectRatio: Float?,
-    forceSquare: Boolean = false,
 ): Float {
-    if (forceSquare) return 1f
     val raw = rawAspectRatio?.takeIf { it > 0f } ?: return (4f / 3f)
     return if (raw >= 1f) raw else maxOf(raw, 9f / 16f)
 }

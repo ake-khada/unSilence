@@ -20,9 +20,9 @@ import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.TextSecondary
 
 /** Maximum number of OG preview cards rendered per note. */
 private const val MAX_OG_CARDS = 1
@@ -66,23 +66,16 @@ internal fun ContentFlow(
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
 
-    // Compute total text length for collapse logic (Text + Links contribute)
-    val textLength = remember(model.segments) {
-        model.segments.sumOf {
-            when (it) {
-                is Segment.Text -> it.text.length
-                is Segment.MentionPubkey -> 20  // chip estimate
-                is Segment.Link -> it.url.length
-                else -> 0
-            }
-        }
+    // Viewport-relative line budget: ~95% of screen in text lines (lineHeight=22sp≈22dp)
+    val screenHeightDp = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
+    val lineBudget = remember(screenHeightDp) {
+        ((screenHeightDp * 0.95f) / 22f).toInt().coerceIn(15, 50)
     }
-    // Embedded quotes: always compact (6 lines), no expand toggle
-    val isLong = !isEmbedded && textLength > 300
+    var hasTextOverflow by remember(model.segments) { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
     val maxLines = when {
         isEmbedded -> 6
-        isLong && !expanded -> 8
+        !expanded -> lineBudget
         else -> Int.MAX_VALUE
     }
     val overflow = if (maxLines < Int.MAX_VALUE) TextOverflow.Ellipsis else TextOverflow.Clip
@@ -130,6 +123,9 @@ internal fun ContentFlow(
                         onTextClick   = { onNoteClick(navigateId) },
                         maxLines      = maxLines,
                         overflow      = overflow,
+                        onTextLayoutResult = if (!isEmbedded) { result ->
+                            if (result.hasVisualOverflow) hasTextOverflow = true
+                        } else null,
                         modifier      = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = hPad)
@@ -154,9 +150,15 @@ internal fun ContentFlow(
                     i = j
                 }
                 is Segment.Image -> {
-                    // Collect consecutive images — always render
+                    // Collect images, absorbing blank-line text between them
                     var j = i
-                    while (j < model.segments.size && model.segments[j] is Segment.Image) j++
+                    while (j < model.segments.size) {
+                        when (val seg = model.segments[j]) {
+                            is Segment.Image -> j++
+                            is Segment.Text -> if (seg.text.isBlank()) j++ else break
+                            else -> break
+                        }
+                    }
                     val images = model.segments.subList(i, j)
                         .filterIsInstance<Segment.Image>()
                     EventMediaGrid(
@@ -233,11 +235,11 @@ internal fun ContentFlow(
             }
         }
 
-        // "Show more" toggle — placed after content if applicable (not in embedded quotes)
-        if (isLong) {
+        // "Show more" toggle — only when text actually overflows the viewport budget
+        if (!isEmbedded && (hasTextOverflow || expanded)) {
             Text(
                 text     = if (expanded) "Show less" else "Show more",
-                color    = Brand,
+                color    = TextSecondary,
                 fontSize = AppType.bodySmall,
                 modifier = Modifier
                     .padding(horizontal = Spacing.medium)

@@ -269,6 +269,8 @@ fun EventCard(
                 author              = parentAuthor,
                 onNoteClick         = onNoteClick,
                 lookupProfile       = lookupProfile,
+                lookupModel         = lookupModel,
+                lookupEvent         = lookupEvent,
                 onAuthorClick       = onAuthorClick,
                 fetchOgMetadata     = fetchOgMetadata,
                 imageDimensionCache = imageDimensionCache,

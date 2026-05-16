@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
@@ -24,7 +23,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -45,20 +42,22 @@ import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
-import com.unsilence.app.ui.theme.AppType
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
+import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 
 private val MediaPlaceholder = Surface1
 
 /**
- * Image grid for pre-parsed [Segment.Image] list from [EventModel.media.images].
+ * Image display for pre-parsed [Segment.Image] list from [EventModel.media.images].
  *
- * Layout: 1=full-width, 2=side-by-side, 3=1+2, 4+=2x2 with +N overlay.
+ * Layout: 1=full-width single image, 2+=horizontal pager carousel with dot indicators.
  * Tapping an image opens a fullscreen pager dialog.
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun EventMediaGrid(
     images: List<Segment.Image>,
     imageDimensionCache: ImageDimensionCache? = null,
@@ -69,123 +68,103 @@ internal fun EventMediaGrid(
     var fullscreenIndex by remember { mutableIntStateOf(-1) }
     val imageUrls = remember(images) { images.map { it.url } }
 
-    val count = images.size
-    when {
-        count == 1 -> {
-            EventMediaImage(
-                image = images[0],
-                onImageClick = { fullscreenIndex = 0 },
-                imageDimensionCache = imageDimensionCache,
-                modifier = modifier,
-            )
+    if (images.size == 1) {
+        EventMediaImage(
+            image = images[0],
+            onImageClick = { fullscreenIndex = 0 },
+            imageDimensionCache = imageDimensionCache,
+            modifier = modifier,
+        )
+    } else {
+        // Carousel frame locked to first image's aspect ratio
+        val firstImage = images[0]
+        val firstImeta = firstImage.imetaAspect
+        val firstCached = imageDimensionCache?.getCached(firstImage.url)
+        var frameAspect by remember(images) {
+            mutableStateOf(feedImageAspectRatio(firstImeta ?: firstCached))
         }
-        count == 2 -> {
-            Row(
-                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                EventMediaImage(
-                    image = images[0],
-                    onImageClick = { fullscreenIndex = 0 },
-                    modifier = Modifier.weight(1f),
-                    forceSquare = true,
-                )
-                EventMediaImage(
-                    image = images[1],
-                    onImageClick = { fullscreenIndex = 1 },
-                    modifier = Modifier.weight(1f),
-                    forceSquare = true,
-                )
+        var frameResolved by remember(images) {
+            mutableStateOf(firstImeta != null || firstCached != null)
+        }
+
+        LaunchedEffect(firstImage.url) {
+            if (frameResolved) return@LaunchedEffect
+            val ratio = imageDimensionCache?.resolve(firstImage.url) ?: return@LaunchedEffect
+            if (!frameResolved) {
+                frameAspect = feedImageAspectRatio(ratio)
+                frameResolved = true
             }
         }
-        count == 3 -> {
-            Column(
-                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                EventMediaImage(
-                    image = images[0],
-                    onImageClick = { fullscreenIndex = 0 },
-                    modifier = Modifier.fillMaxWidth(),
-                    imageDimensionCache = imageDimensionCache,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+
+        val pagerState = rememberPagerState(pageCount = { images.size })
+
+        Column(
+            modifier = modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(frameAspect, matchHeightConstraintsFirst = false)
+                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
+                    .background(MediaPlaceholder),
+            ) { page ->
+                var hasError by remember { mutableStateOf(false) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable { fullscreenIndex = page },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    EventMediaImage(
-                        image = images[1],
-                        onImageClick = { fullscreenIndex = 1 },
-                        modifier = Modifier.weight(1f),
-                        forceSquare = true,
-                    )
-                    EventMediaImage(
-                        image = images[2],
-                        onImageClick = { fullscreenIndex = 2 },
-                        modifier = Modifier.weight(1f),
-                        forceSquare = true,
-                    )
-                }
-            }
-        }
-        else -> {
-            val gridImages = images.take(4)
-            val overflow = count - 4
-            Column(
-                modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    EventMediaImage(
-                        image = gridImages[0],
-                        onImageClick = { fullscreenIndex = 0 },
-                        modifier = Modifier.weight(1f),
-                        forceSquare = true,
-                    )
-                    EventMediaImage(
-                        image = gridImages[1],
-                        onImageClick = { fullscreenIndex = 1 },
-                        modifier = Modifier.weight(1f),
-                        forceSquare = true,
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    EventMediaImage(
-                        image = gridImages[2],
-                        onImageClick = { fullscreenIndex = 2 },
-                        modifier = Modifier.weight(1f),
-                        forceSquare = true,
-                    )
-                    Box(modifier = Modifier.weight(1f)) {
-                        EventMediaImage(
-                            image = gridImages[3],
-                            onImageClick = { fullscreenIndex = 3 },
-                            modifier = Modifier.fillMaxWidth(),
-                            forceSquare = true,
-                        )
-                        if (overflow > 0) {
-                            Box(
-                                modifier = Modifier
-                                    .matchParentSize()
-                                    .background(Color.Black.copy(alpha = 0.5f))
-                                    .clickable { fullscreenIndex = 4 },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    text       = "+$overflow",
-                                    color      = Color.White,
-                                    fontSize   = AppType.display,
-                                    fontWeight = FontWeight.Bold,
-                                )
+                    AsyncImage(
+                        model = rememberFullWidthImageRequest(
+                            images[page].url,
+                            aspectRatio = frameAspect,
+                        ),
+                        contentDescription = null,
+                        contentScale       = ContentScale.Fit,
+                        modifier           = Modifier.fillMaxSize(),
+                        onSuccess = { state ->
+                            if (!frameResolved && page == 0) {
+                                val w = state.result.image.width
+                                val h = state.result.image.height
+                                if (w > 0 && h > 0) {
+                                    val ratio = w.toFloat() / h
+                                    imageDimensionCache?.put(firstImage.url, ratio)
+                                    frameAspect = feedImageAspectRatio(ratio)
+                                    frameResolved = true
+                                }
                             }
-                        }
+                        },
+                        onError = { hasError = true },
+                    )
+                    if (hasError) {
+                        Icon(
+                            imageVector        = Icons.Filled.BrokenImage,
+                            contentDescription = "Image failed to load",
+                            tint               = TextSecondary,
+                            modifier           = Modifier.size(32.dp),
+                        )
                     }
+                }
+            }
+
+            // Dot indicators
+            Row(
+                modifier = Modifier.padding(top = Spacing.small),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                repeat(images.size) { index ->
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(
+                                color = if (pagerState.currentPage == index) Brand
+                                    else Brand.copy(alpha = 0.3f),
+                                shape = CircleShape,
+                            ),
+                    )
                 }
             }
         }
@@ -212,26 +191,25 @@ internal fun EventMediaImage(
     image: Segment.Image,
     onImageClick: () -> Unit,
     modifier: Modifier = Modifier,
-    forceSquare: Boolean = false,
     imageDimensionCache: ImageDimensionCache? = null,
 ) {
     val imetaKnown = image.imetaAspect != null
     val cachedRatio = imageDimensionCache?.getCached(image.url)
     val initialAspect = image.imetaAspect ?: cachedRatio
-    var displayAspect by remember(image.url, forceSquare) {
-        mutableStateOf(feedImageAspectRatio(initialAspect, forceSquare))
+    var displayAspect by remember(image.url) {
+        mutableStateOf(feedImageAspectRatio(initialAspect))
     }
-    var hasBeenResolved by remember(image.url, forceSquare) {
+    var hasBeenResolved by remember(image.url) {
         mutableStateOf(imetaKnown || cachedRatio != null)
     }
 
     // Active resolution: lightweight header fetch (~100-300ms) settles the container
     // while shimmer is still showing — far faster than waiting for the full bitmap decode.
     LaunchedEffect(image.url) {
-        if (forceSquare || hasBeenResolved) return@LaunchedEffect
+        if (hasBeenResolved) return@LaunchedEffect
         val ratio = imageDimensionCache?.resolve(image.url) ?: return@LaunchedEffect
         if (!hasBeenResolved) {
-            displayAspect = feedImageAspectRatio(ratio, false)
+            displayAspect = feedImageAspectRatio(ratio)
             hasBeenResolved = true
         }
     }
@@ -254,10 +232,10 @@ internal fun EventMediaImage(
             onSuccess          = { state ->
                 val w = state.result.image.width
                 val h = state.result.image.height
-                if (!forceSquare && w > 0 && h > 0) {
+                if (w > 0 && h > 0) {
                     imageDimensionCache?.put(image.url, w.toFloat() / h)
                     if (!hasBeenResolved) {
-                        displayAspect = feedImageAspectRatio(w.toFloat() / h, false)
+                        displayAspect = feedImageAspectRatio(w.toFloat() / h)
                         hasBeenResolved = true
                     }
                 }
