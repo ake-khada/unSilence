@@ -43,7 +43,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -212,7 +212,7 @@ class FeedViewModel @Inject constructor(
             // Build ordered result from cache
             displayed.mapNotNull { evt -> feedRowCache[evt.id] }
         }
-            .sample(FEED_SAMPLE_MS)
+            .conflate()
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -823,7 +823,6 @@ class FeedViewModel @Inject constructor(
         const val WARM_ZONE_ABOVE = 10
         const val WARM_ZONE_BELOW = 50
         const val FEED_DISPLAY_CAP = 500
-        const val FEED_SAMPLE_MS = 100L
         const val SNAPSHOT_MERGE_CEILING = 20
     }
 }
