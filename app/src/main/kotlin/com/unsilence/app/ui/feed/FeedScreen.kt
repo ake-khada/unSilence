@@ -192,6 +192,18 @@ fun FeedScreen(
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
     }
 
+    // Pin viewport at top while live-tail is active.
+    // When events are prepended, LazyColumn preserves scroll by key —
+    // pushing firstVisibleItemIndex up by 1 per insertion.  Without
+    // this, _isAtTop drifts to false after a few arrivals and the blue
+    // dot reappears even though the user never scrolled.
+    LaunchedEffect(liveArrivalIds) {
+        val idx = listState.firstVisibleItemIndex
+        if (liveArrivalIds.isNotEmpty() && idx in 1..10) {
+            listState.scrollToItem(0)
+        }
+    }
+
     // Tab row: constant height, slides via offset (no height-collapse jerk)
     val tabRowHeight = 48.dp
     val totalTopPadding = staticTopPadding + tabRowHeight

@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.data.memory.UserEntity
+import kotlinx.coroutines.flow.StateFlow
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -42,6 +43,7 @@ internal fun AuthorHeader(
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 ) {
     val authorLabel = displayName
         ?: "${pubkey.take(6)}…${pubkey.takeLast(4)}"
@@ -64,6 +66,7 @@ internal fun AuthorHeader(
                 picture       = picture,
                 modifier      = Modifier.size(Sizing.avatar),
                 lookupProfile = lookupProfile,
+                profileFlow   = profileFlow,
             )
             Spacer(Modifier.width(Spacing.small))
             Row(

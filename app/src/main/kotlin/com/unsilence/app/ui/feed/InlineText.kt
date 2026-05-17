@@ -83,6 +83,7 @@ internal fun InlineText(
             maxLines  = maxLines,
             overflow  = overflow,
             textAlign = textAlign,
+            onTextLayout = onTextLayoutResult ?: {},
             modifier  = modifier.clickable { onTextClick() },
         )
         return

@@ -260,6 +260,7 @@ fun EventCard(
             onAuthorClick = onAuthorClick,
             onNoteClick = { onNoteClick(model.navigateId) },
             lookupProfile = lookupProfile,
+            profileFlow   = profileFlow,
         )
 
         // Thread parent card (Conversations tab)

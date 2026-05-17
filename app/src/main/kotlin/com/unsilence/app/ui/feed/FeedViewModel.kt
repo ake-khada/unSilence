@@ -364,8 +364,14 @@ class FeedViewModel @Inject constructor(
     /** True when there are queued new posts (used by nav bar dot indicator). */
     val hasNewTopPost: Boolean get() = showDot.value
 
-    /** Clear the new-posts indicator (e.g. when user taps the feed tab). */
-    fun clearNewTopPost() { onDotTapped() }
+    /** Clear the new-posts indicator (e.g. when user taps the feed tab).
+     *  Sets _isAtTop = true immediately so live-tail events merge into
+     *  _events during the animateScrollToItem(0) animation — prevents
+     *  the blue dot from flickering back while the scroll is in flight. */
+    fun clearNewTopPost() {
+        _isAtTop.value = true
+        flushPending()
+    }
 
     // -- Warm-zone hydration ---------------------------------------------------
 
@@ -421,6 +427,12 @@ class FeedViewModel @Inject constructor(
         _events.value = cachedEvents
         _newEvents.value = emptyList()
         _liveArrivalIds.value = emptySet()
+        // Reset at-top: the list re-renders from the top after event replacement.
+        // The snapshotFlow in FeedScreen will quickly correct this if the user
+        // is actually scrolled down. Without this, _isAtTop can stick at false
+        // after a feed switch (snapshotFlow sample misses the idx=0 emission
+        // when layoutInfo doesn't change on a stable list).
+        _isAtTop.value = true
 
         // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
         val subRequests = buildSubRequests(key.type)
@@ -522,7 +534,10 @@ class FeedViewModel @Inject constructor(
 
     fun onViewportChanged(idx: Int) {
         _viewportFirstVisible.value = idx
-        val atTop = idx <= 0
+        // Threshold > 0 so live-tail events prepended at the top don't
+        // immediately flip _isAtTop false (LazyColumn preserves scroll by
+        // key, pushing firstVisibleItemIndex up by 1 per insertion).
+        val atTop = idx <= 3
         if (_isAtTop.value == atTop) return
         _isAtTop.value = atTop
         if (atTop) flushPending()
