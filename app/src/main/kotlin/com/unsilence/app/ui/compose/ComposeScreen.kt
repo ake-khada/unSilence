@@ -110,7 +110,7 @@ fun ComposeScreen(
                 TextButton(onClick = onDismiss) {
                     Text(
                         text     = "Cancel",
-                        color    = Brand,
+                        color    = TextSecondary,
                         fontSize = 15.sp,
                     )
                 }

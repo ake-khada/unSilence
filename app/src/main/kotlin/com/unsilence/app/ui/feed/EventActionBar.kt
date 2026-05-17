@@ -48,6 +48,7 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Zap
@@ -143,6 +144,7 @@ internal fun EventActionBar(
                 count              = reactionCount,
                 contentDescription = "Reactions",
                 highlighted        = hasReacted,
+                highlightColor     = Like,
                 onClick            = onReact,
             )
         }
@@ -200,16 +202,17 @@ internal fun EventActionBar(
     }
 }
 
-/** Single action bar button: vector icon + optional count. Turns Brand when [highlighted]. */
+/** Single action bar button: vector icon + optional count. Turns [highlightColor] when [highlighted]. */
 @Composable
 internal fun EventActionButton(
     icon: ImageVector,
     count: Int,
     contentDescription: String,
     highlighted: Boolean = false,
+    highlightColor: Color = Brand,
     onClick: (() -> Unit)? = null,
 ) {
-    val tint = if (highlighted) Brand else ActionTint
+    val tint = if (highlighted) highlightColor else ActionTint
     val rowModifier = if (onClick != null)
         Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).clickable(onClick = onClick)
     else

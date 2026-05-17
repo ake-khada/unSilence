@@ -60,6 +60,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
@@ -260,6 +261,7 @@ fun ArticleReaderScreen(
                             count              = row.reactionCount,
                             contentDescription = "Reactions",
                             highlighted        = hasReacted,
+                            highlightColor     = Like,
                             onClick            = onReact,
                         )
                     }

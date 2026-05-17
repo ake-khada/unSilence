@@ -2,7 +2,11 @@ package com.unsilence.app.ui.navigation
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
@@ -41,6 +45,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
@@ -113,8 +118,10 @@ import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
+import com.unsilence.app.ui.theme.Warn
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -323,11 +330,14 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.medium),
                 ) {
-                    // Left: app logo mark
+                    // Left: app logo mark (52dp = next golden-ratio step from 32)
+                    // Offset left by 8dp to align waveform visual start with card edges
                     LogoMark(
-                        sizeDp = 32.dp,
+                        sizeDp = Spacing.xxl,
                         static = false,
-                        modifier = Modifier.align(Alignment.CenterStart),
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .offset(x = (-8).dp),
                     )
 
                     if (selectedTab == 2) {
@@ -342,6 +352,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         FeedCarousel(
                             feedList = feedList,
                             currentFeedType = feedType,
+                            relayHealth = relayHealth,
                             onFeedChanged = { feedViewModel.setFeedType(it) },
                             onTap = { showFeedSheet = true },
                             modifier = Modifier.align(Alignment.Center),
@@ -564,6 +575,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
 private fun FeedCarousel(
     feedList: List<Pair<FeedType, String>>,
     currentFeedType: FeedType,
+    relayHealth: Map<String, RelayHealthInfo>,
     onFeedChanged: (FeedType) -> Unit,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
@@ -631,10 +643,16 @@ private fun FeedCarousel(
     val coroutineScope = rememberCoroutineScope()
     var engaged by remember { mutableStateOf(false) }
 
+    // Health dot for the active feed (only for SingleRelay)
+    val activeRelayUrl = (currentFeedType as? FeedType.SingleRelay)?.url
+    val activeHealth = activeRelayUrl?.let { url ->
+        relayHealth[url] ?: normalizeRelayUrl(url)?.let { relayHealth[it] }
+    }
+
     Box(
         modifier = modifier
             .height(pageHeightDp * 1.7f)
-            .widthIn(min = 80.dp, max = 150.dp)
+            .widthIn(min = 80.dp, max = 160.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(if (engaged) Brand.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
             .pointerInput(pagerState) {
@@ -703,14 +721,45 @@ private fun FeedCarousel(
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = feedList[realIdx].second,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    // Health dot — only for the active relay feed page
+                    if (activeHealth != null && pageOffset < 0.5f) {
+                        val dotColor = when {
+                            activeHealth.score == null -> Text3
+                            activeHealth.score!! >= 70 -> Mint
+                            activeHealth.score!! >= 40 -> Warn
+                            else -> Like
+                        }
+                        val breathAlpha = rememberInfiniteTransition(label = "dot")
+                            .animateFloat(
+                                initialValue = 0.55f,
+                                targetValue  = 1f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(2000, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse,
+                                ),
+                                label = "dotAlpha",
+                            )
+                        Box(
+                            Modifier
+                                .size(5.dp)
+                                .graphicsLayer { alpha = breathAlpha.value }
+                                .background(dotColor, CircleShape)
+                        )
+                        Spacer(Modifier.width(Spacing.micro))
+                    }
+                    Text(
+                        text = feedList[realIdx].second,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
