@@ -51,6 +51,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -225,10 +227,18 @@ internal fun AvatarImage(
     modifier: Modifier = Modifier,
     sizeDp: Dp = Sizing.avatar,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 ) {
+    // Observe the profile reactively — when MES receives the kind-0,
+    // _profileSignal bumps and this re-emits the updated UserEntity.
+    val liveProfile = profileFlow?.invoke(pubkey)
+        ?.collectAsStateWithLifecycle()?.value
+
+    val effectivePicture = liveProfile?.picture ?: picture
+
     // Trigger profile fetch when picture is missing — debounced to avoid
     // thundering-herd on initial feed render where many avatars are null.
-    if (picture.isNullOrBlank() && lookupProfile != null) {
+    if (effectivePicture.isNullOrBlank() && lookupProfile != null) {
         LaunchedEffect(pubkey) {
             delay(800)
             lookupProfile(pubkey)
@@ -237,9 +247,9 @@ internal fun AvatarImage(
 
     Box(modifier = modifier.clip(CircleShape)) {
         IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
-        if (!picture.isNullOrBlank()) {
+        if (!effectivePicture.isNullOrBlank()) {
             AsyncImage(
-                model              = rememberAvatarImageRequest(picture, sizeDp),
+                model              = rememberAvatarImageRequest(effectivePicture, sizeDp),
                 contentDescription = null,
                 modifier           = Modifier.fillMaxSize(),
             )
