@@ -111,6 +111,7 @@ class FeedViewModel @Inject constructor(
     private val _newEvents = MutableStateFlow<List<NostrEvent>>(emptyList())
 
     private val _isAtTop = MutableStateFlow(true)
+    val isAtTop: StateFlow<Boolean> = _isAtTop.asStateFlow()
     private val _isLoading = MutableStateFlow(false)
     private val _isLoadingMore = MutableStateFlow(false)
 
@@ -368,10 +369,7 @@ class FeedViewModel @Inject constructor(
      *  Sets _isAtTop = true immediately so live-tail events merge into
      *  _events during the animateScrollToItem(0) animation — prevents
      *  the blue dot from flickering back while the scroll is in flight. */
-    fun clearNewTopPost() {
-        _isAtTop.value = true
-        flushPending()
-    }
+    fun clearNewTopPost() = setAtTop(true)
 
     // -- Warm-zone hydration ---------------------------------------------------
 
@@ -427,12 +425,8 @@ class FeedViewModel @Inject constructor(
         _events.value = cachedEvents
         _newEvents.value = emptyList()
         _liveArrivalIds.value = emptySet()
-        // Reset at-top: the list re-renders from the top after event replacement.
-        // The snapshotFlow in FeedScreen will quickly correct this if the user
-        // is actually scrolled down. Without this, _isAtTop can stick at false
-        // after a feed switch (snapshotFlow sample misses the idx=0 emission
-        // when layoutInfo doesn't change on a stable list).
-        _isAtTop.value = true
+        // Reset at-top: feed switch/refresh means we're back at the live edge.
+        setAtTop(true)
 
         // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
         val subRequests = buildSubRequests(key.type)
@@ -534,16 +528,18 @@ class FeedViewModel @Inject constructor(
 
     fun onViewportChanged(idx: Int) {
         _viewportFirstVisible.value = idx
-        // Threshold > 0 so live-tail events prepended at the top don't
-        // immediately flip _isAtTop false (LazyColumn preserves scroll by
-        // key, pushing firstVisibleItemIndex up by 1 per insertion).
-        val atTop = idx <= 3
-        if (_isAtTop.value == atTop) return
-        _isAtTop.value = atTop
-        if (atTop) flushPending()
     }
 
-    fun onDotTapped() = flushPending()
+    /** Intent-based at-top setter — called from FeedScreen's gesture-driven
+     *  snapshotFlow and from explicit user actions (Home tap, dot tap).
+     *  Never called from idle layout changes (prepends). */
+    fun setAtTop(atTop: Boolean) {
+        val wasAtTop = _isAtTop.value
+        _isAtTop.value = atTop
+        if (atTop && !wasAtTop) flushPending()
+    }
+
+    fun onDotTapped() = setAtTop(true)
 
     private fun flushPending() {
         val pending = _newEvents.value
