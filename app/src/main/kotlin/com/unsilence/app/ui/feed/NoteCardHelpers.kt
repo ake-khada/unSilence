@@ -490,16 +490,17 @@ private fun LinkChip(url: String) {
 
 // ── Action bar primitives (used by ArticleReaderScreen) ─────────────────────
 
-/** Single action bar button: vector icon + optional count. Turns Brand when [highlighted]. */
+/** Single action bar button: vector icon + optional count. Turns [highlightColor] when [highlighted]. */
 @Composable
 internal fun ActionButton(
     icon: ImageVector,
     count: Int,
     contentDescription: String,
     highlighted: Boolean = false,
+    highlightColor: Color = Brand,
     onClick: (() -> Unit)? = null,
 ) {
-    val tint = if (highlighted) Brand else ActionTint
+    val tint = if (highlighted) highlightColor else ActionTint
     val rowModifier = if (onClick != null)
         Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).clickable(onClick = onClick)
     else
