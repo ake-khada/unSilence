@@ -192,14 +192,32 @@ fun FeedScreen(
         if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
     }
 
-    // Pin viewport at top while live-tail is active.
-    // When events are prepended, LazyColumn preserves scroll by key —
-    // pushing firstVisibleItemIndex up by 1 per insertion.  Without
-    // this, _isAtTop drifts to false after a few arrivals and the blue
-    // dot reappears even though the user never scrolled.
+    // Intent-based at-top: only user-driven scrolling changes _isAtTop.
+    // Prepends change firstVisibleItemIndex without scrolling — they must
+    // NOT flip _isAtTop false.  isScrollInProgress is true only during a
+    // user drag/fling, never during a layout-driven index shift.
+    val isAtTop by viewModel.isAtTop.collectAsStateWithLifecycle()
+
+    LaunchedEffect(listState) {
+        var wasScrolling = false
+        snapshotFlow {
+            Triple(
+                listState.isScrollInProgress,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
+        }.collect { (scrolling, idx, offset) ->
+            if (scrolling || wasScrolling) {
+                viewModel.setAtTop(idx == 0 && offset == 0)
+            }
+            wasScrolling = scrolling
+        }
+    }
+
+    // Pin viewport at item 0 while user intends to be at the live edge.
+    // Gated on isAtTop (intent), not an index window.
     LaunchedEffect(liveArrivalIds) {
-        val idx = listState.firstVisibleItemIndex
-        if (liveArrivalIds.isNotEmpty() && idx in 1..10) {
+        if (liveArrivalIds.isNotEmpty() && isAtTop) {
             listState.scrollToItem(0)
         }
     }
@@ -364,19 +382,9 @@ fun FeedScreen(
                 }
                 } // PullToRefreshBox
 
-                // Viewport tracking — used for at-top detection AND auto-paging.
-                //
-                // When the user scrolls within AUTO_PAGE_TRIGGER_DISTANCE rows
-                // of the bottom, fire viewModel.loadMore() so older events
-                // stream in before the user runs out. Matches the infinite-
-                // scroll feel of Jumble / Damus and removes the explicit
-                // "Load more" tap unless the user actively pulls.
-                //
-                // isLoadingMore is read from the ViewModel via collectAsState
-                // above; we also re-read it inside the snapshot block to avoid
-                // stacking parallel loadMore calls. consumer.loadMore() itself
-                // guards the same way, but stopping at the UI saves the round
-                // trip through viewModelScope.launch.
+                // Viewport tracking — warm-zone hydration + auto-paging.
+                // _isAtTop is driven by the gesture-based snapshotFlow above,
+                // NOT from this sampled index (which drifts on prepends).
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
