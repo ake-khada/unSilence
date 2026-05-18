@@ -1734,6 +1734,14 @@ class MemoryEventStore @Inject constructor(
             .map { zappedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
             .distinctUntilChanged()
 
+    /** Synchronous check: has the current user reacted to or reposted [eventId]?
+     *  Used by CardHydrator to skip backfill for already-lit posts. */
+    fun isOwnEngaged(eventId: String): Boolean {
+        val pk = ownPubkey ?: return false
+        return reactedTargetsByActor[pk]?.contains(eventId) == true ||
+            repostedTargetsByActor[pk]?.contains(eventId) == true
+    }
+
     /**
      * Compatibility shim: optimistic zap sats bump.
      * This mutates recipient-side aggregate state (zapStatsByEventId)

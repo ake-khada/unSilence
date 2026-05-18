@@ -88,6 +88,10 @@ class RelayPool @Inject constructor(
      */
     @Volatile var activeSingleRelayFeedUrl: String? = null
 
+    /** Snapshot of currently-connected relay URLs. Read-only, used by CardHydrator
+     *  as fallback when write relays are unknown. */
+    fun connectedRelayUrls(): List<String> = connections.keys.toList()
+
     // ── Connection purpose tracking ────────────────────────────────────────
     // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
     // Persistent sub replay is only skipped when a relay is browse-only.
@@ -119,6 +123,9 @@ class RelayPool @Inject constructor(
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     /** One-shot REQ callbacks that return the first EVENT's raw tags JSON. */
     internal val eventTagsCallbacks = ConcurrentHashMap<String, CompletableDeferred<String?>>()
+    /** Per-subId EOSE completion signal. Callers register before dispatch, await after.
+     *  handleEose completes the deferred when any relay EOSE's the sub. */
+    internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
     /** Global engagement dedup — event IDs already fetched (60s TTL). */
@@ -744,6 +751,7 @@ class RelayPool @Inject constructor(
                             val eoseSubId = extractEoseSubId(raw)
                             if (eoseSubId != null && eoseSubId in pendingSubs) {
                                 conn.send("""["CLOSE","$eoseSubId"]""")
+                                oneShotEoseCallbacks.remove(eoseSubId)?.complete(Unit)
                                 pendingSubs.remove(eoseSubId)
                                 if (pendingSubs.isEmpty()) return@withTimeoutOrNull
                             }
@@ -951,6 +959,8 @@ class RelayPool @Inject constructor(
             engagementSubEventIds.remove(subId)?.let { eventIds ->
                 memoryEventStore.get().invalidateFeedRowCache(eventIds)
             }
+            // Signal EOSE to any awaiting caller (e.g. own-engagement backfill)
+            oneShotEoseCallbacks.remove(subId)?.complete(Unit)
             // Free per-relay slot and flush queued REQs
             relayOneShotCount[conn.url]?.let { count ->
                 val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
