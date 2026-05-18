@@ -32,8 +32,8 @@ class EngagementFetchTest {
     // ── buildEngagementReq ──────────────────────────────────────────────
 
     @Test
-    fun `buildEngagementReq constructs correct filter without since`() {
-        val req = buildEngagementReq("eng-test", "evt-1", since = 0L)
+    fun `buildEngagementReq constructs correct filter`() {
+        val req = buildEngagementReq("eng-test", "evt-1")
         val parsed = Json.parseToJsonElement(req).jsonArray
         assertEquals("REQ", parsed[0].jsonPrimitive.content)
         assertEquals("eng-test", parsed[1].jsonPrimitive.content)
@@ -50,15 +50,8 @@ class EngagementFetchTest {
     }
 
     @Test
-    fun `buildEngagementReq includes since when cursor is positive`() {
-        val req = buildEngagementReq("eng-test", "evt-1", since = 1700000000L)
-        val filter = Json.parseToJsonElement(req).jsonArray[2].jsonObject
-        assertEquals(1700000000L, filter["since"]!!.jsonPrimitive.content.toLong())
-    }
-
-    @Test
     fun `buildEngagementReq has all four engagement kinds`() {
-        val req = buildEngagementReq("eng-test", "evt-1", since = 0L)
+        val req = buildEngagementReq("eng-test", "evt-1")
         val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!
             .jsonArray.map { it.jsonPrimitive.content.toInt() }
         assertEquals(listOf(1, 6, 7, 9735), kinds)

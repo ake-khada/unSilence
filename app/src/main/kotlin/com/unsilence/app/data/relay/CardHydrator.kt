@@ -135,10 +135,9 @@ class CardHydrator @Inject constructor(
     // Freshness tiers gate re-fetch based on post age:
     //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
 
-    /** Per-post engagement fetch state: when we last fetched, cursor for since, capped flag. */
+    /** Per-post engagement fetch state: when we last fetched, capped flag. */
     internal data class EngagementFetchState(
         val lastFetchedAt: Long = 0L,
-        val sinceCursor: Long = 0L,
         val capped: Boolean = false,
     )
 
@@ -741,11 +740,8 @@ class CardHydrator @Inject constructor(
         val nowMs = System.currentTimeMillis()
 
         for (eventId in batch) {
-            val state = engagementTracker[eventId]
-            val since = state?.sinceCursor ?: 0L
             val subId = "eng-${System.nanoTime()}"
-
-            val req = buildEngagementReq(subId, eventId, since)
+            val req = buildEngagementReq(subId, eventId)
 
             // Register EOSE before dispatch so we don't miss a fast EOSE
             val eoseDeferred = CompletableDeferred<Unit>()
@@ -765,7 +761,6 @@ class CardHydrator @Inject constructor(
 
                     engagementTracker[eventId] = EngagementFetchState(
                         lastFetchedAt = nowMs,
-                        sinceCursor = nowMs / 1000L,
                         capped = capped,
                     )
 
@@ -822,7 +817,7 @@ internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
 }
 
 /** Build per-post engagement REQ: all engagement kinds, single #e, bounded by ENGAGEMENT_LIMIT. */
-internal fun buildEngagementReq(subId: String, eventId: String, since: Long): String =
+internal fun buildEngagementReq(subId: String, eventId: String): String =
     buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive(subId))
@@ -835,7 +830,6 @@ internal fun buildEngagementReq(subId: String, eventId: String, since: Long): St
             })
             put("#e", buildJsonArray { add(JsonPrimitive(eventId)) })
             put("limit", JsonPrimitive(ENGAGEMENT_LIMIT))
-            if (since > 0L) put("since", JsonPrimitive(since))
         })
     }.toString()
 
