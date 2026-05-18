@@ -10,6 +10,7 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.NostrJson
@@ -55,6 +56,7 @@ class NoteActionsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
+    private val snapshotScheduler: SnapshotScheduler,
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
@@ -174,6 +176,7 @@ class NoteActionsViewModel @Inject constructor(
 
             // Optimistic insert → MES actor-index updates → reactedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed))
+            snapshotScheduler.scheduleImmediate()
         }
     }
 
@@ -206,6 +209,7 @@ class NoteActionsViewModel @Inject constructor(
 
             // Optimistic insert → MES actor-index updates → repostedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
+            snapshotScheduler.scheduleImmediate()
         }
     }
 
@@ -216,20 +220,20 @@ class NoteActionsViewModel @Inject constructor(
             if (result.isSuccess) {
                 val signed = result.getOrThrow()
                 // Optimistic insert → MES actor-index updates → zappedEventIdsFlow re-emits
+                // Icon lights up immediately; sats display waits for kind-9735 receipt
+                // from relays (handleZapReceipt is the sole path into zapStatsByEventId).
                 memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
-                // Compatibility shim: optimistic zap sats bump.
-                // This mutates recipient-side aggregate state (zapStatsByEventId)
-                // for immediate UX feedback. The canonical recipient-side path is
-                // kind-9735 via handleZapReceipt. This shim preserves the pre-Tier-4
-                // behavior where eventStatsDao.incrementZapStats was called on
-                // successful payment. Remove if/when A.5.2 reworks zap aggregation.
-                memoryEventStore.incrementZapStats(eventId, amountSats)
+                snapshotScheduler.scheduleImmediate()
             }
             withContext(Dispatchers.Main) {
                 _zapLoading.value = _zapLoading.value - eventId
                 if (result.isSuccess) {
+                    // Optimistic sats overlay — instant display until kind-9735 receipt
+                    // arrives and handleZapReceipt bumps zapStatsByEventId. At that point
+                    // clearOptimisticOnReceipt removes the overlay so there's no double-count.
                     _optimisticZapSats.value = _optimisticZapSats.value +
                         (eventId to ((_optimisticZapSats.value[eventId] ?: 0L) + amountSats))
+                    clearOptimisticOnReceipt(eventId)
                     _zapResult.emit(eventId to Result.success(amountSats))
                 } else {
                     _zapResult.emit(eventId to Result.failure(
@@ -237,6 +241,20 @@ class NoteActionsViewModel @Inject constructor(
                     ))
                 }
             }
+        }
+    }
+
+    /**
+     * Auto-clear the optimistic sats overlay for [eventId] once OUR own
+     * kind-9735 receipt arrives. Identity-based: fires only when the
+     * receipt's embedded kind-9734 author matches ownPubkey, so someone
+     * else's zap on the same post doesn't clear our overlay prematurely.
+     */
+    private fun clearOptimisticOnReceipt(eventId: String) {
+        viewModelScope.launch {
+            memoryEventStore.ownZapReceivedFlow
+                .first { it == eventId }
+            _optimisticZapSats.value = _optimisticZapSats.value - eventId
         }
     }
 

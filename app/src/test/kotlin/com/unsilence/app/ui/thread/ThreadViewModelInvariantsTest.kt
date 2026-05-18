@@ -28,7 +28,6 @@ class ThreadViewModelInvariantsTest {
         rootId = rootId,
         hasContentWarning = false,
         contentWarningReason = null,
-        cachedAt = System.currentTimeMillis(),
         zapTotalSats = 0,
         authorName = null,
         authorDisplayName = null,
