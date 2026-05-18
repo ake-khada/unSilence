@@ -44,7 +44,9 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 3
+private const val SNAPSHOT_BINARY_VERSION = 5
+/** Max engaged event IDs persisted per action type (react/repost/zap). */
+private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
 /** Defensive cap on per-string length read from snapshot (1 MB). */
 private const val MAX_SNAPSHOT_STR_LEN = 1024 * 1024
@@ -290,6 +292,19 @@ class MemoryEventStore @Inject constructor(
     private val _relayMonitorSignal = MutableStateFlow(0L)
     private val _snapshotRestoredSignal = MutableStateFlow(0L)
     val snapshotRestoredFlow: StateFlow<Long> = _snapshotRestoredSignal
+
+    /**
+     * Emits the target event ID when a kind-9735 zap receipt arrives whose
+     * embedded kind-9734 zap request was authored by [ownPubkey].
+     * NoteActionsViewModel uses this to clear the optimistic sats overlay
+     * only when our own receipt lands — not on someone else's zap.
+     */
+    private val _ownZapReceived = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 32,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val ownZapReceivedFlow: Flow<String> get() = _ownZapReceived
 
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private var insertsSinceLastEviction = 0
@@ -666,6 +681,25 @@ class MemoryEventStore @Inject constructor(
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
+
+        // Detect own-zap receipt: parse embedded kind-9734 description tag (NIP-57).
+        // If the zap request author matches ownPubkey, signal the VM to clear its
+        // optimistic overlay for this specific event.
+        val own = ownPubkey
+        if (own != null) {
+            val descJson = event.tags
+                .firstOrNull { it.size >= 2 && it[0] == "description" }
+                ?.get(1)
+            if (descJson != null) {
+                try {
+                    val zapReqPubkey = NostrJson.parseToJsonElement(descJson)
+                        .jsonObject["pubkey"]?.jsonPrimitive?.content
+                    if (zapReqPubkey == own) {
+                        _ownZapReceived.tryEmit(targetId)
+                    }
+                } catch (_: Exception) { /* malformed description — skip */ }
+            }
+        }
     }
 
     /**
@@ -2647,6 +2681,17 @@ class MemoryEventStore @Inject constructor(
                 d.writeInt(follows.size)
                 for (f in follows) d.writeStr(f)
             }
+
+            // V5: Own-user engaged sets — written here (FOLLOWS section) so they
+            // restore before the 17K-event parse, giving instant icon state.
+            val ownPk = ownPubkey
+            for (index in listOf(reactedTargetsByActor, repostedTargetsByActor, zappedTargetsByActor)) {
+                val snapshot = if (ownPk != null) index[ownPk]?.toSet() ?: emptySet() else emptySet()
+                val capped = if (snapshot.size <= PERSISTED_ENGAGED_CAP) snapshot.size else PERSISTED_ENGAGED_CAP
+                d.writeInt(capped)
+                var written = 0
+                for (id in snapshot) { if (++written > PERSISTED_ENGAGED_CAP) break; d.writeStr(id) }
+            }
         }
 
         // Build the events list: nonContent (profiles, relay configs, stats
@@ -2693,6 +2738,7 @@ class MemoryEventStore @Inject constructor(
             for ((id, zap) in zaps) {
                 d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
             }
+
         }
 
         val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
@@ -2763,8 +2809,8 @@ class MemoryEventStore @Inject constructor(
                 magic.joinToString("") { "%02x".format(it) })
         }
         val version = input.readInt()
-        if (version != SNAPSHOT_BINARY_VERSION) {
-            throw IOException("Unsupported snapshot version: $version")
+        if (version != 3 && version !in 5..SNAPSHOT_BINARY_VERSION) {
+            throw IOException("Unsupported snapshot version: $version (expected 3 or 5+)")
         }
         // Section offsets — currently informational; we read sections
         // sequentially below. Future lazy-load can seek to these offsets
@@ -2796,12 +2842,33 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        // Fire follows signal early — matches the V2 reader's behavior at
-        // the ---EVENTS--- marker boundary so FeedVM cold-start resolves
-        // before the events parse completes.
+        // V5+: Own-user engaged sets — in FOLLOWS section for instant icon
+        // state before the 17K-event parse. (V4 had them in AGGREGATES.)
+        if (version >= 5) {
+            val ownPk = ownPubkey
+            for ((index, label) in listOf(
+                reactedTargetsByActor to "reacted",
+                repostedTargetsByActor to "reposted",
+                zappedTargetsByActor to "zapped",
+            )) {
+                val n = input.readInt()
+                if (n < 0 || n > PERSISTED_ENGAGED_CAP) throw IOException("Invalid $label count: $n")
+                if (ownPk != null && n > 0) {
+                    val set: MutableSet<String> = ConcurrentHashMap.newKeySet()
+                    for (i in 0 until n) set.add(input.readStr())
+                    index[ownPk] = set
+                } else {
+                    for (i in 0 until n) input.readStr()
+                }
+            }
+        }
+
+        // Fire follows + action signals early so FeedVM cold-start resolves
+        // and engagement icons light up before the events parse completes.
         if (followsByPubkey.isNotEmpty()) {
             _followsSignal.value = System.nanoTime()
         }
+        _actionSignal.value = System.nanoTime()
 
         // EVENTS section
         val eventsCount = input.readInt()
@@ -2899,6 +2966,7 @@ class MemoryEventStore @Inject constructor(
         _profileSignal.value = now
         _statsSignal.value = now
         _followsSignal.value = now
+        _actionSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         _snapshotRestoredSignal.value = now

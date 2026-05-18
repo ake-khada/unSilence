@@ -5,6 +5,7 @@ import androidx.core.util.AtomicFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.After
@@ -316,5 +317,99 @@ class SnapshotSchedulerInvariantsTest {
                 restored.eventsByIds(setOf("ev-1", "ev-50", "ev-100")).size == 3,
             )
         }
+    }
+
+    // ── Test 9: Engaged sets round-trip through V5 snapshot ───────────────
+
+    @Test
+    fun `engaged sets persist and restore in FOLLOWS section with actionSignal bump`() = runTest {
+        val myPk = "my-own-pubkey-hex"
+        store.ownPubkey = myPk
+
+        // kind-7 reaction → populates reactedTargetsByActor[myPk]
+        store.insert(event(
+            id = "react-1", pubkey = myPk, kind = 7,
+            tags = listOf(listOf("e", "target-note-1"), listOf("p", "author-1")),
+            createdAt = 100,
+        ))
+        // kind-6 repost → populates repostedTargetsByActor[myPk]
+        store.insert(event(
+            id = "repost-1", pubkey = myPk, kind = 6,
+            tags = listOf(listOf("e", "target-note-2"), listOf("p", "author-2")),
+            content = "", createdAt = 101, rootId = "target-note-2",
+        ))
+        // kind-9734 zap request → populates zappedTargetsByActor[myPk]
+        store.insert(event(
+            id = "zap-req-1", pubkey = myPk, kind = 9734,
+            tags = listOf(listOf("e", "target-note-3"), listOf("p", "author-3")),
+            createdAt = 102, rootId = "target-note-3",
+        ))
+
+        // Verify pre-save state
+        val preReacted = store.reactedEventIdsFlow(myPk).first()
+        val preReposted = store.repostedEventIdsFlow(myPk).first()
+        val preZapped = store.zappedEventIdsFlow(myPk).first()
+        assertTrue("target-note-1" in preReacted)
+        assertTrue("target-note-2" in preReposted)
+        assertTrue("target-note-3" in preZapped)
+
+        // Save
+        scheduler.saveNow()
+
+        // Restore into a fresh store
+        val restored = MemoryEventStore(object : MuteKeyProvider {})
+        restored.ownPubkey = myPk
+        val actionBefore = restored.actionSignalFlow.value
+
+        val restoredScheduler = SnapshotScheduler(
+            restored, AtomicFile(File(tmpDir, "test.snapshot")),
+        )
+        restoredScheduler.restoreIfPresent()
+
+        // Verify engaged sets were restored
+        val restoredReacted = restored.reactedEventIdsFlow(myPk).first()
+        val restoredReposted = restored.repostedEventIdsFlow(myPk).first()
+        val restoredZapped = restored.zappedEventIdsFlow(myPk).first()
+
+        assertTrue("Reacted set should contain target-note-1", "target-note-1" in restoredReacted)
+        assertTrue("Reposted set should contain target-note-2", "target-note-2" in restoredReposted)
+        assertTrue("Zapped set should contain target-note-3", "target-note-3" in restoredZapped)
+
+        // Verify _actionSignal was bumped (UI picks up engaged state)
+        assertTrue(
+            "actionSignal should be bumped after restore",
+            restored.actionSignalFlow.value > actionBefore,
+        )
+    }
+
+    // ── Test 10: Snapshot with no ownPubkey restores with empty engaged sets ──
+
+    @Test
+    fun `snapshot saved without ownPubkey restores with empty engaged sets`() = runTest {
+        val myPk = "my-own-pubkey-hex"
+
+        // Save with ownPubkey = null → V5 snapshot writes 0-length engaged sets.
+        // Restore with ownPubkey set → engaged sets should be empty (no actor data).
+        store.insert(event(id = "v3-note", kind = 1, createdAt = 100))
+        scheduler.saveNow()
+
+        // Restore — should work even without engaged data
+        val restored = MemoryEventStore(object : MuteKeyProvider {})
+        restored.ownPubkey = myPk
+        val restoredScheduler = SnapshotScheduler(
+            restored, AtomicFile(File(tmpDir, "test.snapshot")),
+        )
+        restoredScheduler.restoreIfPresent()
+
+        // Engaged sets should be empty (no actor data in snapshot)
+        val reacted = restored.reactedEventIdsFlow(myPk).first()
+        val reposted = restored.repostedEventIdsFlow(myPk).first()
+        val zapped = restored.zappedEventIdsFlow(myPk).first()
+        assertTrue("Reacted set should be empty", reacted.isEmpty())
+        assertTrue("Reposted set should be empty", reposted.isEmpty())
+        assertTrue("Zapped set should be empty", zapped.isEmpty())
+
+        // Events should still round-trip
+        assertEquals(1, restored.eventsByIds(setOf("v3-note")).size)
     }
 }
