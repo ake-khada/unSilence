@@ -32,7 +32,7 @@ class TimelineServiceTest {
     fun `single subRequest pre-EOSE buffers events sorted desc by createdAt`() = runTest {
         val emitted = CopyOnWriteArrayList<Pair<List<NostrEvent>, Boolean>>()
         val subRequest = SubRequest(
-            urls = listOf("wss://a"),
+            urls = listOf("wss://a.example"),
             filter = NostrFilter(kinds = listOf(1), limit = 10),
         )
         service.subscribeTimeline(
@@ -40,10 +40,10 @@ class TimelineServiceTest {
             onEvents = { events, eosed -> emitted.add(events to eosed) },
         )
         val subId = transport.lastReqSubId()
-        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 100), "wss://a")
-        tapRegistry.fire(eventMessage(subId, id = "b".repeat(64), createdAt = 200), "wss://a")
-        tapRegistry.fire(eventMessage(subId, id = "c".repeat(64), createdAt = 150), "wss://a")
-        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a")
+        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 100), "wss://a.example")
+        tapRegistry.fire(eventMessage(subId, id = "b".repeat(64), createdAt = 200), "wss://a.example")
+        tapRegistry.fire(eventMessage(subId, id = "c".repeat(64), createdAt = 150), "wss://a.example")
+        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a.example")
         val (lastEvents, lastEosed) = emitted.last()
         assertTrue("should be eosed", lastEosed)
         assertEquals(3, lastEvents.size)
@@ -56,15 +56,16 @@ class TimelineServiceTest {
     fun `post-EOSE event newer than eosedAt fires onNew`() = runTest {
         val news = CopyOnWriteArrayList<NostrEvent>()
         service.subscribeTimeline(
-            subRequests = listOf(SubRequest(listOf("wss://a"), NostrFilter(kinds = listOf(1), limit = 10))),
+            subRequests = listOf(SubRequest(listOf("wss://a.example"), NostrFilter(kinds = listOf(1), limit = 10))),
             onEvents = { _, _ -> },
             onNew = { news.add(it) },
         )
         val subId = transport.lastReqSubId()
-        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 100), "wss://a")
-        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a")
-        // eosedAt is set to System.currentTimeMillis()/1000 — Long.MAX_VALUE guarantees > eosedAt
-        tapRegistry.fire(eventMessage(subId, id = "b".repeat(64), createdAt = Long.MAX_VALUE), "wss://a")
+        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 100), "wss://a.example")
+        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a.example")
+        // eosedAt is set to System.currentTimeMillis()/1000 — 30s in the future is past eosedAt
+        // but within the 60s poisoned-since grace window in Subscription.parseEvent()
+        tapRegistry.fire(eventMessage(subId, id = "b".repeat(64), createdAt = System.currentTimeMillis() / 1000 + 30), "wss://a.example")
         assertEquals(1, news.size)
         assertEquals("b".repeat(64), news[0].id)
     }
@@ -73,13 +74,13 @@ class TimelineServiceTest {
     fun `post-EOSE event older than eosedAt is dropped`() = runTest {
         val news = CopyOnWriteArrayList<NostrEvent>()
         service.subscribeTimeline(
-            subRequests = listOf(SubRequest(listOf("wss://a"), NostrFilter(kinds = listOf(1)))),
+            subRequests = listOf(SubRequest(listOf("wss://a.example"), NostrFilter(kinds = listOf(1)))),
             onEvents = { _, _ -> },
             onNew = { news.add(it) },
         )
         val subId = transport.lastReqSubId()
-        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a")
-        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 1L), "wss://a")
+        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a.example")
+        tapRegistry.fire(eventMessage(subId, id = "a".repeat(64), createdAt = 1L), "wss://a.example")
         assertEquals(0, news.size)
     }
 
@@ -98,29 +99,29 @@ class TimelineServiceTest {
             .map { extractSubId(it.msg) }
         assertEquals(4, reqSubIds.size)
         // First sub gets an event + EOSE — emits immediately (no threshold gate)
-        tapRegistry.fire(eventMessage(reqSubIds[0], id = "a".repeat(64), createdAt = 100), "wss://a")
-        tapRegistry.fire("""["EOSE","${reqSubIds[0]}"]""", "wss://a")
+        tapRegistry.fire(eventMessage(reqSubIds[0], id = "a".repeat(64), createdAt = 100), "wss://a.example")
+        tapRegistry.fire("""["EOSE","${reqSubIds[0]}"]""", "wss://a.example")
         assertTrue("should emit on first per-sub EOSE with events", emissions.isNotEmpty())
         assertEquals("merged has 1 event", 1, emissions.last().first)
         assertTrue("not all subs done yet", !emissions.last().second)
         // Complete remaining (no events — merged still non-empty from sub a)
-        tapRegistry.fire("""["EOSE","${reqSubIds[1]}"]""", "wss://b")
-        tapRegistry.fire("""["EOSE","${reqSubIds[2]}"]""", "wss://c")
-        tapRegistry.fire("""["EOSE","${reqSubIds[3]}"]""", "wss://d")
+        tapRegistry.fire("""["EOSE","${reqSubIds[1]}"]""", "wss://b.example")
+        tapRegistry.fire("""["EOSE","${reqSubIds[2]}"]""", "wss://c.example")
+        tapRegistry.fire("""["EOSE","${reqSubIds[3]}"]""", "wss://d.example")
         assertTrue("final emission should be eosed=true", emissions.last().second)
     }
 
     @Test
     fun `cache hit on second subscribe injects since`() = runTest {
-        val sr = SubRequest(listOf("wss://a"), NostrFilter(kinds = listOf(1), limit = 10))
+        val sr = SubRequest(listOf("wss://a.example"), NostrFilter(kinds = listOf(1), limit = 10))
         val handle1 = service.subscribeTimeline(
             subRequests = listOf(sr),
             onEvents = { _, _ -> },
         )
         val subId1 = transport.lastReqSubId()
         eventLoader.put(makeEvent("a".repeat(64), 100))
-        tapRegistry.fire(eventMessage(subId1, id = "a".repeat(64), createdAt = 100), "wss://a")
-        tapRegistry.fire("""["EOSE","$subId1"]""", "wss://a")
+        tapRegistry.fire(eventMessage(subId1, id = "a".repeat(64), createdAt = 100), "wss://a.example")
+        tapRegistry.fire("""["EOSE","$subId1"]""", "wss://a.example")
         handle1.close()
         transport.sends.clear()
         service.subscribeTimeline(
@@ -156,8 +157,8 @@ class TimelineServiceTest {
     fun `Handle close fires CLOSE for each underlying sub`() = runTest {
         val handle = service.subscribeTimeline(
             subRequests = listOf(
-                SubRequest(listOf("wss://a"), NostrFilter()),
-                SubRequest(listOf("wss://b"), NostrFilter()),
+                SubRequest(listOf("wss://a.example"), NostrFilter()),
+                SubRequest(listOf("wss://b.example"), NostrFilter()),
             ),
             onEvents = { _, _ -> },
         )
@@ -169,16 +170,16 @@ class TimelineServiceTest {
 
     @Test
     fun `timeline cache is populated after EOSE`() = runTest {
-        val sr = SubRequest(listOf("wss://a"), NostrFilter(limit = 10))
+        val sr = SubRequest(listOf("wss://a.example"), NostrFilter(limit = 10))
         service.subscribeTimeline(
             subRequests = listOf(sr),
             onEvents = { _, _ -> },
         )
         val subId = transport.lastReqSubId()
-        tapRegistry.fire(eventMessage(subId, "a".repeat(64), 100), "wss://a")
-        tapRegistry.fire(eventMessage(subId, "b".repeat(64), 200), "wss://a")
-        tapRegistry.fire(eventMessage(subId, "c".repeat(64), 300), "wss://a")
-        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a")
+        tapRegistry.fire(eventMessage(subId, "a".repeat(64), 100), "wss://a.example")
+        tapRegistry.fire(eventMessage(subId, "b".repeat(64), 200), "wss://a.example")
+        tapRegistry.fire(eventMessage(subId, "c".repeat(64), 300), "wss://a.example")
+        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a.example")
         val refs = service.timelineForTest(
             service.generateTimelineKey(sr.urls, sr.filter)
         )
@@ -191,7 +192,7 @@ class TimelineServiceTest {
 
     @Test
     fun `loadMoreTimeline returns events older than until`() = runTest {
-        val sr = SubRequest(listOf("wss://a"), NostrFilter(limit = 10))
+        val sr = SubRequest(listOf("wss://a.example"), NostrFilter(limit = 10))
         val handle = service.subscribeTimeline(
             subRequests = listOf(sr),
             onEvents = { _, _ -> },
@@ -200,9 +201,9 @@ class TimelineServiceTest {
         listOf(100L, 200L, 300L, 400L, 500L).forEachIndexed { i, ts ->
             val id = "e$i".padEnd(64, '0').take(64)
             eventLoader.put(makeEvent(id, ts))
-            tapRegistry.fire(eventMessage(subId, id, ts), "wss://a")
+            tapRegistry.fire(eventMessage(subId, id, ts), "wss://a.example")
         }
-        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a")
+        tapRegistry.fire("""["EOSE","$subId"]""", "wss://a.example")
         val older = service.loadMoreTimeline(handle.timelineKey, until = 300L, limit = 10)
         assertEquals(2, older.size)
         assertTrue(older.all { it.createdAt < 300L })
@@ -221,7 +222,7 @@ class TimelineServiceTest {
             tags = emptyList(),
             tagsJson = "[]",
             sig = "s".repeat(128),
-            relayUrl = "wss://test",
+            relayUrl = "wss://test.example",
             replyToId = null,
             rootId = null,
             hasContentWarning = false,
