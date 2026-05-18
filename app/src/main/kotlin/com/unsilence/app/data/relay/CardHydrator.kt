@@ -543,9 +543,10 @@ class CardHydrator @Inject constructor(
     @Volatile private var lastFullHydrationAt = 0L
 
     /**
-     * @param viewportIds Event IDs currently on-screen (~8 posts). Engagement
-     *   fetch is scoped to these to keep fan-out bounded (8 × ~10 relays = ~80 REQs).
-     *   Warm-zone events still get media + own-engagement hydration.
+     * @param viewportIds Event IDs for engagement fetch (viewport + look-ahead).
+     *   Computed by the caller from the correctly-ordered event list so that
+     *   feedRowsByIds re-sort cannot misalign indices. Warm-zone events still
+     *   get media + own-engagement hydration.
      */
     suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null, viewportIds: Set<String> = emptySet()) {
         if (events.isEmpty()) return
@@ -561,18 +562,25 @@ class CardHydrator @Inject constructor(
         // debounce so hydrateVisibleCards returns immediately.
         accumulateOwnEngagement(events.map { it.id })
 
-        // Engagement counts: scoped to viewport only (not full warm zone).
-        val engagementEvents = if (viewportIds.isNotEmpty()) events.filter { it.id in viewportIds } else events
-        accumulateEngagement(engagementEvents)
+        // Engagement counts: viewport + forward look-ahead (IDs from caller).
+        accumulateEngagement(events.filter { it.id in viewportIds })
     }
 
     /**
      * Engagement-only entry point for surfaces that handle their own media/profile
-     * hydration (e.g. profile screen). Accumulates viewport posts for debounced
-     * per-post engagement fetch. Same dedup + freshness gating as the feed path.
+     * hydration (e.g. profile screen). Accumulates viewport + look-ahead posts
+     * for debounced per-post engagement fetch. Same dedup + freshness gating as
+     * the feed path.
+     *
+     * @param rows   full post list for the surface.
+     * @param first  index of the first visible item.
+     * @param last   index of the last visible item.
      */
-    fun hydrateEngagement(viewportRows: List<FeedRow>) {
-        accumulateEngagement(viewportRows)
+    fun hydrateEngagement(rows: List<FeedRow>, first: Int, last: Int) {
+        val start = first.coerceAtLeast(0)
+        val end = (last + 1 + ENGAGEMENT_LOOKAHEAD).coerceAtMost(rows.size)
+        if (start >= end) return
+        accumulateEngagement(rows.subList(start, end))
     }
 
     /** Engagement target ID: for kind-6 reposts use the original event (rootId),
@@ -795,6 +803,12 @@ internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<
 
 /** Per-post engagement REQ limit. Posts reaching this show "N+" in the UI. */
 internal const val ENGAGEMENT_LIMIT = 100
+
+/** Number of posts BEYOND the viewport to prefetch engagement for.
+ *  Covers ~2 screenfuls of scroll — by the time a post becomes visible,
+ *  its reaction/zap counts are already in MES.  Bounded by the debounce
+ *  and freshness tiers, so fling-through doesn't fan out wastefully. */
+const val ENGAGEMENT_LOOKAHEAD = 15
 
 /**
  * Freshness interval in seconds based on post age. Returns how long to wait

@@ -451,9 +451,9 @@ fun ProfileScreen(
                 val info = listState.layoutInfo
                 val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
                 val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                first to last
-            }.sample(100).collect { (first, last) ->
-                viewModel.onViewportChanged(first, last)
+                Triple(first, last, listState.isScrollInProgress)
+            }.sample(100).collect { (first, last, isScrolling) ->
+                viewModel.onViewportChanged(first, last, isScrolling)
             }
         }
 

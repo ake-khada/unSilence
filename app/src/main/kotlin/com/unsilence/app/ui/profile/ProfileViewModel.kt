@@ -172,17 +172,18 @@ class ProfileViewModel @Inject constructor(
 
     // ── User actions ─────────────────────────────────────────────────────
 
-    fun onViewportChanged(first: Int, last: Int) {
+    fun onViewportChanged(first: Int, last: Int, isScrolling: Boolean = false) {
         val atTop = first <= 0
         if (_isAtTop.value != atTop) _isAtTop.value = atTop
 
-        // Engagement fetch for visible own-profile posts
+        // Skip engagement during flings — same settle guard as video autoplay.
+        if (isScrolling) return
+
+        // LazyColumn indices include header items (spacer, profile header, tab row).
+        // Offset to post-list indices so the look-ahead window aligns with posts.
         val posts = tabPostsFlow.value
         if (posts.isEmpty()) return
-        val vpEnd = (last + 1).coerceAtMost(posts.size)
-        val vpStart = first.coerceAtLeast(0)
-        if (vpStart >= vpEnd) return
-        cardHydrator.hydrateEngagement(posts.subList(vpStart, vpEnd))
+        cardHydrator.hydrateEngagement(posts, first - PROFILE_HEADER_ITEMS, last - PROFILE_HEADER_ITEMS)
     }
 
     fun loadMore(currentOldest: Long) {
@@ -321,6 +322,8 @@ class ProfileViewModel @Inject constructor(
     private companion object {
         const val FEED_DISPLAY_CAP = 500
         const val FEED_SAMPLE_MS = 100L
+        /** Number of LazyColumn item{} blocks before the post list (spacer + header + tabs). */
+        const val PROFILE_HEADER_ITEMS = 3
 
         /** Subscription group: Notes+Replies share kinds [1,6], Longform is [30023]. */
         enum class SubGroup { NOTES_REPLIES, LONGFORM }
