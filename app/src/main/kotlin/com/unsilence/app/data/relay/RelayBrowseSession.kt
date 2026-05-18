@@ -66,10 +66,6 @@ class RelayBrowseSession @Inject constructor(
         // Await WebSocket readiness — prevents browse REQ being sent before ws is open.
         relayPool.connectAndAwait(normalized, timeoutMs = 5_000)
 
-        // Set engagement routing BEFORE sending subs so any engagement fetches
-        // triggered by the new feed are already routed correctly.
-        relayPool.browseEngagementTargets = normalized
-
         // Query latest event timestamp so we only ask for newer events on revisit
         val since = memoryEventStore.maxCreatedAtForRelays(normalized.toSet())
 
@@ -90,8 +86,6 @@ class RelayBrowseSession @Inject constructor(
         for ((url, subId) in activeSubIds) {
             relayPool.sendToRelay(url, """["CLOSE","$subId"]""")
         }
-        // Clear engagement routing.
-        relayPool.browseEngagementTargets = emptyList()
         // Remove BROWSE purpose. releaseIfUnused is currently a no-op (connections
         // are pooled), but gated on hasAnyPurpose so it's safe if it gains real logic.
         for (url in activeTarget) {
