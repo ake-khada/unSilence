@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -56,6 +57,7 @@ class ProfileViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val timelineService: TimelineService,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -156,7 +158,7 @@ class ProfileViewModel @Inject constructor(
     fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
         statsCache.getOrPut(eventId) {
             memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
     /** Live following count from MES follows index. */
@@ -173,6 +175,14 @@ class ProfileViewModel @Inject constructor(
     fun onViewportChanged(first: Int, last: Int) {
         val atTop = first <= 0
         if (_isAtTop.value != atTop) _isAtTop.value = atTop
+
+        // Engagement fetch for visible own-profile posts
+        val posts = tabPostsFlow.value
+        if (posts.isEmpty()) return
+        val vpEnd = (last + 1).coerceAtMost(posts.size)
+        val vpStart = first.coerceAtLeast(0)
+        if (vpStart >= vpEnd) return
+        cardHydrator.hydrateEngagement(posts.subList(vpStart, vpEnd))
     }
 
     fun loadMore(currentOldest: Long) {
