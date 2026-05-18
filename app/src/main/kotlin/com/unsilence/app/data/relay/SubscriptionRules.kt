@@ -39,6 +39,7 @@ object SubscriptionRules {
         "prefetch-",
         "mute-",
         "own-eng-",
+        "eng-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =

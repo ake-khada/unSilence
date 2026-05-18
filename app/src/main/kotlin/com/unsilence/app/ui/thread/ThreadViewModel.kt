@@ -16,6 +16,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.memory.EventStats
 import java.util.concurrent.ConcurrentHashMap
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -105,6 +106,15 @@ class ThreadViewModel @Inject constructor(
                 }
         }
     }
+
+    // ── Per-event stats (reactive counts for thread cards) ─────────────
+    private val statsCache = ConcurrentHashMap<String, StateFlow<EventStats>>()
+
+    fun statsFlow(eventId: String): StateFlow<EventStats> =
+        statsCache.getOrPut(eventId) {
+            memoryEventStore.statsFlow(eventId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EventStats.EMPTY)
+        }
 
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {

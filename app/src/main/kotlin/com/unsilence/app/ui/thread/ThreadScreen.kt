@@ -205,6 +205,7 @@ fun ThreadScreen(
                                     lookupModel         = actionsViewModel::getEventModel,
                                     fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
                                     profileFlow         = null,
+                                    statsFlow           = viewModel::statsFlow,
                                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                                     thumbnailCache      = actionsViewModel.videoThumbnailCache,
                                 )
@@ -280,6 +281,7 @@ fun ThreadScreen(
                                         lookupModel         = actionsViewModel::getEventModel,
                                         fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
                                         profileFlow         = null,
+                                        statsFlow           = viewModel::statsFlow,
                                         imageDimensionCache = actionsViewModel.imageDimensionCache,
                                         thumbnailCache      = actionsViewModel.videoThumbnailCache,
                                     )
