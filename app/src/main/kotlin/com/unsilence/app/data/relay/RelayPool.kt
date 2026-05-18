@@ -128,12 +128,6 @@ class RelayPool @Inject constructor(
     internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
-    /** Global engagement dedup — event IDs already fetched (60s TTL). */
-    private val engagementFetched = ConcurrentHashMap<String, Long>()
-
-    /** Tracks event IDs per engagement subscription for post-EOSE cache invalidation. */
-    private val engagementSubEventIds = ConcurrentHashMap<String, List<String>>()
-
     /** In-flight event fetch dedup — maps event ID to completion signal.
      *  Callers that arrive while a fetch is in-flight skip the REQ;
      *  the monitor coroutine completes the Deferred and removes the entry. */
@@ -467,8 +461,6 @@ class RelayPool @Inject constructor(
             while (true) {
                 delay(300_000)
                 val cutoff = System.currentTimeMillis() - 300_000
-                engagementFetched.entries.removeIf { it.value < cutoff }
-                engagementSubEventIds.entries.removeIf { true } // clear all — subs should be completed by now
                 // eventFetchInFlight: self-cleaning via launchFetchMonitor finally blocks
                 missingRefCache.entries.removeIf { it.value < cutoff } // same 5-min TTL
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
@@ -955,10 +947,6 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
-            // Invalidate FeedRow cache for engagement subs so counts update in UI
-            engagementSubEventIds.remove(subId)?.let { eventIds ->
-                memoryEventStore.get().invalidateFeedRowCache(eventIds)
-            }
             // Signal EOSE to any awaiting caller (e.g. own-engagement backfill)
             oneShotEoseCallbacks.remove(subId)?.complete(Unit)
             // Free per-relay slot and flush queued REQs
@@ -2110,63 +2098,6 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Fetch engagement (replies, reactions, zaps) scoped to specific event IDs.
-     * Called by ViewModels when new posts appear in the feed.
-     * One-shot subscriptions — closed after EOSE.
-     * Sends to at most 6 relays to avoid fan-out.
-     */
-    fun fetchEngagementBatch(eventIds: List<String>) {
-        if (eventIds.isEmpty()) return
-        val now = System.currentTimeMillis()
-        val novel = eventIds.filter { id ->
-            val last = engagementFetched[id]
-            last == null || (now - last) > 60_000
-        }
-        if (novel.isEmpty()) {
-            Log.v(TAG, "fetchEngagementBatch: all ${eventIds.size} IDs already in-flight, skipping")
-            return
-        }
-        novel.forEach { engagementFetched[it] = now }
-        val ts = now
-
-        // Single consolidated subscription for all engagement kinds
-        val subId = "engagement-$ts"
-        _activeOneShotSubs.add(subId)
-        engagementSubEventIds[subId] = novel
-
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(7))
-                    add(JsonPrimitive(9735))
-                })
-                put("#e", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(500))
-            })
-        }.toString()
-
-        // Route engagement to browse relays when active, otherwise use non-indexer
-        // relays only. Indexer relays (purplepag.es, etc.) store profile metadata
-        // (kind 0, 10002), NOT content events — they can't return engagement data.
-        val browseTargets = browseEngagementTargets
-        val targets = if (browseTargets.isNotEmpty()) {
-            browseTargets.mapNotNull { connections[it] }
-        } else {
-            val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-                .mapNotNull { normalizeRelayUrl(it) }.toSet()
-            connections.values.filter { it.url !in indexerUrls }.take(3)
-        }
-
-        targets.forEach { conn ->
-            sendOneShotToRelay(conn, req)
-        }
-        Log.d(TAG, "Fetching engagement for ${novel.size} events from ${targets.size} relay(s), ${eventIds.size - novel.size} deduped")
-    }
-
-    /**
      * Pagination for user profile view.
      * Fetches posts by [pubkey] older than [untilTimestamp].
      * One-shot subscription — closes on EOSE (prefix "older-" matches isOneShotSubscription).
@@ -2370,9 +2301,6 @@ class RelayPool @Inject constructor(
     }
 
     // ── Browse session hooks ────────────────────────────────────────────────
-
-    /** When browse mode is active, engagement one-shots route here instead of general connections. */
-    @Volatile var browseEngagementTargets: List<String> = emptyList()
 
     /** Called after a relay successfully reconnects. Browse session uses this to resend its subs. */
     var onRelayReconnected: ((String) -> Unit)? = null
