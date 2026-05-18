@@ -562,6 +562,20 @@ class CardHydrator @Inject constructor(
     }
 
     /**
+     * Engagement-only entry point for surfaces that handle their own media/profile
+     * hydration (e.g. profile screen). Accumulates viewport posts for debounced
+     * per-post engagement fetch. Same dedup + freshness gating as the feed path.
+     */
+    fun hydrateEngagement(viewportRows: List<FeedRow>) {
+        accumulateEngagement(viewportRows)
+    }
+
+    /** Engagement target ID: for kind-6 reposts use the original event (rootId),
+     *  for everything else use the event's own ID. Matches FeedRow.engagementId. */
+    private fun engagementIdFor(row: FeedRow): String =
+        if (row.kind == 6 && row.rootId != null) row.rootId!! else row.id
+
+    /**
      * Filter novel IDs and add to pending buffer. Launches a debounced
      * background dispatch — each call resets the 250ms timer so rapid
      * viewport changes coalesce into a single REQ.
@@ -660,16 +674,18 @@ class CardHydrator @Inject constructor(
         val nowSec = nowMs / 1000L
 
         val novel = events.filter { row ->
-            row.id !in engagementInFlight &&
-                row.id !in pendingEngagementIds &&
-                isEngagementStale(row.id, row.createdAt, nowMs, nowSec)
+            val engId = engagementIdFor(row)
+            engId !in engagementInFlight &&
+                engId !in pendingEngagementIds &&
+                isEngagementStale(engId, row.createdAt, nowMs, nowSec)
         }
         if (novel.isEmpty()) return
 
-        // Store pubkey alongside ID so dispatch can resolve author inbox relays
+        // Store pubkey alongside engagement ID so dispatch can resolve author inbox relays
         for (row in novel) {
-            pendingEngagementIds.add(row.id)
-            engagementPubkeys[row.id] = row.pubkey
+            val engId = engagementIdFor(row)
+            pendingEngagementIds.add(engId)
+            engagementPubkeys[engId] = row.pubkey
         }
 
         engagementDebounceJob?.cancel()
