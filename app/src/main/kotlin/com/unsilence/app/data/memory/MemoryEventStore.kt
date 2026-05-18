@@ -105,6 +105,9 @@ class MemoryEventStore @Inject constructor(
     private val zappedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
     private val actorAccessedAt = ConcurrentHashMap<String, Long>()
 
+    /** Posts where engagement download hit the limit — cards show "N+" for these. */
+    private val engagementCapped: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
 
@@ -1967,6 +1970,14 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
+    /** Non-Flow snapshot of current engagement counts for a post. */
+    fun currentStatsSnapshot(eventId: String): EventStats = currentStats(eventId)
+
+    // ─── Engagement cap ──────────────────────────────────────────────────────
+
+    fun markEngagementCapped(eventId: String) { engagementCapped.add(eventId) }
+    fun isEngagementCapped(eventId: String): Boolean = eventId in engagementCapped
+
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
     override fun writeRelaysFor(pubkey: String): List<String> =
@@ -3412,6 +3423,7 @@ class MemoryEventStore @Inject constructor(
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
         actorAccessedAt.clear()
+        engagementCapped.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L

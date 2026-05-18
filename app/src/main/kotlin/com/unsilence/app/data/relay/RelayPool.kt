@@ -1525,7 +1525,10 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(0))
+                    add(JsonPrimitive(10002))
+                })
                 put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
@@ -1539,7 +1542,7 @@ class RelayPool @Inject constructor(
             }
         }.ifEmpty { connections.keys.take(minTargets).toList() }
         scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
-        Log.d(TAG, "Fetching ${novel.size} profiles → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")
+        Log.d(TAG, "Fetching ${novel.size} profiles+relaylists → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }
 
     /**

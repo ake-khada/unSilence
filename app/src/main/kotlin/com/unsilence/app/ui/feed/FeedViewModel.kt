@@ -386,10 +386,14 @@ class FeedViewModel @Inject constructor(
                     val zoneEnd = (first + WARM_ZONE_BELOW).coerceAtMost(events.size)
                     if (zoneStart >= zoneEnd) return@collectLatest
                     val warmEvents = events.subList(zoneStart, zoneEnd)
+                    // Viewport slice: only on-screen posts get engagement fetch
+                    val vpStart = (first - zoneStart).coerceAtLeast(0)
+                    val vpEnd = (vpStart + VIEWPORT_SIZE).coerceAtMost(warmEvents.size)
+                    val viewportIds = warmEvents.subList(vpStart, vpEnd).map { it.id }.toSet()
                     val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
                     if (rows.isNotEmpty()) {
                         val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
-                        cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay)
+                        cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay, viewportIds = viewportIds)
                     }
                 }
         }
@@ -822,6 +826,8 @@ class FeedViewModel @Inject constructor(
     private companion object {
         const val WARM_ZONE_ABOVE = 10
         const val WARM_ZONE_BELOW = 50
+        /** Approximate on-screen post count — engagement fetch scoped to this. */
+        const val VIEWPORT_SIZE = 8
         const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
     }

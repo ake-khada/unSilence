@@ -122,7 +122,42 @@ class CardHydrator @Inject constructor(
         pendingBackfillIds.clear()
         ownEngagementInFlight.clear()
         ownEngagementChecked.clear()
+        engagementTracker.clear()
+        engagementInFlight.clear()
+        pendingEngagementIds.clear()
+        engagementPubkeys.clear()
     }
+
+    // ── Engagement count fetch ─────────────────────────────────────────
+    // Per-post bounded download: kinds [1,6,7,9735] with #e:[postId],
+    // limit 100, since:<cursor>. Targets connected relays + post author's
+    // NIP-65 inbox (read) relays. Events flow through EventProcessor → MES
+    // aggregates → statsFlow → card display.
+    //
+    // Freshness tiers gate re-fetch based on post age:
+    //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
+
+    /** Per-post engagement fetch state: when we last fetched, cursor for since, capped flag. */
+    internal data class EngagementFetchState(
+        val lastFetchedAt: Long = 0L,
+        val sinceCursor: Long = 0L,
+        val capped: Boolean = false,
+    )
+
+    /** Tracks per-post engagement fetch state. Cleared on logout/reset. */
+    internal val engagementTracker = ConcurrentHashMap<String, EngagementFetchState>()
+
+    /** Posts whose engagement REQ is currently in flight. */
+    private val engagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Pending post IDs accumulated from hydrateVisibleCards, awaiting debounced dispatch. */
+    private val pendingEngagementIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Debounce job for engagement fetch — cancelled and relaunched on each accumulation. */
+    private var engagementDebounceJob: Job? = null
+
+    /** Pubkey cache for pending engagement IDs — needed for author inbox relay lookup. */
+    private val engagementPubkeys = ConcurrentHashMap<String, String>()
 
     // ── Own-engagement backfill ─────────────────────────────────────────
     // Fetches the user's own kind-7/6 events targeting visible posts from
@@ -502,7 +537,12 @@ class CardHydrator @Inject constructor(
      */
     @Volatile private var lastFullHydrationAt = 0L
 
-    suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null) {
+    /**
+     * @param viewportIds Event IDs currently on-screen (~8 posts). Engagement
+     *   fetch is scoped to these to keep fan-out bounded (8 × ~10 relays = ~80 REQs).
+     *   Warm-zone events still get media + own-engagement hydration.
+     */
+    suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null, viewportIds: Set<String> = emptySet()) {
         if (events.isEmpty()) return
 
         // Profile + ref hydration removed — per-card self-fetch paths handle
@@ -515,6 +555,10 @@ class CardHydrator @Inject constructor(
         // Own-engagement backfill: accumulate novel IDs, dispatch after 250ms
         // debounce so hydrateVisibleCards returns immediately.
         accumulateOwnEngagement(events.map { it.id })
+
+        // Engagement counts: scoped to viewport only (not full warm zone).
+        val engagementEvents = if (viewportIds.isNotEmpty()) events.filter { it.id in viewportIds } else events
+        accumulateEngagement(engagementEvents)
     }
 
     /**
@@ -603,6 +647,133 @@ class CardHydrator @Inject constructor(
             Log.w(TAG, "Own-engagement backfill failed for ${batch.size} posts")
         }
     }
+
+    // ── Engagement count fetch ─────────────────────────────────────────
+
+    /**
+     * Filter visible posts by freshness tier and accumulate for debounced dispatch.
+     * Each call resets the 250ms timer so rapid viewport changes coalesce.
+     */
+    internal fun accumulateEngagement(events: List<FeedRow>) {
+        if (events.isEmpty()) return
+        val nowMs = System.currentTimeMillis()
+        val nowSec = nowMs / 1000L
+
+        val novel = events.filter { row ->
+            row.id !in engagementInFlight &&
+                row.id !in pendingEngagementIds &&
+                isEngagementStale(row.id, row.createdAt, nowMs, nowSec)
+        }
+        if (novel.isEmpty()) return
+
+        // Store pubkey alongside ID so dispatch can resolve author inbox relays
+        for (row in novel) {
+            pendingEngagementIds.add(row.id)
+            engagementPubkeys[row.id] = row.pubkey
+        }
+
+        engagementDebounceJob?.cancel()
+        engagementDebounceJob = backfillScope.launch {
+            delay(250)
+            backfillScope.launch { dispatchEngagement() }
+        }
+    }
+
+    /**
+     * Returns true if this post's engagement counts are stale per freshness tiers.
+     * Posts aged ≥7d that have been fetched once are never re-fetched.
+     */
+    internal fun isEngagementStale(
+        eventId: String,
+        postCreatedAt: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        nowSec: Long = nowMs / 1000L,
+    ): Boolean {
+        val state = engagementTracker[eventId]
+        if (state == null) return true // never fetched
+
+        val ageSec = nowSec - postCreatedAt
+        val staleSec = engagementFreshnessInterval(ageSec)
+        if (staleSec == Long.MAX_VALUE) return false // ≥7d, fetched once — done
+
+        val elapsedMs = nowMs - state.lastFetchedAt
+        return elapsedMs >= staleSec * 1000L
+    }
+
+    /**
+     * Dispatch per-post engagement REQs to connected + author inbox relays.
+     *
+     * Each post gets ONE combined REQ (kinds [1,6,7,9735]) with its own #e and
+     * limit=ENGAGEMENT_LIMIT. Per-post dispatch is a spec invariant: the per-post
+     * limit cap and per-post author-inbox routing both depend on it.
+     *
+     * Relay targeting per post: (authorInbox.take(4) + connected.take(6)).distinct()
+     * EOSE-gated completion via oneShotEoseCallbacks.
+     */
+    private suspend fun dispatchEngagement() {
+        val batch = pendingEngagementIds.toList()
+        pendingEngagementIds.clear()
+        if (batch.isEmpty()) return
+
+        batch.forEach { engagementInFlight.add(it) }
+
+        val connectedUrls = relayPool.connectedRelayUrls()
+        val nowMs = System.currentTimeMillis()
+
+        for (eventId in batch) {
+            val state = engagementTracker[eventId]
+            val since = state?.sinceCursor ?: 0L
+            val subId = "eng-${System.nanoTime()}"
+
+            // Per-post relay targeting: author inbox + connected
+            val authorPk = engagementPubkeys.remove(eventId)
+            val inboxUrls = if (authorPk != null) {
+                memoryEventStore.readRelaysFor(authorPk)
+                    .mapNotNull { normalizeRelayUrl(it) }
+                    .take(4)
+            } else emptyList()
+            val targetUrls = (inboxUrls + connectedUrls.take(6)).distinct()
+            if (targetUrls.isEmpty()) {
+                engagementInFlight.remove(eventId)
+                continue
+            }
+
+            val req = buildEngagementReq(subId, eventId, since)
+
+            // Register EOSE before dispatch so we don't miss a fast EOSE
+            val eoseDeferred = CompletableDeferred<Unit>()
+            relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
+
+            backfillScope.launch {
+                try {
+                    relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
+
+                    val eoseReceived = withTimeoutOrNull(10_000) { eoseDeferred.await() } != null
+
+                    val stats = memoryEventStore.currentStatsSnapshot(eventId)
+                    val totalEngagement = stats.replyCount + stats.repostCount +
+                        stats.reactionCount + stats.zapCount
+                    val capped = totalEngagement >= ENGAGEMENT_LIMIT
+                    if (capped) memoryEventStore.markEngagementCapped(eventId)
+
+                    engagementTracker[eventId] = EngagementFetchState(
+                        lastFetchedAt = nowMs,
+                        sinceCursor = nowMs / 1000L,
+                        capped = capped,
+                    )
+
+                    if (!eoseReceived) {
+                        relayPool.oneShotEoseCallbacks.remove(subId)
+                        Log.w(TAG, "Engagement: ${eventId.take(12)} timed out (no EOSE)")
+                    }
+                } finally {
+                    engagementInFlight.remove(eventId)
+                }
+            }
+        }
+
+        Log.d(TAG, "Engagement: dispatched ${batch.size} posts")
+    }
 }
 
 /** Build the one-shot REQ JSON for own-engagement backfill. Package-private for testing. */
@@ -617,6 +788,47 @@ internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<
                 add(JsonPrimitive(6))
             })
             put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+        })
+    }.toString()
+
+/** Per-post engagement REQ limit. Posts reaching this show "N+" in the UI. */
+internal const val ENGAGEMENT_LIMIT = 100
+
+/**
+ * Freshness interval in seconds based on post age. Returns how long to wait
+ * before re-fetching engagement for a post of the given age.
+ *
+ * | Post age   | Re-fetch after |
+ * |------------|----------------|
+ * | < 1 hour   | 2 minutes      |
+ * | < 6 hours  | 10 minutes     |
+ * | < 24 hours | 1 hour         |
+ * | < 7 days   | 6 hours        |
+ * | ≥ 7 days   | never (once)   |
+ */
+internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
+    postAgeSec < 3_600L       -> 120L          // <1h → 2min
+    postAgeSec < 21_600L      -> 600L          // <6h → 10min
+    postAgeSec < 86_400L      -> 3_600L        // <24h → 1h
+    postAgeSec < 604_800L     -> 21_600L       // <7d → 6h
+    else                      -> Long.MAX_VALUE // ≥7d → fetch once
+}
+
+/** Build per-post engagement REQ: all engagement kinds, single #e, bounded by ENGAGEMENT_LIMIT. */
+internal fun buildEngagementReq(subId: String, eventId: String, since: Long): String =
+    buildJsonArray {
+        add(JsonPrimitive("REQ"))
+        add(JsonPrimitive(subId))
+        add(buildJsonObject {
+            put("kinds", buildJsonArray {
+                add(JsonPrimitive(1))
+                add(JsonPrimitive(6))
+                add(JsonPrimitive(7))
+                add(JsonPrimitive(9735))
+            })
+            put("#e", buildJsonArray { add(JsonPrimitive(eventId)) })
+            put("limit", JsonPrimitive(ENGAGEMENT_LIMIT))
+            if (since > 0L) put("since", JsonPrimitive(since))
         })
     }.toString()
 
