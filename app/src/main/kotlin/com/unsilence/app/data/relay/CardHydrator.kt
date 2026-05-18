@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,7 +118,7 @@ class CardHydrator @Inject constructor(
             refsHydrated.clear()
             mediaHydrated.clear()
         }
-        backfillDebounceJob?.cancel()
+        backfillScope.coroutineContext.cancelChildren()
         pendingBackfillIds.clear()
         ownEngagementInFlight.clear()
         ownEngagementChecked.clear()
@@ -535,11 +536,14 @@ class CardHydrator @Inject constructor(
 
         pendingBackfillIds.addAll(novel)
 
-        // Cancel previous debounce, start fresh 250ms timer
+        // Cancel only the pending debounce delay — an in-flight dispatch
+        // (separate coroutine) keeps running undisturbed.
         backfillDebounceJob?.cancel()
         backfillDebounceJob = backfillScope.launch {
             delay(250)
-            dispatchOwnEngagement(ownPk)
+            // Dispatch in a separate coroutine so future accumulations
+            // cancel only the delay, not the REQ round-trip.
+            backfillScope.launch { dispatchOwnEngagement(ownPk) }
         }
     }
 
