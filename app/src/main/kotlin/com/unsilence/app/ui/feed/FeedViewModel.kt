@@ -12,6 +12,7 @@ import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
@@ -379,17 +380,17 @@ class FeedViewModel @Inject constructor(
         @OptIn(FlowPreview::class)
         viewModelScope.launch(Dispatchers.Default) {
             combine(events, _viewportFirstVisible) { events, first -> events to first }
-                .debounce(300L)
+                .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
                 .collectLatest { (events, first) ->
                     if (events.isEmpty()) return@collectLatest
                     val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
                     val zoneEnd = (first + WARM_ZONE_BELOW).coerceAtMost(events.size)
                     if (zoneStart >= zoneEnd) return@collectLatest
                     val warmEvents = events.subList(zoneStart, zoneEnd)
-                    // Viewport slice: only on-screen posts get engagement fetch
                     val vpStart = (first - zoneStart).coerceAtLeast(0)
                     val vpEnd = (vpStart + VIEWPORT_SIZE).coerceAtMost(warmEvents.size)
-                    val viewportIds = warmEvents.subList(vpStart, vpEnd).map { it.id }.toSet()
+                    val engEnd = (vpEnd + ENGAGEMENT_LOOKAHEAD).coerceAtMost(warmEvents.size)
+                    val viewportIds = warmEvents.subList(vpStart, engEnd).map { it.id }.toSet()
                     val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
                     if (rows.isNotEmpty()) {
                         val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
