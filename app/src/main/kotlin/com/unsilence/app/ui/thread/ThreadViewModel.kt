@@ -113,7 +113,7 @@ class ThreadViewModel @Inject constructor(
     fun statsFlow(eventId: String): StateFlow<EventStats> =
         statsCache.getOrPut(eventId) {
             memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EventStats.EMPTY)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
     /** Wipe stale state so next open doesn't flash old content. */

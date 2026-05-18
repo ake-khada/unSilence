@@ -319,7 +319,7 @@ class FeedViewModel @Inject constructor(
     fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
         statsCache.getOrPut(eventId) {
             memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.EventStats.EMPTY)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
     // -- User relay sets (kind-30002) ------------------------------------------
