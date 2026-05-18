@@ -38,6 +38,7 @@ object SubscriptionRules {
         "trust-scores-",
         "prefetch-",
         "mute-",
+        "own-eng-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =

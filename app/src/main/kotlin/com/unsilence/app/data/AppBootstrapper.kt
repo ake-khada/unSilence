@@ -19,6 +19,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.relay.ConnectionPurpose
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
@@ -89,6 +90,7 @@ class AppBootstrapper @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val initGate: InitGate,
     private val muteListRepository: MuteListRepository,
+    private val cardHydrator: CardHydrator,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -473,6 +475,9 @@ class AppBootstrapper @Inject constructor(
 
         // 7. Clear profile resolver in-flight state
         profileResolver.clear()
+
+        // 8. Clear CardHydrator memo + own-engagement dedup sets
+        cardHydrator.resetHydratedMemo()
 
         // In-memory state already cleared by eventProcessor.stop() (seenIds)
         // and relayPool.disconnectAll() (connections map)

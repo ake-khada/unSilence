@@ -13,11 +13,22 @@ import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
 import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -106,7 +117,36 @@ class CardHydrator @Inject constructor(
             refsHydrated.clear()
             mediaHydrated.clear()
         }
+        backfillDebounceJob?.cancel()
+        pendingBackfillIds.clear()
+        ownEngagementInFlight.clear()
+        ownEngagementChecked.clear()
     }
+
+    // ── Own-engagement backfill ─────────────────────────────────────────
+    // Fetches the user's own kind-7/6 events targeting visible posts from
+    // their write relays. Results flow through EventProcessor → MES →
+    // actor indexes → _actionSignal → icons light up. Self-healing: once
+    // backfilled, the snapshot persists the engagement for future starts.
+    //
+    // Non-blocking: hydrateVisibleCards accumulates novel IDs into a
+    // pending buffer. A debounced coroutine (250ms) coalesces and dispatches
+    // in the background. The checked transition is gated on real EOSE via
+    // RelayPool.oneShotEoseCallbacks.
+
+    private val backfillScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Posts whose backfill REQ reached EOSE — never re-checked this session. */
+    internal val ownEngagementChecked: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Posts whose backfill REQ is in flight — prevents duplicate dispatch. */
+    private val ownEngagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Pending IDs accumulated from hydrateVisibleCards, awaiting debounced dispatch. */
+    private val pendingBackfillIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** The debounce job — cancelled and relaunched on each new accumulation. */
+    private var backfillDebounceJob: Job? = null
 
     /**
      * Profile resolution — avatar, name, identity.
@@ -470,8 +510,111 @@ class CardHydrator @Inject constructor(
         // causing Choreographer frame skips (30-69 frames) on relay-heavy feeds.
         // hydrateMedia remains load-bearing for layout stability (image dims).
         hydrateMedia(events, mmrAllowed = false)
+
+        // Own-engagement backfill: accumulate novel IDs, dispatch after 250ms
+        // debounce so hydrateVisibleCards returns immediately.
+        accumulateOwnEngagement(events.map { it.id })
+    }
+
+    /**
+     * Filter novel IDs and add to pending buffer. Launches a debounced
+     * background dispatch — each call resets the 250ms timer so rapid
+     * viewport changes coalesce into a single REQ.
+     */
+    internal fun accumulateOwnEngagement(eventIds: List<String>) {
+        val ownPk = memoryEventStore.ownPubkey ?: return
+        if (eventIds.isEmpty()) return
+
+        val novel = eventIds.filter { id ->
+            !memoryEventStore.isOwnEngaged(id) &&
+                id !in ownEngagementChecked &&
+                id !in ownEngagementInFlight &&
+                id !in pendingBackfillIds
+        }
+        if (novel.isEmpty()) return
+
+        pendingBackfillIds.addAll(novel)
+
+        // Cancel previous debounce, start fresh 250ms timer
+        backfillDebounceJob?.cancel()
+        backfillDebounceJob = backfillScope.launch {
+            delay(250)
+            dispatchOwnEngagement(ownPk)
+        }
+    }
+
+    /**
+     * Dispatch the accumulated pending IDs as a single batched REQ to write relays.
+     * EOSE-gated: moves IDs from in-flight → checked only when real EOSE arrives.
+     */
+    private suspend fun dispatchOwnEngagement(ownPk: String) {
+        // Drain pending buffer
+        val batch = pendingBackfillIds.toList()
+        pendingBackfillIds.clear()
+        if (batch.isEmpty()) return
+
+        batch.forEach { ownEngagementInFlight.add(it) }
+
+        val subId = "own-eng-${System.nanoTime()}"
+        val req = buildOwnEngagementReq(subId, ownPk, batch)
+
+        val writeRelays = memoryEventStore.writeRelaysFor(ownPk)
+        val targetUrls = writeRelays.ifEmpty { relayPool.connectedRelayUrls() }
+        if (targetUrls.isEmpty()) {
+            batch.forEach { ownEngagementInFlight.remove(it) }
+            return
+        }
+
+        // Register EOSE callback BEFORE dispatch so we don't miss a fast EOSE
+        val eoseDeferred = CompletableDeferred<Unit>()
+        relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
+
+        try {
+            relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
+
+            // Wait for real EOSE (or timeout). sendOneShotBatch returns immediately
+            // for pool-reused relays (fire-and-forget), so the deferred is our
+            // only signal that EOSE actually arrived.
+            val eoseReceived = withTimeoutOrNull(10_000) { eoseDeferred.await() } != null
+
+            if (eoseReceived) {
+                batch.forEach {
+                    ownEngagementInFlight.remove(it)
+                    ownEngagementChecked.add(it)
+                }
+                Log.d(TAG, "Own-engagement backfill: ${batch.size} posts checked (EOSE) → ${targetUrls.size} relay(s)")
+            } else {
+                // Timeout without EOSE — remove from in-flight, stays retry-eligible
+                batch.forEach { ownEngagementInFlight.remove(it) }
+                relayPool.oneShotEoseCallbacks.remove(subId)
+                Log.w(TAG, "Own-engagement backfill: ${batch.size} posts timed out (no EOSE)")
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            batch.forEach { ownEngagementInFlight.remove(it) }
+            relayPool.oneShotEoseCallbacks.remove(subId)
+            throw e
+        } catch (_: Exception) {
+            batch.forEach { ownEngagementInFlight.remove(it) }
+            relayPool.oneShotEoseCallbacks.remove(subId)
+            Log.w(TAG, "Own-engagement backfill failed for ${batch.size} posts")
+        }
     }
 }
+
+/** Build the one-shot REQ JSON for own-engagement backfill. Package-private for testing. */
+internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<String>): String =
+    buildJsonArray {
+        add(JsonPrimitive("REQ"))
+        add(JsonPrimitive(subId))
+        add(buildJsonObject {
+            put("authors", buildJsonArray { add(JsonPrimitive(ownPk)) })
+            put("kinds", buildJsonArray {
+                add(JsonPrimitive(7))
+                add(JsonPrimitive(6))
+            })
+            put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+        })
+    }.toString()
 
 /** Min interval between full hydration passes when novel count is small.
  *  Picked so worst-case profile/ref latency on a slow trickle of new events
