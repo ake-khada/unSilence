@@ -125,14 +125,12 @@ class CardHydrator @Inject constructor(
         engagementTracker.clear()
         engagementInFlight.clear()
         pendingEngagementIds.clear()
-        engagementPubkeys.clear()
     }
 
     // ── Engagement count fetch ─────────────────────────────────────────
     // Per-post bounded download: kinds [1,6,7,9735] with #e:[postId],
-    // limit 100, since:<cursor>. Targets connected relays + post author's
-    // NIP-65 inbox (read) relays. Events flow through EventProcessor → MES
-    // aggregates → statsFlow → card display.
+    // limit 100. Targets the user's NIP-65 read relays (same as fetchThread).
+    // Events flow through EventProcessor → MES aggregates → statsFlow → card display.
     //
     // Freshness tiers gate re-fetch based on post age:
     //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
@@ -156,8 +154,16 @@ class CardHydrator @Inject constructor(
     /** Debounce job for engagement fetch — cancelled and relaunched on each accumulation. */
     private var engagementDebounceJob: Job? = null
 
-    /** Pubkey cache for pending engagement IDs — needed for author inbox relay lookup. */
-    private val engagementPubkeys = ConcurrentHashMap<String, String>()
+    /** User's NIP-65 read relays, resolved once per dispatch batch and cached.
+     *  Matches the relay selection in ThreadViewModel.loadThread — guarantees
+     *  feed engagement counts query the same relays as the thread screen. */
+    private fun userReadRelayUrls(): List<String> {
+        val ownPk = memoryEventStore.ownPubkey ?: return GLOBAL_RELAY_URLS
+        val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPk)
+            .filter { it.marker == null || it.marker == "read" }
+            .mapNotNull { normalizeRelayUrl(it.url) }
+        return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+    }
 
     // ── Own-engagement backfill ─────────────────────────────────────────
     // Fetches the user's own kind-7/6 events targeting visible posts from
@@ -681,11 +687,8 @@ class CardHydrator @Inject constructor(
         }
         if (novel.isEmpty()) return
 
-        // Store pubkey alongside engagement ID so dispatch can resolve author inbox relays
         for (row in novel) {
-            val engId = engagementIdFor(row)
-            pendingEngagementIds.add(engId)
-            engagementPubkeys[engId] = row.pubkey
+            pendingEngagementIds.add(engagementIdFor(row))
         }
 
         engagementDebounceJob?.cancel()
@@ -717,13 +720,14 @@ class CardHydrator @Inject constructor(
     }
 
     /**
-     * Dispatch per-post engagement REQs to connected + author inbox relays.
+     * Dispatch per-post engagement REQs to the user's NIP-65 read relays.
      *
      * Each post gets ONE combined REQ (kinds [1,6,7,9735]) with its own #e and
      * limit=ENGAGEMENT_LIMIT. Per-post dispatch is a spec invariant: the per-post
-     * limit cap and per-post author-inbox routing both depend on it.
+     * limit cap ensures bounded download per post.
      *
-     * Relay targeting per post: (authorInbox.take(4) + connected.take(6)).distinct()
+     * Relay targeting: user's NIP-65 read relays (same as fetchThread), resolved
+     * once per batch. Guarantees feed counts == thread counts by construction.
      * EOSE-gated completion via oneShotEoseCallbacks.
      */
     private suspend fun dispatchEngagement() {
@@ -733,26 +737,13 @@ class CardHydrator @Inject constructor(
 
         batch.forEach { engagementInFlight.add(it) }
 
-        val connectedUrls = relayPool.connectedRelayUrls()
+        val targetUrls = userReadRelayUrls()
         val nowMs = System.currentTimeMillis()
 
         for (eventId in batch) {
             val state = engagementTracker[eventId]
             val since = state?.sinceCursor ?: 0L
             val subId = "eng-${System.nanoTime()}"
-
-            // Per-post relay targeting: author inbox + connected
-            val authorPk = engagementPubkeys.remove(eventId)
-            val inboxUrls = if (authorPk != null) {
-                memoryEventStore.readRelaysFor(authorPk)
-                    .mapNotNull { normalizeRelayUrl(it) }
-                    .take(4)
-            } else emptyList()
-            val targetUrls = (inboxUrls + connectedUrls.take(6)).distinct()
-            if (targetUrls.isEmpty()) {
-                engagementInFlight.remove(eventId)
-                continue
-            }
 
             val req = buildEngagementReq(subId, eventId, since)
 
