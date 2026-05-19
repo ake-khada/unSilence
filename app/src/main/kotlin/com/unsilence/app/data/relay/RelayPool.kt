@@ -126,6 +126,10 @@ class RelayPool @Inject constructor(
     /** Per-subId EOSE completion signal. Callers register before dispatch, await after.
      *  handleEose completes the deferred when any relay EOSE's the sub. */
     internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+    /** Per-subId set of relay URLs the one-shot was sent to. */
+    private val oneShotSubTargets = ConcurrentHashMap<String, Set<String>>()
+    /** Per-subId set of relay URLs that have EOSE'd or CLOSED. */
+    private val oneShotSubEosed = ConcurrentHashMap<String, MutableSet<String>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
     /** In-flight event fetch dedup — maps event ID to completion signal.
@@ -667,6 +671,27 @@ class RelayPool @Inject constructor(
 
         Log.d(TAG, "sendOneShotBatch: ${normalized.size} urls → ${reused.size} reused, ${ephemeral.size} ephemeral")
 
+        // Pre-filter reused URLs to those present in the pool — must match the
+        // send loop's `connections[url] ?: continue` gate so every relay that
+        // receives REQs is counted in targetSet.
+        val liveReused = reused.filter { connections[it] != null }
+
+        // Resolve target set BEFORE sending: live reused + ephemeral
+        val targetSet = (liveReused + ephemeral).toSet()
+
+        // Register target set for EOSE coverage tracking. Requires the caller
+        // to have registered oneShotEoseCallbacks[subId] beforehand — both
+        // engagement callers (dispatchOwnEngagement, dispatchEngagement) do.
+        // Skipping subIds without a callback avoids leaking map entries for
+        // internal callers (fetchProfiles, fetchOlderPosts, etc.).
+        if (targetSet.isNotEmpty()) {
+            for (subId in subIds) {
+                if (oneShotEoseCallbacks.containsKey(subId)) {
+                    oneShotSubTargets[subId] = targetSet
+                }
+            }
+        }
+
         // Pool-reused path: wait for mid-handshake connections, then send via existing infra
         for (url in reused) {
             val conn = connections[url] ?: continue
@@ -743,7 +768,7 @@ class RelayPool @Inject constructor(
                             val eoseSubId = extractEoseSubId(raw)
                             if (eoseSubId != null && eoseSubId in pendingSubs) {
                                 conn.send("""["CLOSE","$eoseSubId"]""")
-                                oneShotEoseCallbacks.remove(eoseSubId)?.complete(Unit)
+                                recordOneShotRelayCoverage(eoseSubId, url)
                                 pendingSubs.remove(eoseSubId)
                                 if (pendingSubs.isEmpty()) return@withTimeoutOrNull
                             }
@@ -882,6 +907,11 @@ class RelayPool @Inject constructor(
                         } else {
                             Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
                         }
+                        // Count this relay as done for EOSE coverage — a CLOSED relay
+                        // won't send EOSE, so don't let it force a full timeout.
+                        if (isOneShotSubscription(closedSubId)) {
+                            recordOneShotRelayCoverage(closedSubId, conn.url)
+                        }
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to parse CLOSED message: ${e.message}")
                     }
@@ -947,14 +977,45 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             conn.send("""["CLOSE","$subId"]""")
-            // Signal EOSE to any awaiting caller (e.g. own-engagement backfill)
-            oneShotEoseCallbacks.remove(subId)?.complete(Unit)
+            // Record this relay as done; complete deferred when all targets covered
+            recordOneShotRelayCoverage(subId, conn.url)
             // Free per-relay slot and flush queued REQs
             relayOneShotCount[conn.url]?.let { count ->
                 val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
                 if (prev > 0) flushRelayQueue(conn)
             }
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
+        }
+    }
+
+    /** Remove a one-shot sub from all tracking maps (EOSE callbacks + coverage). */
+    internal fun cleanupOneShotSub(subId: String) {
+        oneShotEoseCallbacks.remove(subId)
+        oneShotSubTargets.remove(subId)
+        oneShotSubEosed.remove(subId)
+    }
+
+    /**
+     * Record a relay as done for a one-shot sub. Completes the EOSE deferred
+     * when all target relays have responded (EOSE or CLOSED).
+     * Falls back to first-EOSE if no target set was registered.
+     */
+    private fun recordOneShotRelayCoverage(subId: String, relayUrl: String) {
+        val targets = oneShotSubTargets[subId]
+        if (targets == null) {
+            // No target set registered — fall back to old behavior (complete on first)
+            oneShotEoseCallbacks.remove(subId)?.complete(Unit)
+            return
+        }
+        val eosed = oneShotSubEosed.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
+        eosed.add(relayUrl)
+        val covered = eosed.size
+        val total = targets.size
+        Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
+        if (covered >= total) {
+            oneShotEoseCallbacks.remove(subId)?.complete(Unit)
+            oneShotSubTargets.remove(subId)
+            oneShotSubEosed.remove(subId)
         }
     }
 
