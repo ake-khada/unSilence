@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -29,8 +30,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 data class DepthRow(val row: FeedRow, val depth: Int)
@@ -83,14 +87,14 @@ class ThreadViewModel @Inject constructor(
                     val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
                         .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
 
-                    // DFS flatten with depth (cap at 4), visited set prevents
+                    // DFS flatten with depth (cap at 6), visited set prevents
                     // stack overflow from circular reply chains (malicious or bridged)
                     val flatList = mutableListOf<DepthRow>()
                     val visited = mutableSetOf<String>()
                     fun walk(parentId: String, depth: Int) {
                         childrenOf[parentId]?.forEach { row ->
                             if (visited.add(row.id)) {
-                                flatList.add(DepthRow(row, depth.coerceAtMost(4)))
+                                flatList.add(DepthRow(row, depth.coerceAtMost(6)))
                                 walk(row.id, depth + 1)
                             }
                         }
@@ -129,20 +133,47 @@ class ThreadViewModel @Inject constructor(
         // Clear stale state immediately — prevents flash of old thread content
         _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
-            // Resolve thread root: if the tapped event is a reply, load from its root
-            val event = memoryEventStore.getEventEntity(eventId)
-            val rootId = event?.rootId ?: event?.replyToId ?: eventId
-
-            if (eventIdFlow.value == rootId) return@launch  // Already showing this thread
-
-            eventIdFlow.value = rootId
-
             val ownPubkey = pubkeyHex ?: ""
             val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
                 .filter { it.marker == null || it.marker == "read" }
                 .mapNotNull { normalizeRelayUrl(it.url) }
             val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+
+            // Walk UP the reply chain to the true root (fetching ancestors as needed)
+            val rootId = withTimeoutOrNull(8_000) {
+                resolveThreadRoot(eventId, urls)
+            } ?: (memoryEventStore.getEventEntity(eventId)?.rootId ?: eventId)
+
+            if (eventIdFlow.value == rootId) return@launch  // Already showing this thread
+
+            eventIdFlow.value = rootId
             relayPool.fetchThread(urls, rootId)
+        }
+    }
+
+    /**
+     * Walk UP the reply chain, fetching missing ancestors, to the true root.
+     * Best-effort: returns the highest id reached if a relay never returns one.
+     */
+    private suspend fun resolveThreadRoot(startId: String, hints: List<String>): String {
+        val visited = mutableSetOf<String>()
+        var currentId = startId
+        repeat(50) {                                       // hop cap — pathological guard
+            if (!visited.add(currentId)) return currentId   // cycle guard
+            val current = memoryEventStore.getEventEntity(currentId)
+                ?: fetchAncestor(currentId, hints)
+                ?: return currentId                        // unreachable — best-effort root
+            val parentId = current.replyToId ?: current.rootId
+            if (parentId == null || parentId == currentId) return currentId  // root
+            currentId = parentId
+        }
+        return currentId
+    }
+
+    private suspend fun fetchAncestor(id: String, hints: List<String>): EventEntity? {
+        withContext(Dispatchers.IO) { relayPool.fetchEventById(id, hints) }
+        return withTimeoutOrNull(3_000) {
+            memoryEventStore.eventEntityFlow(id).filterNotNull().first()
         }
     }
 
