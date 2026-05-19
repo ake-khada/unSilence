@@ -248,14 +248,18 @@ fun EventCard(
         // first-frame stability. authorProfile reactively updates when MES
         // profile data changes — eliminates list-wide feedRows recompute on
         // every kind-0 arrival.
+        // For reposts (kind-6), row.author* fields belong to the REPOSTER
+        // (toFeedRow uses event.pubkey = wrapper pubkey), so skip them to
+        // avoid briefly showing the reposter's identity on the inner author.
+        val isRepost = model.repost != null
         AuthorHeader(
             pubkey      = model.pubkey,
-            picture     = authorProfile?.picture ?: row.authorPicture,
+            picture     = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
             displayName = authorProfile?.displayName?.takeIf { it.isNotBlank() }
                 ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-                ?: row.displayName
+                ?: (if (isRepost) null else row.displayName)
                 ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
-            nip05       = authorProfile?.nip05 ?: row.authorNip05,
+            nip05       = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
             createdAt   = model.createdAt,
             onAuthorClick = onAuthorClick,
             onNoteClick = { onNoteClick(model.navigateId) },
