@@ -59,6 +59,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
@@ -198,6 +199,11 @@ fun ThreadScreen(
                                     statsFlow           = viewModel::statsFlow,
                                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                                     thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                )
+                                HorizontalDivider(
+                                    color     = BorderFaint,
+                                    thickness = 1.dp,
+                                    modifier  = Modifier.padding(horizontal = Spacing.medium),
                                 )
                             }
                         }
