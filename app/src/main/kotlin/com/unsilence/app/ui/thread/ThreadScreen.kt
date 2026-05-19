@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,10 +18,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -44,8 +41,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -83,10 +78,6 @@ fun ThreadScreen(
     BackHandler(onBack = onDismiss)
     DisposableEffect(Unit) { onDispose { viewModel.clearThread() } }
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
-    LaunchedEffect(viewModel.published) {
-        if (viewModel.published) onDismiss()
-    }
-
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
@@ -96,7 +87,6 @@ fun ThreadScreen(
     val zapFlash        by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar = LocalShowSnackbar.current
-    var replyText by remember { mutableStateOf("") }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
     val listState = rememberLazyListState()
     var didScrollToFocus by remember { mutableStateOf(false) }
@@ -166,7 +156,7 @@ fun ThreadScreen(
                 }
 
                 else -> {
-                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
@@ -292,60 +282,6 @@ fun ThreadScreen(
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
-
-            // ── Reply input ───────────────────────────────────────────────────
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Black)
-                    .navigationBarsPadding()
-                    .imePadding()
-                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val focused = state.focusedNote
-
-                BasicTextField(
-                    value         = replyText,
-                    onValueChange = { replyText = it },
-                    textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodyLarge),
-                    cursorBrush   = SolidColor(Brand),
-                    modifier      = Modifier.weight(1f),
-                    decorationBox = { inner ->
-                        if (replyText.isEmpty()) {
-                            Text("Reply…", color = TextSecondary, fontSize = AppType.bodyLarge)
-                        }
-                        inner()
-                    },
-                )
-
-                Spacer(Modifier.width(Spacing.small))
-
-                // Send arrow
-                IconButton(
-                    onClick  = {
-                        if (replyText.isNotBlank() && focused != null) {
-                            val rootId = focused.rootId ?: focused.id
-                            viewModel.publishReply(
-                                content       = replyText.trim(),
-                                rootId        = rootId,
-                                replyToId     = focused.id,
-                                replyToPubkey = focused.pubkey,
-                            )
-                        }
-                    },
-                    enabled  = replyText.isNotBlank() && focused != null,
-                    modifier = Modifier.size(36.dp),
-                ) {
-                    Icon(
-                        imageVector        = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send reply",
-                        tint               = if (replyText.isNotBlank()) Brand else TextSecondary,
-                        modifier           = Modifier.size(20.dp),
-                    )
-                }
-            }
         }
     }
 
