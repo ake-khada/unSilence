@@ -661,16 +661,16 @@ class CardHydrator @Inject constructor(
             } else {
                 // Timeout without EOSE — remove from in-flight, stays retry-eligible
                 batch.forEach { ownEngagementInFlight.remove(it) }
-                relayPool.oneShotEoseCallbacks.remove(subId)
+                relayPool.cleanupOneShotSub(subId)
                 Log.w(TAG, "Own-engagement backfill: ${batch.size} posts timed out (no EOSE)")
             }
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             batch.forEach { ownEngagementInFlight.remove(it) }
-            relayPool.oneShotEoseCallbacks.remove(subId)
+            relayPool.cleanupOneShotSub(subId)
             throw e
         } catch (_: Exception) {
             batch.forEach { ownEngagementInFlight.remove(it) }
-            relayPool.oneShotEoseCallbacks.remove(subId)
+            relayPool.cleanupOneShotSub(subId)
             Log.w(TAG, "Own-engagement backfill failed for ${batch.size} posts")
         }
     }
@@ -773,7 +773,7 @@ class CardHydrator @Inject constructor(
                     )
 
                     if (!eoseReceived) {
-                        relayPool.oneShotEoseCallbacks.remove(subId)
+                        relayPool.cleanupOneShotSub(subId)
                         Log.w(TAG, "Engagement: ${eventId.take(12)} timed out (no EOSE)")
                     }
                 } finally {
