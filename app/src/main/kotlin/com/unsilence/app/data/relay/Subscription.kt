@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -57,6 +58,7 @@ private const val TAG = "Subscription"
 class Subscription @Inject constructor(
     private val transport: RelayTransport,
     private val tapRegistration: TapRegistration,
+    private val relayPool: RelayPool,
 ) {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
@@ -74,6 +76,14 @@ class Subscription @Inject constructor(
     private val subs = ConcurrentHashMap<String, SubState>()
     private val seqCounter = AtomicLong(0)
     private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
+    private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    init {
+        // Replay persistent subs when a relay reconnects.
+        reconnectScope.launch {
+            relayPool.onRelayReconnected.collect { url -> resumeRelay(url) }
+        }
+    }
 
     /**
      * The single tap registered with [TapRegistration]. Demuxes by subId,
@@ -207,6 +217,25 @@ class Subscription @Inject constructor(
             count++
         }
         if (count > 0) Log.d(TAG, "resumeAll: resumed $count subs")
+    }
+
+    /**
+     * Replay active (non-paused) subscriptions to a single relay that just
+     * reconnected. Resets that relay's EOSE/CLOSED tracking so the fresh
+     * connection gets a clean cycle. Called from the [relayPool] reconnect flow.
+     */
+    fun resumeRelay(url: String) {
+        val normalized = normalizeRelayUrl(url) ?: return
+        var count = 0
+        for (state in subs.values) {
+            if (state.isPaused) continue
+            if (normalized !in state.urls) continue
+            state.eosedRelays.remove(normalized)
+            state.closedRelays.remove(normalized)
+            transport.sendToRelay(normalized, state.reqPayload)
+            count++
+        }
+        if (count > 0) Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
     }
 
     // ── Internals ───────────────────────────────────────────────────────────

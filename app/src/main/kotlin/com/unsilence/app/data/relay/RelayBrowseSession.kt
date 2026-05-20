@@ -2,8 +2,12 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -37,10 +41,14 @@ class RelayBrowseSession @Inject constructor(
         const val MIN_SESSION_LIFETIME_MS = 30_000L
     }
 
+    private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     init {
-        // Register for reconnect notifications so we can resend browse subs
+        // Collect reconnect notifications so we can resend browse subs
         // when a target relay drops and comes back.
-        relayPool.onRelayReconnected = { url -> onRelayReconnected(url) }
+        sessionScope.launch {
+            relayPool.onRelayReconnected.collect { url -> onRelayReconnected(url) }
+        }
     }
 
     suspend fun start(relayUrls: List<String>, force: Boolean = false) {
