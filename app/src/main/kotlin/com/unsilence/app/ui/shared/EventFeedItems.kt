@@ -73,6 +73,9 @@ data class EventActionCallbacks(
      *  Falls back to the snapshot in FeedRow when null. */
     val statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     val onLongPress: ((FeedRow) -> Unit)? = null,
+    val zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
+    val repostPubkeysForEvent: ((String) -> List<String>)? = null,
+    val reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
 )
 
 /**
@@ -377,6 +380,9 @@ private fun EventFeedItem(
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         profileFlow         = callbacks.profileFlow,
         statsFlow           = callbacks.statsFlow,
+        zapDetailsForEvent  = callbacks.zapDetailsForEvent,
+        repostPubkeysForEvent = callbacks.repostPubkeysForEvent,
+        reactionsForEvent   = callbacks.reactionsForEvent,
         imageDimensionCache = imageDimensionCache,
         thumbnailCache      = thumbnailCache,
         exoPlayer           = videoScope?.exoPlayer,

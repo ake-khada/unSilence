@@ -88,6 +88,9 @@ fun EventCard(
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
+    zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
+    repostPubkeysForEvent: ((String) -> List<String>)? = null,
+    reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
     imageDimensionCache: ImageDimensionCache?,
     thumbnailCache: VideoThumbnailCache?,
     // Video
@@ -197,6 +200,13 @@ fun EventCard(
             onQuote = onQuote,
             onZap = onZap,
             onSaveNwcUri = onSaveNwcUri,
+            onAuthorClick = onAuthorClick,
+            statsFlow = statsFlow,
+            profileFlow = profileFlow,
+            lookupProfile = lookupProfile,
+            zapDetailsForEvent = zapDetailsForEvent,
+            repostPubkeysForEvent = repostPubkeysForEvent,
+            reactionsForEvent = reactionsForEvent,
             modifier = modifier,
         )
         return
@@ -396,9 +406,14 @@ fun EventCard(
             exit = shrinkVertically(),
         ) {
             EngagementDrawer(
-                repostCount     = liveRepostCount,
-                reactionCount   = liveReactionCount,
-                zapSats         = liveZapTotalSats + (engagement.optimisticZapSats[row.id] ?: 0L),
+                eventId               = model.engagementId,
+                statsFlow             = statsFlow,
+                zapDetailsForEvent    = zapDetailsForEvent,
+                repostPubkeysForEvent = repostPubkeysForEvent,
+                reactionsForEvent     = reactionsForEvent,
+                profileFlow           = profileFlow,
+                lookupProfile         = lookupProfile,
+                onProfileTap          = onAuthorClick,
             )
         }
 
@@ -427,6 +442,13 @@ private fun ArticleLayout(
     onQuote: (String) -> Unit,
     onZap: (Long) -> Unit,
     onSaveNwcUri: (String) -> Unit,
+    onAuthorClick: (String) -> Unit = {},
+    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
+    repostPubkeysForEvent: ((String) -> List<String>)? = null,
+    reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
     modifier: Modifier = Modifier,
 ) {
     val article = model.article
@@ -535,9 +557,14 @@ private fun ArticleLayout(
                 exit = shrinkVertically(),
             ) {
                 EngagementDrawer(
-                    repostCount     = repostCount,
-                    reactionCount   = reactionCount,
-                    zapSats         = zapTotalSats + (engagement.optimisticZapSats[row.id] ?: 0L),
+                    eventId               = model.engagementId,
+                    statsFlow             = statsFlow,
+                    zapDetailsForEvent    = zapDetailsForEvent,
+                    repostPubkeysForEvent = repostPubkeysForEvent,
+                    reactionsForEvent     = reactionsForEvent,
+                    profileFlow           = profileFlow,
+                    lookupProfile         = lookupProfile,
+                    onProfileTap          = onAuthorClick,
                 )
             }
         }

@@ -181,6 +181,9 @@ fun FeedScreen(
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
+            zapDetailsForEvent = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent = viewModel::reactionsForEvent,
             onLongPress = { row ->
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 actionsRow = row
@@ -469,9 +472,9 @@ fun FeedScreen(
             onShare = {
                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, row.content)
+                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
                 }
-                ctx.startActivity(Intent.createChooser(shareIntent, "Share note"))
+                ctx.startActivity(Intent.createChooser(shareIntent, null))
             },
             onMuteUser = {
                 when (viewModel.muteUser(row.pubkey)) {
