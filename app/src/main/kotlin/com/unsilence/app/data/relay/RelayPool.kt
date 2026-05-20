@@ -66,7 +66,7 @@ class RelayPool @Inject constructor(
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
-) : RelayTransport {
+) : RelayTransport, ReconnectSource {
     // WebSocket consume loops MUST not be starved by snapshot restore or
     // other heavy IO. limitedParallelism(8) reserves dedicated threads for
     // inbound message processing.
@@ -2383,7 +2383,7 @@ class RelayPool @Inject constructor(
         extraBufferCapacity = 16,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    val onRelayReconnected: SharedFlow<String> = _onRelayReconnected.asSharedFlow()
+    override val onRelayReconnected: SharedFlow<String> = _onRelayReconnected.asSharedFlow()
 
     /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
     override fun sendToRelay(url: String, msg: String): Boolean {

@@ -6,6 +6,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.MesEventLoader
 import com.unsilence.app.data.relay.RelayMetadataSource
+import com.unsilence.app.data.relay.ReconnectSource
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayTransport
 import com.unsilence.app.data.relay.TapRegistration
@@ -26,6 +27,9 @@ abstract class RelayBindingsModule {
 
     @Binds
     abstract fun bindRelayTransport(impl: RelayPool): RelayTransport
+
+    @Binds
+    abstract fun bindReconnectSource(impl: RelayPool): ReconnectSource
 
     @Binds
     abstract fun bindTapRegistration(impl: EventProcessor): TapRegistration

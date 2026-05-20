@@ -23,7 +23,7 @@ class TimelineServiceTest {
         transport = FakeRelayTransport()
         tapRegistry = FakeTapRegistration()
         eventLoader = FakeEventLoader()
-        subscription = Subscription(transport, tapRegistry)
+        subscription = Subscription(transport, tapRegistry, FakeReconnectSource())
         service = TimelineService(subscription, eventLoader)
         service.subscribeDispatcher = Dispatchers.Unconfined
     }
