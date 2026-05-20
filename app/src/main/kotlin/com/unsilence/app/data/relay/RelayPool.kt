@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -893,8 +894,8 @@ class RelayPool @Inject constructor(
                             } else if (conn.url in authenticatedRelays) {
                                 // Already authed — notify browse session to resend.
                                 if (closedSubId.startsWith("browse-")) {
-                                    onRelayReconnected?.invoke(conn.url)
-                                    Log.d(TAG, "Notified browse session to resend closed sub '$closedSubId' on ${conn.url}")
+                                    _onRelayReconnected.tryEmit(conn.url)
+                                    Log.d(TAG, "Notified subscribers to resend closed sub '$closedSubId' on ${conn.url}")
                                 }
                             } else if (conn.url !in authFailedRelays) {
                                 Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached (suppressing future warnings)")
@@ -2254,7 +2255,7 @@ class RelayPool @Inject constructor(
                 if (conn.state.value == RelayState.CONNECTED) {
                     guard.set(false)
                     updateConnectionStates()
-                    onRelayReconnected?.invoke(url)
+                    _onRelayReconnected.tryEmit(url)
                     // Resend persistent own-mute-live subscription if this relay carries it
                     if (url in liveMuteSubRelays) {
                         liveMuteSubReq?.let { conn.send(it) }
@@ -2369,14 +2370,20 @@ class RelayPool @Inject constructor(
     private fun completeAuth(conn: RelayConnection, url: String) {
         authenticatedRelays.add(url)
         authInFlight.remove(url)
-        onRelayReconnected?.invoke(url)
-        Log.d(TAG, "AUTH: completed for $url — notified browse session")
+        _onRelayReconnected.tryEmit(url)
+        Log.d(TAG, "AUTH: completed for $url — notified subscribers")
     }
 
-    // ── Browse session hooks ────────────────────────────────────────────────
+    // ── Reconnect signal ──────────────────────────────────────────────────
 
-    /** Called after a relay successfully reconnects. Browse session uses this to resend its subs. */
-    var onRelayReconnected: ((String) -> Unit)? = null
+    /** Emitted when a relay reconnects or completes auth. Multiple subscribers
+     *  (RelayBrowseSession, Subscription) collect this to replay their subs. */
+    private val _onRelayReconnected = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val onRelayReconnected: SharedFlow<String> = _onRelayReconnected.asSharedFlow()
 
     /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
     override fun sendToRelay(url: String, msg: String): Boolean {
