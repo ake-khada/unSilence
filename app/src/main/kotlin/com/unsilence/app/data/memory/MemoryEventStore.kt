@@ -44,7 +44,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 5
+private const val SNAPSHOT_BINARY_VERSION = 6
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -125,6 +125,11 @@ class MemoryEventStore @Inject constructor(
     private val reactionCounts = ConcurrentHashMap<String, Int>()
     private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
+
+    // ─── Engagement contributor indexes (per-target breakdowns for drawer) ──
+    private val repostPubkeysByTarget = ConcurrentHashMap<String, MutableSet<String>>()
+    private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<Pair<String, String>>>()
+    private val zapDetailsByTarget = ConcurrentHashMap<String, MutableList<ZapDetail>>()
 
     // ─── Actor-side action indexes (Tier 4: "what have I done?") ───────────
     // Key: actor pubkey → Set<target event ID>
@@ -631,6 +636,9 @@ class MemoryEventStore @Inject constructor(
     private fun handleRepost(event: NostrEvent, dirty: InsertDirty) {
         val targetId = event.rootId ?: return
         repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
+        repostPubkeysByTarget
+            .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+            .add(event.pubkey)
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reposted
@@ -643,6 +651,10 @@ class MemoryEventStore @Inject constructor(
             .lastOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
+        val emoji = event.content.ifBlank { "+" }
+        reactionsByTarget
+            .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+            .add(event.pubkey to emoji)
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reacted to
@@ -716,24 +728,34 @@ class MemoryEventStore @Inject constructor(
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
 
-        // Detect own-zap receipt: parse embedded kind-9734 description tag (NIP-57).
-        // If the zap request author matches ownPubkey, signal the VM to clear its
-        // optimistic overlay for this specific event.
-        val own = ownPubkey
-        if (own != null) {
-            val descJson = event.tags
-                .firstOrNull { it.size >= 2 && it[0] == "description" }
-                ?.get(1)
-            if (descJson != null) {
-                try {
-                    val zapReqPubkey = NostrJson.parseToJsonElement(descJson)
-                        .jsonObject["pubkey"]?.jsonPrimitive?.content
-                    if (zapReqPubkey == own) {
-                        _ownZapReceived.tryEmit(targetId)
-                    }
-                } catch (_: Exception) { /* malformed description — skip */ }
+        // Parse embedded kind-9734 zap request for sender pubkey + comment.
+        val desc = parseZapDescription(event)
+        if (desc != null) {
+            zapDetailsByTarget
+                .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
+                .add(ZapDetail(desc.senderPubkey, sats, desc.comment))
+
+            // Own-zap detection: signal VM to clear optimistic sats overlay.
+            val own = ownPubkey
+            if (own != null && desc.senderPubkey == own) {
+                _ownZapReceived.tryEmit(targetId)
             }
         }
+    }
+
+    private data class ZapDescription(val senderPubkey: String, val comment: String?)
+
+    /** Parse the kind-9734 zap request embedded in a kind-9735 receipt's description tag. */
+    private fun parseZapDescription(event: NostrEvent): ZapDescription? {
+        val descJson = event.tags
+            .firstOrNull { it.size >= 2 && it[0] == "description" }
+            ?.get(1) ?: return null
+        return try {
+            val obj = NostrJson.parseToJsonElement(descJson).jsonObject
+            val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return null
+            val comment = obj["content"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            ZapDescription(pubkey, comment)
+        } catch (_: Exception) { null }
     }
 
     /**
@@ -1331,13 +1353,16 @@ class MemoryEventStore @Inject constructor(
             eventModelsByEventId.remove(entry.id)
         }
 
-        // Clean up aggregates that only reference removed events
+        // Clean up aggregates + contributor indexes that reference removed events
         val removeIds = toEvict.map { it.id }.toSet()
         replyCounts.keys.removeAll(removeIds)
         repostCounts.keys.removeAll(removeIds)
         reactionCounts.keys.removeAll(removeIds)
         zapStatsByEventId.keys.removeAll(removeIds)
         statsUpdatedAt.keys.removeAll(removeIds)
+        repostPubkeysByTarget.keys.removeAll(removeIds)
+        reactionsByTarget.keys.removeAll(removeIds)
+        zapDetailsByTarget.keys.removeAll(removeIds)
 
         val summary = candidatesByKind
             .filter { (kind, candidates) -> candidates.size > (kindCaps[kind] ?: Int.MAX_VALUE) }
@@ -1639,6 +1664,31 @@ class MemoryEventStore @Inject constructor(
     fun reactionCount(eventId: String): Int = reactionCounts[eventId] ?: 0
     fun zapStats(eventId: String): ZapAggregate = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
     fun statsLastUpdated(eventId: String): Long = statsUpdatedAt[eventId] ?: 0L
+
+    // ─── Engagement contributor queries (drawer) ────────────────────────────
+
+    /** Deduplicated pubkeys of users who replied to [eventId]. */
+    fun replyPubkeysForEvent(eventId: String): List<String> {
+        val replyIds = idsByReplyTarget[eventId] ?: return emptyList()
+        val seen = HashSet<String>()
+        for (id in replyIds) {
+            val pk = eventsById[id]?.pubkey ?: continue
+            seen.add(pk)
+        }
+        return seen.toList()
+    }
+
+    /** Deduplicated pubkeys of users who reposted [eventId]. */
+    fun repostPubkeysForEvent(eventId: String): List<String> =
+        repostPubkeysByTarget[eventId]?.toList() ?: emptyList()
+
+    /** (pubkey, emoji) pairs for all reactions to [eventId]. */
+    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+        reactionsByTarget[eventId]?.toList() ?: emptyList()
+
+    /** Per-zap breakdown for [eventId]: sender, sats, optional comment. */
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        zapDetailsByTarget[eventId]?.toList() ?: emptyList()
 
     // ─── A.5.1 T1: Relay browse queries ───────────────────────────────────
 
@@ -2789,6 +2839,28 @@ class MemoryEventStore @Inject constructor(
                 d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
             }
 
+            // V6: Engagement contributor indexes
+            val repostContribs = repostPubkeysByTarget.mapValues { it.value.toSet() }
+            d.writeInt(repostContribs.size)
+            for ((id, pks) in repostContribs) {
+                d.writeStr(id); d.writeInt(pks.size)
+                for (pk in pks) d.writeStr(pk)
+            }
+            val reactionContribs = reactionsByTarget.mapValues { it.value.toSet() }
+            d.writeInt(reactionContribs.size)
+            for ((id, pairs) in reactionContribs) {
+                d.writeStr(id); d.writeInt(pairs.size)
+                for ((pk, emoji) in pairs) { d.writeStr(pk); d.writeStr(emoji) }
+            }
+            val zapContribs = zapDetailsByTarget.mapValues { it.value.toList() }
+            d.writeInt(zapContribs.size)
+            for ((id, details) in zapContribs) {
+                d.writeStr(id); d.writeInt(details.size)
+                for (z in details) {
+                    d.writeStr(z.senderPubkey); d.writeLong(z.sats)
+                    d.writeStrOrNull(z.comment)
+                }
+            }
         }
 
         val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
@@ -2958,6 +3030,36 @@ class MemoryEventStore @Inject constructor(
             val c = input.readInt()
             val sats = input.readLong()
             zapStatsByEventId[id] = ZapAggregate(c, sats)
+        }
+
+        // V6: Engagement contributor indexes (absent in V5 snapshots)
+        if (version >= 6) {
+            val repostContribN = input.readInt()
+            if (repostContribN < 0 || repostContribN > 5_000_000) throw IOException("Invalid repost contrib count: $repostContribN")
+            for (i in 0 until repostContribN) {
+                val id = input.readStr(); val n = input.readInt()
+                val set: MutableSet<String> = ConcurrentHashMap.newKeySet()
+                for (j in 0 until n) set.add(input.readStr())
+                repostPubkeysByTarget[id] = set
+            }
+            val reactionContribN = input.readInt()
+            if (reactionContribN < 0 || reactionContribN > 5_000_000) throw IOException("Invalid reaction contrib count: $reactionContribN")
+            for (i in 0 until reactionContribN) {
+                val id = input.readStr(); val n = input.readInt()
+                val set: MutableSet<Pair<String, String>> = ConcurrentHashMap.newKeySet()
+                for (j in 0 until n) set.add(input.readStr() to input.readStr())
+                reactionsByTarget[id] = set
+            }
+            val zapContribN = input.readInt()
+            if (zapContribN < 0 || zapContribN > 5_000_000) throw IOException("Invalid zap contrib count: $zapContribN")
+            for (i in 0 until zapContribN) {
+                val id = input.readStr(); val n = input.readInt()
+                val list = java.util.Collections.synchronizedList(mutableListOf<ZapDetail>())
+                for (j in 0 until n) {
+                    list.add(ZapDetail(input.readStr(), input.readLong(), input.readStrOrNull()))
+                }
+                zapDetailsByTarget[id] = list
+            }
         }
 
         // RELAY_HEALTH section
@@ -3435,6 +3537,9 @@ class MemoryEventStore @Inject constructor(
         reactionCounts.clear()
         zapStatsByEventId.clear()
         statsUpdatedAt.clear()
+        repostPubkeysByTarget.clear()
+        reactionsByTarget.clear()
+        zapDetailsByTarget.clear()
         profilesByPubkey.clear()
         profileUpdatedAt.clear()
         profileFieldsCache.clear()

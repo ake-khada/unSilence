@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -54,11 +55,15 @@ private const val TAG = "Subscription"
  * whatever thread the tap fires on (currently EventProcessor's drainer
  * thread — IO-bound). Callbacks must not block.
  */
+interface ReconnectSource {
+    val onRelayReconnected: SharedFlow<String>
+}
+
 @Singleton
 class Subscription @Inject constructor(
     private val transport: RelayTransport,
     private val tapRegistration: TapRegistration,
-    private val relayPool: RelayPool,
+    private val reconnectSource: ReconnectSource,
 ) {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
@@ -81,7 +86,7 @@ class Subscription @Inject constructor(
     init {
         // Replay persistent subs when a relay reconnects.
         reconnectScope.launch {
-            relayPool.onRelayReconnected.collect { url -> resumeRelay(url) }
+            reconnectSource.onRelayReconnected.collect { url -> resumeRelay(url) }
         }
     }
 

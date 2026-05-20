@@ -1,5 +1,7 @@
 package com.unsilence.app.data.relay
 
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** Trivial RelayTransport fake: records sends, controllable success per URL. */
@@ -21,6 +23,11 @@ class FakeRelayTransport : RelayTransport {
         if (ok) sends.add(SentMessage(url, msg))
         return ok
     }
+}
+
+/** ReconnectSource fake: no-op SharedFlow, no emissions. */
+class FakeReconnectSource : ReconnectSource {
+    override val onRelayReconnected: SharedFlow<String> = MutableSharedFlow()
 }
 
 /** Trivial TapRegistration fake: records and exposes a fire() method. */

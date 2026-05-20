@@ -35,6 +35,9 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
     }
 }
 
+/** Per-zap breakdown for the engagement drawer: sender, amount, optional message. */
+data class ZapDetail(val senderPubkey: String, val sats: Long, val comment: String?)
+
 /**
  * Per-event engagement counts. Snapshot of MES aggregate state for a single
  * event, surfaced via [com.unsilence.app.data.memory.MemoryEventStore.statsFlow]
