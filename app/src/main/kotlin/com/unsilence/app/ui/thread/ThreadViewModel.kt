@@ -139,15 +139,25 @@ class ThreadViewModel @Inject constructor(
                 .mapNotNull { normalizeRelayUrl(it.url) }
             val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
 
-            // Walk UP the reply chain to the true root (fetching ancestors as needed)
-            val rootId = withTimeoutOrNull(8_000) {
-                resolveThreadRoot(eventId, urls)
-            } ?: (memoryEventStore.getEventEntity(eventId)?.rootId ?: eventId)
+            // Best-guess root from local MES — instant, no network
+            val event = memoryEventStore.getEventEntity(eventId)
+            val bestGuessRoot = event?.rootId ?: event?.replyToId ?: eventId
 
-            if (eventIdFlow.value == rootId) return@launch  // Already showing this thread
+            if (eventIdFlow.value == bestGuessRoot) return@launch
 
-            eventIdFlow.value = rootId
-            relayPool.fetchThread(urls, rootId)
+            eventIdFlow.value = bestGuessRoot
+            relayPool.fetchThread(urls, bestGuessRoot)
+
+            // Refine root in background — walk UP the reply chain fetching ancestors
+            launch {
+                val trueRoot = withTimeoutOrNull(8_000) {
+                    resolveThreadRoot(eventId, urls)
+                } ?: return@launch
+                if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
+                    eventIdFlow.value = trueRoot
+                    relayPool.fetchThread(urls, trueRoot)
+                }
+            }
         }
     }
 
