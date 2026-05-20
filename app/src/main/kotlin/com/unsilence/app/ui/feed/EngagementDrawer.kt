@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -7,9 +8,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Repeat
@@ -20,8 +25,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.ZapDetail
@@ -29,6 +38,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.flow.StateFlow
 
@@ -42,9 +52,9 @@ private data class DrawerData(
 
 /**
  * Inline engagement drawer — icon-grouped rows with real avatars.
- * Order: zaps · reposts · per-emoji reactions. Replies excluded.
- * Layout: wrapping FlowRow of avatars in slots 1–4, trailing icon in slot 5
- * (aligned under the action bar dropdown chevron). Minimal vertical gap between categories.
+ * Order: zaps (per-zap rows with messages) · reposts · per-emoji reactions.
+ * Layout: 5-slot grid mirroring the action bar. Trailing icon in slot 5
+ * aligned under the chevron. Minimal vertical gap between categories.
  * Collects statsFlow as invalidation signal, re-reads MES indexes on each emission.
  */
 @Composable
@@ -79,24 +89,59 @@ internal fun EngagementDrawer(
             .fillMaxWidth()
             .padding(top = Spacing.micro, bottom = Spacing.small),
     ) {
-        // Zaps
+        // Zaps — one row per zap with optional comment
         if (drawerData.zaps.isNotEmpty()) {
-            EngagementRow(
-                icon = Icons.Filled.ElectricBolt,
-                tint = Zap,
-            ) {
-                drawerData.zaps.forEach { zap ->
-                    ZapChip(
-                        zap = zap,
-                        profileFlow = profileFlow,
-                        lookupProfile = lookupProfile,
-                        onTap = { onProfileTap(zap.senderPubkey) },
-                    )
+            drawerData.zaps.forEachIndexed { index, zap ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 1.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Slots 1–4: avatar + message
+                    Row(
+                        modifier = Modifier.weight(4f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        if (!zap.comment.isNullOrBlank()) {
+                            Text(
+                                text = zap.comment,
+                                color = TextSecondary,
+                                fontSize = AppType.footnote,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Spacer(Modifier.width(Spacing.small))
+                        }
+                        ZapChip(
+                            zap = zap,
+                            profileFlow = profileFlow,
+                            lookupProfile = lookupProfile,
+                            onTap = { onProfileTap(zap.senderPubkey) },
+                        )
+                    }
+
+                    // Slot 5: zap icon on FIRST row only
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (index == 0) {
+                            Icon(
+                                imageVector = Icons.Filled.ElectricBolt,
+                                contentDescription = null,
+                                tint = Zap,
+                                modifier = Modifier.size(Sizing.actionIcon),
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // Reposts
+        // Reposts — unchanged FlowRow grouping
         if (drawerData.reposts.isNotEmpty()) {
             EngagementRow(
                 icon = Icons.Filled.Repeat,
@@ -113,7 +158,7 @@ internal fun EngagementDrawer(
             }
         }
 
-        // Per-emoji reactions
+        // Per-emoji reactions — unchanged FlowRow grouping
         for ((emoji, pubkeys) in drawerData.reactionsByEmoji) {
             val displayEmoji = if (emoji == "+") "\u2764\uFE0F" else emoji
             EngagementRow(
@@ -137,14 +182,13 @@ internal fun EngagementDrawer(
  * Single engagement category row — mirrors the action bar's 5-slot grid.
  * Slots 1–4: wrapping FlowRow of avatars, right-aligned.
  * Slot 5: icon/emoji centered, directly under the action bar chevron.
- * Minimal vertical spacing between rows for tight stacking.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EngagementRow(
     icon: ImageVector? = null,
     emojiText: String? = null,
-    tint: androidx.compose.ui.graphics.Color,
+    tint: Color,
     content: @Composable () -> Unit,
 ) {
     Row(
@@ -153,7 +197,6 @@ private fun EngagementRow(
             .padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Slots 1–4: wrapping avatar grid, right-aligned
         FlowRow(
             modifier = Modifier.weight(4f),
             horizontalArrangement = Arrangement.End,
@@ -162,7 +205,6 @@ private fun EngagementRow(
             content()
         }
 
-        // Slot 5: icon centered — matches action bar chevron position
         Box(
             modifier = Modifier.weight(1f),
             contentAlignment = Alignment.Center,
@@ -206,7 +248,10 @@ private fun AvatarChip(
     )
 }
 
-/** Zap contributor: avatar with bold sats label overlaid at the bottom. */
+/**
+ * Zap contributor: 32dp circular avatar with a dark gradient on the lower half
+ * and bold amber sats label overlaid for readability.
+ */
 @Composable
 private fun ZapChip(
     zap: ZapDetail,
@@ -218,8 +263,8 @@ private fun ZapChip(
     Box(
         modifier = modifier
             .size(Sizing.avatar)
+            .clip(CircleShape)
             .clickable(onClick = onTap),
-        contentAlignment = Alignment.BottomCenter,
     ) {
         AvatarImage(
             pubkey = zap.senderPubkey,
@@ -229,12 +274,31 @@ private fun ZapChip(
             lookupProfile = lookupProfile,
             modifier = Modifier.size(Sizing.avatar),
         )
+        // Dark gradient covering lower 65% — strong enough for sats readability at 32dp
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.65f)
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.85f),
+                            Color.Black.copy(alpha = 0.9f),
+                        ),
+                    ),
+                ),
+        )
         Text(
             text = zap.sats.toCompactSats(),
             color = Zap,
             fontSize = AppType.caption,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 1.dp),
         )
     }
 }
