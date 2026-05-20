@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
@@ -28,6 +30,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -56,7 +59,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * Full-width engagement action bar: reply · repost/quote · react · zap · share.
+ * Full-width engagement action bar: chevron · reply · repost/quote · react · zap · share.
  *
  * Owns the repost dropdown, zap picker/wallet dialogs, and share intent.
  * Consumes engagement state and action callbacks directly.
@@ -76,6 +79,9 @@ internal fun EventActionBar(
     extraZapSats: Long,
     zapFlash: NoteActionsViewModel.ZapFlashState?,
     zapEnabled: Boolean = true,
+    drawerOpen: Boolean = false,
+    onChevronTap: () -> Unit = {},
+    onCountClick: (() -> Unit)? = null,
     onNoteClick: () -> Unit,
     onComment: () -> Unit = {},
     onReact: () -> Unit,
@@ -105,79 +111,103 @@ internal fun EventActionBar(
             .padding(bottom = Spacing.small),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            EventActionButton(
-                icon               = Icons.AutoMirrored.Filled.Chat,
-                count              = replyCount,
-                contentDescription = "Replies",
-                onClick            = onComment,
+        // Chevron toggle for inline engagement drawer
+        IconButton(
+            onClick = onChevronTap,
+            modifier = Modifier.size(32.dp),
+        ) {
+            Icon(
+                imageVector = if (drawerOpen) Icons.Default.ExpandLess
+                              else Icons.Default.ExpandMore,
+                contentDescription = if (drawerOpen) "Hide engagement" else "Show engagement",
+                tint = ActionTint,
+                modifier = Modifier.size(Sizing.actionIcon),
             )
         }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            Box {
+
+        // Existing 5 action slots
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 EventActionButton(
-                    icon               = Icons.Filled.Repeat,
-                    count              = repostCount,
-                    contentDescription = "Reposts",
-                    highlighted        = hasReposted,
-                    onClick            = { showRepostMenu = true },
+                    icon               = Icons.AutoMirrored.Filled.Chat,
+                    count              = replyCount,
+                    contentDescription = "Replies",
+                    onClick            = onComment,
+                    onCountClick       = onCountClick,
                 )
-                DropdownMenu(
-                    expanded         = showRepostMenu,
-                    onDismissRequest = { showRepostMenu = false },
-                    modifier         = Modifier.background(Black),
-                ) {
-                    DropdownMenuItem(
-                        text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
-                        onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Box {
+                    EventActionButton(
+                        icon               = Icons.Filled.Repeat,
+                        count              = repostCount,
+                        contentDescription = "Reposts",
+                        highlighted        = hasReposted,
+                        onClick            = { showRepostMenu = true },
+                        onCountClick       = onCountClick,
                     )
-                    DropdownMenuItem(
-                        text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
-                        onClick = { onQuote(noteId); showRepostMenu = false },
-                    )
+                    DropdownMenu(
+                        expanded         = showRepostMenu,
+                        onDismissRequest = { showRepostMenu = false },
+                        modifier         = Modifier.background(Black),
+                    ) {
+                        DropdownMenuItem(
+                            text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
+                        )
+                        DropdownMenuItem(
+                            text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
+                            onClick = { onQuote(noteId); showRepostMenu = false },
+                        )
+                    }
                 }
             }
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            EventActionButton(
-                icon               = Icons.Filled.Favorite,
-                count              = reactionCount,
-                contentDescription = "Reactions",
-                highlighted        = hasReacted,
-                highlightColor     = Like,
-                onClick            = onReact,
-            )
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            EventZapButton(
-                sats         = zapTotalSats + extraZapSats,
-                hasZapped    = hasZapped,
-                isLoading    = isZapLoading,
-                flashTrigger = zapFlashTrigger,
-                enabled      = zapEnabled,
-                onTap        = {
-                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
-                },
-                onLongPress  = {
-                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
-                },
-            )
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            EventActionButton(
-                icon               = Icons.Filled.Share,
-                count              = 0,
-                contentDescription = "Share",
-                onClick            = {
-                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/$noteId")
-                        type = "text/plain"
-                    }
-                    context.startActivity(Intent.createChooser(sendIntent, null))
-                },
-            )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                EventActionButton(
+                    icon               = Icons.Filled.Favorite,
+                    count              = reactionCount,
+                    contentDescription = "Reactions",
+                    highlighted        = hasReacted,
+                    highlightColor     = Like,
+                    onClick            = onReact,
+                    onCountClick       = onCountClick,
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                EventZapButton(
+                    sats         = zapTotalSats + extraZapSats,
+                    hasZapped    = hasZapped,
+                    isLoading    = isZapLoading,
+                    flashTrigger = zapFlashTrigger,
+                    enabled      = zapEnabled,
+                    onSatsClick  = onCountClick,
+                    onTap        = {
+                        if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
+                        if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                    },
+                    onLongPress  = {
+                        if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
+                        if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                    },
+                )
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                EventActionButton(
+                    icon               = Icons.Filled.Share,
+                    count              = 0,
+                    contentDescription = "Share",
+                    onClick            = {
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/$noteId")
+                            type = "text/plain"
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, null))
+                    },
+                )
+            }
         }
     }
 
@@ -211,6 +241,7 @@ internal fun EventActionButton(
     highlighted: Boolean = false,
     highlightColor: Color = Brand,
     onClick: (() -> Unit)? = null,
+    onCountClick: (() -> Unit)? = null,
 ) {
     val tint = if (highlighted) highlightColor else ActionTint
     val rowModifier = if (onClick != null)
@@ -235,6 +266,7 @@ internal fun EventActionButton(
                 text     = formatCount(count),
                 color    = tint,
                 fontSize = AppType.footnote,
+                modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
             )
         }
     }
@@ -249,6 +281,7 @@ internal fun EventZapButton(
     isLoading: Boolean = false,
     flashTrigger: Int = 0,
     enabled: Boolean = true,
+    onSatsClick: (() -> Unit)? = null,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -318,6 +351,7 @@ internal fun EventZapButton(
                     text     = sats.toCompactSats(),
                     color    = tint,
                     fontSize = AppType.footnote,
+                    modifier = if (onSatsClick != null) Modifier.clickable(onClick = onSatsClick) else Modifier,
                 )
             }
         }

@@ -1,7 +1,10 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -356,10 +359,11 @@ fun EventCard(
             }
         }
 
-        // Action bar
+        // Action bar + inline engagement drawer
         // Optimistic: enabled while profile not yet resolved (null).
         // Disabled only when we know the author has no Lightning address.
         val zapEnabled = authorProfile == null || !authorProfile.lud16.isNullOrBlank()
+        var drawerOpen by remember { mutableStateOf(false) }
         EventActionBar(
             noteId          = row.id,
             replyCount      = liveReplyCount,
@@ -374,6 +378,9 @@ fun EventCard(
             extraZapSats    = engagement.optimisticZapSats[row.id] ?: 0L,
             zapFlash        = engagement.zapFlash,
             zapEnabled      = zapEnabled,
+            drawerOpen      = drawerOpen,
+            onChevronTap    = { drawerOpen = !drawerOpen },
+            onCountClick    = { drawerOpen = true },
             onNoteClick     = { onNoteClick(model.navigateId) },
             onComment       = onComment,
             onReact         = onReact,
@@ -382,6 +389,18 @@ fun EventCard(
             onZap           = onZap,
             onSaveNwcUri    = onSaveNwcUri,
         )
+
+        AnimatedVisibility(
+            visible = drawerOpen,
+            enter = expandVertically(),
+            exit = shrinkVertically(),
+        ) {
+            EngagementDrawer(
+                repostCount     = liveRepostCount,
+                reactionCount   = liveReactionCount,
+                zapSats         = liveZapTotalSats + (engagement.optimisticZapSats[row.id] ?: 0L),
+            )
+        }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
     }
@@ -483,7 +502,8 @@ private fun ArticleLayout(
                 )
             }
 
-            // Action bar
+            // Action bar + inline engagement drawer
+            var drawerOpen by remember { mutableStateOf(false) }
             EventActionBar(
                 noteId          = row.id,
                 replyCount      = replyCount,
@@ -497,6 +517,9 @@ private fun ArticleLayout(
                 isZapLoading    = row.id in engagement.zapLoadingIds,
                 extraZapSats    = engagement.optimisticZapSats[row.id] ?: 0L,
                 zapFlash        = engagement.zapFlash,
+                drawerOpen      = drawerOpen,
+                onChevronTap    = { drawerOpen = !drawerOpen },
+                onCountClick    = { drawerOpen = true },
                 onNoteClick     = { onNoteClick(row.id) },
                 onComment       = onComment,
                 onReact         = onReact,
@@ -505,6 +528,18 @@ private fun ArticleLayout(
                 onZap           = onZap,
                 onSaveNwcUri    = onSaveNwcUri,
             )
+
+            AnimatedVisibility(
+                visible = drawerOpen,
+                enter = expandVertically(),
+                exit = shrinkVertically(),
+            ) {
+                EngagementDrawer(
+                    repostCount     = repostCount,
+                    reactionCount   = reactionCount,
+                    zapSats         = zapTotalSats + (engagement.optimisticZapSats[row.id] ?: 0L),
+                )
+            }
         }
     }
 }
