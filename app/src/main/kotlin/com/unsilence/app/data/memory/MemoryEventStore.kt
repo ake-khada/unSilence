@@ -83,6 +83,34 @@ class MemoryEventStore @Inject constructor(
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
     )
 
+    // ─── Relay hints index (populated on insert from e-tag hints + provenance) ──
+    /** Per-event-ID set of relay URLs where the event might be found.
+     *  Populated from (1) the source relay that delivered an event referencing
+     *  this ID via an e-tag, and (2) explicit NIP-10/NIP-18 relay hints in
+     *  e-tag position [2]. Read via [relayHintsForEvent]. */
+    private val relayHintsForEvent = ConcurrentHashMap<String, MutableSet<String>>()
+
+    /** Immutable snapshot of relay hints for [eventId], or empty. */
+    fun relayHintsForEvent(eventId: String): Set<String> =
+        relayHintsForEvent[eventId]?.toSet() ?: emptySet()
+
+    /** Index e-tag relay hints + provenance for an event's referenced targets. */
+    private fun indexRelayHints(event: NostrEvent) {
+        val sourceRelay = event.relaysSeen.firstOrNull() ?: event.relayUrl
+        if (sourceRelay.isBlank()) return
+        for (tag in event.tags) {
+            if (tag.size < 2 || tag[0] != "e") continue
+            val targetId = tag[1]
+            if (targetId.isBlank()) continue
+            val hints = relayHintsForEvent.computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+            hints += sourceRelay
+            val explicit = tag.getOrNull(2)
+                ?.takeIf { it.startsWith("wss://") || it.startsWith("ws://") }
+                ?.let { normalizeRelayUrl(it) }
+            if (explicit != null) hints += explicit
+        }
+    }
+
     // ─── LRU touch tracking (eviction priority) ──────────────────────────
     /**
      * Last-access timestamp per event id (epoch ms).
@@ -478,6 +506,9 @@ class MemoryEventStore @Inject constructor(
         if (event.rootId != null && event.rootId != event.replyToId) {
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
+
+        // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
+        indexRelayHints(event)
 
         // 3. Update derived aggregates based on kind
         when (event.kind) {
@@ -3140,6 +3171,8 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
+        indexRelayHints(event)
+
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
         if (event.kind in setOf(1, 6, 20, 21)) {
@@ -3436,6 +3469,7 @@ class MemoryEventStore @Inject constructor(
         videoRenderModelsByEventId.clear()
         imetaImageDimsByEventId.clear()
         eventModelsByEventId.clear()
+        relayHintsForEvent.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L

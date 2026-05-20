@@ -1846,8 +1846,15 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${targets.size} relay(s)")
     }
 
-    /** Single-ID overload — delegates to batch. */
-    fun fetchEventById(eventId: String) = fetchEventsByIds(listOf(eventId))
+    /** Single-ID overload — consults MES relay hints before broadcasting. */
+    fun fetchEventById(eventId: String) {
+        val hints = memoryEventStore.get().relayHintsForEvent(eventId).toList()
+        if (hints.isNotEmpty()) {
+            scope.launch { fetchEventById(eventId, hints) }
+        } else {
+            fetchEventsByIds(listOf(eventId))
+        }
+    }
 
     /**
      * Fetch events by ID from a SPECIFIC relay (source-relay or hint-relay targeting).
@@ -2044,7 +2051,9 @@ class RelayPool @Inject constructor(
      * Separate REQs so each kind gets its own limit and they don't compete.
      */
     fun fetchThread(rawRelayUrls: List<String>, eventId: String) {
-        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }
+        val hintUrls = memoryEventStore.get().relayHintsForEvent(eventId)
+            .mapNotNull { normalizeRelayUrl(it) }
+        val relayUrls = (rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet() + hintUrls).toList()
         val ts = System.currentTimeMillis()
         _activeOneShotSubs.add("thread-event-$ts")
         _activeOneShotSubs.add("thread-replies-$ts")
