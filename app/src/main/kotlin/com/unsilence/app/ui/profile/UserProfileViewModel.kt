@@ -131,6 +131,13 @@ class UserProfileViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
+    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
+        memoryEventStore.zapDetailsForEvent(eventId)
+    fun repostPubkeysForEvent(eventId: String): List<String> =
+        memoryEventStore.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+        memoryEventStore.reactionsForEvent(eventId)
+
     /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
     val followerCount = MutableStateFlow<Long?>(null)
     /** Following count parsed from the user's kind-3 event p-tags. */

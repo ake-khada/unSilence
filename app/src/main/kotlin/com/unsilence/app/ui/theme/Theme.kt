@@ -19,6 +19,7 @@ object Spacing {
 
 // Typography scale — named sizes replacing ad-hoc sp values
 object AppType {
+    val zapBadge    =  8.sp  // zap sats overlay inside avatars
     val caption     = 11.sp  // section labels, NIP-05 domains, tiny metadata
     val footnote    = 12.sp  // timestamps, secondary info
     val bodySmall   = 13.sp  // compact body: author names, action counts

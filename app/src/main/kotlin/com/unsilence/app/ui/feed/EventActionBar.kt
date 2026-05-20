@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.content.Intent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -25,12 +24,10 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,7 +42,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
@@ -91,7 +87,6 @@ internal fun EventActionBar(
     onSaveNwcUri: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
@@ -111,103 +106,79 @@ internal fun EventActionBar(
             .padding(bottom = Spacing.small),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Chevron toggle for inline engagement drawer
-        IconButton(
-            onClick = onChevronTap,
-            modifier = Modifier.size(32.dp),
-        ) {
-            Icon(
-                imageVector = if (drawerOpen) Icons.Default.ExpandLess
-                              else Icons.Default.ExpandMore,
-                contentDescription = if (drawerOpen) "Hide engagement" else "Show engagement",
-                tint = ActionTint,
-                modifier = Modifier.size(Sizing.actionIcon),
+        // 5 action slots: reply · repost/quote · react · zap · dropdown chevron
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            EventActionButton(
+                icon               = Icons.AutoMirrored.Filled.Chat,
+                count              = replyCount,
+                contentDescription = "Replies",
+                onClick            = onComment,
+                onCountClick       = onCountClick,
             )
         }
-
-        // Existing 5 action slots
-        Row(
-            modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box {
                 EventActionButton(
-                    icon               = Icons.AutoMirrored.Filled.Chat,
-                    count              = replyCount,
-                    contentDescription = "Replies",
-                    onClick            = onComment,
+                    icon               = Icons.Filled.Repeat,
+                    count              = repostCount,
+                    contentDescription = "Reposts",
+                    highlighted        = hasReposted,
+                    onClick            = { showRepostMenu = true },
                     onCountClick       = onCountClick,
                 )
-            }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Box {
-                    EventActionButton(
-                        icon               = Icons.Filled.Repeat,
-                        count              = repostCount,
-                        contentDescription = "Reposts",
-                        highlighted        = hasReposted,
-                        onClick            = { showRepostMenu = true },
-                        onCountClick       = onCountClick,
+                DropdownMenu(
+                    expanded         = showRepostMenu,
+                    onDismissRequest = { showRepostMenu = false },
+                    modifier         = Modifier.background(Black),
+                ) {
+                    DropdownMenuItem(
+                        text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
+                        onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
                     )
-                    DropdownMenu(
-                        expanded         = showRepostMenu,
-                        onDismissRequest = { showRepostMenu = false },
-                        modifier         = Modifier.background(Black),
-                    ) {
-                        DropdownMenuItem(
-                            text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
-                            onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
-                        )
-                        DropdownMenuItem(
-                            text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
-                            onClick = { onQuote(noteId); showRepostMenu = false },
-                        )
-                    }
+                    DropdownMenuItem(
+                        text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
+                        onClick = { onQuote(noteId); showRepostMenu = false },
+                    )
                 }
             }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                EventActionButton(
-                    icon               = Icons.Filled.Favorite,
-                    count              = reactionCount,
-                    contentDescription = "Reactions",
-                    highlighted        = hasReacted,
-                    highlightColor     = Like,
-                    onClick            = onReact,
-                    onCountClick       = onCountClick,
-                )
-            }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                EventZapButton(
-                    sats         = zapTotalSats + extraZapSats,
-                    hasZapped    = hasZapped,
-                    isLoading    = isZapLoading,
-                    flashTrigger = zapFlashTrigger,
-                    enabled      = zapEnabled,
-                    onSatsClick  = onCountClick,
-                    onTap        = {
-                        if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                        if (isNwcConfigured) onZap(21L) else showConnectWallet = true
-                    },
-                    onLongPress  = {
-                        if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                        if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
-                    },
-                )
-            }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                EventActionButton(
-                    icon               = Icons.Filled.Share,
-                    count              = 0,
-                    contentDescription = "Share",
-                    onClick            = {
-                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/$noteId")
-                            type = "text/plain"
-                        }
-                        context.startActivity(Intent.createChooser(sendIntent, null))
-                    },
-                )
-            }
+        }
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            EventActionButton(
+                icon               = Icons.Filled.Favorite,
+                count              = reactionCount,
+                contentDescription = "Reactions",
+                highlighted        = hasReacted,
+                highlightColor     = Like,
+                onClick            = onReact,
+                onCountClick       = onCountClick,
+            )
+        }
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            EventZapButton(
+                sats         = zapTotalSats + extraZapSats,
+                hasZapped    = hasZapped,
+                isLoading    = isZapLoading,
+                flashTrigger = zapFlashTrigger,
+                enabled      = zapEnabled,
+                onSatsClick  = onCountClick,
+                onTap        = {
+                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
+                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                },
+                onLongPress  = {
+                    if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
+                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                },
+            )
+        }
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            EventActionButton(
+                icon               = if (drawerOpen) Icons.Default.ExpandLess
+                                     else Icons.Default.ExpandMore,
+                count              = 0,
+                contentDescription = if (drawerOpen) "Hide engagement" else "Show engagement",
+                onClick            = onChevronTap,
+            )
         }
     }
 

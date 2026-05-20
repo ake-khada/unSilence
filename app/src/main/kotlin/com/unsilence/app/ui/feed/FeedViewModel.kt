@@ -323,6 +323,17 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
+    // -- Engagement contributor accessors (delegates to MES indexes) ------------
+
+    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
+        memoryEventStore.zapDetailsForEvent(eventId)
+
+    fun repostPubkeysForEvent(eventId: String): List<String> =
+        memoryEventStore.repostPubkeysForEvent(eventId)
+
+    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+        memoryEventStore.reactionsForEvent(eventId)
+
     // -- User relay sets (kind-30002) ------------------------------------------
 
     val userSetsFlow: StateFlow<List<RelaySet>> =

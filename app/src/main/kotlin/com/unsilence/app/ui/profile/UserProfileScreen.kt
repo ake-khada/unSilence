@@ -189,6 +189,9 @@ fun UserProfileScreen(
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
+            zapDetailsForEvent = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent = viewModel::reactionsForEvent,
         )
     }
 
