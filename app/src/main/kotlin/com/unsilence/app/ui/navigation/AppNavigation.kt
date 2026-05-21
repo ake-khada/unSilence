@@ -1,7 +1,12 @@
 package com.unsilence.app.ui.navigation
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
@@ -44,7 +49,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
@@ -117,6 +122,7 @@ import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
@@ -355,29 +361,49 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             modifier = Modifier.align(Alignment.Center),
                         )
 
-                        // Right: action icons
-                        Row(
-                            modifier = Modifier.align(Alignment.CenterEnd),
-                            horizontalArrangement = Arrangement.spacedBy(20.dp),
-                            verticalAlignment     = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                imageVector        = Icons.Filled.Tune,
-                                contentDescription = "Filter",
-                                tint               = if (currentFilter.isNonDefault) Brand else Color.White.copy(alpha = 0.7f),
-                                modifier           = Modifier
-                                    .size(Sizing.navIcon)
-                                    .clickable { showFilter = true },
-                            )
-                            Icon(
-                                imageVector        = Icons.Filled.Edit,
-                                contentDescription = "New post",
-                                tint               = Color.White.copy(alpha = 0.7f),
-                                modifier           = Modifier
-                                    .size(Sizing.navIcon)
-                                    .clickable { showCompose = true },
-                            )
-                        }
+                        // Right: filter icon (24dp — lone icon needs more mass
+                        // to balance the 52dp logo mark on the opposite side)
+                        Icon(
+                            imageVector        = Icons.Filled.Tune,
+                            contentDescription = "Filter",
+                            tint               = if (currentFilter.isNonDefault) Brand else Color.White.copy(alpha = 0.7f),
+                            modifier           = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(24.dp)
+                                .clickable { showFilter = true },
+                        )
+                    }
+                }
+            }
+
+            // ── Floating compose FAB (feed tab only) ──────────────────────────
+            if (selectedTab == 0) {
+                val fabVisible = splashDone && barsVisible
+                AnimatedVisibility(
+                    visible = fabVisible,
+                    enter   = scaleIn(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+                    exit    = scaleOut(animationSpec = tween(150)) + fadeOut(animationSpec = tween(150)),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(
+                            end    = Spacing.medium,
+                            bottom = Sizing.bottomNavHeight + navBarHeight + Spacing.medium + 14.dp,
+                        ),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .background(BrandDeep, CircleShape)
+                            .clip(CircleShape)
+                            .clickable { showCompose = true },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector        = Icons.Outlined.EditNote,
+                            contentDescription = "New note",
+                            tint               = Color.Black,
+                            modifier           = Modifier.size(28.dp),
+                        )
                     }
                 }
             }
