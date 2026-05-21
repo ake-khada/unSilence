@@ -7,6 +7,11 @@ data class BlossomServerInfo(
     val isDefaultSelected: Boolean,
 )
 
+// Validated end-to-end against blossom.primal.net, blossom.band, and
+// blossom.yakihonne.com via Phase 2.0 smoke test. Azzamo (blossom.azzamo.net)
+// was tested and returned 404 on /upload — their service is premium-only
+// and doesn't expose the BUD-01 endpoint to non-paying users. Users who
+// want Azzamo specifically can add it via "+ Add custom server".
 val DEFAULT_BLOSSOM_SERVERS = listOf(
     BlossomServerInfo(
         url = "https://blossom.primal.net",
@@ -24,12 +29,6 @@ val DEFAULT_BLOSSOM_SERVERS = listOf(
         url = "https://blossom.yakihonne.com",
         displayName = "YakiHonne Blossom",
         freeTierNote = "Free tier · limits per provider",
-        isDefaultSelected = false,
-    ),
-    BlossomServerInfo(
-        url = "https://blossom.azzamo.net",
-        displayName = "Azzamo Blossom",
-        freeTierNote = "Free tier with rate limits · Premium pay-as-you-go",
         isDefaultSelected = false,
     ),
 )
