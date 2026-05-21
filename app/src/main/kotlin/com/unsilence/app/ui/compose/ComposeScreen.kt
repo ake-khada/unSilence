@@ -333,7 +333,7 @@ fun ComposeScreen(
             ) {
                 IconButton(onClick = {
                     pickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                     )
                 }) {
                     Icon(

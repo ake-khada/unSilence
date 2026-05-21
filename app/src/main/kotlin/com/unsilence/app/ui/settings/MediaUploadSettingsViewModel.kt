@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.DEFAULT_BLOSSOM_SERVERS
+import com.unsilence.app.data.blossom.VideoTranscoder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,6 +58,7 @@ class MediaUploadSettingsViewModel @Inject constructor(
 
     val imageMaxDim: StateFlow<Int> = blossomServersStore.imageMaxDim
     val imageQuality: StateFlow<Int> = blossomServersStore.imageQuality
+    val videoQuality: StateFlow<VideoTranscoder.Quality> = blossomServersStore.videoQuality
 
     private val _smokeTestState = MutableStateFlow<SmokeTestState>(SmokeTestState.Idle)
     val smokeTestState: StateFlow<SmokeTestState> = _smokeTestState.asStateFlow()
@@ -122,6 +124,10 @@ class MediaUploadSettingsViewModel @Inject constructor(
 
     fun setImageQuality(q: Int) {
         viewModelScope.launch { blossomServersStore.setImageQuality(q) }
+    }
+
+    fun setVideoQuality(quality: VideoTranscoder.Quality) {
+        viewModelScope.launch { blossomServersStore.setVideoQuality(quality) }
     }
 
     private fun extractDisplayName(url: String): String =
