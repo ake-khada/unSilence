@@ -66,6 +66,7 @@ import com.unsilence.app.ui.theme.Zap
 fun ComposeScreen(
     onDismiss: () -> Unit,
     replyToEventId: String? = null,
+    quoteEventId: String? = null,
     viewModel: ComposeViewModel = hiltViewModel(),
 ) {
     val pubkeyHex      = viewModel.pubkeyHex
@@ -75,12 +76,15 @@ fun ComposeScreen(
     val canPublish    by viewModel.canPublish.collectAsStateWithLifecycle()
 
     val isReply = replyToEventId != null
+    val isQuote = quoteEventId != null
     val replyToRow = viewModel.replyToRow
+    val quoteRow = viewModel.quoteRow
 
     // Reset ViewModel state on open (activity-scoped VM survives recomposition)
     LaunchedEffect(Unit) {
         viewModel.reset()
         if (replyToEventId != null) viewModel.loadReplyTo(replyToEventId)
+        if (quoteEventId != null) viewModel.loadQuoteTo(quoteEventId)
     }
 
     // Auto-dismiss once the note is published
@@ -116,7 +120,11 @@ fun ComposeScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = if (isReply) "Replying" else "New note",
+                    text = when {
+                        isReply -> "Replying"
+                        isQuote -> "Quoting"
+                        else    -> "New note"
+                    },
                     color = TextSecondary,
                     fontSize = AppType.body,
                     letterSpacing = 0.5.sp,
@@ -269,6 +277,7 @@ fun ComposeScreen(
                                     placeholder = when {
                                         block.id != firstTextId -> ""
                                         isReply -> "Write your reply\u2026"
+                                        isQuote -> "Add your comment\u2026"
                                         else -> "Break the silence..."
                                     },
                                     modifier = Modifier.fillMaxWidth(),
@@ -282,6 +291,65 @@ fun ComposeScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             }
+                        }
+                    }
+                }
+
+                // ── Quote preview card ──────────────────────────────────────
+                if (isQuote && quoteRow != null) {
+                    val quoteName = quoteRow.authorDisplayName?.takeIf { it.isNotBlank() }
+                        ?: quoteRow.authorName?.takeIf { it.isNotBlank() }
+                        ?: "${quoteRow.pubkey.take(6)}…${quoteRow.pubkey.takeLast(4)}"
+                    val borderColor = BrandDeep
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(0.dp, 8.dp, 8.dp, 0.dp))
+                            .background(BrandDeep.copy(alpha = 0.06f))
+                            .drawBehind {
+                                drawRect(
+                                    color = borderColor,
+                                    topLeft = Offset.Zero,
+                                    size = Size(2.dp.toPx(), size.height),
+                                )
+                            }
+                            .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 10.dp),
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape),
+                        ) {
+                            IdentIcon(pubkey = quoteRow.pubkey, modifier = Modifier.size(24.dp))
+                            if (!quoteRow.authorPicture.isNullOrBlank()) {
+                                AsyncImage(
+                                    model              = rememberAvatarImageRequest(quoteRow.authorPicture, 24.dp),
+                                    contentDescription = null,
+                                    contentScale       = ContentScale.Crop,
+                                    modifier           = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text     = quoteName,
+                                color    = TextSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text       = quoteRow.content.take(200),
+                                color      = Color.White.copy(alpha = 0.82f),
+                                fontSize   = 13.sp,
+                                lineHeight = 18.sp,
+                                maxLines   = 3,
+                                overflow   = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }

@@ -324,6 +324,8 @@ class ComposeViewModel @Inject constructor(
         published = false
         publishError = null
         replyToRow = null
+        quoteRow = null
+        quoteEventId = null
         _blocks.value = listOf(ComposeBlock.Text(""))
     }
 
@@ -336,6 +338,22 @@ class ComposeViewModel @Inject constructor(
     fun loadReplyTo(eventId: String) {
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         replyToRow = rows.firstOrNull()
+    }
+
+    // ── Quote mode ─────────────────────────────────────────────────────────
+
+    /** Quoted note preview, looked up from MES. */
+    var quoteRow by mutableStateOf<com.unsilence.app.data.memory.FeedRow?>(null)
+        private set
+
+    /** Raw event ID for the nevent reference appended at publish time. */
+    var quoteEventId by mutableStateOf<String?>(null)
+        private set
+
+    fun loadQuoteTo(eventId: String) {
+        quoteEventId = eventId
+        val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
+        quoteRow = rows.firstOrNull()
     }
 
     // ── Publishing ──────────────────────────────────────────────────────────
@@ -400,11 +418,25 @@ class ComposeViewModel @Inject constructor(
         publishError = null
         viewModelScope.launch {
             val current = _blocks.value
-            val finalContent = blocksToContent(current)
+            var finalContent = blocksToContent(current)
             val imetaTags = blocksToImetaTags(current)
+
+            // Append nostr:nevent reference for quote posts
+            val qId = quoteEventId
+            val quotedAuthor = quoteRow?.pubkey
+            if (qId != null) {
+                val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+                    .create(qId, quotedAuthor, null, null as com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl?)
+                finalContent = if (finalContent.isBlank()) "nostr:$nevent"
+                    else "$finalContent\n\nnostr:$nevent"
+            }
 
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
+                if (qId != null) {
+                    add(arrayOf("q", qId, "", quotedAuthor ?: ""))
+                    if (quotedAuthor != null) add(arrayOf("p", quotedAuthor))
+                }
             }
             val signed = signingManager.sign(template) ?: run {
                 publishError = "Signing failed — check your key or Amber connection"
