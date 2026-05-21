@@ -26,7 +26,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
@@ -100,60 +99,105 @@ class ComposeViewModel @Inject constructor(
     var publishError by mutableStateOf<String?>(null)
         private set
 
-    // ── Attachments ─────────────────────────────────────────────────────────
+    // ── Block-based content model ───────────────────────────────────────────
 
-    private val _attachments = MutableStateFlow<List<AttachmentState>>(emptyList())
-    val attachments: StateFlow<List<AttachmentState>> = _attachments.asStateFlow()
+    private val _blocks = MutableStateFlow<List<ComposeBlock>>(
+        listOf(ComposeBlock.Text(""))
+    )
+    val blocks: StateFlow<List<ComposeBlock>> = _blocks.asStateFlow()
 
-    /** Text content flow for canPublish — updated from ComposeScreen. */
-    private val _composeText = MutableStateFlow("")
+    /** Derived attachment list — preserves existing ComposeScreen binding. */
+    val attachments: StateFlow<List<AttachmentState>> = _blocks
+        .map { blocks ->
+            blocks.filterIsInstance<ComposeBlock.Attachment>()
+                .map { it.state }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val canPublish: StateFlow<Boolean> = combine(
-        _composeText, _attachments,
-    ) { text, atts ->
-        val hasContent = text.isNotBlank() || atts.any { it is AttachmentState.Uploaded }
-        val noneInFlight = atts.none { it is AttachmentState.Uploading || it is AttachmentState.Idle }
-        hasContent && noneInFlight
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    val canPublish: StateFlow<Boolean> = _blocks
+        .map { blocks ->
+            val hasText = blocks.any { it is ComposeBlock.Text && it.content.isNotBlank() }
+            val hasUploaded = blocks.any {
+                it is ComposeBlock.Attachment && it.state is AttachmentState.Uploaded
+            }
+            val inFlight = blocks.any {
+                it is ComposeBlock.Attachment &&
+                (it.state is AttachmentState.Idle || it.state is AttachmentState.Uploading)
+            }
+            (hasText || hasUploaded) && !inFlight
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     fun updateComposeText(text: String) {
-        _composeText.value = text
+        _blocks.update { blocks ->
+            val idx = blocks.indexOfFirst { it is ComposeBlock.Text }
+            if (idx >= 0) {
+                blocks.toMutableList().also {
+                    it[idx] = ComposeBlock.Text(text)
+                }
+            } else {
+                listOf(ComposeBlock.Text(text)) + blocks
+            }
+        }
     }
 
     init {
         viewModelScope.launch { blossomServersStore.initialize() }
         // Auto-upload idle attachments sequentially.
         viewModelScope.launch {
-            _attachments
-                .map { list -> list.firstOrNull { it is AttachmentState.Idle } }
+            _blocks
+                .map { blocks ->
+                    blocks.firstOrNull {
+                        it is ComposeBlock.Attachment && it.state is AttachmentState.Idle
+                    } as? ComposeBlock.Attachment
+                }
                 .filterNotNull()
-                .distinctUntilChanged { a, b -> a.id == b.id }
-                .collect { idle -> uploadAttachment(idle as AttachmentState.Idle) }
+                .distinctUntilChanged { a, b -> a.state.id == b.state.id }
+                .collect { idleBlock ->
+                    uploadAttachment(idleBlock.state as AttachmentState.Idle)
+                }
         }
     }
 
     fun addAttachments(uris: List<Uri>) {
-        val newOnes = uris.map { uri ->
-            AttachmentState.Idle(uri = uri, id = UUID.randomUUID().toString())
+        val newBlocks = uris.map { uri ->
+            ComposeBlock.Attachment(
+                state = AttachmentState.Idle(
+                    uri = uri,
+                    id = UUID.randomUUID().toString(),
+                )
+            )
         }
-        _attachments.update { it + newOnes }
+        _blocks.update { it + newBlocks }
     }
 
     fun removeAttachment(id: String) {
-        _attachments.update { list -> list.filterNot { it.id == id } }
+        _blocks.update { blocks ->
+            blocks.filterNot {
+                it is ComposeBlock.Attachment && it.state.id == id
+            }
+        }
     }
 
     fun retryAttachment(id: String) {
-        val target = _attachments.value.firstOrNull { it.id == id } ?: return
-        if (target !is AttachmentState.Failed) return
-        _attachments.update { list ->
-            list.map { if (it.id == id) AttachmentState.Idle(target.uri, target.id) else it }
+        _blocks.update { blocks ->
+            blocks.map { block ->
+                if (
+                    block is ComposeBlock.Attachment &&
+                    block.state.id == id &&
+                    block.state is AttachmentState.Failed
+                ) {
+                    block.copy(
+                        state = AttachmentState.Idle(block.state.uri, block.state.id)
+                    )
+                } else block
+            }
         }
     }
 
     private suspend fun uploadAttachment(idle: AttachmentState.Idle) {
-        _attachments.update { list ->
-            list.map { if (it.id == idle.id) AttachmentState.Uploading(idle.uri, idle.id) else it }
+        updateAttachmentState(idle.id) {
+            AttachmentState.Uploading(idle.uri, idle.id)
         }
 
         val server = blossomServersStore.selectedServer.value
@@ -167,16 +211,26 @@ class ComposeViewModel @Inject constructor(
             }
         }
 
-        _attachments.update { list ->
-            list.map {
-                if (it.id != idle.id) return@map it
-                result.fold(
-                    onSuccess = { blob -> AttachmentState.Uploaded(idle.uri, idle.id, blob) },
-                    onFailure = { ex ->
-                        Log.e(TAG, "Upload failed for ${idle.uri}", ex)
-                        AttachmentState.Failed(idle.uri, idle.id, ex.message ?: "Upload failed")
-                    },
-                )
+        updateAttachmentState(idle.id) {
+            result.fold(
+                onSuccess = { blob -> AttachmentState.Uploaded(idle.uri, idle.id, blob) },
+                onFailure = { ex ->
+                    Log.e(TAG, "Upload failed for ${idle.uri}", ex)
+                    AttachmentState.Failed(idle.uri, idle.id, ex.message ?: "Upload failed")
+                },
+            )
+        }
+    }
+
+    private fun updateAttachmentState(
+        id: String,
+        newState: () -> AttachmentState,
+    ) {
+        _blocks.update { blocks ->
+            blocks.map { block ->
+                if (block is ComposeBlock.Attachment && block.state.id == id) {
+                    block.copy(state = newState())
+                } else block
             }
         }
     }
@@ -230,8 +284,7 @@ class ComposeViewModel @Inject constructor(
         published = false
         publishError = null
         replyToRow = null
-        _attachments.value = emptyList()
-        _composeText.value = ""
+        _blocks.value = listOf(ComposeBlock.Text(""))
     }
 
     // ── Reply mode ──────────────────────────────────────────────────────────
@@ -251,13 +304,14 @@ class ComposeViewModel @Inject constructor(
         val parent = replyToRow ?: return
         publishError = null
         viewModelScope.launch {
+            updateComposeText(content)
+            val current = _blocks.value
             val threadRootId = parent.rootId ?: parent.id
             val replyToId = parent.id
             val replyToPubkey = parent.pubkey
 
-            val uploaded = _attachments.value.filterIsInstance<AttachmentState.Uploaded>()
-            val finalContent = buildFinalContent(content, uploaded)
-            val imetaTags = buildImetaTags(uploaded)
+            val finalContent = blocksToContent(current)
+            val imetaTags = blocksToImetaTags(current)
 
             val template = TextNoteEvent.build(note = finalContent, createdAt = System.currentTimeMillis() / 1000L) {
                 add(arrayOf("e", threadRootId, "", "root"))
@@ -298,7 +352,7 @@ class ComposeViewModel @Inject constructor(
                 )
             }
 
-            _attachments.value = emptyList()
+            _blocks.value = listOf(ComposeBlock.Text(""))
             published = true
         }
     }
@@ -306,9 +360,10 @@ class ComposeViewModel @Inject constructor(
     fun publishNote(content: String) {
         publishError = null
         viewModelScope.launch {
-            val uploaded = _attachments.value.filterIsInstance<AttachmentState.Uploaded>()
-            val finalContent = buildFinalContent(content, uploaded)
-            val imetaTags = buildImetaTags(uploaded)
+            updateComposeText(content)
+            val current = _blocks.value
+            val finalContent = blocksToContent(current)
+            val imetaTags = blocksToImetaTags(current)
 
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
@@ -344,32 +399,43 @@ class ComposeViewModel @Inject constructor(
                 )
             }
 
-            _attachments.value = emptyList()
+            _blocks.value = listOf(ComposeBlock.Text(""))
             published = true
         }
     }
 
-    private fun buildFinalContent(text: String, uploaded: List<AttachmentState.Uploaded>): String {
-        if (uploaded.isEmpty()) return text
-        val urls = uploaded.joinToString("\n") { it.blob.url }
-        return if (text.isBlank()) urls else "$text\n\n$urls"
+    // ── Block → content/tags ────────────────────────────────────────────────
+
+    private fun blocksToContent(blocks: List<ComposeBlock>): String {
+        val parts = blocks.mapNotNull { block ->
+            when (block) {
+                is ComposeBlock.Text ->
+                    block.content.takeIf { it.isNotBlank() }
+                is ComposeBlock.Attachment ->
+                    (block.state as? AttachmentState.Uploaded)?.blob?.url
+            }
+        }
+        return parts.joinToString("\n\n")
     }
 
-    private fun buildImetaTags(uploaded: List<AttachmentState.Uploaded>): List<Array<String>> =
-        uploaded.map { att ->
-            val blob = att.blob
-            buildList {
-                add("imeta")
-                add("url ${blob.url}")
-                add("m ${blob.mimeType}")
-                add("x ${blob.sha256}")
-                add("size ${blob.sizeBytes}")
-                blob.dimensions?.let { (w, h) -> add("dim ${w}x${h}") }
-                blob.blurhash?.let { add("blurhash $it") }
-                blob.thumbnailUrl?.let { add("thumb $it") }
-                blob.durationMs?.let { ms ->
-                    if (ms > 0) add("duration ${ms / 1000}")
-                }
-            }.toTypedArray()
-        }
+    private fun blocksToImetaTags(blocks: List<ComposeBlock>): List<Array<String>> {
+        return blocks
+            .filterIsInstance<ComposeBlock.Attachment>()
+            .mapNotNull { (it.state as? AttachmentState.Uploaded)?.blob }
+            .map { blob ->
+                buildList {
+                    add("imeta")
+                    add("url ${blob.url}")
+                    add("m ${blob.mimeType}")
+                    add("x ${blob.sha256}")
+                    add("size ${blob.sizeBytes}")
+                    blob.dimensions?.let { (w, h) -> add("dim ${w}x${h}") }
+                    blob.blurhash?.let { add("blurhash $it") }
+                    blob.thumbnailUrl?.let { add("thumb $it") }
+                    blob.durationMs?.let { ms ->
+                        if (ms > 0) add("duration ${ms / 1000}")
+                    }
+                }.toTypedArray()
+            }
+    }
 }
