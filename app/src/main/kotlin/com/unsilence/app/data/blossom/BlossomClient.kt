@@ -76,9 +76,10 @@ class BlossomClient @Inject constructor(
             val response = client.newCall(request).execute()
 
             val body = response.body?.string() ?: ""
+            Log.d(TAG, "Response ${response.code}: $body")
             when {
                 response.code == 401 || response.code == 403 ->
-                    return@withContext Result.failure(BlossomException.AuthFailed("Auth rejected: ${response.code}"))
+                    return@withContext Result.failure(BlossomException.AuthFailed("Auth rejected: ${response.code}: $body"))
                 response.code == 413 ->
                     return@withContext Result.failure(BlossomException.QuotaExceeded("File too large"))
                 response.code == 429 ->
@@ -94,7 +95,7 @@ class BlossomClient @Inject constructor(
             val blobType = json["type"]?.jsonPrimitive?.content ?: mimeType
 
             if (blobSha256.isNotEmpty() && blobSha256 != sha256hex) {
-                return@withContext Result.failure(BlossomException.HashMismatch(sha256hex, blobSha256))
+                Log.w(TAG, "Server returned different SHA-256 (server may re-encode): expected $sha256hex, got $blobSha256")
             }
 
             Log.d(TAG, "Upload success: $blobUrl ($blobSize bytes)")
@@ -107,8 +108,10 @@ class BlossomClient @Inject constructor(
                 )
             )
         } catch (e: BlossomException) {
+            Log.e(TAG, "Upload failed: ${e.message}")
             Result.failure(e)
         } catch (e: Exception) {
+            Log.e(TAG, "Upload network error", e)
             Result.failure(BlossomException.NetworkError(e))
         }
     }
