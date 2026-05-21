@@ -547,7 +547,8 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             // ── Quote-compose overlay ─────────────────────────────────────────
             quoteNoteId?.let { noteId ->
                 ComposeScreen(
-                    onDismiss = { quoteNoteId = null },
+                    quoteEventId = noteId,
+                    onDismiss    = { quoteNoteId = null },
                 )
             }
 
