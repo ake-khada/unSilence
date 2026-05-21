@@ -400,12 +400,12 @@ class EventProcessor @Inject constructor(
             Log.d(TAG, "Kind-3 direct path: pubkey=${dto.pubkey.take(8)}… ${follows.size} follows (createdAt=${dto.createdAt})")
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
-        // 10002 for outbox prefetch, 10006/10007/10012/30002 for relay config
+        // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
         // UI, 30385 for trust scores, 30166 for relay monitors (hundreds arrive
         // in burst — capacity-2000 channel handles the largest observed burst).
         // The drainer flushes via insertBatch so per-event signal bumps coalesce.
         // Kind-10012 relay set refs are resolved inside flushControlBatch.
-        if (dto.kind in setOf(10000, 10002, 10006, 10007, 10012, 30002, 30166, 30385)) {
+        if (dto.kind in setOf(10000, 10002, 10006, 10007, 10012, 10063, 30002, 30166, 30385)) {
             controlChannel.trySend(nostrEvent)
         }
 

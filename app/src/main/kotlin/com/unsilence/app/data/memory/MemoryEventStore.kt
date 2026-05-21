@@ -44,7 +44,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 6
+private const val SNAPSHOT_BINARY_VERSION = 7
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -201,6 +201,10 @@ class MemoryEventStore @Inject constructor(
     /** Checks if an event was self-published by MuteListRepository.
      *  Wired by AppBootstrapper to avoid re-processing our own echoes. */
     @Volatile internal var isSelfPublishedCheck: ((String) -> Boolean) = { false }
+
+    // ─── Blossom servers (kind 10063 / NIP-B7) ─────────────────────────────────
+    // Key: pubkey → ordered list of server URLs (replaceable event, last-write-wins)
+    private val blossomServersByPubkey = ConcurrentHashMap<String, List<String>>()
 
     // ─── Trust scores (kind 30385) ────────────────────────────────────────────
     private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
@@ -529,6 +533,7 @@ class MemoryEventStore @Inject constructor(
             10006 -> handleBlocked(event, dirty)
             10007 -> handleSearchRelays(event, dirty)
             10012 -> handleFavorites(event, dirty)
+            10063 -> handleBlossomServers(event)
             30002 -> {
                 handleParameterizedReplaceable(event)
                 handleRelaySetMaterialized(event, dirty)
@@ -1098,6 +1103,26 @@ class MemoryEventStore @Inject constructor(
         if (dirty != null) dirty.trustScore = true
         else _trustScoreSignal.value = System.nanoTime()
     }
+
+    // ─── Kind 10063: Blossom server list (NIP-B7 / BUD-03) ────────────────
+
+    private fun handleBlossomServers(event: NostrEvent) {
+        val key = "${event.pubkey}:10063"
+        val existingTs = relayKindCreatedAt[key]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val servers = event.tags
+            .filter { it.size >= 2 && it[0] == "server" }
+            .map { it[1] }
+            .filter { it.startsWith("https://") || it.startsWith("http://") }
+
+        relayKindCreatedAt[key] = event.createdAt
+        blossomServersByPubkey[event.pubkey] = servers
+    }
+
+    /** Ordered blossom server URLs for [pubkey], or empty if no kind-10063 seen. */
+    fun blossomServersFor(pubkey: String): List<String> =
+        blossomServersByPubkey[pubkey] ?: emptyList()
 
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
@@ -2861,6 +2886,14 @@ class MemoryEventStore @Inject constructor(
                     d.writeStrOrNull(z.comment)
                 }
             }
+
+            // V7: Blossom server lists (kind 10063)
+            val blossomServers = blossomServersByPubkey.toMap()
+            d.writeInt(blossomServers.size)
+            for ((pubkey, servers) in blossomServers) {
+                d.writeStr(pubkey); d.writeInt(servers.size)
+                for (url in servers) d.writeStr(url)
+            }
         }
 
         val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
@@ -3059,6 +3092,18 @@ class MemoryEventStore @Inject constructor(
                     list.add(ZapDetail(input.readStr(), input.readLong(), input.readStrOrNull()))
                 }
                 zapDetailsByTarget[id] = list
+            }
+        }
+
+        // V7: Blossom server lists (absent in V5-V6 snapshots)
+        if (version >= 7) {
+            val blossomN = input.readInt()
+            if (blossomN < 0 || blossomN > 100_000) throw IOException("Invalid blossom server count: $blossomN")
+            for (i in 0 until blossomN) {
+                val pubkey = input.readStr(); val n = input.readInt()
+                val servers = ArrayList<String>(n)
+                for (j in 0 until n) servers.add(input.readStr())
+                blossomServersByPubkey[pubkey] = servers
             }
         }
 
@@ -3301,6 +3346,7 @@ class MemoryEventStore @Inject constructor(
             10006 -> handleBlocked(event, sink)
             10007 -> handleSearchRelays(event, sink)
             10012 -> handleFavorites(event, sink)
+            10063 -> handleBlossomServers(event)
             30002 -> {
                 handleParameterizedReplaceable(event)
                 handleRelaySetMaterialized(event, sink)
@@ -3509,6 +3555,7 @@ class MemoryEventStore @Inject constructor(
         relayKindCreatedAt.clear()
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
+        blossomServersByPubkey.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         reactedTargetsByActor.clear()
@@ -3575,6 +3622,7 @@ class MemoryEventStore @Inject constructor(
         imetaImageDimsByEventId.clear()
         eventModelsByEventId.clear()
         relayHintsForEvent.clear()
+        blossomServersByPubkey.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L
