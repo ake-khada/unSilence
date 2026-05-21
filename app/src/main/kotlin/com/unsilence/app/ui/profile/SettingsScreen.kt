@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Drafts
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.ui.relays.RelayManagementScreen
+import com.unsilence.app.ui.settings.MediaUploadSettingsScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -53,6 +55,7 @@ import com.unsilence.app.ui.theme.Text3
 fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
+    var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
@@ -89,6 +92,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
             // ── Menu items ─────────────────────────────────────────────────────
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                 SettingsItem(icon = Icons.Filled.Dns,          label = "Relays",       onClick = { showRelays = true })
+                SettingsItem(icon = Icons.Filled.PhotoLibrary, label = "Media Upload", onClick = { showMediaUpload = true })
                 SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {}, enabled = false, subtitle = "Coming soon")
@@ -121,6 +125,9 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
 
     if (showRelays) {
         RelayManagementScreen(onDismiss = { showRelays = false })
+    }
+    if (showMediaUpload) {
+        MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
     }
     if (showFilters) {
         FiltersScreen(onDismiss = { showFilters = false })
