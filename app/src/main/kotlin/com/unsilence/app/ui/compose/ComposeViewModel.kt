@@ -46,17 +46,31 @@ private const val TAG = "ComposeViewModel"
 sealed interface AttachmentState {
     val uri: Uri
     val id: String
+    val displayName: String
 
-    data class Idle(override val uri: Uri, override val id: String) : AttachmentState
-    data class Uploading(override val uri: Uri, override val id: String) : AttachmentState
+    data class Idle(
+        override val uri: Uri,
+        override val id: String,
+        override val displayName: String,
+    ) : AttachmentState
+
+    data class Uploading(
+        override val uri: Uri,
+        override val id: String,
+        override val displayName: String,
+    ) : AttachmentState
+
     data class Uploaded(
         override val uri: Uri,
         override val id: String,
+        override val displayName: String,
         val blob: BlossomBlob,
     ) : AttachmentState
+
     data class Failed(
         override val uri: Uri,
         override val id: String,
+        override val displayName: String,
         val message: String,
     ) : AttachmentState
 }
@@ -128,15 +142,12 @@ class ComposeViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    fun updateComposeText(text: String) {
+    fun updateTextBlock(id: String, text: String) {
         _blocks.update { blocks ->
-            val idx = blocks.indexOfFirst { it is ComposeBlock.Text }
-            if (idx >= 0) {
-                blocks.toMutableList().also {
-                    it[idx] = ComposeBlock.Text(text)
-                }
-            } else {
-                listOf(ComposeBlock.Text(text)) + blocks
+            blocks.map { block ->
+                if (block is ComposeBlock.Text && block.id == id) {
+                    block.copy(content = text)
+                } else block
             }
         }
     }
@@ -160,15 +171,44 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun addAttachments(uris: List<Uri>) {
-        val newBlocks = uris.map { uri ->
+        val newAttachments = uris.map { uri ->
             ComposeBlock.Attachment(
                 state = AttachmentState.Idle(
                     uri = uri,
                     id = UUID.randomUUID().toString(),
+                    displayName = queryDisplayName(uri),
                 )
             )
         }
-        _blocks.update { it + newBlocks }
+        _blocks.update { blocks ->
+            val lastBlock = blocks.lastOrNull()
+            if (lastBlock is ComposeBlock.Text && lastBlock.content.isEmpty()) {
+                // Trailing empty Text already exists — insert new
+                // attachments BEFORE it, keep that Text as the
+                // type-here target.
+                blocks.dropLast(1) + newAttachments + lastBlock
+            } else {
+                // No trailing empty Text — append attachments + a
+                // fresh empty Text block for continued typing.
+                blocks + newAttachments + ComposeBlock.Text("")
+            }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(0)?.takeIf { it.isNotBlank() }
+                } else null
+            } ?: uri.lastPathSegment ?: "attachment"
+        } catch (_: Exception) {
+            uri.lastPathSegment ?: "attachment"
+        }
     }
 
     fun removeAttachment(id: String) {
@@ -188,7 +228,7 @@ class ComposeViewModel @Inject constructor(
                     block.state is AttachmentState.Failed
                 ) {
                     block.copy(
-                        state = AttachmentState.Idle(block.state.uri, block.state.id)
+                        state = AttachmentState.Idle(block.state.uri, block.state.id, block.state.displayName)
                     )
                 } else block
             }
@@ -197,7 +237,7 @@ class ComposeViewModel @Inject constructor(
 
     private suspend fun uploadAttachment(idle: AttachmentState.Idle) {
         updateAttachmentState(idle.id) {
-            AttachmentState.Uploading(idle.uri, idle.id)
+            AttachmentState.Uploading(idle.uri, idle.id, idle.displayName)
         }
 
         val server = blossomServersStore.selectedServer.value
@@ -213,10 +253,10 @@ class ComposeViewModel @Inject constructor(
 
         updateAttachmentState(idle.id) {
             result.fold(
-                onSuccess = { blob -> AttachmentState.Uploaded(idle.uri, idle.id, blob) },
+                onSuccess = { blob -> AttachmentState.Uploaded(idle.uri, idle.id, idle.displayName, blob) },
                 onFailure = { ex ->
                     Log.e(TAG, "Upload failed for ${idle.uri}", ex)
-                    AttachmentState.Failed(idle.uri, idle.id, ex.message ?: "Upload failed")
+                    AttachmentState.Failed(idle.uri, idle.id, idle.displayName, ex.message ?: "Upload failed")
                 },
             )
         }
@@ -300,11 +340,10 @@ class ComposeViewModel @Inject constructor(
 
     // ── Publishing ──────────────────────────────────────────────────────────
 
-    fun publishReply(content: String) {
+    fun publishReply() {
         val parent = replyToRow ?: return
         publishError = null
         viewModelScope.launch {
-            updateComposeText(content)
             val current = _blocks.value
             val threadRootId = parent.rootId ?: parent.id
             val replyToId = parent.id
@@ -357,10 +396,9 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
-    fun publishNote(content: String) {
+    fun publishNote() {
         publishError = null
         viewModelScope.launch {
-            updateComposeText(content)
             val current = _blocks.value
             val finalContent = blocksToContent(current)
             val imetaTags = blocksToImetaTags(current)
