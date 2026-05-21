@@ -1,6 +1,7 @@
 package com.unsilence.app.data.blossom
 
 import android.util.Log
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -24,6 +25,8 @@ data class BlossomBlob(
     val sizeBytes: Long,
     val mimeType: String,
     val dimensions: Pair<Int, Int>? = null,
+    val blurhash: String? = null,
+    val thumbnailUrl: String? = null,
 )
 
 sealed class BlossomException(message: String, cause: Throwable? = null) : Exception(message, cause) {
@@ -98,13 +101,29 @@ class BlossomClient @Inject constructor(
                 Log.w(TAG, "Server returned different SHA-256 (server may re-encode): expected $sha256hex, got $blobSha256")
             }
 
-            Log.d(TAG, "Upload success: $blobUrl ($blobSize bytes)")
+            // Extract NIP-94 metadata from response (nested under "nip94" array)
+            val nip94 = json["nip94"]?.jsonArray
+                ?.associate { entry ->
+                    val arr = entry.jsonArray
+                    val key = arr.getOrNull(0)?.jsonPrimitive?.content ?: ""
+                    val value = arr.getOrNull(1)?.jsonPrimitive?.content ?: ""
+                    key to value
+                } ?: emptyMap()
+
+            val dimensions = parseDimensions(nip94["dim"])
+            val blurhash = nip94["blurhash"]
+            val thumbnailUrl = nip94["thumb"]
+
+            Log.d(TAG, "Upload success: $blobUrl ($blobSize bytes, dim=${dimensions}, blurhash=${blurhash != null})")
             Result.success(
                 BlossomBlob(
                     url = blobUrl,
                     sha256 = blobSha256.ifEmpty { sha256hex },
                     sizeBytes = blobSize,
                     mimeType = blobType,
+                    dimensions = dimensions,
+                    blurhash = blurhash,
+                    thumbnailUrl = thumbnailUrl,
                 )
             )
         } catch (e: BlossomException) {
@@ -114,6 +133,16 @@ class BlossomClient @Inject constructor(
             Log.e(TAG, "Upload network error", e)
             Result.failure(BlossomException.NetworkError(e))
         }
+    }
+
+    /** Parse "WxH" dimension string (e.g. "100x100") to Pair(width, height). */
+    private fun parseDimensions(dim: String?): Pair<Int, Int>? {
+        if (dim == null) return null
+        val parts = dim.split("x", ignoreCase = true)
+        if (parts.size != 2) return null
+        val w = parts[0].toIntOrNull() ?: return null
+        val h = parts[1].toIntOrNull() ?: return null
+        return if (w > 0 && h > 0) w to h else null
     }
 
     private fun sha256(bytes: ByteArray): String {
