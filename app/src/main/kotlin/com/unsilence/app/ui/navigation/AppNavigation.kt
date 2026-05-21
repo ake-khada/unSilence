@@ -126,8 +126,6 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.thread.ThreadScreen
-import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
-import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -548,10 +546,8 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
 
             // ── Quote-compose overlay ─────────────────────────────────────────
             quoteNoteId?.let { noteId ->
-                val nevent = NEvent.create(noteId, null, null, null as NormalizedRelayUrl?)
                 ComposeScreen(
-                    initialText = "\n\nnostr:$nevent",
-                    onDismiss   = { quoteNoteId = null },
+                    onDismiss = { quoteNoteId = null },
                 )
             }
 

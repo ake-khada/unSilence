@@ -7,11 +7,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -22,21 +24,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -53,13 +59,12 @@ import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
 
 @Composable
 fun ComposeScreen(
     onDismiss: () -> Unit,
-    initialText: String = "",
     replyToEventId: String? = null,
     viewModel: ComposeViewModel = hiltViewModel(),
 ) {
@@ -107,90 +112,86 @@ fun ComposeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.medium),
+                    .padding(start = Spacing.medium, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onDismiss) {
-                    Text(
-                        text     = "Cancel",
-                        color    = TextSecondary,
-                        fontSize = 15.sp,
-                    )
-                }
+                Text(
+                    text = if (isReply) "Replying" else "New note",
+                    color = TextSecondary,
+                    fontSize = AppType.body,
+                    letterSpacing = 0.5.sp,
+                )
 
                 Spacer(Modifier.weight(1f))
 
-                Button(
-                    onClick  = {
-                        if (isReply) viewModel.publishReply() else viewModel.publishNote()
-                    },
-                    enabled  = canPublish,
-                    shape    = RoundedCornerShape(24.dp),
-                    colors   = ButtonDefaults.buttonColors(
-                        containerColor         = Color.White,
-                        contentColor           = Black,
-                        disabledContainerColor = Color.White.copy(alpha = 0.38f),
-                        disabledContentColor   = Black.copy(alpha = 0.38f),
-                    ),
-                    modifier = Modifier.height(36.dp),
-                ) {
-                    Text(
-                        text       = "Post",
-                        fontSize   = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
 
-            // ── Parent note preview (reply mode) ─────────────────────────────
+            // ── Reply context strip (cyan left border) ────────────────────────
             if (isReply && replyToRow != null) {
                 val parentName = replyToRow.authorDisplayName?.takeIf { it.isNotBlank() }
                     ?: replyToRow.authorName?.takeIf { it.isNotBlank() }
                     ?: "${replyToRow.pubkey.take(6)}…${replyToRow.pubkey.takeLast(4)}"
-                Column(
+                val borderColor = BrandDeep
+                Row(
                     modifier = Modifier
+                        .padding(horizontal = 14.dp, vertical = 4.dp)
                         .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium)
-                        .background(Surface2, RoundedCornerShape(8.dp))
-                        .padding(Spacing.medium),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape),
-                        ) {
-                            IdentIcon(pubkey = replyToRow.pubkey, modifier = Modifier.size(24.dp))
-                            if (!replyToRow.authorPicture.isNullOrBlank()) {
-                                AsyncImage(
-                                    model              = rememberAvatarImageRequest(replyToRow.authorPicture, 24.dp),
-                                    contentDescription = null,
-                                    contentScale       = ContentScale.Crop,
-                                    modifier           = Modifier.fillMaxSize(),
-                                )
-                            }
+                        .clip(RoundedCornerShape(0.dp, 8.dp, 8.dp, 0.dp))
+                        .background(BrandDeep.copy(alpha = 0.06f))
+                        .drawBehind {
+                            drawRect(
+                                color = borderColor,
+                                topLeft = Offset.Zero,
+                                size = Size(2.dp.toPx(), size.height),
+                            )
                         }
-                        Spacer(Modifier.width(Spacing.small))
+                        .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 10.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape),
+                    ) {
+                        IdentIcon(pubkey = replyToRow.pubkey, modifier = Modifier.size(24.dp))
+                        if (!replyToRow.authorPicture.isNullOrBlank()) {
+                            AsyncImage(
+                                model              = rememberAvatarImageRequest(replyToRow.authorPicture, 24.dp),
+                                contentDescription = null,
+                                contentScale       = ContentScale.Crop,
+                                modifier           = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text     = parentName,
-                            color    = Color.White,
-                            fontSize = AppType.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
+                            color    = TextSecondary,
+                            fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text       = replyToRow.content.take(140),
+                            color      = Color.White.copy(alpha = 0.82f),
+                            fontSize   = 13.sp,
+                            lineHeight = 18.sp,
+                            maxLines   = 2,
+                            overflow   = TextOverflow.Ellipsis,
+                        )
                     }
-                    Spacer(Modifier.height(Spacing.micro))
-                    Text(
-                        text     = replyToRow.content.take(200),
-                        color    = TextSecondary,
-                        fontSize = AppType.bodySmall,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
-                Spacer(Modifier.height(Spacing.small))
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
             }
 
             // ── Author header ────────────────────────────────────────────────
@@ -286,23 +287,74 @@ fun ComposeScreen(
                 }
             }
 
-            // ── Action row ──────────────────────────────────────────────────
+            // ── Action row (pinned bottom, keyboard-aware) ─────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = Spacing.small, vertical = Spacing.micro),
+                    .imePadding()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                IconButton(onClick = {
-                    pickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                    )
-                }) {
+                IconButton(
+                    onClick = {
+                        pickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                        )
+                    },
+                    modifier = Modifier.size(44.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Filled.AddPhotoAlternate,
-                        contentDescription = "Add photo",
+                        contentDescription = "Add media",
                         tint = BrandDeep,
-                        modifier = Modifier.size(Sizing.actionIcon),
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+
+                Spacer(Modifier.weight(1f))
+
+                // Char counter — visible only past 280 chars
+                val typedChars by remember(blocks) {
+                    derivedStateOf {
+                        blocks.filterIsInstance<ComposeBlock.Text>()
+                            .sumOf { it.content.length }
+                    }
+                }
+                if (typedChars > 280) {
+                    Text(
+                        text = "$typedChars",
+                        color = if (typedChars > 9000) Zap else TextSecondary,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(end = 4.dp),
+                    )
+                }
+
+                // Post pill
+                Button(
+                    onClick = {
+                        if (isReply) viewModel.publishReply() else viewModel.publishNote()
+                    },
+                    enabled = canPublish,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = BrandDeep,
+                        contentColor = Color.Black,
+                        disabledContainerColor = BrandDeep.copy(alpha = 0.3f),
+                        disabledContentColor = Color.Black.copy(alpha = 0.5f),
+                    ),
+                    contentPadding = PaddingValues(horizontal = 22.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = "Post",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Filled.ArrowUpward,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
                     )
                 }
             }

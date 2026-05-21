@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.compose
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +13,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -28,12 +31,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
@@ -45,14 +50,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TextBlock(
     initialText: String,
@@ -62,6 +68,9 @@ fun TextBlock(
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+
     var textValue by remember {
         mutableStateOf(
             TextFieldValue(
@@ -76,30 +85,43 @@ fun TextBlock(
     }
 
     if (autoFocus) {
-        LaunchedEffect(Unit) { focusRequester.requestFocus() }
+        LaunchedEffect(Unit) {
+            focusRequester.requestFocus()
+            bringIntoViewRequester.bringIntoView()
+        }
     }
 
-    Box(modifier = modifier) {
-        if (textValue.text.isEmpty()) {
-            Text(
-                text = placeholder,
-                color = Text3,
-                fontSize = 16.sp,
-            )
-        }
-        BasicTextField(
-            value = textValue,
-            onValueChange = { textValue = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .focusRequester(focusRequester),
-            textStyle = TextStyle(
-                color = Color.White,
-                fontSize = 16.sp,
-            ),
-            cursorBrush = SolidColor(Brand),
-        )
-    }
+    val inputStyle = TextStyle(
+        color = Color.White.copy(alpha = 0.95f),
+        fontSize = 15.sp,
+        lineHeight = 22.sp,
+    )
+
+    BasicTextField(
+        value = textValue,
+        onValueChange = { textValue = it },
+        modifier = modifier
+            .focusRequester(focusRequester)
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusChanged { state ->
+                if (state.isFocused) {
+                    scope.launch { bringIntoViewRequester.bringIntoView() }
+                }
+            },
+        textStyle = inputStyle,
+        cursorBrush = SolidColor(BrandDeep),
+        decorationBox = { innerTextField ->
+            Box {
+                if (textValue.text.isEmpty() && placeholder.isNotEmpty()) {
+                    Text(
+                        text = placeholder,
+                        style = inputStyle.copy(color = Text3),
+                    )
+                }
+                innerTextField()
+            }
+        },
+    )
 }
 
 @Composable
