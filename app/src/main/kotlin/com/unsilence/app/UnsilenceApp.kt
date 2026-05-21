@@ -13,6 +13,7 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.video.VideoFrameDecoder
 import coil3.bitmapFactoryMaxParallelism
 import coil3.request.allowHardware
 import coil3.request.allowRgb565
@@ -117,6 +118,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
                         }
                     )
                 )
+                add(VideoFrameDecoder.Factory())
             }
             .build()
     }

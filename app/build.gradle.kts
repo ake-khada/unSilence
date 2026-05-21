@@ -96,6 +96,8 @@ dependencies {
     // Media (ExoPlayer — inline autoplay + fullscreen)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)   // HLS (.m3u8) — needed by DefaultMediaSourceFactory
+    implementation(libs.media3.transformer)     // Video transcode (H.264/AAC re-encode for upload)
+    implementation(libs.media3.effect)          // Presentation.createForHeight (resolution scaling)
     implementation(libs.media3.ui)
 
     // Other

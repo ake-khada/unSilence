@@ -14,6 +14,7 @@ import com.unsilence.app.data.blossom.BlossomBlob
 import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.ImageCompressor
+import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
@@ -72,6 +73,7 @@ class ComposeViewModel @Inject constructor(
     private val blossomClient: BlossomClient,
     private val blossomServersStore: BlossomServersStore,
     private val imageCompressor: ImageCompressor,
+    private val videoTranscoder: VideoTranscoder,
 ) : ViewModel() {
 
     /** Pubkey for the avatar in the compose UI. */
@@ -119,6 +121,7 @@ class ComposeViewModel @Inject constructor(
     }
 
     init {
+        viewModelScope.launch { blossomServersStore.initialize() }
         // Auto-upload idle attachments sequentially.
         viewModelScope.launch {
             _attachments
@@ -153,35 +156,15 @@ class ComposeViewModel @Inject constructor(
             list.map { if (it.id == idle.id) AttachmentState.Uploading(idle.uri, idle.id) else it }
         }
 
-        val maxDim = blossomServersStore.imageMaxDim.value
-        val quality = blossomServersStore.imageQuality.value
         val server = blossomServersStore.selectedServer.value
+        val sourceMime = contentResolver.getType(idle.uri) ?: "application/octet-stream"
 
         val result = runCatching {
-            val rawBytes = withContext(Dispatchers.IO) {
-                contentResolver.openInputStream(idle.uri)?.use { it.readBytes() }
-                    ?: error("Could not read attachment")
-            }
-
-            // Detect source mime — for Original mode, preserve the actual type.
-            val sourceMime = contentResolver.getType(idle.uri) ?: "image/jpeg"
-
-            // Compress on IO. maxDim == 0 means Original (no resize, no re-encode).
-            val (compressed, uploadMime) = if (maxDim == 0) {
-                rawBytes to sourceMime
+            if (sourceMime.startsWith("video/")) {
+                uploadVideo(idle.uri, server)
             } else {
-                imageCompressor.compressImage(
-                    bytes = rawBytes,
-                    maxDimension = maxDim,
-                    quality = quality,
-                ) to "image/jpeg"
+                uploadImage(idle.uri, sourceMime, server)
             }
-
-            blossomClient.upload(
-                bytes = compressed,
-                mimeType = uploadMime,
-                serverUrl = server,
-            ).getOrThrow()
         }
 
         _attachments.update { list ->
@@ -195,6 +178,50 @@ class ComposeViewModel @Inject constructor(
                     },
                 )
             }
+        }
+    }
+
+    private suspend fun uploadImage(uri: Uri, sourceMime: String, server: String): BlossomBlob {
+        val maxDim = blossomServersStore.imageMaxDim.value
+        val quality = blossomServersStore.imageQuality.value
+
+        val rawBytes = withContext(Dispatchers.IO) {
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: error("Could not read attachment")
+        }
+
+        val (compressed, uploadMime) = if (maxDim == 0) {
+            rawBytes to sourceMime
+        } else {
+            imageCompressor.compressImage(
+                bytes = rawBytes,
+                maxDimension = maxDim,
+                quality = quality,
+            ) to "image/jpeg"
+        }
+
+        return blossomClient.upload(
+            bytes = compressed,
+            mimeType = uploadMime,
+            serverUrl = server,
+        ).getOrThrow()
+    }
+
+    private suspend fun uploadVideo(uri: Uri, server: String): BlossomBlob {
+        val videoQuality = blossomServersStore.videoQuality.value
+        val transcoded = videoTranscoder.transcode(uri, videoQuality)
+        try {
+            val blob = blossomClient.upload(
+                file = transcoded.file,
+                mimeType = transcoded.mimeType,
+                serverUrl = server,
+            ).getOrThrow()
+            return blob.copy(
+                durationMs = transcoded.durationMs,
+                dimensions = transcoded.width to transcoded.height,
+            )
+        } finally {
+            transcoded.file.delete()
         }
     }
 
@@ -340,6 +367,9 @@ class ComposeViewModel @Inject constructor(
                 blob.dimensions?.let { (w, h) -> add("dim ${w}x${h}") }
                 blob.blurhash?.let { add("blurhash $it") }
                 blob.thumbnailUrl?.let { add("thumb $it") }
+                blob.durationMs?.let { ms ->
+                    if (ms > 0) add("duration ${ms / 1000}")
+                }
             }.toTypedArray()
         }
 }

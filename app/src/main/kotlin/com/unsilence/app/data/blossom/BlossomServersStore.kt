@@ -44,6 +44,7 @@ private val KEY_SELECTED_SERVER = stringPreferencesKey("selected_server")
 private val KEY_SERVERS = stringSetPreferencesKey("servers")
 private val KEY_IMAGE_MAX_DIM = intPreferencesKey("image_max_dim")
 private val KEY_IMAGE_QUALITY = intPreferencesKey("image_quality")
+private val KEY_VIDEO_QUALITY = stringPreferencesKey("video_quality")
 
 @Singleton
 class BlossomServersStore @Inject constructor(
@@ -68,6 +69,9 @@ class BlossomServersStore @Inject constructor(
 
     private val _imageQuality = MutableStateFlow(85)
     val imageQuality: StateFlow<Int> = _imageQuality.asStateFlow()
+
+    private val _videoQuality = MutableStateFlow(VideoTranscoder.Quality.STANDARD)
+    val videoQuality: StateFlow<VideoTranscoder.Quality> = _videoQuality.asStateFlow()
 
     private var publishJob: Job? = null
     private var initialized = false
@@ -111,6 +115,9 @@ class BlossomServersStore @Inject constructor(
         _selectedServer.value = selected
         _imageMaxDim.value = prefs[KEY_IMAGE_MAX_DIM] ?: 1600
         _imageQuality.value = prefs[KEY_IMAGE_QUALITY] ?: 85
+        _videoQuality.value = prefs[KEY_VIDEO_QUALITY]?.let { name ->
+            VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
+        } ?: VideoTranscoder.Quality.STANDARD
 
         // Persist to DataStore
         persistServers(servers, selected)
@@ -157,6 +164,13 @@ class BlossomServersStore @Inject constructor(
         _imageQuality.value = q
         editMutex.withLock {
             dataStore.edit { it[KEY_IMAGE_QUALITY] = q }
+        }
+    }
+
+    suspend fun setVideoQuality(quality: VideoTranscoder.Quality) {
+        _videoQuality.value = quality
+        editMutex.withLock {
+            dataStore.edit { it[KEY_VIDEO_QUALITY] = quality.name }
         }
     }
 

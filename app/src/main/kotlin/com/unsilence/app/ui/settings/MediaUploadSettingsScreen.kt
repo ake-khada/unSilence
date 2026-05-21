@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.BuildConfig
+import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Like
@@ -77,6 +78,7 @@ fun MediaUploadSettingsScreen(
     val servers by viewModel.servers.collectAsState()
     val imageMaxDim by viewModel.imageMaxDim.collectAsState()
     val imageQuality by viewModel.imageQuality.collectAsState()
+    val videoQuality by viewModel.videoQuality.collectAsState()
     var showAddDialog by remember { mutableStateOf(false) }
 
     Box(
@@ -224,6 +226,40 @@ fun MediaUploadSettingsScreen(
                     onValueChange = { viewModel.setImageQuality(qualitySteps[it.toInt()]) },
                     valueRange = 0f..2f,
                     steps = 1,
+                    colors = SliderDefaults.colors(
+                        thumbColor = BrandDeep,
+                        activeTrackColor = BrandDeep,
+                        inactiveTrackColor = Surface1,
+                    ),
+                )
+
+                Spacer(Modifier.height(Spacing.large))
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Spacer(Modifier.height(Spacing.large))
+
+                // ── Video upload section ────────────────────────────────
+                Text(
+                    text = "Video upload",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(Spacing.medium))
+
+                val videoSteps = VideoTranscoder.Quality.entries
+                val videoIndex = videoSteps.indexOf(videoQuality).takeIf { it >= 0 } ?: 0
+
+                Text(
+                    text = "Quality: ${videoSteps[videoIndex].label}",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(Spacing.micro))
+                Slider(
+                    value = videoIndex.toFloat(),
+                    onValueChange = { viewModel.setVideoQuality(videoSteps[it.toInt()]) },
+                    valueRange = 0f..(videoSteps.size - 1).toFloat(),
+                    steps = videoSteps.size - 2,
                     colors = SliderDefaults.colors(
                         thumbColor = BrandDeep,
                         activeTrackColor = BrandDeep,
