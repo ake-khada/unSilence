@@ -4,7 +4,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,21 +16,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,22 +33,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,10 +50,7 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
-import com.unsilence.app.ui.theme.Like
-import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
@@ -86,19 +66,11 @@ fun ComposeScreen(
     val pubkeyHex      = viewModel.pubkeyHex
     val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val userEntity    by viewModel.userEntity.collectAsStateWithLifecycle()
-    val attachments   by viewModel.attachments.collectAsStateWithLifecycle()
+    val blocks        by viewModel.blocks.collectAsStateWithLifecycle()
     val canPublish    by viewModel.canPublish.collectAsStateWithLifecycle()
-    // Cursor at position 0 so the user types above a pre-filled quote link.
-    var textValue    by remember { mutableStateOf(TextFieldValue(initialText, TextRange(0))) }
-    val focusRequester = remember { FocusRequester() }
 
     val isReply = replyToEventId != null
     val replyToRow = viewModel.replyToRow
-
-    // Keep ViewModel's text state in sync for canPublish.
-    LaunchedEffect(textValue.text) {
-        viewModel.updateComposeText(textValue.text)
-    }
 
     // Reset ViewModel state on open (activity-scoped VM survives recomposition)
     LaunchedEffect(Unit) {
@@ -109,10 +81,6 @@ fun ComposeScreen(
     // Auto-dismiss once the note is published
     LaunchedEffect(viewModel.published) {
         if (viewModel.published) onDismiss()
-    }
-
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
     }
 
     // ── Photo picker ────────────────────────────────────────────────────────
@@ -154,8 +122,7 @@ fun ComposeScreen(
 
                 Button(
                     onClick  = {
-                        val text = textValue.text.trim()
-                        if (isReply) viewModel.publishReply(text) else viewModel.publishNote(text)
+                        if (isReply) viewModel.publishReply() else viewModel.publishNote()
                     },
                     enabled  = canPublish,
                     shape    = RoundedCornerShape(24.dp),
@@ -280,46 +247,41 @@ fun ComposeScreen(
                 }
             }
 
-            // ── Compose area ────────────────────────────────────────────────
-            BasicTextField(
-                value         = textValue,
-                onValueChange = { textValue = it },
-                modifier      = Modifier
+            // ── Block list ──────────────────────────────────────────────────
+            Column(
+                modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(horizontal = Spacing.medium)
-                    .focusRequester(focusRequester),
-                textStyle     = TextStyle(
-                    color    = Color.White,
-                    fontSize = 16.sp,
-                ),
-                cursorBrush   = SolidColor(Brand),
-                decorationBox = { inner ->
-                    if (textValue.text.isEmpty()) {
-                        Text(
-                            text     = if (isReply) "Write your reply…" else "Break the silence...",
-                            color    = TextSecondary,
-                            fontSize = 16.sp,
-                        )
-                    }
-                    inner()
-                },
-            )
-
-            // ── Attachment thumbnails ───────────────────────────────────────
-            if (attachments.isNotEmpty()) {
-                LazyRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.small),
-                ) {
-                    items(attachments, key = { it.id }) { att ->
-                        AttachmentChip(
-                            state = att,
-                            onRemove = { viewModel.removeAttachment(att.id) },
-                            onRetry = { viewModel.retryAttachment(att.id) },
-                        )
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = Spacing.medium),
+                verticalArrangement = Arrangement.spacedBy(Spacing.small),
+            ) {
+                val firstTextId = blocks.firstOrNull { it is ComposeBlock.Text }?.id
+                blocks.forEach { block ->
+                    key(block.id) {
+                        when (block) {
+                            is ComposeBlock.Text -> {
+                                TextBlock(
+                                    initialText = block.content,
+                                    onTextChange = { viewModel.updateTextBlock(block.id, it) },
+                                    autoFocus = true,
+                                    placeholder = when {
+                                        block.id != firstTextId -> ""
+                                        isReply -> "Write your reply\u2026"
+                                        else -> "Break the silence..."
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                            is ComposeBlock.Attachment -> {
+                                AttachmentBlock(
+                                    state = block.state,
+                                    onRemove = { viewModel.removeAttachment(block.state.id) },
+                                    onRetry = { viewModel.retryAttachment(block.state.id) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -356,105 +318,6 @@ fun ComposeScreen(
                         .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun AttachmentChip(
-    state: AttachmentState,
-    onRemove: () -> Unit,
-    onRetry: () -> Unit,
-) {
-    val chipSize = 80.dp
-
-    Box(
-        modifier = Modifier
-            .size(chipSize)
-            .clip(RoundedCornerShape(8.dp))
-            .then(
-                if (state is AttachmentState.Failed) {
-                    Modifier.clickable(onClick = onRetry)
-                } else {
-                    Modifier
-                }
-            ),
-    ) {
-        // Thumbnail from local URI
-        AsyncImage(
-            model = state.uri,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize()
-                .then(
-                    if (state is AttachmentState.Uploaded) Modifier
-                    else Modifier.alpha(0.5f)
-                ),
-        )
-
-        // State overlay
-        when (state) {
-            is AttachmentState.Idle, is AttachmentState.Uploading -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = BrandDeep,
-                        strokeWidth = 2.dp,
-                    )
-                }
-            }
-            is AttachmentState.Uploaded -> {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .size(16.dp)
-                        .background(Black.copy(alpha = 0.7f), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Check,
-                        contentDescription = "Uploaded",
-                        tint = Mint,
-                        modifier = Modifier.size(12.dp),
-                    )
-                }
-            }
-            is AttachmentState.Failed -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.ErrorOutline,
-                        contentDescription = "Upload failed — tap to retry",
-                        tint = Like,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-        }
-
-        // Remove button — always visible top-right
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(2.dp)
-                .size(22.dp)
-                .background(Black.copy(alpha = 0.7f), CircleShape)
-                .clickable(onClick = onRemove),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Close,
-                contentDescription = "Remove",
-                tint = Color.White,
-                modifier = Modifier.size(14.dp),
-            )
         }
     }
 }
