@@ -21,6 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -37,6 +39,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,12 +49,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.unsilence.app.BuildConfig
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
+import com.unsilence.app.ui.theme.Like
+import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -221,6 +230,115 @@ fun MediaUploadSettingsScreen(
                         inactiveTrackColor = Surface1,
                     ),
                 )
+
+                // ── Debug smoke test ─────────────────────────────────────
+                if (BuildConfig.DEBUG) {
+                    val smokeState by viewModel.smokeTestState.collectAsState()
+                    val clipboard = LocalClipboardManager.current
+
+                    Spacer(Modifier.height(Spacing.large))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    Spacer(Modifier.height(Spacing.large))
+
+                    Text(
+                        text = "Debug — Upload test",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(Spacing.micro))
+                    Text(
+                        text = "Generates a 100×100 PNG and uploads to the selected server. Throwaway scaffolding — removed before release.",
+                        color = Text3,
+                        fontSize = 11.sp,
+                    )
+                    Spacer(Modifier.height(Spacing.medium))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Surface1, RoundedCornerShape(8.dp))
+                            .clickable(enabled = smokeState !is SmokeTestState.Running) {
+                                viewModel.runSmokeTest()
+                            }
+                            .padding(Spacing.medium),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (smokeState is SmokeTestState.Running) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(Sizing.actionIcon),
+                                color = BrandDeep,
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Filled.CloudUpload,
+                                contentDescription = "Test upload",
+                                tint = BrandDeep,
+                                modifier = Modifier.size(Sizing.actionIcon),
+                            )
+                        }
+                        Spacer(Modifier.width(Spacing.small))
+                        Text(
+                            text = when (smokeState) {
+                                is SmokeTestState.Idle -> "Run test upload"
+                                is SmokeTestState.Running -> "Uploading…"
+                                is SmokeTestState.Success -> "Upload succeeded"
+                                is SmokeTestState.Failure -> "Upload failed"
+                            },
+                            color = when (smokeState) {
+                                is SmokeTestState.Success -> Mint
+                                is SmokeTestState.Failure -> Like
+                                else -> Color.White
+                            },
+                            fontSize = 14.sp,
+                        )
+                    }
+
+                    when (val state = smokeState) {
+                        is SmokeTestState.Success -> {
+                            Spacer(Modifier.height(Spacing.small))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = state.url,
+                                        color = BrandDeep,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = "SHA-256: ${state.sha256.take(16)}…  •  ${state.sizeBytes} bytes",
+                                        color = Text3,
+                                        fontSize = 11.sp,
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    clipboard.setText(AnnotatedString(state.url))
+                                }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.ContentCopy,
+                                        contentDescription = "Copy URL",
+                                        tint = TextSecondary,
+                                        modifier = Modifier.size(Sizing.actionIcon),
+                                    )
+                                }
+                            }
+                        }
+                        is SmokeTestState.Failure -> {
+                            Spacer(Modifier.height(Spacing.small))
+                            Text(
+                                text = state.message,
+                                color = Like,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        else -> {}
+                    }
+                }
 
                 Spacer(Modifier.height(Spacing.xxl))
             }
