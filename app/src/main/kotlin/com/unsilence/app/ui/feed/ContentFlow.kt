@@ -116,6 +116,14 @@ internal fun ContentFlow(
                         }
                     }
 
+                    // Strip blank-line padding at media boundaries so text
+                    // sits tight against adjacent images/videos. The \n\n
+                    // separators in the content string create visible gaps
+                    // without this trim.
+                    trimTextRunEdges(runForInline)
+
+                    if (runForInline.isEmpty()) { i = j; continue }
+
                     InlineText(
                         segments      = runForInline,
                         lookupProfile = lookupProfile,
@@ -129,7 +137,7 @@ internal fun ContentFlow(
                         modifier      = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = hPad)
-                            .padding(bottom = Spacing.micro),
+                            .padding(bottom = Spacing.small),
                     )
 
                     // Render OG preview cards for the links we removed from
@@ -247,5 +255,31 @@ internal fun ContentFlow(
                     .clickable { expanded = !expanded },
             )
         }
+    }
+}
+
+/**
+ * Trims leading blank lines from the first Text segment and trailing blank
+ * lines from the last Text segment in a run. Removes segments that become
+ * empty after trimming. This keeps text tight against adjacent media
+ * (images, videos) without the paragraph-level gaps that \n\n separators
+ * create in the content string.
+ */
+private fun trimTextRunEdges(run: MutableList<Segment>) {
+    // Trim leading newlines from first Text
+    while (run.isNotEmpty() && run.first() is Segment.Text) {
+        val first = run.first() as Segment.Text
+        val trimmed = first.text.trimStart('\n')
+        if (trimmed.isEmpty()) { run.removeFirst(); continue }
+        if (trimmed != first.text) run[0] = Segment.Text(trimmed)
+        break
+    }
+    // Trim trailing newlines from last Text
+    while (run.isNotEmpty() && run.last() is Segment.Text) {
+        val last = run.last() as Segment.Text
+        val trimmed = last.text.trimEnd('\n')
+        if (trimmed.isEmpty()) { run.removeLast(); continue }
+        if (trimmed != last.text) run[run.lastIndex] = Segment.Text(trimmed)
+        break
     }
 }
