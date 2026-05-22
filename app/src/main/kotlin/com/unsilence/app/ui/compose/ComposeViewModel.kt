@@ -84,6 +84,18 @@ sealed interface AttachmentState {
     ) : AttachmentState
 }
 
+// ── Send state (confirm step) ───────────────────────────────────────────────
+
+sealed interface SendState {
+    data object Composing : SendState
+    data class Confirming(
+        val isReply: Boolean,
+        val previewContent: String,
+        val previewTagsJson: String,
+    ) : SendState
+    data object Sent : SendState
+}
+
 @HiltViewModel
 class ComposeViewModel @Inject constructor(
     private val keyManager: KeyManager,
@@ -96,6 +108,9 @@ class ComposeViewModel @Inject constructor(
     private val blossomServersStore: BlossomServersStore,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
+    val ogFetcher: com.unsilence.app.data.relay.OgFetcher,
+    val imageDimensionCache: com.unsilence.app.ui.feed.ImageDimensionCache,
+    val videoThumbnailCache: com.unsilence.app.ui.feed.VideoThumbnailCache,
 ) : ViewModel() {
 
     /** Pubkey for the avatar in the compose UI. */
@@ -150,6 +165,25 @@ class ComposeViewModel @Inject constructor(
             (hasText || hasUploaded) && !inFlight
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    // ── Send state (confirm step) ────────────────────────────────────────
+
+    private val _sendState = MutableStateFlow<SendState>(SendState.Composing)
+    val sendState: StateFlow<SendState> = _sendState.asStateFlow()
+
+    // ── ContentFlow lookup delegates ───────────────────────────────────────
+
+    suspend fun lookupProfile(pubkey: String): com.unsilence.app.data.memory.UserEntity? =
+        memoryEventStore.getUserEntity(pubkey)
+
+    fun lookupEvent(eventId: String): com.unsilence.app.data.memory.EventEntity? =
+        memoryEventStore.getEventEntity(eventId)
+
+    fun lookupModel(eventId: String): com.unsilence.app.data.model.EventModel? =
+        memoryEventStore.getOrParseEventModel(eventId)
+
+    suspend fun fetchOgMetadata(url: String): com.unsilence.app.data.relay.OgMetadata? =
+        ogFetcher.fetch(url)
 
     fun updateTextBlock(id: String, text: String) {
         _blocks.update { blocks ->
@@ -419,6 +453,7 @@ class ComposeViewModel @Inject constructor(
         replyToRow = null
         quoteRow = null
         quoteEventId = null
+        _sendState.value = SendState.Composing
         _blocks.value = listOf(ComposeBlock.Text(""))
     }
 
@@ -447,6 +482,69 @@ class ComposeViewModel @Inject constructor(
         quoteEventId = eventId
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         quoteRow = rows.firstOrNull()
+    }
+
+    // ── Confirm flow ────────────────────────────────────────────────────────
+
+    fun requestPublish(isReply: Boolean) {
+        if (_sendState.value !is SendState.Composing) return
+        if (!canPublish.value) return
+
+        val current = _blocks.value
+        val content = buildPreviewContent(current, isReply)
+        val tags = buildPreviewTags(current, isReply)
+        val tagsJsonStr = tagsToJson(tags.map { it.toList() })
+
+        _sendState.value = SendState.Confirming(
+            isReply = isReply,
+            previewContent = content,
+            previewTagsJson = tagsJsonStr,
+        )
+    }
+
+    fun confirmPublish() {
+        val state = _sendState.value as? SendState.Confirming ?: return
+        if (state.isReply) publishReply() else publishNote()
+        _sendState.value = SendState.Sent
+    }
+
+    fun cancelSend() {
+        _sendState.value = SendState.Composing
+    }
+
+    private fun buildPreviewContent(blocks: List<ComposeBlock>, isReply: Boolean): String {
+        var content = blocksToContent(blocks)
+        val qId = quoteEventId
+        val quotedAuthor = quoteRow?.pubkey
+        if (!isReply && qId != null) {
+            val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+                .create(qId, quotedAuthor, null, null as com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl?)
+            content = if (content.isBlank()) "nostr:$nevent"
+                else "$content\n\nnostr:$nevent"
+        }
+        return content
+    }
+
+    private fun buildPreviewTags(blocks: List<ComposeBlock>, isReply: Boolean): List<Array<String>> {
+        val tags = mutableListOf<Array<String>>()
+        tags.addAll(blocksToImetaTags(blocks))
+        if (isReply) {
+            val parent = replyToRow ?: return tags
+            val threadRootId = parent.rootId ?: parent.id
+            tags.add(arrayOf("e", threadRootId, "", "root"))
+            if (parent.id != threadRootId) {
+                tags.add(arrayOf("e", parent.id, "", "reply"))
+            }
+            tags.add(arrayOf("p", parent.pubkey))
+        } else {
+            val qId = quoteEventId
+            val quotedAuthor = quoteRow?.pubkey
+            if (qId != null) {
+                tags.add(arrayOf("q", qId, "", quotedAuthor ?: ""))
+                if (quotedAuthor != null) tags.add(arrayOf("p", quotedAuthor))
+            }
+        }
+        return tags
     }
 
     // ── Publishing ──────────────────────────────────────────────────────────
