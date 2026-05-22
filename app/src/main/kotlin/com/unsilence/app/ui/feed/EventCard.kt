@@ -78,6 +78,7 @@ fun EventCard(
     onQuote: (String) -> Unit,
     onArticleClick: (FeedRow) -> Unit,
     onReact: () -> Unit,
+    onReactLongPress: () -> Unit = {},
     onRepost: () -> Unit,
     onZap: (Long) -> Unit,
     onSaveNwcUri: (String) -> Unit,
@@ -216,36 +217,35 @@ fun EventCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.White.copy(alpha = flashAlpha.value * 0.05f))
-            .then(
-                if (onLongPress != null) Modifier.pointerInput(onLongPress) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        // Wait for the long-press timeout. If the user lifts or drags
-                        // before it expires, withTimeoutOrNull returns the result;
-                        // if the timeout fires first, it returns null → long press.
-                        val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val ch = event.changes.firstOrNull { it.id == down.id }
-                                if (ch == null || ch.changedToUp()) return@withTimeoutOrNull true
-                                val dist = (ch.position - down.position).getDistance()
-                                if (dist > viewConfiguration.touchSlop) return@withTimeoutOrNull true
-                            }
-                            @Suppress("UNREACHABLE_CODE") true
-                        }
-                        if (cancelled == null) {
-                            onLongPress()
-                            // Consume remaining events so child onClick doesn't fire
-                            do {
-                                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                ev.changes.forEach { it.consume() }
-                            } while (ev.changes.any { it.pressed })
-                        }
-                    }
-                } else Modifier,
-            ),
+            .background(Color.White.copy(alpha = flashAlpha.value * 0.05f)),
     ) {
+        // Content area — card-level long-press lives here so it doesn't
+        // intercept action-bar gestures (heart long-press → emoji picker,
+        // zap long-press → amount picker).
+        Column(
+            modifier = if (onLongPress != null) Modifier.pointerInput(onLongPress) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val ch = event.changes.firstOrNull { it.id == down.id }
+                            if (ch == null || ch.changedToUp()) return@withTimeoutOrNull true
+                            val dist = (ch.position - down.position).getDistance()
+                            if (dist > viewConfiguration.touchSlop) return@withTimeoutOrNull true
+                        }
+                        @Suppress("UNREACHABLE_CODE") true
+                    }
+                    if (cancelled == null) {
+                        onLongPress()
+                        do {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            ev.changes.forEach { it.consume() }
+                        } while (ev.changes.any { it.pressed })
+                    }
+                }
+            } else Modifier,
+        ) {
         // Repost header (kind 6 only)
         if (model.repost != null) {
             RepostHeader(
@@ -368,6 +368,7 @@ fun EventCard(
                 }
             }
         }
+        } // end content-area Column (card-level long-press scope)
 
         // Action bar + inline engagement drawer
         // Optimistic: enabled while profile not yet resolved (null).
@@ -391,12 +392,13 @@ fun EventCard(
             drawerOpen      = drawerOpen,
             onChevronTap    = { drawerOpen = !drawerOpen },
             onNoteClick     = { onNoteClick(model.navigateId) },
-            onComment       = onComment,
-            onReact         = onReact,
-            onRepost        = onRepost,
-            onQuote         = onQuote,
-            onZap           = onZap,
-            onSaveNwcUri    = onSaveNwcUri,
+            onComment          = onComment,
+            onReact            = onReact,
+            onReactLongPress   = onReactLongPress,
+            onRepost           = onRepost,
+            onQuote            = onQuote,
+            onZap              = onZap,
+            onSaveNwcUri       = onSaveNwcUri,
         )
 
         AnimatedVisibility(

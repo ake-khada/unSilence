@@ -7,6 +7,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.settings.SettingsStore
+import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -60,12 +62,17 @@ class NoteActionsViewModel @Inject constructor(
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
+    private val settingsStore: SettingsStore,
     val sharedPlayerHolder: SharedPlayerHolder,
     val videoThumbnailCache: VideoThumbnailCache,
     val imageDimensionCache: ImageDimensionCache,
 ) : ViewModel() {
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
+
+    init {
+        viewModelScope.launch { settingsStore.initialize() }
+    }
 
     /**
      * True if a nostr+walletconnect:// URI has been saved.
@@ -83,6 +90,33 @@ class NoteActionsViewModel @Inject constructor(
 
     /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
     fun getEventModel(eventId: String) = memoryEventStore.getOrParseEventModel(eventId)
+
+    // ── Custom emoji picker data ─────────────────────────────────────────────
+
+    /** All resolved custom emoji for the logged-in user (inline + subscribed sets). */
+    fun getSubscribedEmojis(): List<CustomEmoji> =
+        pubkeyHex?.let { memoryEventStore.resolvedEmojisFor(it) } ?: emptyList()
+
+    /** Pinned emoji shortcodes (DataStore-backed). */
+    val pinnedEmojiShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
+
+    /** Toggle pin state for a shortcode. */
+    fun togglePinnedEmoji(shortcode: String) {
+        viewModelScope.launch {
+            val current = settingsStore.pinnedEmojiShortcodes.value
+            val updated = if (shortcode in current) current - shortcode else current + shortcode
+            settingsStore.setPinnedEmojiShortcodes(updated)
+        }
+    }
+
+    /** Resolve pinned shortcodes to full CustomEmoji objects (for quick strip). */
+    fun getPinnedEmojis(): List<CustomEmoji> {
+        val pinned = settingsStore.pinnedEmojiShortcodes.value
+        if (pinned.isEmpty()) return emptyList()
+        val all = getSubscribedEmojis()
+        val byShortcode = all.associateBy { it.shortcode }
+        return pinned.mapNotNull { byShortcode[it] }
+    }
 
     /**
      * Set of event IDs the current user has reacted to.
@@ -154,18 +188,30 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Public actions ────────────────────────────────────────────────────────
 
-    fun react(eventId: String, eventPubkey: String) {
+    fun react(
+        eventId: String,
+        eventPubkey: String,
+        emoji: String = "+",
+        customEmojiUrl: String? = null,
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val nowSeconds = System.currentTimeMillis() / 1000L
+
+            val baseTags = arrayOf(
+                arrayOf("e", eventId),
+                arrayOf("p", eventPubkey),
+            )
+            // NIP-25 + NIP-30: custom emoji reactions include an ["emoji", shortcode, url] tag
+            val tags = if (customEmojiUrl != null) {
+                val shortcode = emoji.removePrefix(":").removeSuffix(":")
+                baseTags + arrayOf(arrayOf("emoji", shortcode, customEmojiUrl))
+            } else baseTags
 
             val template = EventTemplate<ReactionEvent>(
                 createdAt = nowSeconds,
                 kind      = ReactionEvent.KIND,
-                tags      = arrayOf(
-                    arrayOf("e", eventId),
-                    arrayOf("p", eventPubkey),
-                ),
-                content   = "+",
+                tags      = tags,
+                content   = emoji,
             )
             val signed = signingManager.sign(template) ?: run {
                 _actionError.tryEmit("React failed — signing rejected (check Amber permissions)")

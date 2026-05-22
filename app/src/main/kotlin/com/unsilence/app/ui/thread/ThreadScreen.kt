@@ -89,6 +89,12 @@ fun ThreadScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar = LocalShowSnackbar.current
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+
+    // ── Emoji reaction picker state ─────────────────────────────────────────
+    var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var showFullEmojiPicker by remember { mutableStateOf(false) }
+    val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
+    val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     var didScrollToFocus by remember { mutableStateOf(false) }
 
@@ -187,6 +193,10 @@ fun ThreadScreen(
                                     onQuote             = onQuote,
                                     onArticleClick      = { articleRow = it },
                                     onReact             = { actionsViewModel.react(note.id, note.pubkey) },
+                                    onReactLongPress    = {
+                                        emojiReactTarget = note.id to note.pubkey
+                                        if (actionsViewModel.getPinnedEmojis().isEmpty()) showFullEmojiPicker = true
+                                    },
                                     onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
                                     onZap               = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
                                     onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
@@ -271,6 +281,10 @@ fun ThreadScreen(
                                         onQuote             = onQuote,
                                         onArticleClick      = { articleRow = it },
                                         onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                        onReactLongPress    = {
+                                            emojiReactTarget = reply.id to reply.pubkey
+                                            if (actionsViewModel.getPinnedEmojis().isEmpty()) showFullEmojiPicker = true
+                                        },
                                         onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
                                         onZap               = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
                                         onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
@@ -313,6 +327,41 @@ fun ThreadScreen(
             isZapLoading    = row.id in zapLoadingIds,
             extraZapSats    = optimisticSats[row.id] ?: 0L,
             zapFlash        = zapFlash,
+        )
+    }
+
+    // ── Emoji quick strip ───────────────────────────────────────────────────
+    emojiReactTarget?.let { (eventId, pubkey) ->
+        val pinned = remember { actionsViewModel.getPinnedEmojis() }
+        if (pinned.isNotEmpty() && !showFullEmojiPicker) {
+            com.unsilence.app.ui.feed.EmojiQuickStrip(
+                pinnedEmojis = pinned,
+                onSelect = { emoji ->
+                    actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                    emojiReactTarget = null
+                },
+                onOpenFullPicker = { showFullEmojiPicker = true },
+            )
+        }
+    }
+
+    // ── Full emoji picker sheet ─────────────────────────────────────────────
+    if (showFullEmojiPicker && emojiReactTarget != null) {
+        val (eventId, pubkey) = emojiReactTarget!!
+        com.unsilence.app.ui.feed.EmojiPickerSheet(
+            emojis = actionsViewModel.getSubscribedEmojis(),
+            pinnedShortcodes = pinnedShortcodes,
+            onSelect = { emoji ->
+                actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                showFullEmojiPicker = false
+                emojiReactTarget = null
+            },
+            onTogglePin = { actionsViewModel.togglePinnedEmoji(it) },
+            onOpenSettings = openEmojiSettings,
+            onDismiss = {
+                showFullEmojiPicker = false
+                emojiReactTarget = null
+            },
         )
     }
 }

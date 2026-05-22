@@ -81,6 +81,7 @@ internal fun EventActionBar(
     onNoteClick: () -> Unit,
     onComment: () -> Unit = {},
     onReact: () -> Unit,
+    onReactLongPress: () -> Unit = {},
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
     onZap: (Long) -> Unit,
@@ -143,14 +144,12 @@ internal fun EventActionBar(
             }
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            EventActionButton(
-                icon               = Icons.Filled.Favorite,
-                count              = reactionCount,
-                contentDescription = "Reactions",
-                highlighted        = hasReacted,
-                highlightColor     = Like,
-                onClick            = onReact,
-                onCountClick       = onCountClick,
+            EventReactButton(
+                count          = reactionCount,
+                hasReacted     = hasReacted,
+                onCountClick   = onCountClick,
+                onTap          = onReact,
+                onLongPress    = onReactLongPress,
             )
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -228,6 +227,45 @@ internal fun EventActionButton(
         Icon(
             imageVector        = icon,
             contentDescription = contentDescription,
+            tint               = tint,
+            modifier           = Modifier.size(Sizing.actionIcon),
+        )
+        if (count > 0) {
+            Spacer(Modifier.width(Spacing.micro))
+            Text(
+                text     = formatCount(count),
+                color    = tint,
+                fontSize = AppType.footnote,
+                modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
+            )
+        }
+    }
+}
+
+/** React button: Like-red when reacted, combinedClickable for tap (default +) and long-press (emoji picker). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun EventReactButton(
+    count: Int,
+    hasReacted: Boolean,
+    onCountClick: (() -> Unit)? = null,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val tint = if (hasReacted) Like else ActionTint
+    Row(
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier              = Modifier
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .combinedClickable(
+                onClick     = onTap,
+                onLongClick = onLongPress,
+            ),
+    ) {
+        Icon(
+            imageVector        = Icons.Filled.Favorite,
+            contentDescription = "Reactions",
             tint               = tint,
             modifier           = Modifier.size(Sizing.actionIcon),
         )

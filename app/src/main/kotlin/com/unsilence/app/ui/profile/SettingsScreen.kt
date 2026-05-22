@@ -57,6 +57,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     var showRelays by remember { mutableStateOf(false) }
     var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
+    var showCustomEmojis by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -98,7 +99,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
                 SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Security,     label = "Filters",      onClick = { showFilters = true })
                 SettingsItem(icon = Icons.Filled.AccountTree,  label = "Social Graph", onClick = {}, enabled = false, subtitle = "Coming soon")
-                SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.EmojiEmotions,label = "Custom Emojis",onClick = { showCustomEmojis = true })
                 SettingsItem(icon = Icons.Filled.Code,         label = "Console",      onClick = {}, enabled = false, subtitle = "Coming soon")
 
                 Spacer(Modifier.height(Spacing.large))
@@ -131,6 +132,9 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     }
     if (showFilters) {
         FiltersScreen(onDismiss = { showFilters = false })
+    }
+    if (showCustomEmojis) {
+        com.unsilence.app.ui.settings.CustomEmojisScreen(onDismiss = { showCustomEmojis = false })
     }
 }
 

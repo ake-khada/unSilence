@@ -59,7 +59,8 @@ data class EventActionCallbacks(
     val onAuthorClick: (pubkey: String) -> Unit = {},
     val onQuote: (String) -> Unit = {},
     val onArticleClick: (FeedRow) -> Unit = {},
-    val react: (eventId: String, pubkey: String) -> Unit = { _, _ -> },
+    val react: (eventId: String, pubkey: String, emoji: String, customEmojiUrl: String?) -> Unit = { _, _, _, _ -> },
+    val onReactLongPress: ((eventId: String, pubkey: String) -> Unit)? = null,
     val repost: (eventId: String, pubkey: String, relayUrl: String) -> Unit = { _, _, _ -> },
     val zap: (eventId: String, pubkey: String, relayUrl: String, amount: Long) -> Unit = { _, _, _, _ -> },
     val saveNwcUri: (String) -> Unit = {},
@@ -338,7 +339,10 @@ private fun EventFeedItem(
     // Use model.engagementId / model.pubkey so kind-6 reposts target
     // the ORIGINAL event, not the repost wrapper.
     val onReact = remember(model.engagementId, model.pubkey) {
-        { callbacks.react(model.engagementId, model.pubkey) }
+        { callbacks.react(model.engagementId, model.pubkey, "+", null) }
+    }
+    val onReactLongPress = remember(model.engagementId, model.pubkey) {
+        { callbacks.onReactLongPress?.invoke(model.engagementId, model.pubkey) ?: Unit }
     }
     val onRepost = remember(model.engagementId, model.pubkey, row.relayUrl) {
         { callbacks.repost(model.engagementId, model.pubkey, row.relayUrl) }
@@ -370,6 +374,7 @@ private fun EventFeedItem(
         onQuote             = callbacks.onQuote,
         onArticleClick      = callbacks.onArticleClick,
         onReact             = onReact,
+        onReactLongPress    = onReactLongPress,
         onRepost            = onRepost,
         onZap               = onZap,
         onSaveNwcUri        = callbacks.saveNwcUri,
