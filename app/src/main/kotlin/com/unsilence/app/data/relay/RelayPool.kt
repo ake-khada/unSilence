@@ -167,6 +167,9 @@ class RelayPool @Inject constructor(
     /** Auth event IDs awaiting OK response — maps eventId → relay URL. */
     private val pendingAuthEventIds = ConcurrentHashMap<String, String>()
 
+    /** Publish OK callbacks — maps eventId → callback receiving (relayUrl, success, message). */
+    private val publishOkCallbacks = ConcurrentHashMap<String, (String, Boolean, String) -> Unit>()
+
     /** Last time each relay received a message — used for idle eviction. */
     private val connectionLastActivity = ConcurrentHashMap<String, Long>()
 
@@ -2016,6 +2019,19 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Register a callback for OK messages for a specific event ID.
+     * Callback receives (relayUrl, success, message).
+     */
+    fun registerPublishCallback(eventId: String, callback: (String, Boolean, String) -> Unit) {
+        publishOkCallbacks[eventId] = callback
+    }
+
+    /** Unregister a publish OK callback. */
+    fun unregisterPublishCallback(eventId: String) {
+        publishOkCallbacks.remove(eventId)
+    }
+
+    /**
      * Publish an event to specific relay URLs. Connects if not already connected.
      * Used for replaceable events (kind 0, 3, 10002) that target write + indexer relays.
      */
@@ -2347,6 +2363,10 @@ class RelayPool @Inject constructor(
             val arr = NostrJson.parseToJsonElement(raw).jsonArray
             val eventId = arr[1].jsonPrimitive.content
             val success = arr[2].jsonPrimitive.boolean
+            val message = arr.getOrNull(3)?.jsonPrimitive?.content ?: ""
+
+            // Notify publish tracker if registered
+            publishOkCallbacks[eventId]?.invoke(conn.url, success, message)
 
             // Check if this OK is for a pending auth event
             val url = pendingAuthEventIds.remove(eventId) ?: return
@@ -2354,7 +2374,6 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "AUTH OK: relay $url accepted auth (eventId=${eventId.take(8)}…)")
                 completeAuth(conn, url)
             } else {
-                val message = arr.getOrNull(3)?.jsonPrimitive?.content ?: ""
                 Log.w(TAG, "AUTH REJECTED: relay $url rejected auth: $message")
                 authInFlight.remove(url)
             }

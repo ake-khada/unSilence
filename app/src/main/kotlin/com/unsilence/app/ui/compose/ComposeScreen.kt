@@ -34,7 +34,10 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -72,6 +75,8 @@ import com.unsilence.app.ui.feed.ComposePreviewCard
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
+import com.unsilence.app.ui.theme.Like
+import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -103,6 +108,8 @@ fun ComposeScreen(
     val replyToRow = viewModel.replyToRow
     val quoteRow = viewModel.quoteRow
     val isConfirming = sendState is SendState.Confirming
+    val isPublishing = sendState is SendState.Publishing
+    val isFailed = sendState is SendState.Failed
     val keyboardController = LocalSoftwareKeyboardController.current
 
     // Reset ViewModel state on open (activity-scoped VM survives recomposition)
@@ -123,8 +130,8 @@ fun ComposeScreen(
         if (sendState is SendState.Confirming) keyboardController?.hide()
     }
 
-    // System back during confirm → cancel
-    BackHandler(enabled = isConfirming) {
+    // System back during confirm → cancel (blocked during publishing)
+    BackHandler(enabled = isConfirming || isFailed) {
         viewModel.cancelSend()
     }
 
@@ -157,27 +164,32 @@ fun ComposeScreen(
             ) {
                 Text(
                     text = when {
+                        isPublishing -> "Publishing"
+                        isFailed -> "Failed"
                         isConfirming -> "Confirm"
                         isReply -> "Replying"
                         isQuote -> "Quoting"
                         else    -> "New note"
                     },
-                    color = TextSecondary,
+                    color = if (isFailed) Like else TextSecondary,
                     fontSize = AppType.body,
                     letterSpacing = 0.5.sp,
                 )
 
                 Spacer(Modifier.weight(1f))
 
-                IconButton(onClick = {
-                    if (isConfirming) viewModel.cancelSend() else onDismiss()
-                }) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Close",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(22.dp),
-                    )
+                // No close button during Publishing — event already broadcast
+                if (!isPublishing) {
+                    IconButton(onClick = {
+                        if (isConfirming) viewModel.cancelSend() else onDismiss()
+                    }) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
             }
 
@@ -628,22 +640,47 @@ fun ComposeScreen(
                     }
                 }
 
+                is SendState.Publishing -> {
+                    PublishStatusPanel(
+                        statuses = state.statuses,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+
+                is SendState.Failed -> {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(Spacing.medium),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = state.reason,
+                            color = Like,
+                            fontSize = AppType.body,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(Modifier.height(Spacing.large))
+                        Button(
+                            onClick = { viewModel.retryPublish() },
+                            shape = RoundedCornerShape(24.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BrandDeep,
+                                contentColor = Color.Black,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 8.dp),
+                        ) {
+                            Text("Retry", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+
                 is SendState.Sent -> {
                     // Brief — navigation observer will pop
                     Spacer(Modifier.weight(1f))
                 }
-            }
-
-            // ── Error banner ─────────────────────────────────────────────────
-            viewModel.publishError?.let { error ->
-                Text(
-                    text     = error,
-                    color    = Color(0xFFFF5252),
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                )
             }
         }
     }
@@ -745,3 +782,53 @@ private fun NotifyChip(
         )
     }
 }
+
+// ── Publish status panel ───────────────────────────────────────────────────
+
+@Composable
+private fun PublishStatusPanel(
+    statuses: Map<String, RelayPublishStatus>,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(Spacing.medium),
+    ) {
+        val accepted = statuses.values.count { it == RelayPublishStatus.Accepted }
+        val total = statuses.size
+        Text(
+            text = if (accepted == 0) "Publishing to $total relays\u2026"
+                   else "Published to $accepted of $total relays",
+            color = Color.White,
+            fontSize = AppType.body,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(Spacing.medium))
+        statuses.entries.sortedBy { it.key }.forEach { (relay, status) ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 1.dp),
+            ) {
+                val (icon, tint) = when (status) {
+                    RelayPublishStatus.Pending  -> Icons.Filled.HourglassEmpty to TextSecondary
+                    RelayPublishStatus.Accepted -> Icons.Filled.Check to Mint
+                    RelayPublishStatus.Rejected -> Icons.Filled.Close to Like
+                    RelayPublishStatus.TimedOut -> Icons.Filled.ErrorOutline to Zap
+                }
+                Icon(icon, contentDescription = null, tint = tint,
+                    modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = compactRelayName(relay),
+                    color = TextSecondary,
+                    fontSize = AppType.caption,
+                )
+            }
+        }
+    }
+}
+
+/** Strip "wss://" prefix for compact relay display. */
+private fun compactRelayName(url: String): String =
+    url.removePrefix("wss://").removePrefix("ws://").trimEnd('/')
