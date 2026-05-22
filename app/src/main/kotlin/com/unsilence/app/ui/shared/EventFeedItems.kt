@@ -75,7 +75,7 @@ data class EventActionCallbacks(
     val onLongPress: ((FeedRow) -> Unit)? = null,
     val zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     val repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    val reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
+    val reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
 )
 
 /**

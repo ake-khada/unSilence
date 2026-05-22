@@ -38,6 +38,15 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
 /** Per-zap breakdown for the engagement drawer: sender, amount, optional message. */
 data class ZapDetail(val senderPubkey: String, val sats: Long, val comment: String?)
 
+/** Reaction content — Unicode emoji (or "+"/"-") vs NIP-30 custom emoji with image URL. */
+sealed interface ReactionContent {
+    data class Standard(val emoji: String) : ReactionContent
+    data class Custom(val shortcode: String, val url: String) : ReactionContent
+}
+
+/** Reaction record stored in reactionsByTarget. */
+data class ReactionInfo(val pubkey: String, val content: ReactionContent)
+
 /**
  * Per-event engagement counts. Snapshot of MES aggregate state for a single
  * event, surfaced via [com.unsilence.app.data.memory.MemoryEventStore.statsFlow]

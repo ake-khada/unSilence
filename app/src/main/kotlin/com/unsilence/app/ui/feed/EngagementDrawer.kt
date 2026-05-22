@@ -32,6 +32,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.layout.ContentScale
+import coil3.compose.AsyncImage
+import com.unsilence.app.data.memory.ReactionContent
+import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.ui.theme.AppType
@@ -44,10 +49,15 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class EngagementSection { REPLIES, REPOSTS, REACTIONS, ZAPS }
 
+private data class ReactionGroup(
+    val displayContent: ReactionContent,
+    val pubkeys: List<String>,
+)
+
 private data class DrawerData(
     val zaps: List<ZapDetail> = emptyList(),
     val reposts: List<String> = emptyList(),
-    val reactionsByEmoji: List<Pair<String, List<String>>> = emptyList(),
+    val reactionGroups: List<ReactionGroup> = emptyList(),
 )
 
 /**
@@ -63,7 +73,7 @@ internal fun EngagementDrawer(
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)?,
     zapDetailsForEvent: ((String) -> List<ZapDetail>)?,
     repostPubkeysForEvent: ((String) -> List<String>)?,
-    reactionsForEvent: ((String) -> List<Pair<String, String>>)?,
+    reactionsForEvent: ((String) -> List<ReactionInfo>)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onProfileTap: (String) -> Unit,
@@ -74,14 +84,25 @@ internal fun EngagementDrawer(
         val zaps = zapDetailsForEvent?.invoke(eventId)
             ?.sortedByDescending { it.sats } ?: emptyList()
         val reposts = repostPubkeysForEvent?.invoke(eventId) ?: emptyList()
-        val grouped = reactionsForEvent?.invoke(eventId)
-            ?.filter { it.second != "-" }
-            ?.groupBy { it.second }
-            ?.mapValues { (_, pairs) -> pairs.map { it.first }.distinct() }
-            ?.toList()
-            ?.sortedByDescending { it.second.size }
+        val groups = reactionsForEvent?.invoke(eventId)
+            ?.filter { info ->
+                (info.content as? ReactionContent.Standard)?.emoji != "-"
+            }
+            ?.groupBy { info ->
+                when (val c = info.content) {
+                    is ReactionContent.Custom -> "custom:${c.shortcode}"
+                    is ReactionContent.Standard -> "std:${c.emoji}"
+                }
+            }
+            ?.map { (_, infos) ->
+                ReactionGroup(
+                    displayContent = infos.first().content,
+                    pubkeys = infos.map { it.pubkey }.distinct(),
+                )
+            }
+            ?.sortedByDescending { it.pubkeys.size }
             ?: emptyList()
-        value = DrawerData(zaps, reposts, grouped)
+        value = DrawerData(zaps, reposts, groups)
     }.value
 
     Column(
@@ -158,20 +179,39 @@ internal fun EngagementDrawer(
             }
         }
 
-        // Per-emoji reactions — unchanged FlowRow grouping
-        for ((emoji, pubkeys) in drawerData.reactionsByEmoji) {
-            val displayEmoji = if (emoji == "+") "\u2764\uFE0F" else emoji
-            EngagementRow(
-                emojiText = displayEmoji,
-                tint = if (emoji == "+") Like else ActionTint,
-            ) {
-                pubkeys.forEach { pubkey ->
-                    AvatarChip(
-                        pubkey = pubkey,
-                        profileFlow = profileFlow,
-                        lookupProfile = lookupProfile,
-                        onTap = { onProfileTap(pubkey) },
-                    )
+        // Per-emoji reactions — grouped by content type
+        for (group in drawerData.reactionGroups) {
+            when (val content = group.displayContent) {
+                is ReactionContent.Custom -> {
+                    EngagementRow(
+                        emojiImageUrl = content.url,
+                        tint = ActionTint,
+                    ) {
+                        group.pubkeys.forEach { pubkey ->
+                            AvatarChip(
+                                pubkey = pubkey,
+                                profileFlow = profileFlow,
+                                lookupProfile = lookupProfile,
+                                onTap = { onProfileTap(pubkey) },
+                            )
+                        }
+                    }
+                }
+                is ReactionContent.Standard -> {
+                    val displayEmoji = if (content.emoji == "+") "\u2764\uFE0F" else content.emoji
+                    EngagementRow(
+                        emojiText = displayEmoji,
+                        tint = if (content.emoji == "+") Like else ActionTint,
+                    ) {
+                        group.pubkeys.forEach { pubkey ->
+                            AvatarChip(
+                                pubkey = pubkey,
+                                profileFlow = profileFlow,
+                                lookupProfile = lookupProfile,
+                                onTap = { onProfileTap(pubkey) },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -188,6 +228,7 @@ internal fun EngagementDrawer(
 private fun EngagementRow(
     icon: ImageVector? = null,
     emojiText: String? = null,
+    emojiImageUrl: String? = null,
     tint: Color,
     content: @Composable () -> Unit,
 ) {
@@ -214,6 +255,13 @@ private fun EngagementRow(
                     imageVector = icon,
                     contentDescription = null,
                     tint = tint,
+                    modifier = Modifier.size(Sizing.actionIcon),
+                )
+            } else if (emojiImageUrl != null) {
+                AsyncImage(
+                    model = emojiImageUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier.size(Sizing.actionIcon),
                 )
             } else if (emojiText != null) {

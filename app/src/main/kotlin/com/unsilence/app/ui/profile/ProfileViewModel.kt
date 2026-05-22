@@ -165,7 +165,7 @@ class ProfileViewModel @Inject constructor(
         memoryEventStore.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> =
         memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
         memoryEventStore.reactionsForEvent(eventId)
 
     /** Live following count from MES follows index. */
