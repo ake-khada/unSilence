@@ -1,6 +1,9 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.InlineTextContent
+import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -10,7 +13,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -20,7 +26,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
@@ -41,12 +49,15 @@ import kotlinx.coroutines.coroutineScope
  * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
  */
+private val EMOJI_SHORTCODE_REGEX = Regex(""":([A-Za-z0-9_]+):""")
+
 @Composable
 internal fun InlineText(
     segments: List<Segment>,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
     onTextClick: () -> Unit,
+    customEmojis: Map<String, String> = emptyMap(),
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
@@ -70,8 +81,8 @@ internal fun InlineText(
         textSegments.any { it is Segment.Link }
     }
 
-    // No mentions AND no links — plain Text with click handler (fast path)
-    if (mentionPubkeys.isEmpty() && !hasLinks) {
+    // No mentions AND no links AND no custom emoji — plain Text (fast path)
+    if (mentionPubkeys.isEmpty() && !hasLinks && customEmojis.isEmpty()) {
         val plainText = remember(textSegments) {
             textSegments.joinToString("") { (it as Segment.Text).text }
         }
@@ -103,11 +114,17 @@ internal fun InlineText(
         }
     }
 
-    val annotatedText = remember(textSegments, profileMap, onAuthorClick) {
+    val annotatedText = remember(textSegments, profileMap, onAuthorClick, customEmojis) {
         buildAnnotatedString {
             for (segment in textSegments) {
                 when (segment) {
-                    is Segment.Text -> append(segment.text)
+                    is Segment.Text -> {
+                        if (customEmojis.isEmpty()) {
+                            append(segment.text)
+                        } else {
+                            appendTextWithEmoji(segment.text, customEmojis)
+                        }
+                    }
                     is Segment.MentionPubkey -> {
                         val profile = profileMap[segment.pubkeyHex]
                         val npubFallback = runCatching {
@@ -154,8 +171,29 @@ internal fun InlineText(
         }
     }
 
+    val emojiInlineContent = remember(customEmojis) {
+        if (customEmojis.isEmpty()) emptyMap()
+        else customEmojis.mapValues { (_, url) ->
+            InlineTextContent(
+                placeholder = Placeholder(
+                    width = 1.2.em,
+                    height = 1.2.em,
+                    placeholderVerticalAlign = PlaceholderVerticalAlign.Center,
+                ),
+            ) {
+                AsyncImage(
+                    model = url,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+
     Text(
         text         = annotatedText,
+        inlineContent = emojiInlineContent,
         color        = MaterialTheme.colorScheme.onSurface,
         fontSize     = AppType.bodyLarge,
         lineHeight   = 22.sp,
@@ -165,4 +203,28 @@ internal fun InlineText(
         onTextLayout = onTextLayoutResult ?: {},
         modifier     = modifier.clickable { onTextClick() },
     )
+}
+
+/**
+ * Appends [text] to the receiver, substituting `:shortcode:` substrings with
+ * inline content placeholders when the shortcode exists in [emojis].
+ * Unmatched colon patterns pass through as plain text.
+ */
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji(
+    text: String,
+    emojis: Map<String, String>,
+) {
+    var cursor = 0
+    for (match in EMOJI_SHORTCODE_REGEX.findAll(text)) {
+        val shortcode = match.groupValues[1]
+        if (shortcode !in emojis) continue
+        if (match.range.first > cursor) {
+            append(text.substring(cursor, match.range.first))
+        }
+        appendInlineContent(shortcode, ":$shortcode:")
+        cursor = match.range.last + 1
+    }
+    if (cursor < text.length) {
+        append(text.substring(cursor))
+    }
 }

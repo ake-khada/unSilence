@@ -100,6 +100,9 @@ object ContentParser {
         // ── Step 5: kind-30023 article info from tags ─────────────────────
         val article = if (kind == 30023) parseArticleInfo(effectiveTagsJson) else null
 
+        // ── Step 6: NIP-30 custom emoji tags ─────────────────────────────
+        val customEmojis = parseCustomEmojis(effectiveTagsJson)
+
         return EventModel(
             id = id,
             pubkey = effectivePubkey,
@@ -116,6 +119,7 @@ object ContentParser {
             repost = repost,
             article = article,
             warnings = ContentWarnings(hasContentWarning, contentWarningReason),
+            customEmojis = customEmojis,
         )
     }
 
@@ -404,6 +408,28 @@ object ContentParser {
             }
         }
         return ArticleInfo(title, summary, image, publishedAt, dTag)
+    }
+
+    // ── NIP-30 emoji tags ───────────────────────────────────────────────
+
+    private fun parseCustomEmojis(tagsJson: String): Map<String, String> {
+        if (!tagsJson.contains("\"emoji\"")) return emptyMap()
+        return try {
+            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+            val out = LinkedHashMap<String, String>()
+            for (tag in parsed) {
+                val arr = tag.jsonArray
+                if (arr.size < 3) continue
+                if (arr[0].jsonPrimitive.content != "emoji") continue
+                val shortcode = arr[1].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
+                val url = arr[2].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
+                if (!shortcode.all { it.isLetterOrDigit() || it == '_' }) continue
+                out.putIfAbsent(shortcode, url)
+            }
+            out
+        } catch (_: Exception) {
+            emptyMap()
+        }
     }
 
     // ── Tag helpers ──────────────────────────────────────────────────────

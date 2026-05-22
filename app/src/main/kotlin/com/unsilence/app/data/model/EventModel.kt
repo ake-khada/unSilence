@@ -33,6 +33,7 @@ data class EventModel(
     val repost: RepostInfo?,             // null unless kind == 6
     val article: ArticleInfo?,           // null unless kind == 30023
     val warnings: ContentWarnings,
+    val customEmojis: Map<String, String> = emptyMap(), // NIP-30: shortcode → url
 )
 
 /**
