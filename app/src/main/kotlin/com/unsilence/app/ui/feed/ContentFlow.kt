@@ -129,6 +129,7 @@ internal fun ContentFlow(
                         lookupProfile = lookupProfile,
                         onAuthorClick = onAuthorClick,
                         onTextClick   = { onNoteClick(navigateId) },
+                        customEmojis  = model.customEmojis,
                         maxLines      = maxLines,
                         overflow      = overflow,
                         onTextLayoutResult = if (!isEmbedded) { result ->
