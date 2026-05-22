@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
+import android.os.Build
 import android.os.StrictMode
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -13,6 +14,8 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.gif.AnimatedImageDecoder
+import coil3.gif.GifDecoder
 import coil3.video.VideoFrameDecoder
 import coil3.bitmapFactoryMaxParallelism
 import coil3.request.allowHardware
@@ -118,6 +121,11 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
                         }
                     )
                 )
+                if (Build.VERSION.SDK_INT >= 28) {
+                    add(AnimatedImageDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
                 add(VideoFrameDecoder.Factory())
             }
             .build()
