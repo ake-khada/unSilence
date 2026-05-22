@@ -1,25 +1,17 @@
 package com.unsilence.app.ui.thread
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.RelayPool
-import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.memory.EventStats
 import java.util.concurrent.ConcurrentHashMap
-import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,7 +44,6 @@ class ThreadViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
-    private val signingManager: SigningManager,
     private val userRepository: UserRepository,
 ) : ViewModel() {
 
@@ -69,9 +60,6 @@ class ThreadViewModel @Inject constructor(
             .map { it?.picture }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
-
-    var published by mutableStateOf(false)
-        private set
 
     init {
         viewModelScope.launch {
@@ -128,7 +116,6 @@ class ThreadViewModel @Inject constructor(
     }
 
     fun loadThread(eventId: String) {
-        published = false  // Always reset so LaunchedEffect won't auto-dismiss
         tappedId = eventId
         // Clear stale state immediately — prevents flash of old thread content
         _uiState.value = ThreadUiState(loading = true)
@@ -187,43 +174,4 @@ class ThreadViewModel @Inject constructor(
         }
     }
 
-    fun publishReply(content: String, rootId: String, replyToId: String, replyToPubkey: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val nowMs        = System.currentTimeMillis()
-            val nowSeconds   = nowMs / 1000L
-
-            val template = TextNoteEvent.build(note = content, createdAt = nowSeconds) {
-                add(arrayOf("e", rootId, "", "root"))
-                add(arrayOf("e", replyToId, "", "reply"))
-                add(arrayOf("p", replyToPubkey))
-            }
-            val signed = signingManager.sign(template) ?: return@launch
-
-            relayPool.publish(toEventJson(signed))
-
-            // Optimistic insert into MES → appears in thread immediately
-            val parsedTags = signed.tags.map { it.toList() }
-            memoryEventStore.insert(
-                NostrEvent(
-                    id = signed.id,
-                    pubkey = signed.pubKey,
-                    kind = signed.kind,
-                    content = signed.content,
-                    createdAt = signed.createdAt,
-                    tags = parsedTags,
-                    tagsJson = tagsToJson(parsedTags),
-                    sig = signed.sig,
-                    relayUrl = "local",
-                    replyToId = replyToId,
-                    rootId = rootId,
-                    hasContentWarning = false,
-                    contentWarningReason = null,
-                    firstSeenAt = nowMs,
-                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                )
-            )
-
-            published = true
-        }
-    }
 }
