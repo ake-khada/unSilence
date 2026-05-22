@@ -44,7 +44,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 7
+private const val SNAPSHOT_BINARY_VERSION = 8
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -212,6 +212,14 @@ class MemoryEventStore @Inject constructor(
     // ─── Relay monitors (kind 30166 / NIP-66) ─────────────────────────────────
     private val relayMonitorsByUrl = ConcurrentHashMap<String, RelayMonitorEntity>()
 
+    // ─── Custom emoji (NIP-30) ───────────────────────────────────────────────
+    // Kind-30030 emoji sets, keyed by (authorPubkey, setName) coordinate
+    private val emojiSetsByCoordinate = ConcurrentHashMap<Pair<String, String>, EmojiSetEntity>()
+    // Kind-10030 user emoji lists, keyed by pubkey
+    private val userEmojiListByPubkey = ConcurrentHashMap<String, UserEmojiListEntity>()
+    // Replaceable dedup: "$pubkey:$kind:$dTag" → createdAt
+    private val emojiKindCreatedAt = ConcurrentHashMap<String, Long>()
+
     // ─── A.5.1 T5a: Relay config state (kinds 10002/10006/10007/10012) ──────
     private val blockedRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
     private val searchRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
@@ -330,6 +338,7 @@ class MemoryEventStore @Inject constructor(
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
+    private val _emojiSetSignal = MutableStateFlow(0L)
     private val _snapshotRestoredSignal = MutableStateFlow(0L)
     val snapshotRestoredFlow: StateFlow<Long> = _snapshotRestoredSignal
 
@@ -369,6 +378,7 @@ class MemoryEventStore @Inject constructor(
         var trustScore = false
         var relayMonitor = false
         var relaySet = false
+        var emojiSet = false
         val invalidatedStatsIds: MutableSet<String> = mutableSetOf()
     }
 
@@ -383,6 +393,7 @@ class MemoryEventStore @Inject constructor(
         if (d.trustScore) _trustScoreSignal.value = now
         if (d.relayMonitor) _relayMonitorSignal.value = now
         if (d.relaySet) _relaySetSignal.value = now
+        if (d.emojiSet) _emojiSetSignal.value = now
         if (d.invalidatedStatsIds.isNotEmpty()) {
             _statsInvalidations.tryEmit(
                 StatsInvalidation.Targeted(d.invalidatedStatsIds.toSet())
@@ -538,6 +549,8 @@ class MemoryEventStore @Inject constructor(
                 handleParameterizedReplaceable(event)
                 handleRelaySetMaterialized(event, dirty)
             }
+            10030 -> handleUserEmojiList(event, dirty)
+            30030 -> handleEmojiSet(event, dirty)
             30166 -> handleRelayMonitor(event, dirty)
             30385 -> handleTrustScore(event, dirty)
         }
@@ -1123,6 +1136,112 @@ class MemoryEventStore @Inject constructor(
     /** Ordered blossom server URLs for [pubkey], or empty if no kind-10063 seen. */
     fun blossomServersFor(pubkey: String): List<String> =
         blossomServersByPubkey[pubkey] ?: emptyList()
+
+    // ─── Kind 30030: NIP-30 Emoji Set ────────────────────────────────────
+
+    private fun handleEmojiSet(event: NostrEvent, dirty: InsertDirty? = null) {
+        val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: return
+        val dedupKey = "${event.pubkey}:30030:$dTag"
+        val existingTs = emojiKindCreatedAt[dedupKey]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val title = event.tags.firstOrNull {
+            it.size >= 2 && it[0] == "title"
+        }?.get(1)?.takeIf { it.isNotBlank() }
+
+        val emojis = event.tags.mapNotNull { tag ->
+            if (tag.size < 3 || tag[0] != "emoji") return@mapNotNull null
+            val shortcode = tag[1].takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val url = tag[2].takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            CustomEmoji(shortcode, url)
+        }
+        if (emojis.isEmpty()) return
+
+        emojiKindCreatedAt[dedupKey] = event.createdAt
+        emojiSetsByCoordinate[event.pubkey to dTag] = EmojiSetEntity(
+            authorPubkey = event.pubkey,
+            setName = dTag,
+            title = title,
+            emojis = emojis,
+            updatedAt = event.createdAt,
+        )
+        if (dirty != null) dirty.emojiSet = true
+        else _emojiSetSignal.value = System.nanoTime()
+    }
+
+    // ─── Kind 10030: NIP-30 User Emoji List ──────────────────────────────
+
+    private fun handleUserEmojiList(event: NostrEvent, dirty: InsertDirty? = null) {
+        val dedupKey = "${event.pubkey}:10030"
+        val existingTs = emojiKindCreatedAt[dedupKey]
+        if (existingTs != null && existingTs >= event.createdAt) return
+
+        val setRefs = mutableListOf<EmojiSetRef>()
+        val inlineEmojis = mutableListOf<CustomEmoji>()
+
+        for (tag in event.tags) {
+            if (tag.size < 2) continue
+            when (tag[0]) {
+                "a" -> {
+                    val parts = tag[1].split(":")
+                    if (parts.size != 3 || parts[0] != "30030") continue
+                    val authorPubkey = parts[1].lowercase()
+                    val setName = parts[2]
+                    val hintRelay = tag.getOrNull(2)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { normalizeRelayUrl(it) }
+                    setRefs.add(EmojiSetRef(authorPubkey, setName, hintRelay))
+                }
+                "emoji" -> {
+                    if (tag.size < 3) continue
+                    val shortcode = tag[1].takeIf { it.isNotBlank() } ?: continue
+                    val url = tag[2].takeIf { it.isNotBlank() } ?: continue
+                    inlineEmojis.add(CustomEmoji(shortcode, url))
+                }
+            }
+        }
+
+        emojiKindCreatedAt[dedupKey] = event.createdAt
+        userEmojiListByPubkey[event.pubkey] = UserEmojiListEntity(
+            pubkey = event.pubkey,
+            setRefs = setRefs,
+            inlineEmojis = inlineEmojis,
+            updatedAt = event.createdAt,
+        )
+        if (dirty != null) dirty.emojiSet = true
+        else _emojiSetSignal.value = System.nanoTime()
+    }
+
+    // ─── NIP-30 query APIs ───────────────────────────────────────────────
+
+    fun getEmojiSet(authorPubkey: String, setName: String): EmojiSetEntity? =
+        emojiSetsByCoordinate[authorPubkey to setName]
+
+    fun getUserEmojiList(pubkey: String): UserEmojiListEntity? =
+        userEmojiListByPubkey[pubkey]
+
+    /** All emoji available to [pubkey]: inline + all subscribed sets, deduped by shortcode. */
+    fun resolvedEmojisFor(pubkey: String): List<CustomEmoji> {
+        val list = userEmojiListByPubkey[pubkey] ?: return emptyList()
+        val seen = HashSet<String>()
+        val out = mutableListOf<CustomEmoji>()
+        for (e in list.inlineEmojis) {
+            if (seen.add(e.shortcode)) out.add(e)
+        }
+        for (ref in list.setRefs) {
+            val set = emojiSetsByCoordinate[ref.authorPubkey to ref.setName] ?: continue
+            for (e in set.emojis) {
+                if (seen.add(e.shortcode)) out.add(e)
+            }
+        }
+        return out
+    }
+
+    fun resolvedEmojisFlow(pubkey: String): Flow<List<CustomEmoji>> =
+        _emojiSetSignal
+            .map { resolvedEmojisFor(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
 
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
@@ -2894,6 +3013,40 @@ class MemoryEventStore @Inject constructor(
                 d.writeStr(pubkey); d.writeInt(servers.size)
                 for (url in servers) d.writeStr(url)
             }
+
+            // V8: NIP-30 emoji sets (kind 30030)
+            val emojiSets = emojiSetsByCoordinate.toMap()
+            d.writeInt(emojiSets.size)
+            for ((_, set) in emojiSets) {
+                d.writeStr(set.authorPubkey)
+                d.writeStr(set.setName)
+                d.writeStrOrNull(set.title)
+                d.writeInt(set.emojis.size)
+                for (e in set.emojis) {
+                    d.writeStr(e.shortcode)
+                    d.writeStr(e.url)
+                }
+                d.writeLong(set.updatedAt)
+            }
+
+            // V8: NIP-30 user emoji lists (kind 10030)
+            val emojiLists = userEmojiListByPubkey.toMap()
+            d.writeInt(emojiLists.size)
+            for ((_, list) in emojiLists) {
+                d.writeStr(list.pubkey)
+                d.writeInt(list.setRefs.size)
+                for (ref in list.setRefs) {
+                    d.writeStr(ref.authorPubkey)
+                    d.writeStr(ref.setName)
+                    d.writeStrOrNull(ref.hintRelay)
+                }
+                d.writeInt(list.inlineEmojis.size)
+                for (e in list.inlineEmojis) {
+                    d.writeStr(e.shortcode)
+                    d.writeStr(e.url)
+                }
+                d.writeLong(list.updatedAt)
+            }
         }
 
         val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
@@ -3107,6 +3260,49 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
+        // V8: NIP-30 emoji sets + user emoji lists (absent in V5-V7 snapshots)
+        if (version >= 8) {
+            val emojiSetN = input.readInt()
+            if (emojiSetN < 0 || emojiSetN > 100_000) throw IOException("Invalid emoji set count: $emojiSetN")
+            for (i in 0 until emojiSetN) {
+                val authorPubkey = input.readStr()
+                val setName = input.readStr()
+                val title = input.readStrOrNull()
+                val emojiN = input.readInt()
+                if (emojiN < 0 || emojiN > 10_000) throw IOException("Invalid emoji count: $emojiN")
+                val emojis = ArrayList<CustomEmoji>(emojiN)
+                for (j in 0 until emojiN) emojis.add(CustomEmoji(input.readStr(), input.readStr()))
+                val updatedAt = input.readLong()
+                emojiSetsByCoordinate[authorPubkey to setName] = EmojiSetEntity(
+                    authorPubkey = authorPubkey, setName = setName,
+                    title = title, emojis = emojis, updatedAt = updatedAt,
+                )
+                emojiKindCreatedAt["$authorPubkey:30030:$setName"] = updatedAt
+            }
+
+            val emojiListN = input.readInt()
+            if (emojiListN < 0 || emojiListN > 100_000) throw IOException("Invalid emoji list count: $emojiListN")
+            for (i in 0 until emojiListN) {
+                val pubkey = input.readStr()
+                val refN = input.readInt()
+                if (refN < 0 || refN > 10_000) throw IOException("Invalid emoji set ref count: $refN")
+                val refs = ArrayList<EmojiSetRef>(refN)
+                for (j in 0 until refN) {
+                    refs.add(EmojiSetRef(input.readStr(), input.readStr(), input.readStrOrNull()))
+                }
+                val inlineN = input.readInt()
+                if (inlineN < 0 || inlineN > 10_000) throw IOException("Invalid inline emoji count: $inlineN")
+                val inline = ArrayList<CustomEmoji>(inlineN)
+                for (j in 0 until inlineN) inline.add(CustomEmoji(input.readStr(), input.readStr()))
+                val updatedAt = input.readLong()
+                userEmojiListByPubkey[pubkey] = UserEmojiListEntity(
+                    pubkey = pubkey, setRefs = refs,
+                    inlineEmojis = inline, updatedAt = updatedAt,
+                )
+                emojiKindCreatedAt["$pubkey:10030"] = updatedAt
+            }
+        }
+
         // RELAY_HEALTH section
         val trustN = input.readInt()
         if (trustN < 0 || trustN > 100_000) throw IOException("Invalid trust count: $trustN")
@@ -3166,6 +3362,7 @@ class MemoryEventStore @Inject constructor(
         _actionSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
+        _emojiSetSignal.value = now
         _snapshotRestoredSignal.value = now
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
@@ -3623,9 +3820,13 @@ class MemoryEventStore @Inject constructor(
         eventModelsByEventId.clear()
         relayHintsForEvent.clear()
         blossomServersByPubkey.clear()
+        emojiSetsByCoordinate.clear()
+        userEmojiListByPubkey.clear()
+        emojiKindCreatedAt.clear()
         trustScoresByUrl.clear()
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L
+        _emojiSetSignal.value = 0L
         _trustScoreSignal.value = 0L
         _relayMonitorSignal.value = 0L
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)

@@ -1248,6 +1248,85 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * One-shot fetch for NIP-30 user emoji list (kind 10030).
+     * Sent to indexer + connected write relays, same pattern as fetchMuteList.
+     */
+    fun fetchUserEmojiList(pubkeyHex: String, rawIndexerRelayUrls: List<String>) {
+        val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val subId = "emoji-list-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(10030)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+        val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in indexerRelayUrls && connections.containsKey(it) }
+        val allTargets = indexerRelayUrls + writeRelayUrls
+        for (url in allTargets) {
+            connections[url]?.let { sendOneShotToRelay(it, req) }
+        }
+        Log.d(TAG, "Fetching NIP-30 emoji list (kind 10030) for ${pubkeyHex.take(8)}… from ${allTargets.size} relay(s)")
+    }
+
+    /**
+     * One-shot batch fetch for NIP-30 emoji sets (kind 30030).
+     * Groups refs by author, sends one REQ per author to their write relays + indexers.
+     * Uses connectAndAwait for hint relays that aren't already connected.
+     */
+    suspend fun fetchEmojiSets(refs: List<com.unsilence.app.data.memory.EmojiSetRef>) {
+        if (refs.isEmpty()) return
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+        // Group by author so we can batch d-tags per author
+        val byAuthor = refs.groupBy { it.authorPubkey }
+        for ((author, authorRefs) in byAuthor) {
+            val dTags = authorRefs.map { it.setName }
+            // Collect hint relays from the refs + author's write relays + indexers
+            val hintUrls = authorRefs.mapNotNull { it.hintRelay }
+                .mapNotNull { normalizeRelayUrl(it) }
+                .filter { it !in blockedUrls }
+            val writeUrls = memoryEventStore.get().writeRelaysFor(author)
+                .mapNotNull { normalizeRelayUrl(it) }
+                .filter { it !in blockedUrls }
+            val allTargets = (indexerUrls + writeUrls + hintUrls).distinct()
+            if (allTargets.isEmpty()) continue
+
+            // Connect to hint relays not yet connected
+            val unconnected = allTargets.filter { !connections.containsKey(it) }
+            if (unconnected.isNotEmpty()) {
+                connectAndAwait(unconnected, timeoutMs = 3_000)
+            }
+
+            val subId = "emoji-set-${System.nanoTime()}"
+            _activeOneShotSubs.add(subId)
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(30030)) })
+                    put("authors", buildJsonArray { add(JsonPrimitive(author)) })
+                    put("#d", buildJsonArray { dTags.forEach { add(JsonPrimitive(it)) } })
+                    put("limit", JsonPrimitive(dTags.size))
+                })
+            }.toString()
+
+            var sent = 0
+            for (url in allTargets) {
+                connections[url]?.let { conn ->
+                    sendOneShotToRelay(conn, req)
+                    sent++
+                }
+            }
+            Log.d(TAG, "Fetching NIP-30 emoji sets: ${dTags.size} set(s) for ${author.take(8)}… from $sent relay(s)")
+        }
+    }
+
+    /**
      * Open a persistent subscription for own kind-10000 on the user's write relays.
      * No limit, no closeOnEose — this is a live tail for the app session.
      * When another client (Amethyst, etc.) publishes an updated mute list, the
