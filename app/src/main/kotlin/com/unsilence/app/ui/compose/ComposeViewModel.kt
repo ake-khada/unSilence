@@ -22,8 +22,14 @@ import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,7 +37,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
+import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
+import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
+import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -170,6 +181,60 @@ class ComposeViewModel @Inject constructor(
 
     private val _sendState = MutableStateFlow<SendState>(SendState.Composing)
     val sendState: StateFlow<SendState> = _sendState.asStateFlow()
+
+    // ── Focus tracking + mention insertion ──────────────────────────────────
+
+    private val _focusedBlockId = MutableStateFlow<String?>(null)
+
+    fun setFocusedBlock(id: String?) { _focusedBlockId.value = id }
+
+    private val _pendingMentionInsert = MutableStateFlow<Pair<String, String>?>(null) // (blockId, text)
+    val pendingMentionInsert: StateFlow<Pair<String, String>?> = _pendingMentionInsert.asStateFlow()
+
+    fun consumeMentionInsert() { _pendingMentionInsert.value = null }
+
+    // ── Mention picker ────────────────────────────────────────────────────
+
+    private val _mentionPickerOpen = MutableStateFlow(false)
+    val mentionPickerOpen: StateFlow<Boolean> = _mentionPickerOpen.asStateFlow()
+
+    private val _mentionQuery = MutableStateFlow("")
+    val mentionQuery: StateFlow<String> = _mentionQuery.asStateFlow()
+
+    val mentionFollows: StateFlow<List<com.unsilence.app.data.memory.UserEntity>> =
+        flow {
+            val pk = pubkeyHex ?: ""
+            val followPubkeys = memoryEventStore.getFollows(pk) ?: emptySet()
+            val users = followPubkeys
+                .mapNotNull { memoryEventStore.getUserEntity(it) }
+                .sortedBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: "" }
+            emit(users)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    @OptIn(FlowPreview::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val mentionSearchResults: StateFlow<List<com.unsilence.app.data.memory.UserEntity>> =
+        _mentionQuery
+            .debounce(150)
+            .distinctUntilChanged()
+            .flatMapLatest { q ->
+                if (q.isBlank()) flowOf(emptyList())
+                else memoryEventStore.searchUsersFlow(q)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun openMentionPicker() { _mentionPickerOpen.value = true; _mentionQuery.value = "" }
+    fun closeMentionPicker() { _mentionPickerOpen.value = false }
+    fun setMentionQuery(q: String) { _mentionQuery.value = q }
+
+    fun selectMention(user: com.unsilence.app.data.memory.UserEntity) {
+        val npub = runCatching { user.pubkey.hexToByteArray().toNpub() }.getOrNull() ?: return
+        val mentionText = "nostr:$npub "
+        val blockId = _focusedBlockId.value
+            ?: _blocks.value.firstOrNull { it is ComposeBlock.Text }?.id
+            ?: return
+        _pendingMentionInsert.value = blockId to mentionText
+        closeMentionPicker()
+    }
 
     // ── ContentFlow lookup delegates ───────────────────────────────────────
 
@@ -454,6 +519,10 @@ class ComposeViewModel @Inject constructor(
         quoteRow = null
         quoteEventId = null
         _sendState.value = SendState.Composing
+        _focusedBlockId.value = null
+        _pendingMentionInsert.value = null
+        _mentionPickerOpen.value = false
+        _mentionQuery.value = ""
         _blocks.value = listOf(ComposeBlock.Text(""))
     }
 
@@ -527,6 +596,7 @@ class ComposeViewModel @Inject constructor(
 
     private fun buildPreviewTags(blocks: List<ComposeBlock>, isReply: Boolean): List<Array<String>> {
         val tags = mutableListOf<Array<String>>()
+        val existingPTags = mutableSetOf<String>()
         tags.addAll(blocksToImetaTags(blocks))
         if (isReply) {
             val parent = replyToRow ?: return tags
@@ -536,13 +606,22 @@ class ComposeViewModel @Inject constructor(
                 tags.add(arrayOf("e", parent.id, "", "reply"))
             }
             tags.add(arrayOf("p", parent.pubkey))
+            existingPTags.add(parent.pubkey)
         } else {
             val qId = quoteEventId
             val quotedAuthor = quoteRow?.pubkey
             if (qId != null) {
                 tags.add(arrayOf("q", qId, "", quotedAuthor ?: ""))
-                if (quotedAuthor != null) tags.add(arrayOf("p", quotedAuthor))
+                if (quotedAuthor != null) {
+                    tags.add(arrayOf("p", quotedAuthor))
+                    existingPTags.add(quotedAuthor)
+                }
             }
+        }
+        // Add p-tags for @mentions in content
+        val content = blocksToContent(blocks)
+        extractMentionPubkeys(content).forEach { pk ->
+            if (pk !in existingPTags) tags.add(arrayOf("p", pk))
         }
         return tags
     }
@@ -561,12 +640,16 @@ class ComposeViewModel @Inject constructor(
             val finalContent = blocksToContent(current)
             val imetaTags = blocksToImetaTags(current)
 
+            val mentionPubkeys = extractMentionPubkeys(finalContent)
             val template = TextNoteEvent.build(note = finalContent, createdAt = System.currentTimeMillis() / 1000L) {
                 add(arrayOf("e", threadRootId, "", "root"))
                 if (replyToId != threadRootId) {
                     add(arrayOf("e", replyToId, "", "reply"))
                 }
                 add(arrayOf("p", replyToPubkey))
+                mentionPubkeys.forEach { pk ->
+                    if (pk != replyToPubkey) add(arrayOf("p", pk))
+                }
                 imetaTags.forEach { add(it) }
             }
             val signed = signingManager.sign(template) ?: run {
@@ -622,11 +705,19 @@ class ComposeViewModel @Inject constructor(
                     else "$finalContent\n\nnostr:$nevent"
             }
 
+            val mentionPubkeys = extractMentionPubkeys(finalContent)
+            val existingPTags = mutableSetOf<String>()
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
                 if (qId != null) {
                     add(arrayOf("q", qId, "", quotedAuthor ?: ""))
-                    if (quotedAuthor != null) add(arrayOf("p", quotedAuthor))
+                    if (quotedAuthor != null) {
+                        add(arrayOf("p", quotedAuthor))
+                        existingPTags.add(quotedAuthor)
+                    }
+                }
+                mentionPubkeys.forEach { pk ->
+                    if (pk !in existingPTags) add(arrayOf("p", pk))
                 }
             }
             val signed = signingManager.sign(template) ?: run {
@@ -677,6 +768,24 @@ class ComposeViewModel @Inject constructor(
             }
         }
         return parts.joinToString("\n\n")
+    }
+
+    private val NOSTR_MENTION_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", RegexOption.IGNORE_CASE)
+
+    /** Extract pubkeys from nostr:npub/nprofile URIs in content text. */
+    private fun extractMentionPubkeys(content: String): Set<String> {
+        val pubkeys = mutableSetOf<String>()
+        NOSTR_MENTION_REGEX.findAll(content).forEach { match ->
+            val bech32 = match.value.removePrefix("nostr:")
+            runCatching {
+                when (val entity = Nip19Parser.uriToRoute(bech32)?.entity) {
+                    is NPub -> pubkeys.add(entity.hex)
+                    is NProfile -> pubkeys.add(entity.hex)
+                    else -> {}
+                }
+            }
+        }
+        return pubkeys
     }
 
     private fun blocksToImetaTags(blocks: List<ComposeBlock>): List<Array<String>> {
