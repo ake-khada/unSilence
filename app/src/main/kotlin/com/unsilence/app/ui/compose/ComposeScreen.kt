@@ -288,6 +288,10 @@ fun ComposeScreen(
                                     state = block.state,
                                     onRemove = { viewModel.removeAttachment(block.state.id) },
                                     onRetry = { viewModel.retryAttachment(block.state.id) },
+                                    onUpload = { viewModel.startUpload(block.state.id) },
+                                    onQualityChange = { quality ->
+                                        viewModel.updateAttachmentQuality(block.state.id, quality)
+                                    },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             }
