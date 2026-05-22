@@ -182,6 +182,13 @@ class ComposeViewModel @Inject constructor(
     private val _sendState = MutableStateFlow<SendState>(SendState.Composing)
     val sendState: StateFlow<SendState> = _sendState.asStateFlow()
 
+    // ── NIP-36 sensitive toggle ─────────────────────────────────────────────
+
+    private val _isSensitive = MutableStateFlow(false)
+    val isSensitive: StateFlow<Boolean> = _isSensitive.asStateFlow()
+
+    fun toggleSensitive() { _isSensitive.value = !_isSensitive.value }
+
     // ── Focus tracking + mention insertion ──────────────────────────────────
 
     private val _focusedBlockId = MutableStateFlow<String?>(null)
@@ -523,6 +530,7 @@ class ComposeViewModel @Inject constructor(
         _pendingMentionInsert.value = null
         _mentionPickerOpen.value = false
         _mentionQuery.value = ""
+        _isSensitive.value = false
         _blocks.value = listOf(ComposeBlock.Text(""))
     }
 
@@ -623,6 +631,7 @@ class ComposeViewModel @Inject constructor(
         extractMentionPubkeys(content).forEach { pk ->
             if (pk !in existingPTags) tags.add(arrayOf("p", pk))
         }
+        if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
         return tags
     }
 
@@ -651,6 +660,7 @@ class ComposeViewModel @Inject constructor(
                     if (pk != replyToPubkey) add(arrayOf("p", pk))
                 }
                 imetaTags.forEach { add(it) }
+                if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
                 publishError = "Signing failed — check your key or Amber connection"
@@ -719,6 +729,7 @@ class ComposeViewModel @Inject constructor(
                 mentionPubkeys.forEach { pk ->
                     if (pk !in existingPTags) add(arrayOf("p", pk))
                 }
+                if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
                 publishError = "Signing failed — check your key or Amber connection"

@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -88,6 +89,7 @@ fun ComposeScreen(
     val mentionFollows    by viewModel.mentionFollows.collectAsStateWithLifecycle()
     val mentionSearchResults by viewModel.mentionSearchResults.collectAsStateWithLifecycle()
     val pendingMention    by viewModel.pendingMentionInsert.collectAsStateWithLifecycle()
+    val isSensitive       by viewModel.isSensitive.collectAsStateWithLifecycle()
 
     val isReply = replyToEventId != null
     val isQuote = quoteEventId != null
@@ -435,6 +437,18 @@ fun ComposeScreen(
                             )
                         }
 
+                        IconButton(
+                            onClick = { viewModel.toggleSensitive() },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.WarningAmber,
+                                contentDescription = if (isSensitive) "Marked sensitive" else "Mark as sensitive",
+                                tint = if (isSensitive) Zap else TextSecondary.copy(alpha = 0.5f),
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+
                         Spacer(Modifier.weight(1f))
 
                         // Char counter — visible only past 280 chars
@@ -507,6 +521,27 @@ fun ComposeScreen(
                             .weight(1f)
                             .verticalScroll(rememberScrollState()),
                     ) {
+                        if (isSensitive) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.medium, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.WarningAmber,
+                                    contentDescription = null,
+                                    tint = Zap,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "Marked sensitive \u2014 viewers see a blur until tap",
+                                    color = Zap,
+                                    fontSize = AppType.caption,
+                                )
+                            }
+                        }
                         if (previewModel != null && pubkeyHex != null) {
                             ComposePreviewCard(
                                 model = previewModel,
