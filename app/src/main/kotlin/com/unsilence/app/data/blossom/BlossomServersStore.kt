@@ -118,7 +118,6 @@ class BlossomServersStore @Inject constructor(
         _videoQuality.value = prefs[KEY_VIDEO_QUALITY]?.let { name ->
             VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
         } ?: VideoTranscoder.Quality.STANDARD
-
         // Persist to DataStore
         persistServers(servers, selected)
     }

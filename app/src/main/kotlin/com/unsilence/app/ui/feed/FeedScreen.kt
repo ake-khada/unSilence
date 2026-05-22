@@ -129,6 +129,13 @@ fun FeedScreen(
     val clipboard = LocalClipboardManager.current
     val ctx = LocalContext.current
 
+    // ── Emoji reaction picker state ─────────────────────────────────────────
+    // (eventId, pubkey) of the note being custom-reacted to
+    var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var showFullEmojiPicker by remember { mutableStateOf(false) }
+    val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
+    val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
         val flash = zapFlash ?: return@LaunchedEffect
@@ -171,7 +178,12 @@ fun FeedScreen(
             onAuthorClick = onAuthorClick,
             onQuote = onQuote,
             onArticleClick = { articleRow = it },
-            react = { id, pk -> actionsViewModel.react(id, pk) },
+            react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
+            onReactLongPress = { id, pk ->
+                emojiReactTarget = id to pk
+                val pinned = actionsViewModel.getPinnedEmojis()
+                if (pinned.isEmpty()) showFullEmojiPicker = true
+            },
             repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
             zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
             saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -497,6 +509,41 @@ fun FeedScreen(
             onTypeSelected = { type ->
                 viewModel.reportEvent(row.id, row.pubkey, type)
                 showSnackbar("Reported")
+            },
+        )
+    }
+
+    // ── Emoji quick strip (pinned) ──────────────────────────────────────────
+    emojiReactTarget?.let { (eventId, pubkey) ->
+        val pinned = remember { actionsViewModel.getPinnedEmojis() }
+        if (pinned.isNotEmpty() && !showFullEmojiPicker) {
+            EmojiQuickStrip(
+                pinnedEmojis = pinned,
+                onSelect = { emoji ->
+                    actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                    emojiReactTarget = null
+                },
+                onOpenFullPicker = { showFullEmojiPicker = true },
+            )
+        }
+    }
+
+    // ── Full emoji picker sheet ─────────────────────────────────────────────
+    if (showFullEmojiPicker && emojiReactTarget != null) {
+        val (eventId, pubkey) = emojiReactTarget!!
+        EmojiPickerSheet(
+            emojis = actionsViewModel.getSubscribedEmojis(),
+            pinnedShortcodes = pinnedShortcodes,
+            onSelect = { emoji ->
+                actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                showFullEmojiPicker = false
+                emojiReactTarget = null
+            },
+            onTogglePin = { actionsViewModel.togglePinnedEmoji(it) },
+            onOpenSettings = openEmojiSettings,
+            onDismiss = {
+                showFullEmojiPicker = false
+                emojiReactTarget = null
             },
         )
     }

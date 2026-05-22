@@ -133,6 +133,12 @@ fun UserProfileScreen(
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
     val scope = rememberCoroutineScope()
 
+    // ── Emoji reaction picker state ─────────────────────────────────────────
+    var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var showFullEmojiPicker by remember { mutableStateOf(false) }
+    val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
+    val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
         val flash = zapFlash ?: return@LaunchedEffect
@@ -179,7 +185,11 @@ fun UserProfileScreen(
             onComment = onComment,
             onAuthorClick = interceptedAuthorClick,
             onArticleClick = { articleRow = it },
-            react = { id, pk -> actionsViewModel.react(id, pk) },
+            react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
+            onReactLongPress = { id, pk ->
+                emojiReactTarget = id to pk
+                if (actionsViewModel.getPinnedEmojis().isEmpty()) showFullEmojiPicker = true
+            },
             repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
             zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
             saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -561,6 +571,41 @@ fun UserProfileScreen(
         FullScreenVideoDialog(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
+        )
+    }
+
+    // ── Emoji quick strip ───────────────────────────────────────────────────
+    emojiReactTarget?.let { (eventId, pubkey) ->
+        val pinned = remember { actionsViewModel.getPinnedEmojis() }
+        if (pinned.isNotEmpty() && !showFullEmojiPicker) {
+            com.unsilence.app.ui.feed.EmojiQuickStrip(
+                pinnedEmojis = pinned,
+                onSelect = { emoji ->
+                    actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                    emojiReactTarget = null
+                },
+                onOpenFullPicker = { showFullEmojiPicker = true },
+            )
+        }
+    }
+
+    // ── Full emoji picker sheet ─────────────────────────────────────────────
+    if (showFullEmojiPicker && emojiReactTarget != null) {
+        val (eventId, pubkey) = emojiReactTarget!!
+        com.unsilence.app.ui.feed.EmojiPickerSheet(
+            emojis = actionsViewModel.getSubscribedEmojis(),
+            pinnedShortcodes = pinnedShortcodes,
+            onSelect = { emoji ->
+                actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
+                showFullEmojiPicker = false
+                emojiReactTarget = null
+            },
+            onTogglePin = { actionsViewModel.togglePinnedEmoji(it) },
+            onOpenSettings = openEmojiSettings,
+            onDismiss = {
+                showFullEmojiPicker = false
+                emojiReactTarget = null
+            },
         )
     }
 }

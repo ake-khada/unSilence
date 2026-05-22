@@ -178,6 +178,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
+    var showEmojiSettings    by remember { mutableStateOf(false) }
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
@@ -271,7 +272,10 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
         }
     }
 
-    CompositionLocalProvider(LocalShowSnackbar provides showSnackbar) {
+    CompositionLocalProvider(
+        LocalShowSnackbar provides showSnackbar,
+        com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
+    ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -575,6 +579,13 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                 ComposeScreen(
                     quoteEventId = noteId,
                     onDismiss    = { quoteNoteId = null },
+                )
+            }
+
+            // ── Settings → Custom Emojis overlay ────────────────────────────
+            if (showEmojiSettings) {
+                com.unsilence.app.ui.settings.CustomEmojisScreen(
+                    onDismiss = { showEmojiSettings = false },
                 )
             }
 

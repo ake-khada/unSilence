@@ -1180,6 +1180,7 @@ class MemoryEventStore @Inject constructor(
             emojis = emojis,
             updatedAt = event.createdAt,
         )
+        Log.d("EmojiPicker", "Set stored: ${event.pubkey.take(8)}…/$dTag title=$title emojiN=${emojis.size}")
         if (dirty != null) dirty.emojiSet = true
         else _emojiSetSignal.value = System.nanoTime()
     }
@@ -1223,6 +1224,9 @@ class MemoryEventStore @Inject constructor(
             inlineEmojis = inlineEmojis,
             updatedAt = event.createdAt,
         )
+        Log.d("EmojiPicker", "UserEmojiList stored for ${event.pubkey.take(8)}…: " +
+                "inlineN=${inlineEmojis.size} setRefsN=${setRefs.size} " +
+                "refs=${setRefs.map { "${it.authorPubkey.take(8)}…/${it.setName}" }}")
         if (dirty != null) dirty.emojiSet = true
         else _emojiSetSignal.value = System.nanoTime()
     }
