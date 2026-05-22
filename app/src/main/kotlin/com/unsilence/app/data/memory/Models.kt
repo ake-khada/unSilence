@@ -286,6 +286,34 @@ data class PaginatedFetchResult(
     val relay: String,
 )
 
+// ── NIP-30 Custom Emoji ────────────────────────────────────────────────────
+
+/** Single emoji declaration: shortcode + image URL. */
+data class CustomEmoji(val shortcode: String, val url: String)
+
+/** Kind-30030 emoji set: replaceable per (author, setName). */
+data class EmojiSetEntity(
+    val authorPubkey: String,
+    val setName: String,
+    val title: String?,
+    val emojis: List<CustomEmoji>,
+    val updatedAt: Long,
+)
+
+/** Kind-10030 user emoji list: references to subscribed sets + inline emoji tags. */
+data class UserEmojiListEntity(
+    val pubkey: String,
+    val setRefs: List<EmojiSetRef>,
+    val inlineEmojis: List<CustomEmoji>,
+    val updatedAt: Long,
+)
+
+data class EmojiSetRef(
+    val authorPubkey: String,
+    val setName: String,
+    val hintRelay: String? = null,
+)
+
 /** Parse an [EventModel] from a [FeedRow]'s fields. Pure function — equivalent to MES-parsed model. */
 fun FeedRow.toEventModel(): com.unsilence.app.data.model.EventModel =
     com.unsilence.app.data.model.ContentParser.parse(

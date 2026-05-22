@@ -368,6 +368,25 @@ class AppBootstrapper @Inject constructor(
             }
         }
 
+        // NIP-30 custom emoji: fetch user's emoji list, then resolve subscribed sets.
+        // Non-blocking — launched in background so it doesn't delay Phase 3.
+        scope.launch {
+            relayPool.fetchUserEmojiList(pubkeyHex, indexerUrls)
+            // Wait for kind-10030 to land in MES (up to 5s)
+            var waited = 0L
+            while (waited < 5_000L && memoryEventStore.getUserEmojiList(pubkeyHex) == null) {
+                delay(250L)
+                waited += 250L
+            }
+            val emojiList = memoryEventStore.getUserEmojiList(pubkeyHex)
+            if (emojiList != null && emojiList.setRefs.isNotEmpty()) {
+                relayPool.fetchEmojiSets(emojiList.setRefs)
+                Log.d(TAG, "Phase2: NIP-30 emoji sets requested (${emojiList.setRefs.size} refs)")
+            } else {
+                Log.d(TAG, "Phase2: NIP-30 no emoji list or empty set refs")
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         // Phase 3 (2500ms): Maintenance + media preconnect
         // ═══════════════════════════════════════════════════════════════════
