@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -81,6 +82,12 @@ fun ComposeScreen(
     val blocks        by viewModel.blocks.collectAsStateWithLifecycle()
     val canPublish    by viewModel.canPublish.collectAsStateWithLifecycle()
     val sendState     by viewModel.sendState.collectAsStateWithLifecycle()
+
+    val mentionPickerOpen by viewModel.mentionPickerOpen.collectAsStateWithLifecycle()
+    val mentionQuery      by viewModel.mentionQuery.collectAsStateWithLifecycle()
+    val mentionFollows    by viewModel.mentionFollows.collectAsStateWithLifecycle()
+    val mentionSearchResults by viewModel.mentionSearchResults.collectAsStateWithLifecycle()
+    val pendingMention    by viewModel.pendingMentionInsert.collectAsStateWithLifecycle()
 
     val isReply = replyToEventId != null
     val isQuote = quoteEventId != null
@@ -296,9 +303,15 @@ fun ComposeScreen(
                             key(block.id) {
                                 when (block) {
                                     is ComposeBlock.Text -> {
+                                        val mentionForBlock = pendingMention
+                                            ?.takeIf { it.first == block.id }?.second
                                         TextBlock(
+                                            blockId = block.id,
                                             initialText = block.content,
                                             onTextChange = { viewModel.updateTextBlock(block.id, it) },
+                                            onFocused = { viewModel.setFocusedBlock(it) },
+                                            pendingInsert = mentionForBlock,
+                                            onInsertConsumed = { viewModel.consumeMentionInsert() },
                                             autoFocus = true,
                                             placeholder = when {
                                                 block.id != firstTextId -> ""
@@ -405,6 +418,18 @@ fun ComposeScreen(
                             Icon(
                                 imageVector = Icons.Filled.AddPhotoAlternate,
                                 contentDescription = "Add media",
+                                tint = BrandDeep,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.openMentionPicker() },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.AlternateEmail,
+                                contentDescription = "Mention",
                                 tint = BrandDeep,
                                 modifier = Modifier.size(24.dp),
                             )
@@ -572,5 +597,17 @@ fun ComposeScreen(
                 )
             }
         }
+    }
+
+    // ── Mention picker sheet ────────────────────────────────────────────
+    if (mentionPickerOpen) {
+        MentionPickerSheet(
+            follows = mentionFollows,
+            searchResults = mentionSearchResults,
+            query = mentionQuery,
+            onQueryChange = viewModel::setMentionQuery,
+            onSelect = viewModel::selectMention,
+            onDismiss = viewModel::closeMentionPicker,
+        )
     }
 }

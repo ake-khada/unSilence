@@ -66,8 +66,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TextBlock(
+    blockId: String,
     initialText: String,
     onTextChange: (String) -> Unit,
+    onFocused: (String) -> Unit,
+    pendingInsert: String?,
+    onInsertConsumed: () -> Unit,
     autoFocus: Boolean = false,
     placeholder: String = "What's on your mind?",
     modifier: Modifier = Modifier,
@@ -87,6 +91,19 @@ fun TextBlock(
 
     LaunchedEffect(textValue.text) {
         onTextChange(textValue.text)
+    }
+
+    // Insert mention text at cursor when pendingInsert arrives for this block
+    LaunchedEffect(pendingInsert) {
+        val insert = pendingInsert ?: return@LaunchedEffect
+        val current = textValue
+        val cursor = current.selection.start.coerceIn(0, current.text.length)
+        val newText = current.text.substring(0, cursor) + insert + current.text.substring(cursor)
+        val newCursor = cursor + insert.length
+        textValue = TextFieldValue(text = newText, selection = TextRange(newCursor))
+        onTextChange(newText)
+        onInsertConsumed()
+        focusRequester.requestFocus()
     }
 
     if (autoFocus) {
@@ -110,6 +127,7 @@ fun TextBlock(
             .bringIntoViewRequester(bringIntoViewRequester)
             .onFocusChanged { state ->
                 if (state.isFocused) {
+                    onFocused(blockId)
                     scope.launch { bringIntoViewRequester.bringIntoView() }
                 }
             },
