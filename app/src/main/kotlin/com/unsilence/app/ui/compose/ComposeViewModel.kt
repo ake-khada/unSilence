@@ -45,6 +45,7 @@ import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -95,6 +96,10 @@ sealed interface AttachmentState {
     ) : AttachmentState
 }
 
+// ── Relay publish status ────────────────────────────────────────────────────
+
+enum class RelayPublishStatus { Pending, Accepted, Rejected, TimedOut }
+
 // ── Send state (confirm step) ───────────────────────────────────────────────
 
 sealed interface SendState {
@@ -106,6 +111,10 @@ sealed interface SendState {
         val notifyCandidates: List<NotifyCandidate>,
         val notifyActive: Set<String>,
     ) : SendState
+    data class Publishing(
+        val statuses: Map<String, RelayPublishStatus>,
+    ) : SendState
+    data class Failed(val reason: String) : SendState
     data object Sent : SendState
 }
 
@@ -596,7 +605,16 @@ class ComposeViewModel @Inject constructor(
     fun confirmPublish() {
         val state = _sendState.value as? SendState.Confirming ?: return
         if (state.isReply) publishReply(state.notifyActive) else publishNote(state.notifyActive)
-        _sendState.value = SendState.Sent
+    }
+
+    fun retryPublish() {
+        val state = _sendState.value as? SendState.Failed ?: return
+        // Re-enter Composing then re-request — blocks + reply state are intact
+        _sendState.value = SendState.Composing
+        val isReply = replyToRow != null
+        requestPublish(isReply)
+        val confirming = _sendState.value as? SendState.Confirming ?: return
+        if (confirming.isReply) publishReply(confirming.notifyActive) else publishNote(confirming.notifyActive)
     }
 
     fun toggleNotify(pubkey: String) {
@@ -652,6 +670,8 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun cancelSend() {
+        // Cannot cancel during Publishing — event already broadcast
+        if (_sendState.value is SendState.Publishing) return
         _sendState.value = SendState.Composing
     }
 
@@ -733,13 +753,12 @@ class ComposeViewModel @Inject constructor(
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
-                publishError = "Signing failed — check your key or Amber connection"
+                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
                 return@launch
             }
 
-            withContext(Dispatchers.IO) {
-                relayPool.publish(toEventJson(signed))
-
+            val eventJson = toEventJson(signed)
+            publishAndTrack(signed.id, eventJson, replyToId, threadRootId) {
                 val nowMs = System.currentTimeMillis()
                 val parsedTags = signed.tags.map { it.toList() }
                 memoryEventStore.insert(
@@ -762,9 +781,6 @@ class ComposeViewModel @Inject constructor(
                     )
                 )
             }
-
-            _blocks.value = listOf(ComposeBlock.Text(""))
-            published = true
         }
     }
 
@@ -804,13 +820,12 @@ class ComposeViewModel @Inject constructor(
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
-                publishError = "Signing failed — check your key or Amber connection"
+                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
                 return@launch
             }
 
-            withContext(Dispatchers.IO) {
-                relayPool.publish(toEventJson(signed))
-
+            val eventJson = toEventJson(signed)
+            publishAndTrack(signed.id, eventJson, null, null) {
                 val nowMs = System.currentTimeMillis()
                 val parsedTags = signed.tags.map { it.toList() }
                 memoryEventStore.insert(
@@ -833,9 +848,77 @@ class ComposeViewModel @Inject constructor(
                     )
                 )
             }
+        }
+    }
 
-            _blocks.value = listOf(ComposeBlock.Text(""))
-            published = true
+    /**
+     * Shared publish-and-track: broadcasts to write relays, enters Publishing state,
+     * tracks per-relay OK responses with 6s timeout, then inserts into MES on success.
+     */
+    private suspend fun publishAndTrack(
+        eventId: String,
+        eventJson: String,
+        replyToId: String?,
+        rootId: String?,
+        insertIntoMes: suspend () -> Unit,
+    ) {
+        val ownPk = pubkeyHex ?: ""
+        val writeRelays = memoryEventStore.writeRelaysFor(ownPk)
+            .mapNotNull { com.unsilence.app.data.relay.normalizeRelayUrl(it) }
+            .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS }
+
+        // Enter Publishing state with all relays Pending
+        val statusMap = ConcurrentHashMap<String, RelayPublishStatus>()
+        writeRelays.forEach { statusMap[it] = RelayPublishStatus.Pending }
+        _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+
+        // Register OK callback before sending
+        relayPool.registerPublishCallback(eventId) { relayUrl, success, _ ->
+            val normalized = com.unsilence.app.data.relay.normalizeRelayUrl(relayUrl)
+            val key = normalized ?: relayUrl
+            if (statusMap.containsKey(key)) {
+                statusMap[key] = if (success) RelayPublishStatus.Accepted else RelayPublishStatus.Rejected
+                _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+            }
+        }
+
+        try {
+            // Broadcast to relays
+            withContext(Dispatchers.IO) {
+                relayPool.publish(eventJson)
+            }
+
+            // Wait up to 6s for all relays to respond
+            val deadline = System.currentTimeMillis() + 6_000
+            while (System.currentTimeMillis() < deadline) {
+                val accepted = statusMap.values.count { it == RelayPublishStatus.Accepted }
+                val final = statusMap.values.count { it != RelayPublishStatus.Pending }
+                if (final == statusMap.size || accepted > 0) break
+                delay(200)
+            }
+
+            // Time out any remaining Pending relays
+            for ((url, status) in statusMap) {
+                if (status == RelayPublishStatus.Pending) {
+                    statusMap[url] = RelayPublishStatus.TimedOut
+                }
+            }
+            _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+
+            val acceptedCount = statusMap.values.count { it == RelayPublishStatus.Accepted }
+            if (acceptedCount > 0) {
+                // Insert into MES for local state
+                withContext(Dispatchers.IO) { insertIntoMes() }
+                // Brief pause to show final state
+                delay(800)
+                _blocks.value = listOf(ComposeBlock.Text(""))
+                published = true
+                _sendState.value = SendState.Sent
+            } else {
+                _sendState.value = SendState.Failed("No relays accepted the event")
+            }
+        } finally {
+            relayPool.unregisterPublishCallback(eventId)
         }
     }
 
