@@ -891,9 +891,7 @@ class ComposeViewModel @Inject constructor(
             // Wait up to 6s for all relays to respond
             val deadline = System.currentTimeMillis() + 6_000
             while (System.currentTimeMillis() < deadline) {
-                val accepted = statusMap.values.count { it == RelayPublishStatus.Accepted }
-                val final = statusMap.values.count { it != RelayPublishStatus.Pending }
-                if (final == statusMap.size || accepted > 0) break
+                if (statusMap.values.none { it == RelayPublishStatus.Pending }) break
                 delay(200)
             }
 
