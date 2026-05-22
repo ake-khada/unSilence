@@ -44,7 +44,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 8
+private const val SNAPSHOT_BINARY_VERSION = 9
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -128,7 +128,7 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Engagement contributor indexes (per-target breakdowns for drawer) ──
     private val repostPubkeysByTarget = ConcurrentHashMap<String, MutableSet<String>>()
-    private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<Pair<String, String>>>()
+    private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<ReactionInfo>>()
     private val zapDetailsByTarget = ConcurrentHashMap<String, MutableList<ZapDetail>>()
 
     // ─── Actor-side action indexes (Tier 4: "what have I done?") ───────────
@@ -663,16 +663,31 @@ class MemoryEventStore @Inject constructor(
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
     }
 
+    private val EMOJI_SHORTCODE_REACTION = Regex(""":([A-Za-z0-9_]+):""")
+
     private fun handleReaction(event: NostrEvent, dirty: InsertDirty) {
         // Last e-tag is the target
         val targetId = event.tags
             .lastOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
-        val emoji = event.content.ifBlank { "+" }
+        val contentStr = event.content.ifBlank { "+" }
+        val reactionContent: ReactionContent = run {
+            val match = EMOJI_SHORTCODE_REACTION.matchEntire(contentStr)
+            if (match != null) {
+                val shortcode = match.groupValues[1]
+                val url = event.tags.firstOrNull { tag ->
+                    tag.size >= 3 && tag[0] == "emoji" && tag[1] == shortcode
+                }?.get(2)
+                if (url != null) ReactionContent.Custom(shortcode, url)
+                else ReactionContent.Standard(contentStr)
+            } else {
+                ReactionContent.Standard(contentStr)
+            }
+        }
         reactionsByTarget
             .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
-            .add(event.pubkey to emoji)
+            .add(ReactionInfo(event.pubkey, reactionContent))
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reacted to
@@ -1826,8 +1841,8 @@ class MemoryEventStore @Inject constructor(
     fun repostPubkeysForEvent(eventId: String): List<String> =
         repostPubkeysByTarget[eventId]?.toList() ?: emptyList()
 
-    /** (pubkey, emoji) pairs for all reactions to [eventId]. */
-    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+    /** Reaction info for all reactions to [eventId]. */
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
         reactionsByTarget[eventId]?.toList() ?: emptyList()
 
     /** Per-zap breakdown for [eventId]: sender, sats, optional comment. */
@@ -2992,9 +3007,22 @@ class MemoryEventStore @Inject constructor(
             }
             val reactionContribs = reactionsByTarget.mapValues { it.value.toSet() }
             d.writeInt(reactionContribs.size)
-            for ((id, pairs) in reactionContribs) {
-                d.writeStr(id); d.writeInt(pairs.size)
-                for ((pk, emoji) in pairs) { d.writeStr(pk); d.writeStr(emoji) }
+            for ((id, infos) in reactionContribs) {
+                d.writeStr(id); d.writeInt(infos.size)
+                for (info in infos) {
+                    d.writeStr(info.pubkey)
+                    when (val c = info.content) {
+                        is ReactionContent.Standard -> {
+                            d.writeByte(0)
+                            d.writeStr(c.emoji)
+                        }
+                        is ReactionContent.Custom -> {
+                            d.writeByte(1)
+                            d.writeStr(c.shortcode)
+                            d.writeStr(c.url)
+                        }
+                    }
+                }
             }
             val zapContribs = zapDetailsByTarget.mapValues { it.value.toList() }
             d.writeInt(zapContribs.size)
@@ -3232,8 +3260,24 @@ class MemoryEventStore @Inject constructor(
             if (reactionContribN < 0 || reactionContribN > 5_000_000) throw IOException("Invalid reaction contrib count: $reactionContribN")
             for (i in 0 until reactionContribN) {
                 val id = input.readStr(); val n = input.readInt()
-                val set: MutableSet<Pair<String, String>> = ConcurrentHashMap.newKeySet()
-                for (j in 0 until n) set.add(input.readStr() to input.readStr())
+                val set: MutableSet<ReactionInfo> = ConcurrentHashMap.newKeySet()
+                if (version >= 9) {
+                    for (j in 0 until n) {
+                        val pk = input.readStr()
+                        val disc = input.readByte().toInt()
+                        val content = if (disc == 1) {
+                            ReactionContent.Custom(input.readStr(), input.readStr())
+                        } else {
+                            ReactionContent.Standard(input.readStr())
+                        }
+                        set.add(ReactionInfo(pk, content))
+                    }
+                } else {
+                    // V8 and earlier: (pubkey, emoji) pairs → Standard
+                    for (j in 0 until n) {
+                        set.add(ReactionInfo(input.readStr(), ReactionContent.Standard(input.readStr())))
+                    }
+                }
                 reactionsByTarget[id] = set
             }
             val zapContribN = input.readInt()

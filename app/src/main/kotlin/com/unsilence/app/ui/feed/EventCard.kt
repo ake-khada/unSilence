@@ -90,7 +90,7 @@ fun EventCard(
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
+    reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
     imageDimensionCache: ImageDimensionCache?,
     thumbnailCache: VideoThumbnailCache?,
     // Video
@@ -447,7 +447,7 @@ private fun ArticleLayout(
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    reactionsForEvent: ((String) -> List<Pair<String, String>>)? = null,
+    reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
     modifier: Modifier = Modifier,
 ) {
     val article = model.article

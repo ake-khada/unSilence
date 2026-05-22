@@ -135,7 +135,7 @@ class UserProfileViewModel @Inject constructor(
         memoryEventStore.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> =
         memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
         memoryEventStore.reactionsForEvent(eventId)
 
     /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */

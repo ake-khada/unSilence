@@ -331,7 +331,7 @@ class FeedViewModel @Inject constructor(
     fun repostPubkeysForEvent(eventId: String): List<String> =
         memoryEventStore.repostPubkeysForEvent(eventId)
 
-    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
         memoryEventStore.reactionsForEvent(eventId)
 
     // -- User relay sets (kind-30002) ------------------------------------------
