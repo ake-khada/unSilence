@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.blossom.AttachmentQuality
 import com.unsilence.app.data.blossom.BlossomBlob
 import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
@@ -26,8 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
@@ -47,23 +46,31 @@ sealed interface AttachmentState {
     val uri: Uri
     val id: String
     val displayName: String
+    val originalBytes: Long
+    val quality: AttachmentQuality
 
     data class Idle(
         override val uri: Uri,
         override val id: String,
         override val displayName: String,
+        override val originalBytes: Long,
+        override val quality: AttachmentQuality,
     ) : AttachmentState
 
     data class Uploading(
         override val uri: Uri,
         override val id: String,
         override val displayName: String,
+        override val originalBytes: Long,
+        override val quality: AttachmentQuality,
     ) : AttachmentState
 
     data class Uploaded(
         override val uri: Uri,
         override val id: String,
         override val displayName: String,
+        override val originalBytes: Long,
+        override val quality: AttachmentQuality,
         val blob: BlossomBlob,
     ) : AttachmentState
 
@@ -71,6 +78,8 @@ sealed interface AttachmentState {
         override val uri: Uri,
         override val id: String,
         override val displayName: String,
+        override val originalBytes: Long,
+        override val quality: AttachmentQuality,
         val message: String,
     ) : AttachmentState
 }
@@ -154,29 +163,48 @@ class ComposeViewModel @Inject constructor(
 
     init {
         viewModelScope.launch { blossomServersStore.initialize() }
-        // Auto-upload idle attachments sequentially.
-        viewModelScope.launch {
-            _blocks
-                .map { blocks ->
-                    blocks.firstOrNull {
-                        it is ComposeBlock.Attachment && it.state is AttachmentState.Idle
-                    } as? ComposeBlock.Attachment
-                }
-                .filterNotNull()
-                .distinctUntilChanged { a, b -> a.state.id == b.state.id }
-                .collect { idleBlock ->
-                    uploadAttachment(idleBlock.state as AttachmentState.Idle)
-                }
+    }
+
+    /** Manually trigger upload for a single idle attachment. */
+    fun startUpload(id: String) {
+        val block = _blocks.value.firstOrNull {
+            it is ComposeBlock.Attachment && it.state.id == id
+        } as? ComposeBlock.Attachment ?: return
+        val idle = block.state as? AttachmentState.Idle ?: return
+        viewModelScope.launch { uploadAttachment(idle) }
+    }
+
+    private fun defaultImageQuality(): AttachmentQuality {
+        // Settings slider uses dimSteps: 1024 / 1600 / 2048 / 0(original).
+        val maxDim = blossomServersStore.imageMaxDim.value
+        return when {
+            maxDim == 0 -> AttachmentQuality.ORIGINAL
+            maxDim <= 1024 -> AttachmentQuality.SMALL
+            maxDim <= 1600 -> AttachmentQuality.STANDARD
+            else -> AttachmentQuality.HIGH
+        }
+    }
+
+    private fun defaultVideoQuality(): AttachmentQuality {
+        return when (blossomServersStore.videoQuality.value) {
+            VideoTranscoder.Quality.SMALL -> AttachmentQuality.SMALL
+            VideoTranscoder.Quality.STANDARD -> AttachmentQuality.STANDARD
+            VideoTranscoder.Quality.HIGH -> AttachmentQuality.HIGH
         }
     }
 
     fun addAttachments(uris: List<Uri>) {
         val newAttachments = uris.map { uri ->
+            val mime = contentResolver.getType(uri) ?: ""
+            val defaultQuality = if (mime.startsWith("video/"))
+                defaultVideoQuality() else defaultImageQuality()
             ComposeBlock.Attachment(
                 state = AttachmentState.Idle(
                     uri = uri,
                     id = UUID.randomUUID().toString(),
                     displayName = queryDisplayName(uri),
+                    originalBytes = queryFileSize(uri),
+                    quality = defaultQuality,
                 )
             )
         }
@@ -211,6 +239,20 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
+    private fun queryFileSize(uri: Uri): Long {
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.SIZE),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+            } ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
     fun removeAttachment(id: String) {
         _blocks.update { blocks ->
             blocks.filterNot {
@@ -227,9 +269,31 @@ class ComposeViewModel @Inject constructor(
                     block.state.id == id &&
                     block.state is AttachmentState.Failed
                 ) {
+                    val f = block.state as AttachmentState.Failed
                     block.copy(
-                        state = AttachmentState.Idle(block.state.uri, block.state.id, block.state.displayName)
+                        state = AttachmentState.Idle(
+                            uri = f.uri,
+                            id = f.id,
+                            displayName = f.displayName,
+                            originalBytes = f.originalBytes,
+                            quality = f.quality,
+                        )
                     )
+                } else block
+            }
+        }
+    }
+
+    fun updateAttachmentQuality(id: String, quality: AttachmentQuality) {
+        _blocks.update { blocks ->
+            blocks.map { block ->
+                if (block is ComposeBlock.Attachment && block.state.id == id) {
+                    val newState = when (val s = block.state) {
+                        is AttachmentState.Idle -> s.copy(quality = quality)
+                        is AttachmentState.Failed -> s.copy(quality = quality)
+                        else -> s // Uploading and Uploaded are locked
+                    }
+                    block.copy(state = newState)
                 } else block
             }
         }
@@ -237,7 +301,13 @@ class ComposeViewModel @Inject constructor(
 
     private suspend fun uploadAttachment(idle: AttachmentState.Idle) {
         updateAttachmentState(idle.id) {
-            AttachmentState.Uploading(idle.uri, idle.id, idle.displayName)
+            AttachmentState.Uploading(
+                uri = idle.uri,
+                id = idle.id,
+                displayName = idle.displayName,
+                originalBytes = idle.originalBytes,
+                quality = idle.quality,
+            )
         }
 
         val server = blossomServersStore.selectedServer.value
@@ -245,18 +315,34 @@ class ComposeViewModel @Inject constructor(
 
         val result = runCatching {
             if (sourceMime.startsWith("video/")) {
-                uploadVideo(idle.uri, server)
+                uploadVideo(idle.uri, server, idle.quality)
             } else {
-                uploadImage(idle.uri, sourceMime, server)
+                uploadImage(idle.uri, sourceMime, server, idle.quality)
             }
         }
 
         updateAttachmentState(idle.id) {
             result.fold(
-                onSuccess = { blob -> AttachmentState.Uploaded(idle.uri, idle.id, idle.displayName, blob) },
+                onSuccess = { blob ->
+                    AttachmentState.Uploaded(
+                        uri = idle.uri,
+                        id = idle.id,
+                        displayName = idle.displayName,
+                        originalBytes = idle.originalBytes,
+                        quality = idle.quality,
+                        blob = blob,
+                    )
+                },
                 onFailure = { ex ->
                     Log.e(TAG, "Upload failed for ${idle.uri}", ex)
-                    AttachmentState.Failed(idle.uri, idle.id, idle.displayName, ex.message ?: "Upload failed")
+                    AttachmentState.Failed(
+                        uri = idle.uri,
+                        id = idle.id,
+                        displayName = idle.displayName,
+                        originalBytes = idle.originalBytes,
+                        quality = idle.quality,
+                        message = ex.message ?: "Upload failed",
+                    )
                 },
             )
         }
@@ -275,22 +361,26 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
-    private suspend fun uploadImage(uri: Uri, sourceMime: String, server: String): BlossomBlob {
-        val maxDim = blossomServersStore.imageMaxDim.value
-        val quality = blossomServersStore.imageQuality.value
-
+    private suspend fun uploadImage(
+        uri: Uri,
+        sourceMime: String,
+        server: String,
+        quality: AttachmentQuality,
+    ): BlossomBlob {
         val rawBytes = withContext(Dispatchers.IO) {
             contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: error("Could not read attachment")
         }
 
-        val (compressed, uploadMime) = if (maxDim == 0) {
+        val (maxDim, jpegQuality) = quality.imageSettings()
+
+        val (compressed, uploadMime) = if (quality == AttachmentQuality.ORIGINAL || maxDim == 0) {
             rawBytes to sourceMime
         } else {
             imageCompressor.compressImage(
                 bytes = rawBytes,
                 maxDimension = maxDim,
-                quality = quality,
+                quality = jpegQuality,
             ) to "image/jpeg"
         }
 
@@ -301,9 +391,12 @@ class ComposeViewModel @Inject constructor(
         ).getOrThrow()
     }
 
-    private suspend fun uploadVideo(uri: Uri, server: String): BlossomBlob {
-        val videoQuality = blossomServersStore.videoQuality.value
-        val transcoded = videoTranscoder.transcode(uri, videoQuality)
+    private suspend fun uploadVideo(
+        uri: Uri,
+        server: String,
+        quality: AttachmentQuality,
+    ): BlossomBlob {
+        val transcoded = videoTranscoder.transcode(uri, quality.videoQuality())
         try {
             val blob = blossomClient.upload(
                 file = transcoded.file,
