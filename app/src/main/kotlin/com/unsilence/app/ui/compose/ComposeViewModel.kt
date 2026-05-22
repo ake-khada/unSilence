@@ -103,9 +103,20 @@ sealed interface SendState {
         val isReply: Boolean,
         val previewContent: String,
         val previewTagsJson: String,
+        val notifyCandidates: List<NotifyCandidate>,
+        val notifyActive: Set<String>,
     ) : SendState
     data object Sent : SendState
 }
+
+enum class NotifySource { ReplyParent, QuoteAuthor, Mention }
+
+data class NotifyCandidate(
+    val pubkey: String,
+    val source: NotifySource,
+    val displayName: String?,
+    val picture: String?,
+)
 
 @HiltViewModel
 class ComposeViewModel @Inject constructor(
@@ -571,18 +582,73 @@ class ComposeViewModel @Inject constructor(
         val content = buildPreviewContent(current, isReply)
         val tags = buildPreviewTags(current, isReply)
         val tagsJsonStr = tagsToJson(tags.map { it.toList() })
+        val candidates = buildNotifyCandidates(current, isReply)
 
         _sendState.value = SendState.Confirming(
             isReply = isReply,
             previewContent = content,
             previewTagsJson = tagsJsonStr,
+            notifyCandidates = candidates,
+            notifyActive = candidates.map { it.pubkey }.toSet(),
         )
     }
 
     fun confirmPublish() {
         val state = _sendState.value as? SendState.Confirming ?: return
-        if (state.isReply) publishReply() else publishNote()
+        if (state.isReply) publishReply(state.notifyActive) else publishNote(state.notifyActive)
         _sendState.value = SendState.Sent
+    }
+
+    fun toggleNotify(pubkey: String) {
+        val state = _sendState.value as? SendState.Confirming ?: return
+        val newActive = if (pubkey in state.notifyActive)
+            state.notifyActive - pubkey
+        else
+            state.notifyActive + pubkey
+        _sendState.value = state.copy(notifyActive = newActive)
+    }
+
+    private fun buildNotifyCandidates(
+        blocks: List<ComposeBlock>,
+        isReply: Boolean,
+    ): List<NotifyCandidate> {
+        val ownPubkey = pubkeyHex ?: ""
+        val candidates = mutableListOf<NotifyCandidate>()
+        val seen = mutableSetOf(ownPubkey)
+
+        if (isReply) {
+            val parent = replyToRow
+            if (parent != null && parent.pubkey !in seen) {
+                candidates.add(buildCandidate(parent.pubkey, NotifySource.ReplyParent))
+                seen.add(parent.pubkey)
+            }
+        } else {
+            val quoted = quoteRow?.pubkey
+            if (quoted != null && quoted !in seen) {
+                candidates.add(buildCandidate(quoted, NotifySource.QuoteAuthor))
+                seen.add(quoted)
+            }
+        }
+
+        val content = blocksToContent(blocks)
+        extractMentionPubkeys(content).forEach { pk ->
+            if (pk !in seen) {
+                candidates.add(buildCandidate(pk, NotifySource.Mention))
+                seen.add(pk)
+            }
+        }
+        return candidates
+    }
+
+    private fun buildCandidate(pubkey: String, source: NotifySource): NotifyCandidate {
+        val user = memoryEventStore.getUserEntity(pubkey)
+        return NotifyCandidate(
+            pubkey = pubkey,
+            source = source,
+            displayName = user?.displayName?.takeIf { it.isNotBlank() }
+                ?: user?.name?.takeIf { it.isNotBlank() },
+            picture = user?.picture,
+        )
     }
 
     fun cancelSend() {
@@ -637,7 +703,7 @@ class ComposeViewModel @Inject constructor(
 
     // ── Publishing ──────────────────────────────────────────────────────────
 
-    fun publishReply() {
+    private fun publishReply(activeNotifyPubkeys: Set<String>) {
         val parent = replyToRow ?: return
         publishError = null
         viewModelScope.launch {
@@ -655,9 +721,13 @@ class ComposeViewModel @Inject constructor(
                 if (replyToId != threadRootId) {
                     add(arrayOf("e", replyToId, "", "reply"))
                 }
-                add(arrayOf("p", replyToPubkey))
+                if (replyToPubkey in activeNotifyPubkeys) {
+                    add(arrayOf("p", replyToPubkey))
+                }
                 mentionPubkeys.forEach { pk ->
-                    if (pk != replyToPubkey) add(arrayOf("p", pk))
+                    if (pk != replyToPubkey && pk in activeNotifyPubkeys) {
+                        add(arrayOf("p", pk))
+                    }
                 }
                 imetaTags.forEach { add(it) }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
@@ -698,7 +768,7 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
-    fun publishNote() {
+    private fun publishNote(activeNotifyPubkeys: Set<String>) {
         publishError = null
         viewModelScope.launch {
             val current = _blocks.value
@@ -721,13 +791,15 @@ class ComposeViewModel @Inject constructor(
                 imetaTags.forEach { add(it) }
                 if (qId != null) {
                     add(arrayOf("q", qId, "", quotedAuthor ?: ""))
-                    if (quotedAuthor != null) {
+                    if (quotedAuthor != null && quotedAuthor in activeNotifyPubkeys) {
                         add(arrayOf("p", quotedAuthor))
                         existingPTags.add(quotedAuthor)
                     }
                 }
                 mentionPubkeys.forEach { pk ->
-                    if (pk !in existingPTags) add(arrayOf("p", pk))
+                    if (pk !in existingPTags && pk in activeNotifyPubkeys) {
+                        add(arrayOf("p", pk))
+                    }
                 }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }

@@ -6,6 +6,8 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +22,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +49,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -52,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -563,6 +570,13 @@ fun ComposeScreen(
                         }
                     }
 
+                    // ── Notify-whom toggle row ────────────────────────────
+                    NotifyToggleRow(
+                        candidates = state.notifyCandidates,
+                        active = state.notifyActive,
+                        onToggle = { viewModel.toggleNotify(it) },
+                    )
+
                     // ── Confirm + Cancel row ───────────────────────────────
                     Row(
                         modifier = Modifier
@@ -643,6 +657,91 @@ fun ComposeScreen(
             onQueryChange = viewModel::setMentionQuery,
             onSelect = viewModel::selectMention,
             onDismiss = viewModel::closeMentionPicker,
+        )
+    }
+}
+
+// ── Notify-whom toggle ──────────────────────────────────────────────────
+
+@Composable
+private fun NotifyToggleRow(
+    candidates: List<NotifyCandidate>,
+    active: Set<String>,
+    onToggle: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (candidates.isEmpty()) return
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+    ) {
+        Text(
+            text = "Notify",
+            color = TextSecondary,
+            fontSize = AppType.caption,
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(candidates, key = { it.pubkey }) { candidate ->
+                NotifyChip(
+                    candidate = candidate,
+                    isActive = candidate.pubkey in active,
+                    onClick = { onToggle(candidate.pubkey) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotifyChip(
+    candidate: NotifyCandidate,
+    isActive: Boolean,
+    onClick: () -> Unit,
+) {
+    val displayName = candidate.displayName
+        ?: "${candidate.pubkey.take(6)}\u2026${candidate.pubkey.takeLast(4)}"
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(
+                if (isActive) BrandDeep.copy(alpha = 0.18f)
+                else Color.Transparent
+            )
+            .border(
+                width = 0.5.dp,
+                color = if (isActive) BrandDeep
+                        else Color.White.copy(alpha = 0.18f),
+                shape = RoundedCornerShape(999.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(20.dp).clip(CircleShape)) {
+            IdentIcon(pubkey = candidate.pubkey, modifier = Modifier.size(20.dp))
+            if (!candidate.picture.isNullOrBlank()) {
+                AsyncImage(
+                    model = rememberAvatarImageRequest(candidate.picture, 20.dp),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(if (isActive) 1f else 0.4f),
+                )
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = displayName,
+            color = if (isActive) Color.White else TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = if (isActive) FontWeight.Medium else FontWeight.Normal,
+            textDecoration = if (isActive) null else TextDecoration.LineThrough,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 120.dp),
         )
     }
 }
