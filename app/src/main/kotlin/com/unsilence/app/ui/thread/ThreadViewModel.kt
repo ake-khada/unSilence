@@ -108,6 +108,23 @@ class ThreadViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
         }
 
+    // ── Engagement drawer data (contributor indexes) ─────────────────────
+    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
+        memoryEventStore.zapDetailsForEvent(eventId)
+    fun repostPubkeysForEvent(eventId: String): List<String> =
+        memoryEventStore.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<Pair<String, String>> =
+        memoryEventStore.reactionsForEvent(eventId)
+
+    // ── Profile flow (reactive avatar/name for drawer chips) ─────────────
+    private val profileCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.UserEntity?>>()
+
+    fun profileFlow(pubkey: String): StateFlow<com.unsilence.app.data.memory.UserEntity?> =
+        profileCache.getOrPut(pubkey) {
+            userRepository.userFlow(pubkey)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
+
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
         eventIdFlow.value = null
