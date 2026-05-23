@@ -6,6 +6,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -78,6 +79,9 @@ fun ArticleReaderScreen(
     onDismiss: () -> Unit,
     onNoteClick: (String) -> Unit = {},
     onReact: () -> Unit = {},
+    onReactLongPress: () -> Unit = {},
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
+    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit = {},
     onQuote: (String) -> Unit = {},
     onZap: (amountSats: Long) -> Unit = {},
@@ -256,14 +260,43 @@ fun ArticleReaderScreen(
                         }
                     }
                     Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        ActionButton(
-                            icon               = Icons.Filled.Favorite,
-                            count              = row.reactionCount,
-                            contentDescription = "Reactions",
-                            highlighted        = hasReacted,
-                            highlightColor     = Like,
-                            onClick            = onReact,
-                        )
+                        var showStrip by remember { mutableStateOf(false) }
+                        Box(
+                            modifier = Modifier.combinedClickable(
+                                onClick     = onReact,
+                                onLongClick = {
+                                    if (pinnedEmojis.isNotEmpty()) showStrip = true
+                                    else onReactLongPress()
+                                },
+                            ),
+                        ) {
+                            ActionButton(
+                                icon               = Icons.Filled.Favorite,
+                                count              = row.reactionCount,
+                                contentDescription = "Reactions",
+                                highlighted        = hasReacted,
+                                highlightColor     = Like,
+                            )
+                            if (showStrip) {
+                                androidx.compose.ui.window.Popup(
+                                    alignment = Alignment.BottomCenter,
+                                    onDismissRequest = { showStrip = false },
+                                    properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+                                ) {
+                                    EmojiQuickStrip(
+                                        pinnedEmojis = pinnedEmojis,
+                                        onSelect = { emoji ->
+                                            onReactWithEmoji(emoji)
+                                            showStrip = false
+                                        },
+                                        onOpenFullPicker = {
+                                            showStrip = false
+                                            onReactLongPress()
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                     Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                         ZapButton(

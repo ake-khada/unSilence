@@ -13,7 +13,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -27,8 +26,8 @@ private const val QUICK_STRIP_SLOTS = 5
 
 /**
  * Compact 6-tile horizontal strip: up to 5 pinned emoji + trailing "…" to open full picker.
- * Shown as a popup/overlay near the heart button on long-press.
- * If no pinned emoji exist, shows nothing (caller opens full sheet directly).
+ * Rendered as a Popup inside [EventReactButton] on long-press, centered above the heart.
+ * If no pinned emoji exist, the caller opens the full sheet directly.
  */
 @Composable
 internal fun EmojiQuickStrip(

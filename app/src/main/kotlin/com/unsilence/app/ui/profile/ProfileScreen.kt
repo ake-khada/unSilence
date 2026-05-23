@@ -176,8 +176,9 @@ fun ProfileScreen(
         react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
         onReactLongPress = { id, pk ->
             emojiReactTarget = id to pk
-            if (actionsViewModel.getPinnedEmojis().isEmpty()) showFullEmojiPicker = true
+            showFullEmojiPicker = true
         },
+        pinnedEmojis = actionsViewModel::getPinnedEmojis,
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
         zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -523,6 +524,14 @@ fun ProfileScreen(
             row             = row,
             onDismiss       = { articleRow = null },
             onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onReactLongPress = {
+                emojiReactTarget = row.id to row.pubkey
+                showFullEmojiPicker = true
+            },
+            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            onReactWithEmoji = { emoji ->
+                actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
+            },
             onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
             onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
             onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
@@ -541,21 +550,6 @@ fun ProfileScreen(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
         )
-    }
-
-    // ── Emoji quick strip ───────────────────────────────────────────────────
-    emojiReactTarget?.let { (eventId, pubkey) ->
-        val pinned = remember { actionsViewModel.getPinnedEmojis() }
-        if (pinned.isNotEmpty() && !showFullEmojiPicker) {
-            com.unsilence.app.ui.feed.EmojiQuickStrip(
-                pinnedEmojis = pinned,
-                onSelect = { emoji ->
-                    actionsViewModel.react(eventId, pubkey, ":${emoji.shortcode}:", emoji.url)
-                    emojiReactTarget = null
-                },
-                onOpenFullPicker = { showFullEmojiPicker = true },
-            )
-        }
     }
 
     // ── Full emoji picker sheet ─────────────────────────────────────────────

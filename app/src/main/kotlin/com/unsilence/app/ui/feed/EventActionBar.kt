@@ -82,6 +82,8 @@ internal fun EventActionBar(
     onComment: () -> Unit = {},
     onReact: () -> Unit,
     onReactLongPress: () -> Unit = {},
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
+    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
     onZap: (Long) -> Unit,
@@ -145,11 +147,13 @@ internal fun EventActionBar(
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
             EventReactButton(
-                count          = reactionCount,
-                hasReacted     = hasReacted,
-                onCountClick   = onCountClick,
-                onTap          = onReact,
-                onLongPress    = onReactLongPress,
+                count            = reactionCount,
+                hasReacted       = hasReacted,
+                onCountClick     = onCountClick,
+                onTap            = onReact,
+                onOpenFullPicker = onReactLongPress,
+                pinnedEmojis     = pinnedEmojis,
+                onSelectEmoji    = onReactWithEmoji,
             )
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -242,7 +246,9 @@ internal fun EventActionButton(
     }
 }
 
-/** React button: Like-red when reacted, combinedClickable for tap (default +) and long-press (emoji picker). */
+/** React button: Like-red when reacted, combinedClickable for tap (default +) and long-press (emoji picker).
+ *  When [pinnedEmojis] is non-empty, long-press shows an inline [EmojiQuickStrip] Popup centered
+ *  above the heart. When empty, long-press calls [onOpenFullPicker] directly. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun EventReactButton(
@@ -250,33 +256,62 @@ internal fun EventReactButton(
     hasReacted: Boolean,
     onCountClick: (() -> Unit)? = null,
     onTap: () -> Unit,
-    onLongPress: () -> Unit,
+    onOpenFullPicker: () -> Unit,
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
+    onSelectEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
 ) {
     val tint = if (hasReacted) Like else ActionTint
-    Row(
-        verticalAlignment     = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-        modifier              = Modifier
-            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-            .combinedClickable(
-                onClick     = onTap,
-                onLongClick = onLongPress,
-            ),
-    ) {
-        Icon(
-            imageVector        = Icons.Filled.Favorite,
-            contentDescription = "Reactions",
-            tint               = tint,
-            modifier           = Modifier.size(Sizing.actionIcon),
-        )
-        if (count > 0) {
-            Spacer(Modifier.width(Spacing.micro))
-            Text(
-                text     = formatCount(count),
-                color    = tint,
-                fontSize = AppType.footnote,
-                modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
+    var showStrip by remember { mutableStateOf(false) }
+
+    Box {
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier              = Modifier
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .combinedClickable(
+                    onClick     = onTap,
+                    onLongClick = {
+                        if (pinnedEmojis.isNotEmpty()) showStrip = true
+                        else onOpenFullPicker()
+                    },
+                ),
+        ) {
+            Icon(
+                imageVector        = Icons.Filled.Favorite,
+                contentDescription = "Reactions",
+                tint               = tint,
+                modifier           = Modifier.size(Sizing.actionIcon),
             )
+            if (count > 0) {
+                Spacer(Modifier.width(Spacing.micro))
+                Text(
+                    text     = formatCount(count),
+                    color    = tint,
+                    fontSize = AppType.footnote,
+                    modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
+                )
+            }
+        }
+
+        if (showStrip) {
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.BottomCenter,
+                onDismissRequest = { showStrip = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+            ) {
+                EmojiQuickStrip(
+                    pinnedEmojis = pinnedEmojis,
+                    onSelect = { emoji ->
+                        onSelectEmoji(emoji)
+                        showStrip = false
+                    },
+                    onOpenFullPicker = {
+                        showStrip = false
+                        onOpenFullPicker()
+                    },
+                )
+            }
         }
     }
 }
