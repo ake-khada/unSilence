@@ -423,7 +423,6 @@ object ContentParser {
                 if (arr[0].jsonPrimitive.content != "emoji") continue
                 val shortcode = arr[1].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
                 val url = arr[2].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
-                if (!shortcode.all { it.isLetterOrDigit() || it == '_' }) continue
                 out.putIfAbsent(shortcode, url)
             }
             out

@@ -32,6 +32,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.outlined.SentimentSatisfied
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
@@ -69,6 +70,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.ContentParser
+import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.feed.ComposePreviewCard
@@ -102,6 +104,11 @@ fun ComposeScreen(
     val mentionSearchResults by viewModel.mentionSearchResults.collectAsStateWithLifecycle()
     val pendingMention    by viewModel.pendingMentionInsert.collectAsStateWithLifecycle()
     val isSensitive       by viewModel.isSensitive.collectAsStateWithLifecycle()
+
+    val emojiPickerOpen   by viewModel.emojiPickerOpen.collectAsStateWithLifecycle()
+    val resolvedEmojis    by viewModel.resolvedEmojis.collectAsStateWithLifecycle()
+    val pinnedShortcodes  by viewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+    val pendingEmoji      by viewModel.pendingEmojiInsert.collectAsStateWithLifecycle()
 
     val isReply = replyToEventId != null
     val isQuote = quoteEventId != null
@@ -326,13 +333,19 @@ fun ComposeScreen(
                                     is ComposeBlock.Text -> {
                                         val mentionForBlock = pendingMention
                                             ?.takeIf { it.first == block.id }?.second
+                                        val emojiForBlock = pendingEmoji
+                                            ?.takeIf { it.first == block.id }?.second
+                                        val insertForBlock = mentionForBlock ?: emojiForBlock
                                         TextBlock(
                                             blockId = block.id,
                                             initialText = block.content,
                                             onTextChange = { viewModel.updateTextBlock(block.id, it) },
                                             onFocused = { viewModel.setFocusedBlock(it) },
-                                            pendingInsert = mentionForBlock,
-                                            onInsertConsumed = { viewModel.consumeMentionInsert() },
+                                            pendingInsert = insertForBlock,
+                                            onInsertConsumed = {
+                                                if (mentionForBlock != null) viewModel.consumeMentionInsert()
+                                                else viewModel.consumeEmojiInsert()
+                                            },
                                             autoFocus = true,
                                             placeholder = when {
                                                 block.id != firstTextId -> ""
@@ -451,6 +464,18 @@ fun ComposeScreen(
                             Icon(
                                 imageVector = Icons.Filled.AlternateEmail,
                                 contentDescription = "Mention",
+                                tint = BrandDeep,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.openEmojiPicker() },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.SentimentSatisfied,
+                                contentDescription = "Insert emoji",
                                 tint = BrandDeep,
                                 modifier = Modifier.size(24.dp),
                             )
@@ -694,6 +719,18 @@ fun ComposeScreen(
             onQueryChange = viewModel::setMentionQuery,
             onSelect = viewModel::selectMention,
             onDismiss = viewModel::closeMentionPicker,
+        )
+    }
+
+    // ── Emoji picker sheet ──────────────────────────────────────────────
+    if (emojiPickerOpen) {
+        EmojiPickerSheet(
+            emojis = resolvedEmojis,
+            pinnedShortcodes = pinnedShortcodes,
+            onSelect = viewModel::selectEmoji,
+            onTogglePin = viewModel::toggleEmojiPin,
+            onOpenSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current,
+            onDismiss = viewModel::closeEmojiPicker,
         )
     }
 }
