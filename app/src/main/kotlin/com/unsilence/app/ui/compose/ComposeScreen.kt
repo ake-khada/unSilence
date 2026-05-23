@@ -107,6 +107,7 @@ fun ComposeScreen(
 
     val emojiPickerOpen   by viewModel.emojiPickerOpen.collectAsStateWithLifecycle()
     val resolvedEmojis    by viewModel.resolvedEmojis.collectAsStateWithLifecycle()
+    val emojiCategories   by viewModel.emojiCategories.collectAsStateWithLifecycle()
     val pinnedShortcodes  by viewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pendingEmoji      by viewModel.pendingEmojiInsert.collectAsStateWithLifecycle()
 
@@ -731,6 +732,7 @@ fun ComposeScreen(
             onTogglePin = viewModel::toggleEmojiPin,
             onOpenSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current,
             onDismiss = viewModel::closeEmojiPicker,
+            categories = emojiCategories,
         )
     }
 }

@@ -97,6 +97,10 @@ class NoteActionsViewModel @Inject constructor(
     fun getSubscribedEmojis(): List<CustomEmoji> =
         pubkeyHex?.let { memoryEventStore.resolvedEmojisFor(it) } ?: emptyList()
 
+    /** Emojis grouped by set name — for category-headed picker rendering. */
+    fun getSubscribedEmojisBySet(): List<Pair<String, List<CustomEmoji>>> =
+        pubkeyHex?.let { memoryEventStore.resolvedEmojisBySet(it) } ?: emptyList()
+
     /** Pinned emoji shortcodes (DataStore-backed). */
     val pinnedEmojiShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
 

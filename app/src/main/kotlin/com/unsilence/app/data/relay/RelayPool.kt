@@ -1331,6 +1331,42 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * One-shot fetch for kind-30030 emoji sets.
+     * Used by the discover surface on the Custom Emoji settings screen.
+     * Sends to all connected relays — indexers specialize in kinds 0/3/10002
+     * and don't carry kind-30030 broadly; emoji sets live on general relays.
+     */
+    fun fetchDiscoverEmojiSets(authorPubkeys: List<String> = emptyList()) {
+        val targetUrls = connections.keys.toList()
+        if (targetUrls.isEmpty()) return
+
+        val subId = "emoji-discover-${System.nanoTime()}"
+        _activeOneShotSubs.add(subId)
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30030)) })
+                if (authorPubkeys.isNotEmpty()) {
+                    put("authors", buildJsonArray { authorPubkeys.forEach { add(JsonPrimitive(it)) } })
+                }
+                put("limit", JsonPrimitive(100))
+            })
+        }.toString()
+
+        var sent = 0
+        for (url in targetUrls) {
+            connections[url]?.let { conn ->
+                sendOneShotToRelay(conn, req)
+                sent++
+            }
+        }
+        Log.d(TAG, "Fetching discover emoji sets " +
+            "(authors=${authorPubkeys.size.takeIf { it > 0 } ?: "any"}) " +
+            "via $sent relay(s)")
+    }
+
+    /**
      * Open a persistent subscription for own kind-10000 on the user's write relays.
      * No limit, no closeOnEose — this is a live tail for the app session.
      * When another client (Amethyst, etc.) publishes an updated mute list, the

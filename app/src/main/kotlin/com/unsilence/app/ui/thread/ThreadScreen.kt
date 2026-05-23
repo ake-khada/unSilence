@@ -363,6 +363,7 @@ fun ThreadScreen(
                 showFullEmojiPicker = false
                 emojiReactTarget = null
             },
+            categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
     }
 }
