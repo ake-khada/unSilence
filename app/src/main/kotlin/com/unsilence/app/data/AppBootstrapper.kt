@@ -382,6 +382,20 @@ class AppBootstrapper @Inject constructor(
             if (emojiList != null && emojiList.setRefs.isNotEmpty()) {
                 relayPool.fetchEmojiSets(emojiList.setRefs)
                 Log.d(TAG, "Phase2: NIP-30 emoji sets requested (${emojiList.setRefs.size} refs)")
+
+                // Retry unresolved set refs after 30s. Hint relays may be down
+                // (e.g. frens.nostr1.com observed returning HTTP 503 during
+                // Phase 3a validation). Fall back to indexers + author write
+                // relays only.
+                delay(30_000L)
+                val unresolved = emojiList.setRefs.filter { ref ->
+                    memoryEventStore.getEmojiSet(ref.authorPubkey, ref.setName) == null
+                }
+                if (unresolved.isNotEmpty()) {
+                    relayPool.fetchEmojiSets(unresolved, skipHintRelays = true)
+                    Log.d(TAG, "Phase2: NIP-30 retry for ${unresolved.size} " +
+                            "unresolved set ref(s) (skipping hint relays)")
+                }
             } else {
                 Log.d(TAG, "Phase2: NIP-30 no emoji list or empty set refs")
             }

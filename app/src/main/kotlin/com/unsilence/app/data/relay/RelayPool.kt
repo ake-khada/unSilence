@@ -1279,7 +1279,10 @@ class RelayPool @Inject constructor(
      * Groups refs by author, sends one REQ per author to their write relays + indexers.
      * Uses connectAndAwait for hint relays that aren't already connected.
      */
-    suspend fun fetchEmojiSets(refs: List<com.unsilence.app.data.memory.EmojiSetRef>) {
+    suspend fun fetchEmojiSets(
+        refs: List<com.unsilence.app.data.memory.EmojiSetRef>,
+        skipHintRelays: Boolean = false,
+    ) {
         if (refs.isEmpty()) return
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
         // Group by author so we can batch d-tags per author
@@ -1287,9 +1290,10 @@ class RelayPool @Inject constructor(
         for ((author, authorRefs) in byAuthor) {
             val dTags = authorRefs.map { it.setName }
             // Collect hint relays from the refs + author's write relays + indexers
-            val hintUrls = authorRefs.mapNotNull { it.hintRelay }
-                .mapNotNull { normalizeRelayUrl(it) }
-                .filter { it !in blockedUrls }
+            val hintUrls = if (skipHintRelays) emptyList()
+                else authorRefs.mapNotNull { it.hintRelay }
+                    .mapNotNull { normalizeRelayUrl(it) }
+                    .filter { it !in blockedUrls }
             val writeUrls = memoryEventStore.get().writeRelaysFor(author)
                 .mapNotNull { normalizeRelayUrl(it) }
                 .filter { it !in blockedUrls }
