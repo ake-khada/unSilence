@@ -663,7 +663,22 @@ class MemoryEventStore @Inject constructor(
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
     }
 
-    private val EMOJI_SHORTCODE_REACTION = Regex(""":([A-Za-z0-9_]+):""")
+    /**
+     * Parses a kind-7 reaction content string into [ReactionContent].
+     * If content is `:shortcode:` and the event has a matching `["emoji", shortcode, url]` tag,
+     * returns [ReactionContent.Custom]. No regex needed — handles any characters in shortcode
+     * (spaces, hyphens, dots, etc.).
+     */
+    private fun parseReactionContent(content: String, tags: List<List<String>>): ReactionContent {
+        if (content.length >= 3 && content.startsWith(':') && content.endsWith(':')) {
+            val shortcode = content.substring(1, content.length - 1)
+            val url = tags.firstOrNull { tag ->
+                tag.size >= 3 && tag[0] == "emoji" && tag[1] == shortcode
+            }?.get(2)
+            if (url != null) return ReactionContent.Custom(shortcode, url)
+        }
+        return ReactionContent.Standard(content)
+    }
 
     private fun handleReaction(event: NostrEvent, dirty: InsertDirty) {
         // Last e-tag is the target
@@ -672,19 +687,7 @@ class MemoryEventStore @Inject constructor(
             ?.get(1) ?: return
         reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         val contentStr = event.content.ifBlank { "+" }
-        val reactionContent: ReactionContent = run {
-            val match = EMOJI_SHORTCODE_REACTION.matchEntire(contentStr)
-            if (match != null) {
-                val shortcode = match.groupValues[1]
-                val url = event.tags.firstOrNull { tag ->
-                    tag.size >= 3 && tag[0] == "emoji" && tag[1] == shortcode
-                }?.get(2)
-                if (url != null) ReactionContent.Custom(shortcode, url)
-                else ReactionContent.Standard(contentStr)
-            } else {
-                ReactionContent.Standard(contentStr)
-            }
-        }
+        val reactionContent = parseReactionContent(contentStr, event.tags)
         reactionsByTarget
             .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
             .add(ReactionInfo(event.pubkey, reactionContent))
@@ -692,6 +695,33 @@ class MemoryEventStore @Inject constructor(
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reacted to
         addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+    }
+
+    /**
+     * Rebuilds [reactionsByTarget] from raw kind-7 events in [eventsById].
+     * Called after snapshot restore so [parseReactionContent] reclassifies reactions
+     * that were persisted with the old narrower regex.
+     */
+    private fun reindexReactionsFromEvents() {
+        val kind7Ids = idsByKind[7] ?: return
+        if (kind7Ids.isEmpty()) return
+        reactionsByTarget.clear()
+        var customCount = 0
+        var standardCount = 0
+        var noETagCount = 0
+        for (id in kind7Ids) {
+            val event = eventsById[id] ?: continue
+            val targetId = event.tags
+                .lastOrNull { it.size >= 2 && it[0] == "e" }
+                ?.get(1) ?: run { noETagCount++; continue }
+            val contentStr = event.content.ifBlank { "+" }
+            val reactionContent = parseReactionContent(contentStr, event.tags)
+            if (reactionContent is ReactionContent.Custom) customCount++ else standardCount++
+            reactionsByTarget
+                .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+                .add(ReactionInfo(event.pubkey, reactionContent))
+        }
+        Log.d("MES", "Reindexed ${kind7Ids.size} kind-7 reactions (custom=$customCount, standard=$standardCount, noETag=$noETagCount)")
     }
 
     private fun handleZapRequest(event: NostrEvent) {
@@ -1180,7 +1210,6 @@ class MemoryEventStore @Inject constructor(
             emojis = emojis,
             updatedAt = event.createdAt,
         )
-        Log.d("EmojiPicker", "Set stored: ${event.pubkey.take(8)}…/$dTag title=$title emojiN=${emojis.size}")
         if (dirty != null) dirty.emojiSet = true
         else _emojiSetSignal.value = System.nanoTime()
     }
@@ -1224,9 +1253,6 @@ class MemoryEventStore @Inject constructor(
             inlineEmojis = inlineEmojis,
             updatedAt = event.createdAt,
         )
-        Log.d("EmojiPicker", "UserEmojiList stored for ${event.pubkey.take(8)}…: " +
-                "inlineN=${inlineEmojis.size} setRefsN=${setRefs.size} " +
-                "refs=${setRefs.map { "${it.authorPubkey.take(8)}…/${it.setName}" }}")
         if (dirty != null) dirty.emojiSet = true
         else _emojiSetSignal.value = System.nanoTime()
     }
@@ -3400,6 +3426,10 @@ class MemoryEventStore @Inject constructor(
                 createdAt = createdAt,
             )
         }
+
+        // Reindex kind-7 reactions from raw events so the widened shortcode regex
+        // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
+        reindexReactionsFromEvents()
 
         // End-of-restore signal bumps (matches V2 reader)
         val now = System.nanoTime()

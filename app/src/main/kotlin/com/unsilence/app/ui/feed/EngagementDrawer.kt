@@ -84,24 +84,24 @@ internal fun EngagementDrawer(
         val zaps = zapDetailsForEvent?.invoke(eventId)
             ?.sortedByDescending { it.sats } ?: emptyList()
         val reposts = repostPubkeysForEvent?.invoke(eventId) ?: emptyList()
-        val groups = reactionsForEvent?.invoke(eventId)
-            ?.filter { info ->
+        val reactions = reactionsForEvent?.invoke(eventId) ?: emptyList()
+        val groups = reactions
+            .filter { info ->
                 (info.content as? ReactionContent.Standard)?.emoji != "-"
             }
-            ?.groupBy { info ->
+            .groupBy { info ->
                 when (val c = info.content) {
                     is ReactionContent.Custom -> "custom:${c.shortcode}"
                     is ReactionContent.Standard -> "std:${c.emoji}"
                 }
             }
-            ?.map { (_, infos) ->
+            .map { (_, infos) ->
                 ReactionGroup(
                     displayContent = infos.first().content,
                     pubkeys = infos.map { it.pubkey }.distinct(),
                 )
             }
-            ?.sortedByDescending { it.pubkeys.size }
-            ?: emptyList()
+            .sortedByDescending { it.pubkeys.size }
         value = DrawerData(zaps, reposts, groups)
     }.value
 
