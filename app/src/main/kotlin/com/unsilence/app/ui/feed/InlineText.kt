@@ -49,8 +49,6 @@ import kotlinx.coroutines.coroutineScope
  * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
  */
-private val EMOJI_SHORTCODE_REGEX = Regex(""":([A-Za-z0-9_\-.]+):""")
-
 @Composable
 internal fun InlineText(
     segments: List<Segment>,
@@ -208,6 +206,8 @@ internal fun InlineText(
 /**
  * Appends [text] to the receiver, substituting `:shortcode:` substrings with
  * inline content placeholders when the shortcode exists in [emojis].
+ * Scans structurally for `:` pairs and checks against the emoji map directly —
+ * no regex charset restrictions, handles spaces/hyphens/dots in shortcodes.
  * Unmatched colon patterns pass through as plain text.
  */
 private fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji(
@@ -215,14 +215,21 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji
     emojis: Map<String, String>,
 ) {
     var cursor = 0
-    for (match in EMOJI_SHORTCODE_REGEX.findAll(text)) {
-        val shortcode = match.groupValues[1]
-        if (shortcode !in emojis) continue
-        if (match.range.first > cursor) {
-            append(text.substring(cursor, match.range.first))
+    while (cursor < text.length) {
+        val openColon = text.indexOf(':', cursor)
+        if (openColon == -1 || openColon + 2 >= text.length) break
+        val closeColon = text.indexOf(':', openColon + 1)
+        if (closeColon == -1) break
+        val shortcode = text.substring(openColon + 1, closeColon)
+        if (shortcode.isNotEmpty() && shortcode in emojis) {
+            if (openColon > cursor) append(text.substring(cursor, openColon))
+            appendInlineContent(shortcode, ":$shortcode:")
+            cursor = closeColon + 1
+        } else {
+            // Not a known emoji — emit up to and including the opening colon, keep scanning
+            append(text.substring(cursor, openColon + 1))
+            cursor = openColon + 1
         }
-        appendInlineContent(shortcode, ":$shortcode:")
-        cursor = match.range.last + 1
     }
     if (cursor < text.length) {
         append(text.substring(cursor))

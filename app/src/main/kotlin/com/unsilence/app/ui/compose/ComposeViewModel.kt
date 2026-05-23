@@ -16,9 +16,11 @@ import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.ImageCompressor
 import com.unsilence.app.data.blossom.VideoTranscoder
+import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
+import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
@@ -137,6 +139,7 @@ class ComposeViewModel @Inject constructor(
     private val contentResolver: ContentResolver,
     private val blossomClient: BlossomClient,
     private val blossomServersStore: BlossomServersStore,
+    private val settingsStore: SettingsStore,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
     val ogFetcher: com.unsilence.app.data.relay.OgFetcher,
@@ -261,6 +264,48 @@ class ComposeViewModel @Inject constructor(
             ?: return
         _pendingMentionInsert.value = blockId to mentionText
         closeMentionPicker()
+    }
+
+    // ── Emoji picker ──────────────────────────────────────────────────────
+
+    private val _emojiPickerOpen = MutableStateFlow(false)
+    val emojiPickerOpen: StateFlow<Boolean> = _emojiPickerOpen.asStateFlow()
+
+    private val _pendingEmojiInsert = MutableStateFlow<Pair<String, String>?>(null) // (blockId, text)
+    val pendingEmojiInsert: StateFlow<Pair<String, String>?> = _pendingEmojiInsert.asStateFlow()
+
+    fun consumeEmojiInsert() { _pendingEmojiInsert.value = null }
+
+    val resolvedEmojis: StateFlow<List<CustomEmoji>> =
+        pubkeyHex?.let { pk ->
+            memoryEventStore.resolvedEmojisFlow(pk)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        } ?: MutableStateFlow(emptyList())
+
+    val pinnedEmojiShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
+
+    fun openEmojiPicker() { _emojiPickerOpen.value = true }
+    fun closeEmojiPicker() { _emojiPickerOpen.value = false }
+
+    fun selectEmoji(emoji: CustomEmoji) {
+        val normalized = normalizeShortcode(emoji.shortcode) ?: run {
+            closeEmojiPicker()
+            return
+        }
+        val insertText = ":$normalized: "
+        val blockId = _focusedBlockId.value
+            ?: _blocks.value.firstOrNull { it is ComposeBlock.Text }?.id
+            ?: return
+        _pendingEmojiInsert.value = blockId to insertText
+        closeEmojiPicker()
+    }
+
+    fun toggleEmojiPin(shortcode: String) {
+        viewModelScope.launch {
+            val current = settingsStore.pinnedEmojiShortcodes.value
+            val updated = if (shortcode in current) current - shortcode else current + shortcode
+            settingsStore.setPinnedEmojiShortcodes(updated)
+        }
     }
 
     // ── ContentFlow lookup delegates ───────────────────────────────────────
@@ -550,6 +595,8 @@ class ComposeViewModel @Inject constructor(
         _pendingMentionInsert.value = null
         _mentionPickerOpen.value = false
         _mentionQuery.value = ""
+        _emojiPickerOpen.value = false
+        _pendingEmojiInsert.value = null
         _isSensitive.value = false
         _blocks.value = listOf(ComposeBlock.Text(""))
     }
@@ -717,6 +764,8 @@ class ComposeViewModel @Inject constructor(
         extractMentionPubkeys(content).forEach { pk ->
             if (pk !in existingPTags) tags.add(arrayOf("p", pk))
         }
+        // Add emoji tags for :shortcode: tokens
+        tags.addAll(extractEmojiTags(content))
         if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
         return tags
     }
@@ -736,6 +785,7 @@ class ComposeViewModel @Inject constructor(
             val imetaTags = blocksToImetaTags(current)
 
             val mentionPubkeys = extractMentionPubkeys(finalContent)
+            val emojiTags = extractEmojiTags(finalContent)
             val template = TextNoteEvent.build(note = finalContent, createdAt = System.currentTimeMillis() / 1000L) {
                 add(arrayOf("e", threadRootId, "", "root"))
                 if (replyToId != threadRootId) {
@@ -750,6 +800,7 @@ class ComposeViewModel @Inject constructor(
                     }
                 }
                 imetaTags.forEach { add(it) }
+                emojiTags.forEach { add(it) }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
@@ -802,6 +853,7 @@ class ComposeViewModel @Inject constructor(
             }
 
             val mentionPubkeys = extractMentionPubkeys(finalContent)
+            val emojiTags = extractEmojiTags(finalContent)
             val existingPTags = mutableSetOf<String>()
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
@@ -817,6 +869,7 @@ class ComposeViewModel @Inject constructor(
                         add(arrayOf("p", pk))
                     }
                 }
+                emojiTags.forEach { add(it) }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
@@ -950,6 +1003,55 @@ class ComposeViewModel @Inject constructor(
             }
         }
         return pubkeys
+    }
+
+    /** Extract ["emoji", shortcode, url] tags for resolved :shortcode: tokens in content. */
+    private fun extractEmojiTags(content: String): List<Array<String>> {
+        val pk = pubkeyHex ?: return emptyList()
+        val resolved = memoryEventStore.resolvedEmojisFor(pk)
+        if (resolved.isEmpty()) return emptyList()
+        // Key by normalized shortcode so content tokens (already normalized
+        // at insert time) match against the original emoji set.
+        val byNormalized = resolved
+            .mapNotNull { emoji ->
+                normalizeShortcode(emoji.shortcode)?.let { norm -> norm to emoji }
+            }
+            .toMap()
+        val tags = mutableListOf<Array<String>>()
+        val seen = mutableSetOf<String>()
+        var i = 0
+        while (i < content.length) {
+            if (content[i] == ':' && i + 2 < content.length) {
+                val end = content.indexOf(':', i + 1)
+                if (end > i + 1) {
+                    val shortcode = content.substring(i + 1, end)
+                    val emoji = byNormalized[shortcode]
+                    if (emoji != null && seen.add(shortcode)) {
+                        tags.add(arrayOf("emoji", shortcode, emoji.url))
+                    }
+                    i = end + 1
+                    continue
+                }
+            }
+            i++
+        }
+        return tags
+    }
+
+    /** NIP-30 requires shortcodes to be [a-zA-Z0-9_]+. Normalize by
+     *  replacing whitespace/hyphens/dots with underscores and stripping
+     *  all other non-conforming chars. Empty result returns null. */
+    private fun normalizeShortcode(raw: String): String? {
+        val normalized = buildString {
+            for (c in raw) {
+                when {
+                    c.isLetterOrDigit() -> append(c)
+                    c.isWhitespace() || c == '-' || c == '.' || c == '_' -> append('_')
+                    // Drop everything else (punctuation, emoji, etc.)
+                }
+            }
+        }
+        return normalized.takeIf { it.isNotEmpty() }
     }
 
     private fun blocksToImetaTags(blocks: List<ComposeBlock>): List<Array<String>> {
