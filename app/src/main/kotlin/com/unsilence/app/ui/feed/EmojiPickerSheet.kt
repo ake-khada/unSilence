@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
@@ -46,12 +47,13 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 
 /**
  * Full emoji picker sheet — ModalBottomSheet with search, grid, and pin support.
- * Header has title + MoreVert overflow to navigate to Settings → Custom Emojis.
- * Empty state shows "No custom emoji yet" with a "Manage in Settings" link.
+ * When [categories] is provided, emojis are grouped under set-name headers.
+ * Pinned emojis float to the top as their own section.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +64,7 @@ internal fun EmojiPickerSheet(
     onTogglePin: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
+    categories: List<Pair<String, List<CustomEmoji>>> = emptyList(),
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -143,34 +146,99 @@ internal fun EmojiPickerSheet(
                 )
                 Spacer(Modifier.height(Spacing.small))
 
-                val filtered = remember(emojis, query, pinnedShortcodes) {
-                    val sorted = emojis.sortedWith(
-                        compareByDescending<CustomEmoji> { it.shortcode in pinnedShortcodes }
-                            .thenBy { it.shortcode },
-                    )
-                    if (query.isBlank()) sorted
-                    else sorted.filter { it.shortcode.contains(query.trim(), ignoreCase = true) }
-                }
+                if (categories.isNotEmpty() && query.isBlank()) {
+                    // Grouped rendering — pinned section first, then categories
+                    val pinnedEmojis = remember(emojis, pinnedShortcodes) {
+                        if (pinnedShortcodes.isEmpty()) emptyList()
+                        else emojis.filter { it.shortcode in pinnedShortcodes }
+                    }
 
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(5),
-                    modifier = Modifier.heightIn(max = 400.dp),
-                    contentPadding = PaddingValues(bottom = Spacing.medium),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.small),
-                    verticalArrangement = Arrangement.spacedBy(Spacing.small),
-                ) {
-                    items(filtered, key = { it.shortcode }) { emoji ->
-                        EmojiGridCell(
-                            emoji = emoji,
-                            isPinned = emoji.shortcode in pinnedShortcodes,
-                            onTap = { onSelect(emoji) },
-                            onLongPress = { onTogglePin(emoji.shortcode) },
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(5),
+                        modifier = Modifier.heightIn(max = 400.dp),
+                        contentPadding = PaddingValues(bottom = Spacing.medium),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.small),
+                    ) {
+                        // Pinned section
+                        if (pinnedEmojis.isNotEmpty()) {
+                            item(
+                                key = "header:pinned",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                CategoryHeader("Pinned")
+                            }
+                            items(pinnedEmojis.size, key = { "p:$it" }) { i ->
+                                val emoji = pinnedEmojis[i]
+                                EmojiGridCell(
+                                    emoji = emoji,
+                                    isPinned = true,
+                                    onTap = { onSelect(emoji) },
+                                    onLongPress = { onTogglePin(emoji.shortcode) },
+                                )
+                            }
+                        }
+                        // Category sections
+                        categories.forEachIndexed { idx, (title, catEmojis) ->
+                            item(
+                                key = "header:$idx",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                CategoryHeader(title)
+                            }
+                            items(catEmojis.size, key = { "$idx:$it" }) { i ->
+                                val emoji = catEmojis[i]
+                                EmojiGridCell(
+                                    emoji = emoji,
+                                    isPinned = emoji.shortcode in pinnedShortcodes,
+                                    onTap = { onSelect(emoji) },
+                                    onLongPress = { onTogglePin(emoji.shortcode) },
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Flat rendering — search active or no categories
+                    val filtered = remember(emojis, query, pinnedShortcodes) {
+                        val sorted = emojis.sortedWith(
+                            compareByDescending<CustomEmoji> { it.shortcode in pinnedShortcodes }
+                                .thenBy { it.shortcode },
                         )
+                        if (query.isBlank()) sorted
+                        else sorted.filter { it.shortcode.contains(query.trim(), ignoreCase = true) }
+                    }
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(5),
+                        modifier = Modifier.heightIn(max = 400.dp),
+                        contentPadding = PaddingValues(bottom = Spacing.medium),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.small),
+                    ) {
+                        items(filtered, key = { it.shortcode }) { emoji ->
+                            EmojiGridCell(
+                                emoji = emoji,
+                                isPinned = emoji.shortcode in pinnedShortcodes,
+                                onTap = { onSelect(emoji) },
+                                onLongPress = { onTogglePin(emoji.shortcode) },
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun CategoryHeader(title: String) {
+    Text(
+        text = title,
+        color = Text3,
+        fontSize = AppType.caption,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.padding(top = Spacing.small, bottom = 2.dp),
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)

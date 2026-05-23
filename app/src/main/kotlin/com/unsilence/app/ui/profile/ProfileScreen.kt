@@ -569,6 +569,7 @@ fun ProfileScreen(
                 showFullEmojiPicker = false
                 emojiReactTarget = null
             },
+            categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
     }
 }

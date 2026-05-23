@@ -282,6 +282,12 @@ class ComposeViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
+    val emojiCategories: StateFlow<List<Pair<String, List<CustomEmoji>>>> =
+        pubkeyHex?.let { pk ->
+            memoryEventStore.resolvedEmojisBySetFlow(pk)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        } ?: MutableStateFlow(emptyList())
+
     val pinnedEmojiShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
 
     fun openEmojiPicker() { _emojiPickerOpen.value = true }

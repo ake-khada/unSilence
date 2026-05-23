@@ -1282,6 +1282,36 @@ class MemoryEventStore @Inject constructor(
         return out
     }
 
+    /** All known emoji sets (for discover surface). Snapshot-safe: values copied. */
+    fun allEmojiSets(): List<EmojiSetEntity> =
+        emojiSetsByCoordinate.values.toList()
+
+    fun allEmojiSetsFlow(): Flow<List<EmojiSetEntity>> =
+        _emojiSetSignal.map { allEmojiSets() }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    /** Emojis grouped by set name — inline first, then subscribed sets in order. */
+    fun resolvedEmojisBySet(pubkey: String): List<Pair<String, List<CustomEmoji>>> {
+        val list = userEmojiListByPubkey[pubkey] ?: return emptyList()
+        val result = mutableListOf<Pair<String, List<CustomEmoji>>>()
+        if (list.inlineEmojis.isNotEmpty()) {
+            result.add("Inline" to list.inlineEmojis)
+        }
+        for (ref in list.setRefs) {
+            val set = emojiSetsByCoordinate[ref.authorPubkey to ref.setName] ?: continue
+            val title = set.title ?: set.setName
+            if (set.emojis.isNotEmpty()) result.add(title to set.emojis)
+        }
+        return result
+    }
+
+    fun resolvedEmojisBySetFlow(pubkey: String): Flow<List<Pair<String, List<CustomEmoji>>>> =
+        _emojiSetSignal
+            .map { resolvedEmojisBySet(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     fun resolvedEmojisFlow(pubkey: String): Flow<List<CustomEmoji>> =
         _emojiSetSignal
             .map { resolvedEmojisFor(pubkey) }

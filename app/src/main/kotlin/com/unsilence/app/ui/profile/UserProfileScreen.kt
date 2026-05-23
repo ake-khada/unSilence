@@ -600,6 +600,7 @@ fun UserProfileScreen(
                 showFullEmojiPicker = false
                 emojiReactTarget = null
             },
+            categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
     }
 }

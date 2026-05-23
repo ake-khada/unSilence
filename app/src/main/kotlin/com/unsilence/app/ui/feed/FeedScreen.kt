@@ -538,6 +538,7 @@ fun FeedScreen(
                 showFullEmojiPicker = false
                 emojiReactTarget = null
             },
+            categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
     }
 }

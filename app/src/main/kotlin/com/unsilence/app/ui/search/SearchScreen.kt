@@ -376,6 +376,7 @@ fun SearchScreen(
                 showFullEmojiPicker = false
                 emojiReactTarget = null
             },
+            categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
     }
 }
