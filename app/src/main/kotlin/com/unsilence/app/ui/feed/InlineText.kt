@@ -49,7 +49,7 @@ import kotlinx.coroutines.coroutineScope
  * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
  */
-private val EMOJI_SHORTCODE_REGEX = Regex(""":([A-Za-z0-9_]+):""")
+private val EMOJI_SHORTCODE_REGEX = Regex(""":([A-Za-z0-9_\-.]+):""")
 
 @Composable
 internal fun InlineText(
