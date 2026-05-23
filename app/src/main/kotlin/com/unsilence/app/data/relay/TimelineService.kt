@@ -185,7 +185,10 @@ class TimelineService @Inject constructor(
                 if (closed) return
                 closed = true
                 subScope.cancel()
-                multiHandles.forEach { runCatching { it.close() } }
+                // Snapshot before iterating — subScope coroutines may still be
+                // adding to the synchronizedList concurrently.
+                val snapshot = synchronized(multiHandles) { ArrayList(multiHandles) }
+                snapshot.forEach { runCatching { it.close() } }
                 multiKeys.remove(multiKey)
             }
         }
