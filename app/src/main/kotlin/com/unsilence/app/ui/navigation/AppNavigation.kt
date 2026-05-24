@@ -228,7 +228,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
-    val topBarShown    = splashDone && barsVisible && selectedTab != 3
+    val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3
     val bottomBarShown = splashDone && barsVisible
 
     val topBarOffset by animateDpAsState(
@@ -308,7 +308,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                         viewModel          = feedViewModel,
                     )
-                    1    -> Box(Modifier.padding(top = staticTopPadding)) {
+                    1    -> Box(Modifier.padding(top = statusBarHeight)) {
                         SearchScreen(
                             onNoteClick   = { eventId -> threadEventId = eventId },
                             onComment     = { eventId -> replyToEventId = eventId },

@@ -1989,6 +1989,48 @@ class MemoryEventStore @Inject constructor(
         return Pair(cached.first, cached.second)
     }
 
+    /**
+     * Trending hashtags: frequency scan of `t` tags across recent kind-1 events.
+     * Returns up to [limit] (tag, count) pairs sorted by count DESC.
+     * Scans the most recent 500 kind-1 events by createdAt.
+     */
+    fun trendingHashtags(limit: Int = 8): List<Pair<String, Int>> {
+        val freq = HashMap<String, Int>()
+        eventsById.values.asSequence()
+            .filter { it.kind == 1 }
+            .sortedByDescending { it.createdAt }
+            .take(500)
+            .forEach { event ->
+                event.tags.forEach { tag ->
+                    if (tag.size >= 2 && tag[0] == "t" && tag[1].isNotBlank()) {
+                        val value = tag[1].lowercase()
+                        freq[value] = (freq[value] ?: 0) + 1
+                    }
+                }
+            }
+        return freq.entries
+            .sortedByDescending { it.value }
+            .take(limit)
+            .map { it.key to it.value }
+    }
+
+    /**
+     * Trending users: profiles with the highest cached follower counts.
+     * Returns up to [limit] UserEntity objects with followerCount populated.
+     */
+    fun trendingUsers(limit: Int = 8): List<UserEntity> {
+        return followerCountCache.entries
+            .filter { it.value.first > 0 && profilesByPubkey.containsKey(it.key) }
+            .sortedByDescending { it.value.first }
+            .take(limit)
+            .mapNotNull { (pubkey, countPair) ->
+                getUserEntity(pubkey)?.copy(
+                    followerCount = countPair.first,
+                    followerCountUpdatedAt = countPair.second,
+                )
+            }
+    }
+
     // ─── A.5.1 T2: Optimistic follow mutations ───────────────────────────
 
     /** Optimistic add: appends [targetPubkey] to [ownPubkey]'s follows set. */
