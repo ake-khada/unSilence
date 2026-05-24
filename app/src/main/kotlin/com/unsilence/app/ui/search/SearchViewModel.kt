@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.TrendingClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -41,10 +42,19 @@ class SearchViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
+    private val trendingClient: TrendingClient,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
     val uiState: StateFlow<SearchUiState> = _uiState.asStateFlow()
+
+    /** Trending hashtags from client-side t-tag frequency scan (top 8). */
+    private val _trendingHashtags = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
+    val trendingHashtags: StateFlow<List<Pair<String, Int>>> = _trendingHashtags.asStateFlow()
+
+    /** Trending users ranked by cached follower count (top 8). */
+    private val _trendingUsers = MutableStateFlow<List<UserEntity>>(emptyList())
+    val trendingUsers: StateFlow<List<UserEntity>> = _trendingUsers.asStateFlow()
 
     private val _queryFlow = MutableStateFlow("")
 
@@ -62,6 +72,29 @@ class SearchViewModel @Inject constructor(
     }
 
     init {
+        // Fetch trending data from antiprimal (network), fall back to local MES scan
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            val networkData = trendingClient.fetch()
+            if (networkData != null && networkData.hashtags.isNotEmpty()) {
+                _trendingHashtags.value = networkData.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) }
+                _trendingUsers.value = networkData.profiles.map { profile ->
+                    UserEntity(
+                        pubkey = profile.pubkey,
+                        name = profile.name,
+                        displayName = profile.displayName,
+                        picture = profile.picture,
+                        about = profile.about,
+                        nip05 = profile.nip05,
+                        followerCount = profile.followerCount,
+                    )
+                }
+            } else {
+                // Fallback: local MES scan
+                _trendingHashtags.value = memoryEventStore.trendingHashtags()
+                _trendingUsers.value = memoryEventStore.trendingUsers()
+            }
+        }
+
         // Collect search result IDs for the lifetime of the ViewModel.
         // Only accumulate results matching the current search token —
         // late arrivals from previous queries are silently dropped.
