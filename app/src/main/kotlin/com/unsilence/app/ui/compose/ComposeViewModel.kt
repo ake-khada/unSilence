@@ -18,6 +18,7 @@ import com.unsilence.app.data.blossom.ImageCompressor
 import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.settings.SettingsStore
@@ -772,6 +773,8 @@ class ComposeViewModel @Inject constructor(
         }
         // Add emoji tags for :shortcode: tokens
         tags.addAll(extractEmojiTags(content))
+        // Add t-tags for #hashtags (NIP-12)
+        tags.addAll(extractHashtags(content))
         if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
         return tags
     }
@@ -792,6 +795,7 @@ class ComposeViewModel @Inject constructor(
 
             val mentionPubkeys = extractMentionPubkeys(finalContent)
             val emojiTags = extractEmojiTags(finalContent)
+            val hashtagTags = extractHashtags(finalContent)
             val template = TextNoteEvent.build(note = finalContent, createdAt = System.currentTimeMillis() / 1000L) {
                 add(arrayOf("e", threadRootId, "", "root"))
                 if (replyToId != threadRootId) {
@@ -807,6 +811,7 @@ class ComposeViewModel @Inject constructor(
                 }
                 imetaTags.forEach { add(it) }
                 emojiTags.forEach { add(it) }
+                hashtagTags.forEach { add(it) }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
@@ -860,6 +865,7 @@ class ComposeViewModel @Inject constructor(
 
             val mentionPubkeys = extractMentionPubkeys(finalContent)
             val emojiTags = extractEmojiTags(finalContent)
+            val hashtagTags = extractHashtags(finalContent)
             val existingPTags = mutableSetOf<String>()
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
@@ -876,6 +882,7 @@ class ComposeViewModel @Inject constructor(
                     }
                 }
                 emojiTags.forEach { add(it) }
+                hashtagTags.forEach { add(it) }
                 if (_isSensitive.value) add(arrayOf("content-warning", ""))
             }
             val signed = signingManager.sign(template) ?: run {
@@ -1058,6 +1065,24 @@ class ComposeViewModel @Inject constructor(
             }
         }
         return normalized.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Extract ["t", value] tags for NIP-12 hashtags in content.
+     * Shares the structural tokenizer with ContentParser so URL-fragment
+     * exclusion is consistent between display and publish.
+     * Values are lowercased per NIP-12 convention and deduplicated.
+     */
+    private fun extractHashtags(content: String): List<Array<String>> {
+        val seen = mutableSetOf<String>()
+        val tags = mutableListOf<Array<String>>()
+        for ((_, _, tag) in ContentParser.findHashtags(content)) {
+            val lower = tag.lowercase()
+            if (seen.add(lower)) {
+                tags.add(arrayOf("t", lower))
+            }
+        }
+        return tags
     }
 
     private fun blocksToImetaTags(blocks: List<ComposeBlock>): List<Array<String>> {

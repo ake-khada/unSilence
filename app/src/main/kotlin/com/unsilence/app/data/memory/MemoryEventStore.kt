@@ -2094,6 +2094,26 @@ class MemoryEventStore @Inject constructor(
             .map { toFeedRow(it) }
     }
 
+    /** Reactive hashtag search: finds kind-1 events with a matching `t` tag. */
+    fun searchNotesByHashtagFlow(tag: String): Flow<List<FeedRow>> =
+        _feedSignal
+            .map { searchNotesByHashtag(tag) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    private fun searchNotesByHashtag(tag: String): List<FeedRow> {
+        val lower = tag.lowercase()
+        return eventsById.values
+            .filter { event ->
+                event.kind == 1 && event.tags.any { t ->
+                    t.size >= 2 && t[0] == "t" && t[1].lowercase() == lower
+                }
+            }
+            .sortedByDescending { it.createdAt }
+            .take(50)
+            .map { toFeedRow(it) }
+    }
+
     /** Reactive profile search: matches name, display_name, about; case-insensitive; display_name ASC; limit 50. */
     fun searchUsersFlow(query: String): Flow<List<UserEntity>> =
         _profileSignal

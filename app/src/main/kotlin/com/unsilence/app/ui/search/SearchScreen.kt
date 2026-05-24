@@ -88,7 +88,10 @@ fun SearchScreen(
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
     onQuote: (String) -> Unit = {},
+    initialQuery: String? = null,
+    onInitialQueryConsumed: () -> Unit = {},
     viewModel: SearchViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
@@ -122,8 +125,21 @@ fun SearchScreen(
     var pendingSearch by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        // Only auto-focus (open keyboard) if there's no pre-filled query
+        if (initialQuery == null) focusRequester.requestFocus()
+    }
     LaunchedEffect(state.loading) { if (state.loading) pendingSearch = false }
+    // Consume initial query from hashtag tap navigation
+    LaunchedEffect(initialQuery) {
+        if (initialQuery != null) {
+            keyboardController?.hide()
+            viewModel.search(initialQuery)
+            pendingSearch = initialQuery.length >= 3
+            if (initialQuery.startsWith("#")) selectedTab = 1
+            onInitialQueryConsumed()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -297,6 +313,7 @@ fun SearchScreen(
                             onNoteClick = onNoteClick,
                             onComment = onComment,
                             onAuthorClick = onAuthorClick,
+                            onHashtagClick = onHashtagClick,
                             onQuote = onQuote,
                             onArticleClick = { articleRow = it },
                             react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },

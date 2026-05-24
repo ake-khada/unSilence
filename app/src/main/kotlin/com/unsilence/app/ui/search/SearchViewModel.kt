@@ -110,8 +110,17 @@ class SearchViewModel @Inject constructor(
                     currentSearchToken.set(token)
                     _searchResultEventIds.value = emptySet()
 
-                    // Send NIP-50 REQ to search relays — results flow into MES via EventProcessor.
-                    relayPool.searchNotes(searchRelays, query, token)
+                    // Detect hashtag queries: starts with # or is a bare
+                    // alphanumeric+underscore token.
+                    val hashtagTag = extractHashtagQuery(query)
+
+                    if (hashtagTag != null) {
+                        // NIP-12 #t filter search
+                        relayPool.searchHashtag(searchRelays, hashtagTag, token)
+                    } else {
+                        // NIP-50 full-text search
+                        relayPool.searchNotes(searchRelays, query, token)
+                    }
 
                     // Give relays time to respond before declaring "no results"
                     val searchStart = System.currentTimeMillis()
@@ -127,10 +136,20 @@ class SearchViewModel @Inject constructor(
                         }
 
                     // Combine local MES results with relay-returned results + people search.
+                    val localNotesFlow = if (hashtagTag != null) {
+                        memoryEventStore.searchNotesByHashtagFlow(hashtagTag)
+                    } else {
+                        memoryEventStore.searchNotesFlow(query)
+                    }
+                    val peopleFlow = if (hashtagTag != null) {
+                        flowOf(emptyList())
+                    } else {
+                        memoryEventStore.searchUsersFlow(query)
+                    }
                     combine(
-                        memoryEventStore.searchNotesFlow(query),
+                        localNotesFlow,
                         relayResults,
-                        memoryEventStore.searchUsersFlow(query),
+                        peopleFlow,
                     ) { localNotes, relayNotes, people ->
                         Triple(localNotes, relayNotes, people)
                     }.collect { (localNotes, relayNotes, people) ->
@@ -184,5 +203,22 @@ class SearchViewModel @Inject constructor(
             "wss://search.nos.today",
             ANTIPRIMAL_RELAY_URL,
         )
+
+        /**
+         * Returns the lowercase hashtag value if [query] is a hashtag query, or null.
+         * Hashtag query: starts with `#` followed by word chars, or is a bare
+         * alphanumeric+underscore token without spaces or special characters.
+         */
+        fun extractHashtagQuery(query: String): String? {
+            val trimmed = query.trim()
+            if (trimmed.startsWith("#") && trimmed.length > 1) {
+                val tag = trimmed.substring(1)
+                // All chars must be hashtag-valid (letters, digits, underscore)
+                if (tag.all { it.isLetterOrDigit() || it == '_' }) {
+                    return tag.lowercase()
+                }
+            }
+            return null
+        }
     }
 }

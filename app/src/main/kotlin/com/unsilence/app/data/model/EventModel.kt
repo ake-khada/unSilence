@@ -82,6 +82,9 @@ sealed class Segment {
         val dTag: String,
         val hints: List<String>,
     ) : Segment()
+
+    @Immutable
+    data class Hashtag(val tag: String) : Segment()
 }
 
 /**
