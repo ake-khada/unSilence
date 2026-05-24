@@ -278,6 +278,10 @@ object ContentParser {
                 Segment.Link(m.value)
             })
         }
+        // Precedence 6: hashtags (structural walk — not regex)
+        for ((start, end, tag) in findHashtags(content)) {
+            matches.add(Match(start, end, 6) { Segment.Hashtag(tag) })
+        }
 
         // Resolve overlaps: sort by start ASC, length DESC, precedence ASC.
         matches.sortWith(
@@ -345,6 +349,50 @@ object ContentParser {
                 null
             }
         }
+    }
+
+    // ── Hashtag detection (structural walk) ────────────────────────────
+
+    /**
+     * Walk [content] and return (start, end, tag) triples for valid hashtags.
+     *
+     * Rules:
+     *   - `#` must be at start-of-content or preceded by whitespace
+     *   - NOT after `/`, letter, or digit (avoids URL fragments and `id#123`)
+     *   - Tag body: 1+ chars that are Unicode letters, digits, or underscore
+     *   - Trailing punctuation excluded from the segment
+     *
+     * Overlap resolution with URLs is handled by the caller (precedence 6 loses
+     * to precedence 1-5 URLs), so a `#section` inside a URL won't be emitted.
+     */
+    internal fun findHashtags(content: String): List<Triple<Int, Int, String>> {
+        val results = mutableListOf<Triple<Int, Int, String>>()
+        var i = 0
+        while (i < content.length) {
+            if (content[i] == '#') {
+                // Check preceding character for valid word boundary
+                val valid = if (i == 0) true else {
+                    val prev = content[i - 1]
+                    prev.isWhitespace() || prev == '\n'
+                }
+                if (valid && i + 1 < content.length) {
+                    // Walk the tag body: letters, digits, underscores
+                    var j = i + 1
+                    while (j < content.length) {
+                        val c = content[j]
+                        if (c.isLetterOrDigit() || c == '_') j++ else break
+                    }
+                    if (j > i + 1) {
+                        val tag = content.substring(i + 1, j)
+                        results.add(Triple(i, j, tag))
+                        i = j
+                        continue
+                    }
+                }
+            }
+            i++
+        }
+        return results
     }
 
     /**

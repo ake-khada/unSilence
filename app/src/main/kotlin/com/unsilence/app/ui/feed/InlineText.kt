@@ -33,18 +33,19 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.BrandDeep
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /**
- * Renders pre-parsed segments as rich text with inline @mention links and
- * clickable URLs.
+ * Renders pre-parsed segments as rich text with inline @mention links,
+ * clickable URLs, and tappable #hashtag pills.
  *
- * Walks [Segment.Text], [Segment.MentionPubkey], and [Segment.Link] in order,
- * building an AnnotatedString. Links render as cyan clickable text that opens
- * the URL via the system handler.
+ * Walks [Segment.Text], [Segment.MentionPubkey], [Segment.Link], and
+ * [Segment.Hashtag] in order, building an AnnotatedString. Links render as
+ * cyan clickable text. Hashtags render as BrandDeep tappable text.
  *
  * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
@@ -54,6 +55,7 @@ internal fun InlineText(
     segments: List<Segment>,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
+    onHashtagClick: (String) -> Unit = {},
     onTextClick: () -> Unit,
     customEmojis: Map<String, String> = emptyMap(),
     modifier: Modifier = Modifier,
@@ -64,7 +66,7 @@ internal fun InlineText(
 ) {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
-        segments.filter { it is Segment.Text || it is Segment.MentionPubkey || it is Segment.Link }
+        segments.filter { it is Segment.Text || it is Segment.MentionPubkey || it is Segment.Link || it is Segment.Hashtag }
     }
 
     // No text content at all — skip rendering
@@ -79,8 +81,12 @@ internal fun InlineText(
         textSegments.any { it is Segment.Link }
     }
 
-    // No mentions AND no links AND no custom emoji — plain Text (fast path)
-    if (mentionPubkeys.isEmpty() && !hasLinks && customEmojis.isEmpty()) {
+    val hasHashtags = remember(textSegments) {
+        textSegments.any { it is Segment.Hashtag }
+    }
+
+    // No mentions AND no links AND no hashtags AND no custom emoji — plain Text (fast path)
+    if (mentionPubkeys.isEmpty() && !hasLinks && !hasHashtags && customEmojis.isEmpty()) {
         val plainText = remember(textSegments) {
             textSegments.joinToString("") { (it as Segment.Text).text }
         }
@@ -161,6 +167,22 @@ internal fun InlineText(
                             ),
                         ) {
                             append(segment.url)
+                        }
+                    }
+                    is Segment.Hashtag -> {
+                        withLink(
+                            LinkAnnotation.Clickable(
+                                tag = "hashtag:${segment.tag}",
+                                styles = TextLinkStyles(
+                                    style = SpanStyle(
+                                        color          = BrandDeep,
+                                        textDecoration = TextDecoration.None,
+                                    ),
+                                ),
+                                linkInteractionListener = { onHashtagClick(segment.tag) },
+                            ),
+                        ) {
+                            append("#${segment.tag}")
                         }
                     }
                     else -> { /* skip non-text segments */ }

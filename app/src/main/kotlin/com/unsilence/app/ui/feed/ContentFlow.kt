@@ -47,6 +47,7 @@ internal fun ContentFlow(
     role: CardRole,
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit,
+    onHashtagClick: (String) -> Unit = {},
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
     lookupModel: ((String) -> EventModel?)? = null,
@@ -87,13 +88,14 @@ internal fun ContentFlow(
         var ogCardsRendered = 0
         while (i < model.segments.size) {
             when (model.segments[i]) {
-                is Segment.Text, is Segment.MentionPubkey, is Segment.Link -> {
-                    // Collect consecutive text/mention/link run
+                is Segment.Text, is Segment.MentionPubkey, is Segment.Link, is Segment.Hashtag -> {
+                    // Collect consecutive text/mention/link/hashtag run
                     var j = i
                     while (j < model.segments.size &&
                         (model.segments[j] is Segment.Text ||
                             model.segments[j] is Segment.MentionPubkey ||
-                            model.segments[j] is Segment.Link)) j++
+                            model.segments[j] is Segment.Link ||
+                            model.segments[j] is Segment.Hashtag)) j++
                     val run = model.segments.subList(i, j).toList()
 
                     // Pick the link(s) in this run that will become an OG
@@ -128,6 +130,7 @@ internal fun ContentFlow(
                         segments      = runForInline,
                         lookupProfile = lookupProfile,
                         onAuthorClick = onAuthorClick,
+                        onHashtagClick = onHashtagClick,
                         onTextClick   = { onNoteClick(navigateId) },
                         customEmojis  = model.customEmojis,
                         maxLines      = maxLines,

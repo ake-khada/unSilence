@@ -179,10 +179,15 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
     var showEmojiSettings    by remember { mutableStateOf(false) }
+    var hashtagSearchQuery   by remember { mutableStateOf<String?>(null) }
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
     val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
+    val onHashtagClick: (String) -> Unit = { tag ->
+        hashtagSearchQuery = "#$tag"
+        selectedTab = 1
+    }
 
     // Key VMs by pubkey so logout → re-login with a different npub creates fresh
     // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
@@ -299,6 +304,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onNoteClick        = { eventId -> threadEventId = eventId },
                         onComment          = { eventId -> replyToEventId = eventId },
                         onAuthorClick      = onAuthorClick,
+                        onHashtagClick     = onHashtagClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                         viewModel          = feedViewModel,
                     )
@@ -307,7 +313,10 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             onNoteClick   = { eventId -> threadEventId = eventId },
                             onComment     = { eventId -> replyToEventId = eventId },
                             onAuthorClick = onAuthorClick,
+                            onHashtagClick = onHashtagClick,
                             onQuote       = { noteId  -> quoteNoteId   = noteId  },
+                            initialQuery  = hashtagSearchQuery,
+                            onInitialQueryConsumed = { hashtagSearchQuery = null },
                         )
                     }
                     2    -> NotificationsScreen(

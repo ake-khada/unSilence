@@ -1890,6 +1890,53 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Search for notes matching a hashtag via NIP-12 generic tag query (`#t` filter).
+     * Sends a single sub (search-notes-{token}) with `{"kinds":[1],"#t":["tag"],"limit":50}`.
+     * Results flow through [searchResults] like [searchNotes].
+     */
+    fun searchHashtag(rawSearchRelayUrls: List<String>, tag: String, token: Long) {
+        if (tag.isBlank()) return
+        val searchRelayUrls = rawSearchRelayUrls.mapNotNull { normalizeRelayUrl(it) }
+
+        val notesSubId = "search-notes-$token"
+        _activeOneShotSubs.add(notesSubId)
+
+        val notesReq = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(notesSubId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                put("#t", buildJsonArray { add(JsonPrimitive(tag.lowercase())) })
+                put("limit", JsonPrimitive(50))
+            })
+        }.toString()
+
+        for (url in searchRelayUrls) {
+            val conn = connections.getOrPut(url) {
+                RelayConnection(url, okHttpClient).also { c ->
+                    scope.launch { listenForEvents(c) }
+                }
+            }
+            if (!conn.isConnected) conn.connect()
+
+            scope.launch {
+                try {
+                    conn.awaitConnected()
+                    conn.send(notesReq)
+                    Log.d(TAG, "Hashtag search REQ (#$tag) sent to $url")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Hashtag search relay $url failed: ${e.message}")
+                }
+            }
+        }
+        searchTimeoutJobs[token] = scope.launch {
+            delay(SEARCH_TIMEOUT_MS)
+            closeSearch(token)
+        }
+        Log.d(TAG, "Queued NIP-12 hashtag search for #$tag to ${searchRelayUrls.size} relay(s) [token=$token]")
+    }
+
+    /**
      * Fetch events older than [untilTimestamp] (Unix seconds) from the specified [relayUrls].
      * Used by pagination: caller sets `until` = oldest event's createdAt in the current list.
      */
