@@ -75,7 +75,7 @@ class NotificationsViewModel @Inject constructor(
         collectJob = viewModelScope.launch {
             val followedOnly = _filter.value == NotifFilter.Following
 
-            memoryEventStore.notificationsFlow(pubkey, limit = 100, followedOnly = followedOnly)
+            memoryEventStore.notificationsFlow(pubkey, followedOnly = followedOnly)
                 .collect { items ->
                     _uiState.update { it.copy(items = items, loading = false) }
                     if (items.isNotEmpty()) {

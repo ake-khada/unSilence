@@ -2747,7 +2747,6 @@ class MemoryEventStore @Inject constructor(
      */
     fun getNotifications(
         recipientPubkey: String,
-        limit: Int = 100,
         followedOnly: Boolean = false,
     ): List<NotificationItem> {
         val follows = if (followedOnly) followsByPubkey[recipientPubkey] else null
@@ -2756,14 +2755,13 @@ class MemoryEventStore @Inject constructor(
         for (kind in NOTIFICATION_KINDS) {
             idsByKind[kind]?.let { candidateIds.addAll(it) }
         }
-        // Filter, resolve, sort, limit
+        // Filter, resolve, sort
         val items = mutableListOf<NotificationItem>()
         val sorted = candidateIds
             .mapNotNull { id -> eventsById[id]?.let { EventEntry(id, it.createdAt) } }
             .sortedWith(compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id })
 
         for (entry in sorted) {
-            if (items.size >= limit) break
             val event = eventsById[entry.id] ?: continue
             // Check #p tag for recipient match
             if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
@@ -2816,11 +2814,10 @@ class MemoryEventStore @Inject constructor(
      */
     fun notificationsFlow(
         recipientPubkey: String,
-        limit: Int = 100,
         followedOnly: Boolean = false,
     ): Flow<List<NotificationItem>> =
         combine(_feedSignal, _statsSignal) { _, _ -> }
-            .map { getNotifications(recipientPubkey, limit, followedOnly) }
+            .map { getNotifications(recipientPubkey, followedOnly) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 

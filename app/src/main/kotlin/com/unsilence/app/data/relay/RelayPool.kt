@@ -1417,6 +1417,63 @@ class RelayPool @Inject constructor(
      * after bootstrap. Historical engagement is covered by ProfilePipeline step 4.
      * Replayed automatically on relay reconnect.
      */
+    /**
+     * Paginated historical notification backfill. Fetches notification-eligible
+     * events addressed to [pubkeyHex] via #p tag from ALL connected relays,
+     * paginating as deep as each relay allows. Events flow through
+     * EventProcessor → MES → snapshot automatically.
+     *
+     * Strategy: write relays first (highest yield), then remaining connected
+     * non-indexer relays in batches of 6 (concurrent within batch, sequential
+     * between batches). The #p filter is highly selective — relays without
+     * matching events return EOSE immediately, so the cost of asking is low.
+     */
+    suspend fun fetchHistoricalNotifications(pubkeyHex: String) {
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+            .mapNotNull { normalizeRelayUrl(it) }.toSet()
+
+        // Write relays first — highest probability of carrying our notifications.
+        val writeUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { connections.containsKey(it) }
+
+        // Remaining connected relays (exclude indexers + already-queried write relays).
+        val otherUrls = connectedRelayUrls()
+            .filter { it !in indexerUrls && it !in writeUrls && connections[it]?.isConnected == true }
+
+        val allTargets = writeUrls + otherUrls
+        if (allTargets.isEmpty()) return
+
+        val filter = buildJsonObject {
+            put("kinds", buildJsonArray {
+                add(JsonPrimitive(1))    // replies
+                add(JsonPrimitive(6))    // reposts
+                add(JsonPrimitive(7))    // reactions
+                add(JsonPrimitive(9735)) // zap receipts
+            })
+            put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+            put("limit", JsonPrimitive(500))
+        }
+
+        var grandTotal = 0
+        // Process in batches of 6 relays (concurrent within batch).
+        for (batch in allTargets.chunked(6)) {
+            Log.d(TAG, "notif-hist batch: ${batch.size} relays")
+            val results = fetchPaginatedEvents(
+                urls = batch,
+                baseFilter = filter,
+                subIdPrefix = "notif-hist",
+                maxPages = 20,
+                timeoutMs = 30_000,
+                onPage = { page, count ->
+                    Log.d(TAG, "notif-hist page $page: $count events")
+                },
+            )
+            grandTotal += results.sumOf { it.totalEvents }
+        }
+        Log.d(TAG, "fetchHistoricalNotifications done: $grandTotal events across ${allTargets.size} relays")
+    }
+
     fun subscribeOwnNotifications(pubkeyHex: String, sinceEpochSeconds: Long) {
         val readRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
             .mapNotNull { normalizeRelayUrl(it) }

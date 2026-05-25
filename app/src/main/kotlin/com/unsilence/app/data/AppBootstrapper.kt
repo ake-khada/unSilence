@@ -415,8 +415,16 @@ class AppBootstrapper @Inject constructor(
             )
         }
 
+        // Historical notification backfill: paginated #p fetch across all connected
+        // relays. Delayed 15s so outbox relay connections stabilize first — notifications
+        // come from OTHER people's write relays, not just ours.
+        // Non-blocking — launched in background so it doesn't delay Phase 3.
+        scope.launch {
+            delay(15_000)
+            relayPool.fetchHistoricalNotifications(pubkeyHex)
+        }
+
         // Persistent notification tail: forward-looking only (since:now).
-        // Historical engagement is covered by ProfilePipeline step 4 above.
         // New reactions/reposts/zaps/replies arrive via EventProcessor → MES
         // and surface in NotificationsViewModel's MES flow.
         relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000)
