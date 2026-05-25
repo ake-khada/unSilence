@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
@@ -87,12 +88,16 @@ internal fun EventActionBar(
     onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
-    onZap: (Long) -> Unit,
+    onZap: (ZapRequest) -> Unit,
     onSaveNwcUri: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val showSnackbar = LocalShowSnackbar.current
-    val defaultZapAmount = LocalZapPreferences.current.presets.firstOrNull()?.amountSats ?: 21L
+    val prefs = LocalZapPreferences.current
+    val firstPreset = prefs.presets.firstOrNull()
+    val defaultZapAmount = firstPreset?.amountSats ?: 21L
+    val defaultZapMessage = firstPreset?.message
+    val defaultIsPrivate = prefs.defaultPrivate
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
@@ -168,7 +173,9 @@ internal fun EventActionBar(
                 onSatsClick  = onCountClick,
                 onTap        = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                    if (isNwcConfigured) onZap(defaultZapAmount) else showConnectWallet = true
+                    if (isNwcConfigured) onZap(
+                        ZapRequest(defaultZapAmount, defaultZapMessage, defaultIsPrivate)
+                    ) else showConnectWallet = true
                 },
                 onLongPress  = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
@@ -199,8 +206,8 @@ internal fun EventActionBar(
 
     if (showZapPicker) {
         ZapAmountDialog(
-            onZap = { amount ->
-                onZap(amount)
+            onZap = { req ->
+                onZap(req)
                 showZapPicker = false
             },
             onDismiss = { showZapPicker = false },

@@ -43,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
@@ -120,7 +121,7 @@ fun ConnectWalletDialog(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ZapAmountDialog(
-    onZap: (amountSats: Long) -> Unit,
+    onZap: (request: ZapRequest) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val prefs = LocalZapPreferences.current
@@ -262,7 +263,15 @@ fun ZapAmountDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Zap, RoundedCornerShape(12.dp))
-                    .clickable { onZap(selected) }
+                    .clickable {
+                        onZap(
+                            ZapRequest(
+                                amountSats = selected,
+                                message = message.takeIf { it.isNotBlank() },
+                                isPrivate = isPrivate,
+                            )
+                        )
+                    }
                     .padding(vertical = 14.dp),
             ) {
                 Icon(

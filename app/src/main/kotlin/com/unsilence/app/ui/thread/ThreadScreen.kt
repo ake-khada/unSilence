@@ -216,7 +216,7 @@ fun ThreadScreen(
                                         actionsViewModel.react(note.id, note.pubkey, ":${emoji.shortcode}:", emoji.url)
                                     },
                                     onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                    onZap               = { amt -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, amt) },
+                                    onZap               = { req -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, req) },
                                     onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
                                     lookupProfile       = actionsViewModel::lookupProfile,
                                     lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
@@ -314,7 +314,7 @@ fun ThreadScreen(
                                             actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
                                         },
                                         onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                        onZap               = { amt -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, amt) },
+                                        onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
                                         onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
                                         lookupProfile       = actionsViewModel::lookupProfile,
                                         lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
@@ -360,7 +360,7 @@ fun ThreadScreen(
                 actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
             onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onZap           = { req -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, req) },
             onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
             hasReacted      = row.engagementId in reactedIds,
             hasReposted     = row.engagementId in repostedIds,

@@ -59,6 +59,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
@@ -85,7 +86,7 @@ fun ArticleReaderScreen(
     onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit = {},
     onQuote: (String) -> Unit = {},
-    onZap: (amountSats: Long) -> Unit = {},
+    onZap: (request: ZapRequest) -> Unit = {},
     onSaveNwcUri: (String) -> Unit = {},
     hasReacted: Boolean = false,
     hasReposted: Boolean = false,
@@ -99,7 +100,11 @@ fun ArticleReaderScreen(
     val image = articleTagValue(row.tags, "image")
     val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
-    val defaultZapAmount = LocalZapPreferences.current.presets.firstOrNull()?.amountSats ?: 21L
+    val prefs = LocalZapPreferences.current
+    val firstPreset = prefs.presets.firstOrNull()
+    val defaultZapAmount = firstPreset?.amountSats ?: 21L
+    val defaultZapMessage = firstPreset?.message
+    val defaultIsPrivate = prefs.defaultPrivate
 
     val bodyHtml = remember(row.content) { markdownToHtml(row.content) }
 
@@ -307,7 +312,9 @@ fun ArticleReaderScreen(
                             isLoading    = isZapLoading,
                             flashTrigger = zapFlashTrigger,
                             onTap        = {
-                                if (isNwcConfigured) onZap(defaultZapAmount) else showConnectWallet = true
+                                if (isNwcConfigured) onZap(
+                                    ZapRequest(defaultZapAmount, defaultZapMessage, defaultIsPrivate)
+                                ) else showConnectWallet = true
                             },
                             onLongPress = {
                                 if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
@@ -345,8 +352,8 @@ fun ArticleReaderScreen(
 
     if (showZapPicker) {
         ZapAmountDialog(
-            onZap = { amount ->
-                onZap(amount)
+            onZap = { req ->
+                onZap(req)
                 showZapPicker = false
             },
             onDismiss = { showZapPicker = false },

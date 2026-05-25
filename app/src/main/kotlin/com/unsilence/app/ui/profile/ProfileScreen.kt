@@ -180,7 +180,7 @@ fun ProfileScreen(
         },
         pinnedEmojis = actionsViewModel::getPinnedEmojis,
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
-        zap = { id, pk, relay, amt -> actionsViewModel.zap(id, pk, relay, amt) },
+        zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
         lookupProfile = actionsViewModel::lookupProfile,
         lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
@@ -533,7 +533,7 @@ fun ProfileScreen(
                 actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
             onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-            onZap           = { amt -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, amt) },
+            onZap           = { req -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, req) },
             onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
             hasReacted      = row.engagementId in reactedIds,
             hasReposted     = row.engagementId in repostedIds,

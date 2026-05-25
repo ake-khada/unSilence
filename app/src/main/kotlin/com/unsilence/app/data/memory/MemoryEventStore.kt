@@ -2234,6 +2234,19 @@ class MemoryEventStore @Inject constructor(
     }
 
     /**
+     * Insert an optimistic zap detail so the engagement drawer shows the
+     * user's chip immediately after payment, before the kind-9735 receipt
+     * arrives from the LNURL service.
+     */
+    fun addOptimisticZapDetail(targetId: String, senderPubkey: String, sats: Long, comment: String?) {
+        zapDetailsByTarget
+            .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
+            .add(ZapDetail(senderPubkey, sats, comment))
+        statsUpdatedAt[targetId] = System.currentTimeMillis()
+        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
+    }
+
+    /**
      * Invalidate cached FeedRows for the given event IDs so the next feedFlow scan
      * rebuilds them with fresh stats. Called after engagement batch completion.
      */
