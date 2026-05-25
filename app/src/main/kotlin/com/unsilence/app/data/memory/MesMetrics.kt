@@ -47,6 +47,9 @@ data class MesSizeSnapshot(
 
     // ── Dedup & provenance ──────────────────────────────────────────────
     val pendingRelayEntries: Int,
+
+    // ── Profile pipeline anchoring ─────────────────────────────────────
+    val profileAnchoredRefEntries: Int = 0,
 ) {
     /** Rough total estimated bytes across all measured collections. */
     val totalEstimatedBytes: Long get() =

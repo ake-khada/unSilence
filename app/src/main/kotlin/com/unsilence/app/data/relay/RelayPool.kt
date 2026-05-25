@@ -1535,6 +1535,47 @@ class RelayPool @Inject constructor(
         )
     }
 
+    // ── Public paginated fetch wrapper ──────────────────────────────────
+
+    /**
+     * Paginated fetch across multiple relays (concurrent). Events flow through
+     * EventProcessor → MES as they arrive — no special routing needed.
+     *
+     * @param urls relay URLs to fetch from (will be connected via [connectAndAwait]).
+     * @param baseFilter JSON filter object (kinds, authors, limit, etc.).
+     * @param subIdPrefix subscription ID prefix for all pages.
+     * @param maxPages max pages per relay before stopping.
+     * @param timeoutMs overall timeout per relay.
+     * @param onPage per-page callback (pageNum, eventCount) for logging.
+     * @return list of [PaginatedFetchResult], one per relay that responded.
+     */
+    suspend fun fetchPaginatedEvents(
+        urls: List<String>,
+        baseFilter: JsonObject,
+        subIdPrefix: String,
+        maxPages: Int = 5,
+        timeoutMs: Long = 30_000,
+        onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
+    ): List<PaginatedFetchResult> {
+        val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+            .filter { it !in blockedUrls }
+        if (normalized.isEmpty()) return emptyList()
+
+        connectAndAwait(normalized, timeoutMs = 5_000)
+
+        return coroutineScope {
+            normalized.mapNotNull { url ->
+                val conn = connections[url] ?: return@mapNotNull null
+                if (!conn.isConnected) return@mapNotNull null
+                async {
+                    val perRelayTimeout = (timeoutMs / normalized.size.coerceAtLeast(1))
+                        .coerceIn(10_000, timeoutMs)
+                    paginatedFetch(conn, baseFilter, subIdPrefix, perRelayTimeout, onPage)
+                }
+            }.awaitAll()
+        }
+    }
+
     // ── Relay health fetch orchestrators ──────────────────────────────────
 
     /**
