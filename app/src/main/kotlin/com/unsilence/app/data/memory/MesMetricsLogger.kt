@@ -108,7 +108,7 @@ class MesMetricsLogger @Inject constructor(
         // Eviction anchor counters (cumulative since last snapshot, then reset)
         val (anchoredOwn, anchoredMentioned, anchoredViewed) = memoryEventStore.snapshotEvictionAnchors()
         if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
-            Log.d(TAG, "eviction: anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed")
+            Log.d(TAG, "eviction: anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed profileAnchoredRefs=${s.profileAnchoredRefEntries}")
         }
 
         // Relay fetch dedup metrics (resets peaks/counters on each snapshot)

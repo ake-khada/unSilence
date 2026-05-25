@@ -148,6 +148,12 @@ class MemoryEventStore @Inject constructor(
      *  Set by UserProfileViewModel on loadProfile(), cleared on onCleared(). */
     @Volatile var viewedPubkey: String? = null
 
+    /** Ref IDs anchored by the OWN profile pipeline — quoted notes, repost targets,
+     *  thread parents of own-authored events. OWN-scope only (populated at cold-start,
+     *  rebuilt from MES own-notes on every app startup). Flat set, no LRU, no per-profile
+     *  partitioning. Cleared on logout via [clear]. */
+    val profileAnchoredIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     // Cumulative eviction anchor counters (reset on snapshot via snapshotEvictionAnchors)
     private val evictionAnchoredOwn = AtomicLong(0)
     private val evictionAnchoredMentioned = AtomicLong(0)
@@ -1506,6 +1512,13 @@ class MemoryEventStore @Inject constructor(
                 evictionAnchoredViewed.incrementAndGet()
                 continue
             }
+            // Band A: ref events anchored by own-profile pipeline (quoted notes,
+            // repost targets, thread parents of own-authored events)
+            if (entry.id in profileAnchoredIds) {
+                anchoredOwn++ // counted under "own" since they protect own-profile refs
+                evictionAnchoredOwn.incrementAndGet()
+                continue
+            }
 
             candidatesByKind.getOrPut(kind) { mutableListOf() }.add(entry)
         }
@@ -1631,6 +1644,18 @@ class MemoryEventStore @Inject constructor(
             .filter { it.kind in kinds }
             .sortedByDescending { it.createdAt }
             .take(limit)
+    }
+
+    /** Latest createdAt for any event by [pubkey] in the given [kinds], or null if MES has none. */
+    fun latestEventTimestampForAuthor(pubkey: String, kinds: Set<Int>): Long? {
+        val ids = idsByPubkey[pubkey] ?: return null
+        var latest: Long? = null
+        for (id in ids) {
+            val event = eventsById[id] ?: continue
+            if (event.kind !in kinds) continue
+            if (latest == null || event.createdAt > latest) latest = event.createdAt
+        }
+        return latest
     }
 
     fun threadEvents(rootId: String): List<NostrEvent> {
@@ -2881,6 +2906,7 @@ class MemoryEventStore @Inject constructor(
             relayMonitorEntries = relayMonitorsByUrl.size,
             relaySetEntries = relaySetsByCoordinate.size,
             pendingRelayEntries = pendingRelays.size,
+            profileAnchoredRefEntries = profileAnchoredIds.size,
         )
     }
 
@@ -3976,6 +4002,7 @@ class MemoryEventStore @Inject constructor(
         zappedTargetsByActor.clear()
         actorAccessedAt.clear()
         engagementCapped.clear()
+        profileAnchoredIds.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L
