@@ -1,19 +1,22 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import com.unsilence.app.data.memory.MemoryEventStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -47,6 +50,8 @@ data class TrendingData(
 @Singleton
 class TrendingClient @Inject constructor(
     private val okHttpClient: OkHttpClient,
+    private val memoryEventStore: MemoryEventStore,
+    private val relayPool: RelayPool,
 ) {
     /** Staleness guard: don't fetch more than once per 30 minutes. */
     private val lastFetchMs = AtomicLong(0L)
@@ -61,7 +66,7 @@ class TrendingClient @Inject constructor(
 
         val result = withContext(Dispatchers.IO) {
             try {
-                fetchFromAntiprimal()
+                fetchFromTrendingRelay()
             } catch (e: Exception) {
                 Log.w(TAG, "Trending fetch failed: ${e.message}")
                 null
@@ -75,96 +80,84 @@ class TrendingClient @Inject constructor(
         return result ?: cached
     }
 
-    private suspend fun fetchFromAntiprimal(): TrendingData? {
-        return withTimeoutOrNull(8_000) {
+    /**
+     * Connect to trending.relays.land, collect kind-1 events, then derive
+     * hashtag frequencies and top author profiles client-side.
+     */
+    private suspend fun fetchFromTrendingRelay(): TrendingData? {
+        val events = fetchTrendingEvents() ?: return null
+        if (events.isEmpty()) return null
+
+        // Client-side aggregation: t-tag frequencies + author frequencies
+        val tagCounts = mutableMapOf<String, Int>()
+        val authorCounts = mutableMapOf<String, Int>()
+
+        for (event in events) {
+            val pubkey = event["pubkey"]?.jsonPrimitive?.content ?: continue
+            authorCounts[pubkey] = (authorCounts[pubkey] ?: 0) + 1
+
+            val tags = event["tags"]?.jsonArray ?: continue
+            for (tag in tags) {
+                val arr = tag.jsonArray
+                if (arr.size >= 2 && arr[0].jsonPrimitive.content == "t") {
+                    val value = arr[1].jsonPrimitive.content.lowercase()
+                    tagCounts[value] = (tagCounts[value] ?: 0) + 1
+                }
+            }
+        }
+
+        val topHashtags = tagCounts.entries
+            .sortedByDescending { it.value }
+            .take(8)
+            .map { TrendingHashtag(it.key, it.value.toDouble()) }
+
+        val topAuthorPubkeys = authorCounts.entries
+            .sortedByDescending { it.value }
+            .take(8)
+            .map { it.key }
+
+        val profiles = enrichProfiles(topAuthorPubkeys)
+
+        Log.d(TAG, "Trending: ${topHashtags.size} tags, ${profiles.size} profiles from ${events.size} events")
+        return TrendingData(hashtags = topHashtags, profiles = profiles)
+    }
+
+    /** Standard NIP-01 REQ for kind 1, limit 200. Collects until EOSE or 5s timeout. */
+    private suspend fun fetchTrendingEvents(): List<JsonObject>? {
+        return withTimeoutOrNull(5_000) {
             suspendCancellableCoroutine { cont ->
-                val hashtagSubId = "trending-tags-${System.nanoTime()}"
-                val usersSubId = "trending-users-${System.nanoTime()}"
-
-                val hashtagReq = buildJsonArray {
+                val subId = "trending-${System.nanoTime()}"
+                val req = buildJsonArray {
                     add(JsonPrimitive("REQ"))
-                    add(JsonPrimitive(hashtagSubId))
+                    add(JsonPrimitive(subId))
                     add(buildJsonObject {
-                        put("cache", buildJsonArray {
-                            add(JsonPrimitive("trending_hashtags_4h"))
-                        })
+                        put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                        put("limit", JsonPrimitive(200))
                     })
                 }.toString()
 
-                val usersReq = buildJsonArray {
-                    add(JsonPrimitive("REQ"))
-                    add(JsonPrimitive(usersSubId))
-                    add(buildJsonObject {
-                        put("cache", buildJsonArray {
-                            add(JsonPrimitive("explore_people"))
-                            add(buildJsonObject {
-                                put("limit", JsonPrimitive(8))
-                            })
-                        })
-                    })
-                }.toString()
-
-                val hashtags = mutableListOf<TrendingHashtag>()
-                val profiles = mutableMapOf<String, MutableMap<String, String?>>()
-                val followerCounts = mutableMapOf<String, Long>()
-                var hashtagEose = false
-                var usersEose = false
-
-                val request = Request.Builder().url(PRIMAL_CACHE_URL).build()
+                val events = mutableListOf<JsonObject>()
+                val request = Request.Builder().url(TRENDING_RELAY_URL).build()
                 val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
-                        Log.d(TAG, "Connected to Primal cache for trending")
-                        webSocket.send(hashtagReq)
-                        webSocket.send(usersReq)
+                        Log.d(TAG, "Connected to $TRENDING_RELAY_URL")
+                        webSocket.send(req)
                     }
 
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         try {
                             val arr = Json.parseToJsonElement(text).jsonArray
-                            val type = arr[0].jsonPrimitive.content
-
-                            when (type) {
+                            when (arr[0].jsonPrimitive.content) {
                                 "EVENT" -> {
-                                    val subId = arr[1].jsonPrimitive.content
-                                    val event = arr[2].jsonObject
-                                    val kind = event["kind"]?.jsonPrimitive?.int ?: return
-                                    val content = event["content"]?.jsonPrimitive?.content ?: return
-
-                                    when {
-                                        subId == hashtagSubId && kind == 10000116 -> {
-                                            parseHashtags(content, hashtags)
-                                        }
-                                        subId == usersSubId && kind == 0 -> {
-                                            val pubkey = event["pubkey"]?.jsonPrimitive?.content ?: return
-                                            parseProfile(pubkey, content, profiles)
-                                        }
-                                        subId == usersSubId && kind == 10000133 -> {
-                                            parseFollowerCounts(content, followerCounts)
-                                        }
-                                    }
+                                    events.add(arr[2].jsonObject)
                                 }
                                 "EOSE" -> {
-                                    val subId = arr[1].jsonPrimitive.content
-                                    if (subId == hashtagSubId) hashtagEose = true
-                                    if (subId == usersSubId) usersEose = true
-
-                                    if (hashtagEose && usersEose) {
-                                        // Send CLOSE for both subs
-                                        webSocket.send(buildJsonArray {
-                                            add(JsonPrimitive("CLOSE"))
-                                            add(JsonPrimitive(hashtagSubId))
-                                        }.toString())
-                                        webSocket.send(buildJsonArray {
-                                            add(JsonPrimitive("CLOSE"))
-                                            add(JsonPrimitive(usersSubId))
-                                        }.toString())
-                                        webSocket.close(1000, "done")
-
-                                        val result = assembleTrendingData(
-                                            hashtags, profiles, followerCounts,
-                                        )
-                                        if (cont.isActive) cont.resume(result)
-                                    }
+                                    webSocket.send(buildJsonArray {
+                                        add(JsonPrimitive("CLOSE"))
+                                        add(JsonPrimitive(subId))
+                                    }.toString())
+                                    webSocket.close(1000, "done")
+                                    if (cont.isActive) cont.resume(events)
                                 }
                             }
                         } catch (e: Exception) {
@@ -182,89 +175,49 @@ class TrendingClient @Inject constructor(
                     }
                 })
 
-                cont.invokeOnCancellation {
-                    ws.cancel()
+                cont.invokeOnCancellation { ws.cancel() }
+            }
+        }
+    }
+
+    /**
+     * For each pubkey: look up profile in MES, fetch follower count via
+     * antiprimal NIP-45 COUNT (parallel).
+     */
+    private suspend fun enrichProfiles(pubkeys: List<String>): List<TrendingProfile> =
+        coroutineScope {
+            relayPool.connectAndAwait(
+                listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true,
+            )
+
+            pubkeys.map { pubkey ->
+                async {
+                    val user = memoryEventStore.getUserEntity(pubkey)
+                    val followerCount = try {
+                        relayPool.sendCount(
+                            relayUrl = ANTIPRIMAL_RELAY_URL,
+                            filter = buildJsonObject {
+                                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                            },
+                        ) ?: 0L
+                    } catch (_: Exception) { 0L }
+
+                    TrendingProfile(
+                        pubkey = pubkey,
+                        name = user?.name,
+                        displayName = user?.displayName,
+                        picture = user?.picture,
+                        about = user?.about,
+                        nip05 = user?.nip05,
+                        followerCount = followerCount,
+                    )
                 }
-            }
+            }.awaitAll()
         }
-    }
-
-    private fun parseHashtags(content: String, out: MutableList<TrendingHashtag>) {
-        try {
-            val obj = Json.parseToJsonElement(content).jsonObject
-            for ((tag, scoreEl) in obj) {
-                val score = scoreEl.jsonPrimitive.content.toDoubleOrNull() ?: continue
-                out.add(TrendingHashtag(tag, score))
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse hashtags: ${e.message}")
-        }
-    }
-
-    private fun parseProfile(
-        pubkey: String,
-        content: String,
-        out: MutableMap<String, MutableMap<String, String?>>,
-    ) {
-        try {
-            val obj = Json.parseToJsonElement(content).jsonObject
-            out[pubkey] = mutableMapOf(
-                "name" to obj["name"]?.jsonPrimitive?.content,
-                "display_name" to obj["display_name"]?.jsonPrimitive?.content,
-                "picture" to obj["picture"]?.jsonPrimitive?.content,
-                "about" to obj["about"]?.jsonPrimitive?.content,
-                "nip05" to obj["nip05"]?.jsonPrimitive?.content,
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse profile: ${e.message}")
-        }
-    }
-
-    private fun parseFollowerCounts(
-        content: String,
-        out: MutableMap<String, Long>,
-    ) {
-        try {
-            val obj = Json.parseToJsonElement(content).jsonObject
-            for ((pubkey, countEl) in obj) {
-                out[pubkey] = countEl.jsonPrimitive.long
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse follower counts: ${e.message}")
-        }
-    }
-
-    private fun assembleTrendingData(
-        hashtags: List<TrendingHashtag>,
-        profiles: Map<String, Map<String, String?>>,
-        followerCounts: Map<String, Long>,
-    ): TrendingData {
-        // Hashtags: top 8, sorted by score descending
-        val topHashtags = hashtags
-            .sortedByDescending { it.score }
-            .take(8)
-
-        // Profiles: merge with follower counts, top 8 by follower count
-        val topProfiles = profiles.map { (pubkey, meta) ->
-            TrendingProfile(
-                pubkey = pubkey,
-                name = meta["name"],
-                displayName = meta["display_name"],
-                picture = meta["picture"],
-                about = meta["about"],
-                nip05 = meta["nip05"],
-                followerCount = followerCounts[pubkey] ?: 0L,
-            )
-        }
-            .sortedByDescending { it.followerCount }
-            .take(8)
-
-        Log.d(TAG, "Trending: ${topHashtags.size} tags, ${topProfiles.size} profiles")
-        return TrendingData(hashtags = topHashtags, profiles = topProfiles)
-    }
 
     companion object {
         private const val STALENESS_MS = 30 * 60 * 1000L // 30 minutes
-        private const val PRIMAL_CACHE_URL = "wss://cache2.primal.net/v1"
+        private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
     }
 }
