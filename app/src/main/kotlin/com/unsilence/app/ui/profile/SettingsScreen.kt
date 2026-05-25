@@ -56,6 +56,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
     var showMediaUpload by remember { mutableStateOf(false) }
+    var showZapSettings by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
     var showCustomEmojis by remember { mutableStateOf(false) }
     Box(
@@ -94,7 +95,7 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                 SettingsItem(icon = Icons.Filled.Dns,          label = "Relays",       onClick = { showRelays = true })
                 SettingsItem(icon = Icons.Filled.PhotoLibrary, label = "Media Upload", onClick = { showMediaUpload = true })
-                SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Wallet",       onClick = {}, enabled = false, subtitle = "Coming soon")
+                SettingsItem(icon = Icons.Filled.ElectricBolt, label = "Zap settings",  onClick = { showZapSettings = true })
                 SettingsItem(icon = Icons.Filled.Drafts,       label = "Drafts",       onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Key,          label = "Keys",         onClick = {}, enabled = false, subtitle = "Coming soon")
                 SettingsItem(icon = Icons.Filled.Security,     label = "Filters",      onClick = { showFilters = true })
@@ -129,6 +130,9 @@ fun SettingsScreen(onDismiss: () -> Unit, onLogout: () -> Unit) {
     }
     if (showMediaUpload) {
         MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
+    }
+    if (showZapSettings) {
+        com.unsilence.app.ui.settings.ZapSettingsScreen(onDismiss = { showZapSettings = false })
     }
     if (showFilters) {
         FiltersScreen(onDismiss = { showFilters = false })

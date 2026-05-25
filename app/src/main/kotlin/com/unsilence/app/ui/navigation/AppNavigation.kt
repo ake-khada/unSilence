@@ -120,6 +120,8 @@ import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.common.LocalZapPreferences
+import com.unsilence.app.ui.settings.ZapSettingsViewModel
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
@@ -195,6 +197,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
+    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel()
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
@@ -206,6 +209,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val hasNewTopPost by feedViewModel.showDot.collectAsStateWithLifecycle()
     val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
     val hasNewNotifications by notifViewModel.hasNewNotifications.collectAsStateWithLifecycle()
+    val zapPreferences      by zapSettingsVm.preferences.collectAsStateWithLifecycle()
 
     // Build the ordered feed list for the carousel
     val feedList = remember(hasFollows, pinnedRelays, userSets) {
@@ -279,6 +283,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
 
     CompositionLocalProvider(
         LocalShowSnackbar provides showSnackbar,
+        LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
     ) {
     Box(
