@@ -59,6 +59,7 @@ import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Like
@@ -98,6 +99,7 @@ fun ArticleReaderScreen(
     val image = articleTagValue(row.tags, "image")
     val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
+    val defaultZapAmount = LocalZapPreferences.current.presets.firstOrNull()?.amountSats ?: 21L
 
     val bodyHtml = remember(row.content) { markdownToHtml(row.content) }
 
@@ -305,7 +307,7 @@ fun ArticleReaderScreen(
                             isLoading    = isZapLoading,
                             flashTrigger = zapFlashTrigger,
                             onTap        = {
-                                if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                                if (isNwcConfigured) onZap(defaultZapAmount) else showConnectWallet = true
                             },
                             onLongPress = {
                                 if (isNwcConfigured) showZapPicker = true else showConnectWallet = true

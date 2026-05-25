@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
@@ -91,6 +92,7 @@ internal fun EventActionBar(
     modifier: Modifier = Modifier,
 ) {
     val showSnackbar = LocalShowSnackbar.current
+    val defaultZapAmount = LocalZapPreferences.current.presets.firstOrNull()?.amountSats ?: 21L
     var showRepostMenu    by remember { mutableStateOf(false) }
     var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
@@ -166,7 +168,7 @@ internal fun EventActionBar(
                 onSatsClick  = onCountClick,
                 onTap        = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                    if (isNwcConfigured) onZap(21L) else showConnectWallet = true
+                    if (isNwcConfigured) onZap(defaultZapAmount) else showConnectWallet = true
                 },
                 onLongPress  = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
