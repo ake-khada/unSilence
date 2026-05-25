@@ -110,6 +110,7 @@ import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
 import com.unsilence.app.ui.feed.FilterBottomSheet
+import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.notifications.NotificationsViewModel
@@ -181,6 +182,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
     var showEmojiSettings    by remember { mutableStateOf(false) }
+    var showZapSettings      by remember { mutableStateOf(false) }
     var hashtagSearchQuery   by remember { mutableStateOf<String?>(null) }
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
@@ -198,6 +200,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
     val zapSettingsVm: ZapSettingsViewModel = hiltViewModel()
+    val noteActionsVm: NoteActionsViewModel = hiltViewModel()
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
@@ -285,6 +288,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
         LocalShowSnackbar provides showSnackbar,
         LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
+        com.unsilence.app.ui.common.LocalOpenZapSettings provides { showZapSettings = true },
     ) {
     Box(
         modifier = Modifier
@@ -600,6 +604,16 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             if (showEmojiSettings) {
                 com.unsilence.app.ui.settings.CustomEmojisScreen(
                     onDismiss = { showEmojiSettings = false },
+                )
+            }
+
+            // ── Zap settings overlay ────────────────────────────────────────
+            if (showZapSettings) {
+                com.unsilence.app.ui.settings.ZapSettingsScreen(
+                    onDismiss = {
+                        showZapSettings = false
+                        noteActionsVm.refreshNwcConfigured()
+                    },
                 )
             }
 

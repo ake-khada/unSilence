@@ -322,6 +322,9 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
+    /** Re-read NWC configured state from storage. Call after external changes (e.g. ZapSettingsScreen). */
+    fun refreshNwcConfigured() { isNwcConfigured = nwcManager.isConfigured }
+
     /** Parse and persist a nostr+walletconnect:// URI. Returns true on success. */
     fun saveNwcUri(uri: String): Boolean {
         val saved = nwcManager.save(uri)

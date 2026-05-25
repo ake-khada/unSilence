@@ -1,18 +1,17 @@
 package com.unsilence.app.data.wallet
 
 import android.util.Log
-import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
+import com.vitorpamplona.quartz.nip57Zaps.PrivateZapEncryption
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +26,7 @@ import java.net.URLEncoder
  * Bundled zap parameters. [amountSats] is the only required value. [message]
  * is sent as kind-9734.content for public zaps and inside the encrypted
  * anon payload for private zaps. [isPrivate] triggers the NIP-57 private
- * zap path (one-shot anon keypair, NIP-44-encrypted sender info).
+ * zap path (Quartz PrivateZapRequestBuilder, deterministic anon key).
  */
 data class ZapRequest(
     val amountSats: Long,
@@ -49,7 +48,6 @@ class ZapRepository @Inject constructor(
     private val nwcManager: NwcManager,
     private val userRepository: UserRepository,
     private val signingManager: SigningManager,
-    private val keyManager: KeyManager,
     private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
@@ -103,13 +101,8 @@ class ZapRepository @Inject constructor(
 
         val zapRequest: Event = if (request.isPrivate) {
             buildPrivateZapRequest(
-                recipientPubkey = eventPubkey,
-                eventId = eventId,
-                relayUrl = relayUrl,
-                msats = msats,
-                nowSeconds = nowSeconds,
-                message = request.message,
-            ) ?: return Result.failure(Exception("Private zap encryption failed"))
+                eventPubkey, eventId, relayUrl, msats, nowSeconds, request.message,
+            ) ?: return Result.failure(Exception("Private zap signing failed"))
         } else {
             val template = EventTemplate<Event>(
                 createdAt = nowSeconds,
@@ -150,10 +143,17 @@ class ZapRepository @Inject constructor(
     }
 
     /**
-     * Build a NIP-57 private zap request. The outer kind-9734 is signed by a
-     * one-shot anonymous keypair — the user's real key never touches this path.
-     * The real sender pubkey + message are NIP-44 encrypted inside an "anon" tag
-     * that only the recipient can decrypt.
+     * Build a NIP-57 private zap request.
+     *
+     * Fast path (internal signer): Quartz's NostrSignerSync.sign() detects the
+     * ["anon",""] sentinel on kind-9734 and delegates to PrivateZapRequestBuilder
+     * which creates an inner kind-9733, encrypts it with a deterministic key,
+     * and returns the outer kind-9734 — fully spec-compliant.
+     *
+     * Fallback (Amber / external signer): manually builds the inner kind-9733
+     * signed via signingManager, encrypts with a random anon keypair using
+     * Quartz's bech32 PrivateZapEncryption, and signs the outer kind-9734
+     * with that keypair. Recipient can decrypt via NIP-04 shared secret.
      */
     private suspend fun buildPrivateZapRequest(
         recipientPubkey: String,
@@ -163,47 +163,61 @@ class ZapRepository @Inject constructor(
         nowSeconds: Long,
         message: String?,
     ): Event? {
-        val realSenderPubkey = keyManager.getPublicKeyHex() ?: return null
-
-        // One-shot anon keypair — no relationship to the user's real identity.
-        val anonKeyPair = KeyPair()
-        val anonSigner = NostrSignerInternal(anonKeyPair)
-
-        // Inner payload: receiver's PrivateZapRepository.processOne reads pubkey + content.
-        val innerPayload = buildJsonObject {
-            put("pubkey", JsonPrimitive(realSenderPubkey))
-            put("content", JsonPrimitive(message ?: ""))
-        }.toString()
-
-        // NIP-44 encrypt between anon key and recipient.
-        val ciphertext = try {
-            anonSigner.nip44Encrypt(innerPayload, recipientPubkey)
-        } catch (e: Exception) {
-            Log.w(TAG, "anon nip44Encrypt failed: ${e.message}")
-            return null
-        } ?: return null
-
-        // Outer kind-9734: standard zap tags + anon ciphertext. Content is empty —
-        // the message lives only inside the encrypted payload.
-        val template = EventTemplate<Event>(
-            createdAt = nowSeconds,
-            kind      = 9734,
-            tags      = arrayOf(
-                arrayOf("relays", relayUrl),
-                arrayOf("amount", msats.toString()),
-                arrayOf("p", recipientPubkey),
-                arrayOf("e", eventId),
-                arrayOf("anon", ciphertext),
-            ),
-            content = "",
+        val tags = arrayOf(
+            arrayOf("relays", relayUrl),
+            arrayOf("amount", msats.toString()),
+            arrayOf("p", recipientPubkey),
+            arrayOf("e", eventId),
         )
 
-        // Sign with anon key — public observers see kind-9734 from a one-shot pubkey.
-        return try {
-            anonSigner.sign(template)
+        // ── Fast path: internal signer → Quartz PrivateZapRequestBuilder ─────
+        val signerSync = signingManager.getSignerSync()
+        if (signerSync != null) {
+            return try {
+                val tagsWithAnon = tags + arrayOf(arrayOf("anon", ""))
+                signerSync.sign<Event>(nowSeconds, 9734, tagsWithAnon, message ?: "")
+            } catch (e: Exception) {
+                Log.w(TAG, "Private zap (sync) failed: ${e.message}")
+                null
+            }
+        }
+
+        // ── Fallback: Amber / external signer ────────────────────────────────
+        // 1. Inner kind-9733 signed by the user's real key (via Amber intent).
+        val innerTemplate = EventTemplate<Event>(
+            createdAt = nowSeconds, kind = 9733, tags = tags,
+            content = message ?: "",
+        )
+        val signedInner = signingManager.sign(innerTemplate) ?: run {
+            Log.w(TAG, "inner kind-9733 sign failed"); return null
+        }
+        val innerJson = toEventJson(signedInner)
+
+        // 2. Random anon keypair for encryption + outer signing.
+        val anonKeyPair = KeyPair()
+        val anonPrivBytes = anonKeyPair.privKey ?: run {
+            Log.w(TAG, "anon keypair missing privKey"); return null
+        }
+
+        // 3. Encrypt inner JSON (bech32 pzap1…_iv1… format).
+        val ciphertext = try {
+            PrivateZapEncryption.encryptPrivateZapMessage(
+                innerJson, anonPrivBytes, recipientPubkey.hexToByteArray(),
+            )
         } catch (e: Exception) {
-            Log.w(TAG, "anon sign failed: ${e.message}")
-            null
+            Log.w(TAG, "anon encrypt failed: ${e.message}"); return null
+        }
+
+        // 4. Outer kind-9734: anon-signed, ciphertext in anon tag, empty content.
+        val outerTemplate = EventTemplate<Event>(
+            createdAt = nowSeconds, kind = 9734,
+            tags = tags + arrayOf(arrayOf("anon", ciphertext)),
+            content = "",
+        )
+        return try {
+            NostrSignerInternal(anonKeyPair).sign(outerTemplate)
+        } catch (e: Exception) {
+            Log.w(TAG, "anon outer sign failed: ${e.message}"); null
         }
     }
 

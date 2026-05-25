@@ -282,7 +282,8 @@ fun ZapAmountDialog(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Zap ${formatPreset(selected)} sats",
+                    if (isPrivate) "Zap ${formatPreset(selected)} sats privately"
+                    else "Zap ${formatPreset(selected)} sats",
                     color = Black,
                     fontSize = AppType.body,
                     fontWeight = FontWeight.Medium,

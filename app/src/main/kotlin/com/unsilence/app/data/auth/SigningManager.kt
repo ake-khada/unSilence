@@ -8,6 +8,7 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
 import com.vitorpamplona.quartz.nip55AndroidSigner.client.NostrSignerExternal
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -54,6 +55,16 @@ class SigningManager @Inject constructor(
 
         signer = newSigner
         return newSigner
+    }
+
+    /**
+     * Return a synchronous signer for Quartz APIs that require [NostrSignerSync]
+     * (e.g., NIP-57 private zap requests). Only available in internal signing
+     * mode; returns null in Amber mode (no private key access).
+     */
+    fun getSignerSync(): NostrSignerSync? {
+        val privKeyHex = keyManager.getPrivateKeyHex() ?: return null
+        return NostrSignerSync(KeyPair(privKey = privKeyHex.hexToByteArray()))
     }
 
     suspend fun <T : Event> sign(template: EventTemplate<T>): T? {

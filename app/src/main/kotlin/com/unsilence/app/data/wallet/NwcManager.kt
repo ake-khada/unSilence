@@ -261,6 +261,100 @@ class NwcManager @Inject constructor(
         return sendPayment(warm, bolt11)
     }
 
+    /**
+     * Query the connected NWC wallet for the current balance via NIP-47
+     * `get_balance`. Returns balance in millisats, or null on any failure
+     * (not configured, timeout, wallet doesn't support the method).
+     */
+    suspend fun getBalance(): Long? = withContext(Dispatchers.IO) {
+        val conn = connection() ?: return@withContext null
+
+        val nwcPrivKeyBytes = conn.secret.hexToByteArray()
+        val nwcKeyPair      = KeyPair(privKey = nwcPrivKeyBytes)
+        val nwcSigner       = NostrSignerInternal(nwcKeyPair)
+        val nwcPubkeyHex    = nwcKeyPair.pubKey.toHexKey()
+        val walletPubBytes  = conn.walletPubkey.hexToByteArray()
+        val nowSeconds      = System.currentTimeMillis() / 1000L
+
+        val plaintext = buildJsonObject {
+            put("method", "get_balance")
+            put("params", buildJsonObject {})
+        }.toString()
+
+        val encryptedContent = runCatching {
+            Nip04.encrypt(plaintext, nwcPrivKeyBytes, walletPubBytes)
+        }.getOrElse { return@withContext null }
+
+        val template = EventTemplate<Event>(
+            createdAt = nowSeconds,
+            kind      = 23194,
+            tags      = arrayOf(arrayOf("p", conn.walletPubkey)),
+            content   = encryptedContent,
+        )
+        val signed = runCatching { nwcSigner.sign(template) }
+            .getOrElse { return@withContext null }
+
+        val deferred = CompletableDeferred<Long?>()
+        val subId = "nwc-balance-${System.currentTimeMillis()}"
+        val reqCmd = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds",   buildJsonArray { add(JsonPrimitive(23195)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(conn.walletPubkey)) })
+                put("#p",      buildJsonArray { add(JsonPrimitive(nwcPubkeyHex)) })
+            })
+        }.toString()
+        val eventCmd = buildJsonArray {
+            add(JsonPrimitive("EVENT"))
+            add(NostrJson.parseToJsonElement(toEventJson(signed)))
+        }.toString()
+
+        val listener = object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                ws.send(reqCmd)
+                ws.send(eventCmd)
+                Log.d(TAG, "NWC balance request sent")
+            }
+            override fun onMessage(ws: WebSocket, text: String) {
+                try {
+                    val msg = NostrJson.parseToJsonElement(text).jsonArray
+                    if (msg.getOrNull(0)?.jsonPrimitive?.content != "EVENT") return
+                    if (msg.size < 3) return
+                    val obj = msg[2].jsonObject
+                    if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
+                    val encContent = obj["content"]?.jsonPrimitive?.content ?: return
+                    val decrypted = runCatching {
+                        Nip04.decrypt(encContent, nwcPrivKeyBytes, walletPubBytes)
+                    }.getOrNull() ?: return
+                    Log.d(TAG, "NWC balance response: $decrypted")
+                    val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
+                    if (resp["error"] != null && resp["error"] !is kotlinx.serialization.json.JsonNull) {
+                        deferred.complete(null)
+                    } else {
+                        val msats = resp["result"]?.jsonObject?.get("balance")
+                            ?.jsonPrimitive?.content?.toLongOrNull()
+                        deferred.complete(msats)
+                    }
+                    ws.close(1000, "done")
+                } catch (_: Exception) {
+                    if (!deferred.isCompleted) deferred.complete(null)
+                }
+            }
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                Log.w(TAG, "NWC balance WS failure: ${t.message}")
+                if (!deferred.isCompleted) deferred.complete(null)
+            }
+        }
+
+        val ws = okHttpClient.newWebSocket(Request.Builder().url(conn.relayUrl).build(), listener)
+        val result = runCatching {
+            withTimeout(10_000) { deferred.await() }
+        }.getOrElse { null }
+        ws.close(1000, "done")
+        result
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**

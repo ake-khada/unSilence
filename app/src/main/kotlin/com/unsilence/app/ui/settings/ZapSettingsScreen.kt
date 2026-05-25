@@ -29,9 +29,12 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,10 +52,12 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.data.wallet.ZapPreferences
 import com.unsilence.app.data.wallet.ZapPreset
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.feed.ConnectWalletDialog
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
@@ -62,8 +67,13 @@ import com.unsilence.app.ui.theme.Zap
 fun ZapSettingsScreen(onDismiss: () -> Unit) {
     BackHandler(onBack = onDismiss)
     val vm: ZapSettingsViewModel = hiltViewModel()
+    val showSnackbar = LocalShowSnackbar.current
     val state by vm.preferences.collectAsState()
+    val balanceSats by vm.balanceSats.collectAsState()
     var showConnectWallet by remember { mutableStateOf(false) }
+    var showConfirmDisconnect by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { vm.refreshBalance() }
 
     Column(
         modifier = Modifier
@@ -102,8 +112,9 @@ fun ZapSettingsScreen(onDismiss: () -> Unit) {
         WalletCard(
             connected = vm.walletConnected,
             label = vm.walletLabel,
+            balanceSats = balanceSats,
             onConnect = { showConnectWallet = true },
-            onDisconnect = { vm.disconnectWallet() },
+            onDisconnect = { showConfirmDisconnect = true },
         )
 
         SectionLabel("Presets")
@@ -146,10 +157,32 @@ fun ZapSettingsScreen(onDismiss: () -> Unit) {
     if (showConnectWallet) {
         ConnectWalletDialog(
             onConnect = { uri ->
-                vm.saveNwcUri(uri)
+                if (vm.saveNwcUri(uri)) {
+                    showSnackbar("Wallet connected")
+                }
                 showConnectWallet = false
             },
             onDismiss = { showConnectWallet = false },
+        )
+    }
+
+    if (showConfirmDisconnect) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDisconnect = false },
+            containerColor = Surface1,
+            title = { Text("Disconnect wallet", color = Color.White) },
+            text = { Text("One-tap zaps will stop working until you reconnect.", color = TextSecondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.disconnectWallet()
+                    showConfirmDisconnect = false
+                }) { Text("Disconnect", color = Like) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDisconnect = false }) {
+                    Text("Cancel", color = Brand)
+                }
+            },
         )
     }
 }
@@ -186,6 +219,7 @@ private fun HelperText(text: String) {
 private fun WalletCard(
     connected: Boolean,
     label: String?,
+    balanceSats: Long?,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
@@ -213,11 +247,19 @@ private fun WalletCard(
                 color = Color.White,
                 fontSize = AppType.bodySmall,
             )
-            Text(
-                if (connected) "Tap to disconnect" else "Tap to connect via NWC",
-                color = TextSecondary,
-                fontSize = AppType.caption,
-            )
+            if (connected && balanceSats != null) {
+                Text(
+                    "${formatSats(balanceSats)} sats available",
+                    color = Zap,
+                    fontSize = AppType.caption,
+                )
+            } else {
+                Text(
+                    if (connected) "Tap to disconnect" else "Tap to connect via NWC",
+                    color = TextSecondary,
+                    fontSize = AppType.caption,
+                )
+            }
         }
         Text(
             if (connected) "Disconnect" else "Connect",
@@ -225,6 +267,12 @@ private fun WalletCard(
             fontSize = AppType.bodySmall,
         )
     }
+}
+
+private fun formatSats(sats: Long): String = when {
+    sats >= 1_000_000 -> "%.1fM".format(sats / 1_000_000.0)
+    sats >= 1_000     -> "%,d".format(sats)
+    else              -> sats.toString()
 }
 
 @Composable
