@@ -58,6 +58,7 @@ import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalZapPreferences
@@ -100,6 +101,7 @@ fun ArticleReaderScreen(
     val image = articleTagValue(row.tags, "image")
     val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
+    val openZapSettings = LocalOpenZapSettings.current
     val prefs = LocalZapPreferences.current
     val firstPreset = prefs.presets.firstOrNull()
     val defaultZapAmount = firstPreset?.amountSats ?: 21L
@@ -115,7 +117,6 @@ fun ArticleReaderScreen(
             zapFlashTrigger++
         }
     }
-    var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
 
     Dialog(
@@ -314,10 +315,10 @@ fun ArticleReaderScreen(
                             onTap        = {
                                 if (isNwcConfigured) onZap(
                                     ZapRequest(defaultZapAmount, defaultZapMessage, defaultIsPrivate)
-                                ) else showConnectWallet = true
+                                ) else openZapSettings()
                             },
                             onLongPress = {
-                                if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                                if (isNwcConfigured) showZapPicker = true else openZapSettings()
                             },
                         )
                     }
@@ -338,16 +339,6 @@ fun ArticleReaderScreen(
                 }
             }
         }
-    }
-
-    if (showConnectWallet) {
-        ConnectWalletDialog(
-            onConnect = { uri ->
-                onSaveNwcUri(uri)
-                showConnectWallet = false
-            },
-            onDismiss = { showConnectWallet = false },
-        )
     }
 
     if (showZapPicker) {

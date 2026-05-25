@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.wallet.ZapRequest
+import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
@@ -93,13 +94,13 @@ internal fun EventActionBar(
     modifier: Modifier = Modifier,
 ) {
     val showSnackbar = LocalShowSnackbar.current
+    val openZapSettings = LocalOpenZapSettings.current
     val prefs = LocalZapPreferences.current
     val firstPreset = prefs.presets.firstOrNull()
     val defaultZapAmount = firstPreset?.amountSats ?: 21L
     val defaultZapMessage = firstPreset?.message
     val defaultIsPrivate = prefs.defaultPrivate
     var showRepostMenu    by remember { mutableStateOf(false) }
-    var showConnectWallet by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
 
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
@@ -175,11 +176,11 @@ internal fun EventActionBar(
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
                     if (isNwcConfigured) onZap(
                         ZapRequest(defaultZapAmount, defaultZapMessage, defaultIsPrivate)
-                    ) else showConnectWallet = true
+                    ) else openZapSettings()
                 },
                 onLongPress  = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
-                    if (isNwcConfigured) showZapPicker = true else showConnectWallet = true
+                    if (isNwcConfigured) showZapPicker = true else openZapSettings()
                 },
             )
         }
@@ -192,16 +193,6 @@ internal fun EventActionBar(
                 onClick            = onChevronTap,
             )
         }
-    }
-
-    if (showConnectWallet) {
-        ConnectWalletDialog(
-            onConnect = { uri ->
-                onSaveNwcUri(uri)
-                showConnectWallet = false
-            },
-            onDismiss = { showConnectWallet = false },
-        )
     }
 
     if (showZapPicker) {
