@@ -2,12 +2,14 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.memory.NostrEvent
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -351,6 +353,68 @@ class TimelineService @Inject constructor(
         gathered.sortWith(compareTimelineRefsDesc)
         val ids = gathered.take(limit).map { it.id }
         return eventLoader.getEvents(ids)
+    }
+
+    /**
+     * Fetch older events from relays when the local cache is exhausted.
+     * Sends a relay REQ with `until` to paginate backwards, waits for EOSE,
+     * merges results into the timeline cache, and returns the events.
+     */
+    suspend fun fetchOlderTimeline(
+        timelineKey: String,
+        until: Long,
+        limit: Int,
+    ): List<NostrEvent> {
+        // Try cache first
+        val cached = loadMoreTimeline(timelineKey, until, limit)
+        if (cached.size >= limit) return cached
+
+        // Cache exhausted — fetch from relays using stored filter + urls
+        val keys = multiKeys[timelineKey] ?: listOf(timelineKey)
+        val allFetched = mutableListOf<NostrEvent>()
+        for (k in keys) {
+            val tl = timelines[k] ?: continue
+            val paginationFilter = tl.filter.copy(
+                until = until,
+                since = null,
+                limit = limit,
+            )
+            val events = Collections.synchronizedList(mutableListOf<NostrEvent>())
+            val eoseSignal = CompletableDeferred<Unit>()
+
+            val handle = subscription.subscribe(
+                urls = tl.urls,
+                filter = paginationFilter,
+                onevent = { evt -> events.add(evt) },
+                oneose = { allEosed -> if (allEosed) eoseSignal.complete(Unit) },
+            )
+            try {
+                withTimeoutOrNull(10_000) { eoseSignal.await() }
+            } finally {
+                handle.close()
+            }
+
+            val sorted = events.sortedWith(compareEventsDesc)
+            allFetched.addAll(sorted)
+
+            // Merge into timeline cache (append older refs)
+            val existing = timelines[k]
+            if (existing != null) {
+                val newRefs = sorted.map { TimelineRef(it.id, it.createdAt) }
+                val existingIds = existing.refs.map { it.id }.toSet()
+                val deduped = newRefs.filter { it.id !in existingIds }
+                if (deduped.isNotEmpty()) {
+                    timelines[k] = existing.copy(refs = existing.refs + deduped)
+                }
+            }
+        }
+
+        // Combine cached + relay-fetched, dedup, sort DESC
+        val combined = (cached + allFetched)
+            .distinctBy { it.id }
+            .sortedWith(compareEventsDesc)
+            .take(limit)
+        return combined
     }
 
     // ── Test helpers ────────────────────────────────────────────────────────
