@@ -1,13 +1,18 @@
 package com.unsilence.app.data.wallet
 
 import android.util.Log
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +22,18 @@ import okhttp3.Request
 import javax.inject.Inject
 import javax.inject.Singleton
 import java.net.URLEncoder
+
+/**
+ * Bundled zap parameters. [amountSats] is the only required value. [message]
+ * is sent as kind-9734.content for public zaps and inside the encrypted
+ * anon payload for private zaps. [isPrivate] triggers the NIP-57 private
+ * zap path (one-shot anon keypair, NIP-44-encrypted sender info).
+ */
+data class ZapRequest(
+    val amountSats: Long,
+    val message: String? = null,
+    val isPrivate: Boolean = false,
+)
 
 private const val TAG = "ZapRepository"
 
@@ -32,6 +49,7 @@ class ZapRepository @Inject constructor(
     private val nwcManager: NwcManager,
     private val userRepository: UserRepository,
     private val signingManager: SigningManager,
+    private val keyManager: KeyManager,
     private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
@@ -49,15 +67,16 @@ class ZapRepository @Inject constructor(
      * @param eventId       ID of the note being zapped
      * @param eventPubkey   Author's pubkey (hex)
      * @param relayUrl      Relay where the note was seen (included in zap request tags)
-     * @param amountSats    Amount in satoshis (converted to millisats internally)
+     * @param request       Bundled zap parameters (amount, message, privacy)
      */
     suspend fun zap(
         eventId: String,
         eventPubkey: String,
         relayUrl: String,
-        amountSats: Long,
+        request: ZapRequest,
     ): Result<Event> {
         val t0 = System.currentTimeMillis()
+        val amountSats = request.amountSats
 
         // ── 1. Get lightning address from author's profile ────────────────────
         val lud16 = userRepository.getUserLud16(eventPubkey)
@@ -82,19 +101,30 @@ class ZapRepository @Inject constructor(
         val msats      = amountSats * 1000L
         val nowSeconds = System.currentTimeMillis() / 1000L
 
-        val template = EventTemplate<Event>(
-            createdAt = nowSeconds,
-            kind      = 9734,
-            tags      = arrayOf(
-                arrayOf("relays", relayUrl),
-                arrayOf("amount", msats.toString()),
-                arrayOf("p", eventPubkey),
-                arrayOf("e", eventId),
-            ),
-            content = "",
-        )
-        val zapRequest = signingManager.sign(template)
-            ?: return Result.failure(IllegalStateException("Signing failed"))
+        val zapRequest: Event = if (request.isPrivate) {
+            buildPrivateZapRequest(
+                recipientPubkey = eventPubkey,
+                eventId = eventId,
+                relayUrl = relayUrl,
+                msats = msats,
+                nowSeconds = nowSeconds,
+                message = request.message,
+            ) ?: return Result.failure(Exception("Private zap encryption failed"))
+        } else {
+            val template = EventTemplate<Event>(
+                createdAt = nowSeconds,
+                kind      = 9734,
+                tags      = arrayOf(
+                    arrayOf("relays", relayUrl),
+                    arrayOf("amount", msats.toString()),
+                    arrayOf("p", eventPubkey),
+                    arrayOf("e", eventId),
+                ),
+                content = request.message ?: "",
+            )
+            signingManager.sign(template)
+                ?: return Result.failure(IllegalStateException("Signing failed"))
+        }
 
         // Publish the zap request to the relay so the recipient's wallet can see it
         relayPool.publish(toEventJson(zapRequest))
@@ -114,9 +144,67 @@ class ZapRepository @Inject constructor(
 
         // ── 5. Pay on the already-connected WebSocket ─────────────────────────
         val payResult = nwcManager.sendPayment(warmSocket, bolt11)
-        Log.d(TAG, "Zap total: ${System.currentTimeMillis() - t0}ms, success=${payResult.isSuccess}")
+        Log.d(TAG, "Zap total: ${System.currentTimeMillis() - t0}ms, success=${payResult.isSuccess}, private=${request.isPrivate}")
         return if (payResult.isSuccess) Result.success(zapRequest)
                else Result.failure(payResult.exceptionOrNull() ?: Exception("Payment failed"))
+    }
+
+    /**
+     * Build a NIP-57 private zap request. The outer kind-9734 is signed by a
+     * one-shot anonymous keypair — the user's real key never touches this path.
+     * The real sender pubkey + message are NIP-44 encrypted inside an "anon" tag
+     * that only the recipient can decrypt.
+     */
+    private suspend fun buildPrivateZapRequest(
+        recipientPubkey: String,
+        eventId: String,
+        relayUrl: String,
+        msats: Long,
+        nowSeconds: Long,
+        message: String?,
+    ): Event? {
+        val realSenderPubkey = keyManager.getPublicKeyHex() ?: return null
+
+        // One-shot anon keypair — no relationship to the user's real identity.
+        val anonKeyPair = KeyPair()
+        val anonSigner = NostrSignerInternal(anonKeyPair)
+
+        // Inner payload: receiver's PrivateZapRepository.processOne reads pubkey + content.
+        val innerPayload = buildJsonObject {
+            put("pubkey", JsonPrimitive(realSenderPubkey))
+            put("content", JsonPrimitive(message ?: ""))
+        }.toString()
+
+        // NIP-44 encrypt between anon key and recipient.
+        val ciphertext = try {
+            anonSigner.nip44Encrypt(innerPayload, recipientPubkey)
+        } catch (e: Exception) {
+            Log.w(TAG, "anon nip44Encrypt failed: ${e.message}")
+            return null
+        } ?: return null
+
+        // Outer kind-9734: standard zap tags + anon ciphertext. Content is empty —
+        // the message lives only inside the encrypted payload.
+        val template = EventTemplate<Event>(
+            createdAt = nowSeconds,
+            kind      = 9734,
+            tags      = arrayOf(
+                arrayOf("relays", relayUrl),
+                arrayOf("amount", msats.toString()),
+                arrayOf("p", recipientPubkey),
+                arrayOf("e", eventId),
+                arrayOf("anon", ciphertext),
+            ),
+            content = "",
+        )
+
+        // Sign with anon key — public observers see kind-9734 from a one-shot pubkey.
+        return try {
+            anonSigner.sign(template)
+        } catch (e: Exception) {
+            Log.w(TAG, "anon sign failed: ${e.message}")
+            null
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

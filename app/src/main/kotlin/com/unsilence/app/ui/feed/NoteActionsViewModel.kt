@@ -24,6 +24,7 @@ import com.unsilence.app.data.repository.UserRepository
 import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapRepository
+import com.unsilence.app.data.wallet.ZapRequest
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip18Reposts.RepostEvent
@@ -263,16 +264,29 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
-    fun zap(eventId: String, eventPubkey: String, relayUrl: String, amountSats: Long) {
+    fun zap(eventId: String, eventPubkey: String, relayUrl: String, request: ZapRequest) {
+        val amountSats = request.amountSats
         _zapLoading.value = _zapLoading.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
-            val result = zapRepository.zap(eventId, eventPubkey, relayUrl, amountSats)
+            val result = zapRepository.zap(eventId, eventPubkey, relayUrl, request)
             if (result.isSuccess) {
                 val signed = result.getOrThrow()
                 // Optimistic insert → MES actor-index updates → zappedEventIdsFlow re-emits
                 // Icon lights up immediately; sats display waits for kind-9735 receipt
                 // from relays (handleZapReceipt is the sole path into zapStatsByEventId).
-                memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
+                val nostrEvent = signedEventToNostrEvent(signed, rootId = eventId)
+                // Private zaps are signed by a one-shot anon keypair. Override pubkey
+                // to own so MES actor indexes correctly track "has zapped" state.
+                val toInsert = if (request.isPrivate && pubkeyHex != null)
+                    nostrEvent.copy(pubkey = pubkeyHex)
+                else nostrEvent
+                memoryEventStore.insert(toInsert)
+                // Optimistic drawer chip — shows immediately before kind-9735 arrives.
+                if (pubkeyHex != null) {
+                    memoryEventStore.addOptimisticZapDetail(
+                        eventId, pubkeyHex, amountSats, request.message,
+                    )
+                }
                 snapshotScheduler.scheduleImmediate()
             }
             withContext(Dispatchers.Main) {

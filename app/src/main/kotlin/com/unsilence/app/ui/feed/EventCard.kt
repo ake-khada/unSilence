@@ -56,6 +56,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -84,7 +85,7 @@ fun EventCard(
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
     onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit,
-    onZap: (Long) -> Unit,
+    onZap: (ZapRequest) -> Unit,
     onSaveNwcUri: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
@@ -460,7 +461,7 @@ private fun ArticleLayout(
     onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
-    onZap: (Long) -> Unit,
+    onZap: (ZapRequest) -> Unit,
     onSaveNwcUri: (String) -> Unit,
     onAuthorClick: (String) -> Unit = {},
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,

@@ -46,6 +46,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
 
@@ -64,7 +65,7 @@ data class EventActionCallbacks(
     val onReactLongPress: ((eventId: String, pubkey: String) -> Unit)? = null,
     val pinnedEmojis: () -> List<com.unsilence.app.data.memory.CustomEmoji> = { emptyList() },
     val repost: (eventId: String, pubkey: String, relayUrl: String) -> Unit = { _, _, _ -> },
-    val zap: (eventId: String, pubkey: String, relayUrl: String, amount: Long) -> Unit = { _, _, _, _ -> },
+    val zap: (eventId: String, pubkey: String, relayUrl: String, request: ZapRequest) -> Unit = { _, _, _, _ -> },
     val saveNwcUri: (String) -> Unit = {},
     val lookupProfile: (suspend (String) -> UserEntity?)? = null,
     val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
@@ -353,8 +354,8 @@ private fun EventFeedItem(
     val onRepost = remember(model.engagementId, model.pubkey, row.relayUrl) {
         { callbacks.repost(model.engagementId, model.pubkey, row.relayUrl) }
     }
-    val onZap: (Long) -> Unit = remember(model.engagementId, model.pubkey, row.relayUrl) {
-        { amt: Long -> callbacks.zap(model.engagementId, model.pubkey, row.relayUrl, amt) }
+    val onZap: (ZapRequest) -> Unit = remember(model.engagementId, model.pubkey, row.relayUrl) {
+        { req: ZapRequest -> callbacks.zap(model.engagementId, model.pubkey, row.relayUrl, req) }
     }
     val onToggleMute = remember(videoScope) {
         { videoScope?.toggleMute(); Unit }
