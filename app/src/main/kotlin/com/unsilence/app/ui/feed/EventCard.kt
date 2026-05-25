@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -178,9 +179,15 @@ fun EventCard(
     // distinctUntilChanged inside MES filters out signal bumps caused by
     // unrelated events. Falls back to the FeedRow snapshot when no provider
     // is wired (older surfaces, tests).
-    val liveStats = if (statsFlow != null)
-        statsFlow(model.engagementId).collectAsState().value
-    else null
+    // key(engagementId): forces collectAsState to reseed its remembered
+    // State when the slot recycles to a different event. Without this,
+    // the State holds the previous event's counts for one or more frames
+    // after the slot diffs to a new ID.
+    val liveStats = if (statsFlow != null) {
+        key(model.engagementId) {
+            statsFlow(model.engagementId).collectAsState().value
+        }
+    } else null
     val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
     val liveRepostCount   = liveStats?.repostCount   ?: row.repostCount
     val liveReactionCount = liveStats?.reactionCount ?: row.reactionCount
