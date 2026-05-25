@@ -1412,12 +1412,6 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Open a persistent subscription for events mentioning the user (#p tag).
-     * Forward-looking only: uses `since` so relays deliver only events created
-     * after bootstrap. Historical engagement is covered by ProfilePipeline step 4.
-     * Replayed automatically on relay reconnect.
-     */
-    /**
      * Paginated historical notification backfill. Fetches notification-eligible
      * events addressed to [pubkeyHex] via #p tag from ALL connected relays,
      * paginating as deep as each relay allows. Events flow through
@@ -1474,6 +1468,11 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "fetchHistoricalNotifications done: $grandTotal events across ${allTargets.size} relays")
     }
 
+    /**
+     * Open a persistent subscription for events mentioning the user (#p tag).
+     * Forward-looking only: uses `since` so relays deliver only events created
+     * after bootstrap. Replayed automatically on relay reconnect.
+     */
     fun subscribeOwnNotifications(pubkeyHex: String, sinceEpochSeconds: Long) {
         val readRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
             .mapNotNull { normalizeRelayUrl(it) }
