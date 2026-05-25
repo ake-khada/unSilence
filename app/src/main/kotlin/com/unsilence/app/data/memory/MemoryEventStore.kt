@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.sample
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -130,6 +131,22 @@ class MemoryEventStore @Inject constructor(
     private val repostPubkeysByTarget = ConcurrentHashMap<String, MutableSet<String>>()
     private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<ReactionInfo>>()
     private val zapDetailsByTarget = ConcurrentHashMap<String, MutableList<ZapDetail>>()
+
+    // ─── NIP-57 private zap decrypt sidecar ─────────────────────────────────
+    /**
+     * Decrypted NIP-57 private zaps, keyed by kind-9735 event id.
+     * Populated by PrivateZapRepository after async NIP-44 decrypt completes.
+     * Memory-only — re-decrypted on cold start via rescanPendingPrivateZapDecrypts.
+     */
+    private val privateZapDecryptedById = ConcurrentHashMap<String, DecryptedPrivateZap>()
+
+    /** Fires when a kind-9735 with anon tag arrives addressed to own pubkey. */
+    private val _pendingPrivateZapDecrypts = MutableSharedFlow<PendingPrivateZapDecrypt>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val pendingPrivateZapDecrypts: Flow<PendingPrivateZapDecrypt> get() = _pendingPrivateZapDecrypts
 
     // ─── Actor-side action indexes (Tier 4: "what have I done?") ───────────
     // Key: actor pubkey → Set<target event ID>
@@ -809,6 +826,23 @@ class MemoryEventStore @Inject constructor(
         if (own != null && desc != null && desc.senderPubkey == own) {
             _ownZapReceived.tryEmit(targetId)
         }
+
+        // NIP-57 private zap detection. The embedded kind-9734's anon tag carries
+        // a NIP-44 ciphertext that, when decrypted with our key, reveals the real
+        // sender + real message. We only attempt decrypt for receipts addressed
+        // to our own pubkey — private zaps for others can't be decrypted by us.
+        if (own != null) {
+            val recipientP = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.get(1)
+            if (recipientP == own) {
+                val (anonCt, anonSigner) = parseAnonTagAndSigner(event)
+                if (anonCt != null && anonSigner != null &&
+                    !privateZapDecryptedById.containsKey(event.id)) {
+                    _pendingPrivateZapDecrypts.tryEmit(
+                        PendingPrivateZapDecrypt(event.id, anonCt, anonSigner)
+                    )
+                }
+            }
+        }
     }
 
     private data class ZapDescription(val senderPubkey: String, val comment: String?)
@@ -824,6 +858,33 @@ class MemoryEventStore @Inject constructor(
             val comment = obj["content"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
             ZapDescription(pubkey, comment)
         } catch (_: Exception) { null }
+    }
+
+    /**
+     * Extract the NIP-44 ciphertext from the kind-9734's anon tag, along
+     * with the kind-9734 signer's pubkey (publicKey_a) — needed as the
+     * peerPubkey for NIP-44 decrypt.
+     *
+     * Returns (null, null) if no anon tag, no description tag, or malformed JSON.
+     */
+    private fun parseAnonTagAndSigner(event: NostrEvent): Pair<String?, String?> {
+        val descJson = event.tags
+            .firstOrNull { it.size >= 2 && it[0] == "description" }
+            ?.get(1) ?: return null to null
+        return try {
+            val obj = NostrJson.parseToJsonElement(descJson).jsonObject
+            val signerPubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return null to null
+            val tagsArr = obj["tags"]?.jsonArray ?: return null to null
+            val anonTag = tagsArr.firstOrNull { el ->
+                val arr = el as? JsonArray ?: return@firstOrNull false
+                arr.size >= 2 && arr[0].jsonPrimitive.content == "anon"
+            } as? JsonArray ?: return null to null
+            val ct = anonTag[1].jsonPrimitive.content.takeIf { it.isNotBlank() }
+                ?: return null to null
+            ct to signerPubkey
+        } catch (_: Exception) {
+            null to null
+        }
     }
 
     /**
@@ -1933,6 +1994,50 @@ class MemoryEventStore @Inject constructor(
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
         zapDetailsByTarget[eventId]?.toList() ?: emptyList()
 
+    /** Lookup decrypted private-zap result. Returns null if not (yet) decrypted. */
+    fun getDecryptedPrivateZap(zapReceiptId: String): DecryptedPrivateZap? =
+        privateZapDecryptedById[zapReceiptId]
+
+    /**
+     * Called by PrivateZapRepository when async decrypt completes successfully.
+     * Writes the result and bumps stats so the affected event's notification
+     * flow re-emits (notification row rebuilds with real sender).
+     */
+    fun updateDecryptedPrivateZap(
+        zapReceiptId: String,
+        decrypted: DecryptedPrivateZap,
+        targetId: String,
+    ) {
+        privateZapDecryptedById[zapReceiptId] = decrypted
+        statsUpdatedAt[targetId] = System.currentTimeMillis()
+        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
+        // Bump stats signal so notification flow re-derives rows.
+        _statsSignal.value = System.nanoTime()
+    }
+
+    /**
+     * Public scan trigger — call after snapshot restore + ownPubkey is set.
+     * Walks kind-9735 events addressed to own pubkey and re-fires pending
+     * decrypts for any with anon tags that aren't already in the sidecar.
+     * Idempotent: PrivateZapRepository skips entries already decrypted.
+     */
+    fun rescanPendingPrivateZapDecrypts() {
+        val own = ownPubkey ?: return
+        val zapReceiptIds = idsByKind[9735] ?: return
+        for (id in zapReceiptIds) {
+            if (privateZapDecryptedById.containsKey(id)) continue
+            val event = eventsById[id] ?: continue
+            val recipientP = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.get(1)
+            if (recipientP != own) continue
+            val (anonCt, anonSigner) = parseAnonTagAndSigner(event)
+            if (anonCt != null && anonSigner != null) {
+                _pendingPrivateZapDecrypts.tryEmit(
+                    PendingPrivateZapDecrypt(id, anonCt, anonSigner)
+                )
+            }
+        }
+    }
+
     // ─── A.5.1 T1: Relay browse queries ───────────────────────────────────
 
     /**
@@ -2664,8 +2769,10 @@ class MemoryEventStore @Inject constructor(
             if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
             // Exclude self-notifications (for kind-9735, check real sender not LNURL service)
             if (event.kind == 9735) {
-                val desc = parseZapDescription(event)
-                if (desc != null && desc.senderPubkey == recipientPubkey) continue
+                val decrypted = privateZapDecryptedById[event.id]
+                val effectiveSender = decrypted?.senderPubkey
+                    ?: parseZapDescription(event)?.senderPubkey
+                if (effectiveSender == recipientPubkey) continue
             } else {
                 if (event.pubkey == recipientPubkey) continue
             }
@@ -2688,8 +2795,10 @@ class MemoryEventStore @Inject constructor(
                 val event = eventsById[id] ?: continue
                 if (event.createdAt <= since) continue
                 if (event.kind == 9735) {
-                    val desc = parseZapDescription(event)
-                    if (desc != null && desc.senderPubkey == recipientPubkey) continue
+                    val decrypted = privateZapDecryptedById[event.id]
+                    val effectiveSender = decrypted?.senderPubkey
+                        ?: parseZapDescription(event)?.senderPubkey
+                    if (effectiveSender == recipientPubkey) continue
                 } else {
                     if (event.pubkey == recipientPubkey) continue
                 }
@@ -2758,18 +2867,34 @@ class MemoryEventStore @Inject constructor(
         }
 
         // For kind-9735 zap receipts, event.pubkey is the LNURL service signer —
-        // resolve the real sender from the embedded kind-9734 description tag.
+        // resolve the real sender: decrypted private zap > description tag > anonymous.
         val actorPubkey: String
         val actorFields: Map<String, String?>
         if (event.kind == 9735) {
+            val decryptedPrivate = privateZapDecryptedById[event.id]
             val desc = parseZapDescription(event)
-            if (desc != null) {
-                actorPubkey = desc.senderPubkey
-                actorFields = cachedProfileFields(desc.senderPubkey)
-            } else {
-                // Anonymous zap — still show it but with service pubkey
-                actorPubkey = event.pubkey
-                actorFields = fields
+            when {
+                decryptedPrivate != null -> {
+                    // NIP-57 private zap successfully decrypted.
+                    actorPubkey = decryptedPrivate.senderPubkey
+                    actorFields = cachedProfileFields(decryptedPrivate.senderPubkey)
+                }
+                desc != null -> {
+                    // Standard public zap — kind-9734 signed by real sender.
+                    actorPubkey = desc.senderPubkey
+                    actorFields = cachedProfileFields(desc.senderPubkey)
+                }
+                else -> {
+                    // Truly anonymous OR private-but-undecrypted. Show as "Anonymous"
+                    // — never the LNURL service profile. IdentIcon falls back from
+                    // event.pubkey so each LNURL still gets a distinct generic icon.
+                    actorPubkey = event.pubkey
+                    actorFields = mapOf(
+                        "name" to "Anonymous",
+                        "display_name" to null,
+                        "picture" to null,
+                    )
+                }
             }
         } else {
             actorPubkey = event.pubkey
@@ -4032,6 +4157,7 @@ class MemoryEventStore @Inject constructor(
         actorAccessedAt.clear()
         engagementCapped.clear()
         profileAnchoredIds.clear()
+        privateZapDecryptedById.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L

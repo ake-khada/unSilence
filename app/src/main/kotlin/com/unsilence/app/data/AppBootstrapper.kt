@@ -92,6 +92,7 @@ class AppBootstrapper @Inject constructor(
     private val muteListRepository: MuteListRepository,
     private val cardHydrator: CardHydrator,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
+    private val privateZapRepository: com.unsilence.app.data.repository.PrivateZapRepository,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -419,6 +420,12 @@ class AppBootstrapper @Inject constructor(
         // New reactions/reposts/zaps/replies arrive via EventProcessor → MES
         // and surface in NotificationsViewModel's MES flow.
         relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000)
+
+        // NIP-57 private zap decryption: start collector + rescan snapshot.
+        // After snapshot restore + ownPubkey set, any kind-9735 with anon tags
+        // addressed to us will fire pending decrypt requests to PrivateZapRepository.
+        privateZapRepository.start()
+        memoryEventStore.rescanPendingPrivateZapDecrypts()
 
         // ═══════════════════════════════════════════════════════════════════
         // Phase 3 (2500ms): Maintenance + media preconnect
