@@ -197,7 +197,7 @@ class ProfileViewModel @Inject constructor(
         val handle = currentHandle ?: return
         val until = _events.value.lastOrNull()?.createdAt ?: return
         viewModelScope.launch {
-            val older = timelineService.loadMoreTimeline(handle.timelineKey, until, 100)
+            val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
             if (older.isNotEmpty()) {
                 _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
             }
