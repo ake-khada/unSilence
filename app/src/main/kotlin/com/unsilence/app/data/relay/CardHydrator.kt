@@ -808,7 +808,7 @@ internal const val ENGAGEMENT_LIMIT = 100
  *  Covers ~2 screenfuls of scroll — by the time a post becomes visible,
  *  its reaction/zap counts are already in MES.  Bounded by the debounce
  *  and freshness tiers, so fling-through doesn't fan out wastefully. */
-const val ENGAGEMENT_LOOKAHEAD = 15
+const val ENGAGEMENT_LOOKAHEAD = 12
 
 /**
  * Freshness interval in seconds based on post age. Returns how long to wait
