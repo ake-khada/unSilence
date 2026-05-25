@@ -54,10 +54,12 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.EventCard
+import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.AppType
@@ -97,6 +99,18 @@ fun ThreadScreen(
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     var didScrollToFocus by remember { mutableStateOf(false) }
+
+    // ── Video playback scope ────────────────────────────────────────────────
+    val allThreadRows = remember(state.focusedNote, state.replies) {
+        listOfNotNull(state.focusedNote) + state.replies.map { it.row }
+    }
+    val videoScope = rememberVideoPlaybackScope(
+        ownerId            = "thread-$eventId",
+        holder             = actionsViewModel.sharedPlayerHolder,
+        events             = allThreadRows,
+        listState          = listState,
+        videoModelProvider = actionsViewModel::getVideoRenderModels,
+    )
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -216,6 +230,12 @@ fun ThreadScreen(
                                     reactionsForEvent   = viewModel::reactionsForEvent,
                                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                                     thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                    exoPlayer           = videoScope.exoPlayer,
+                                    isMuted             = videoScope.isMuted,
+                                    onToggleMute        = { videoScope.toggleMute() },
+                                    isActiveVideo       = videoScope.isActiveVideo(note.id),
+                                    isFullscreen        = videoScope.showFullscreenVideo,
+                                    onOpenFullscreen    = { videoScope.openFullscreen(note.id) },
                                 )
                                 HorizontalDivider(
                                     color     = BorderFaint,
@@ -308,6 +328,12 @@ fun ThreadScreen(
                                         reactionsForEvent   = viewModel::reactionsForEvent,
                                         imageDimensionCache = actionsViewModel.imageDimensionCache,
                                         thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                        exoPlayer           = videoScope.exoPlayer,
+                                        isMuted             = videoScope.isMuted,
+                                        onToggleMute        = { videoScope.toggleMute() },
+                                        isActiveVideo       = videoScope.isActiveVideo(reply.id),
+                                        isFullscreen        = videoScope.showFullscreenVideo,
+                                        onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
                                     )
                                 }
                             }
@@ -343,6 +369,14 @@ fun ThreadScreen(
             isZapLoading    = row.id in zapLoadingIds,
             extraZapSats    = optimisticSats[row.id] ?: 0L,
             zapFlash        = zapFlash,
+        )
+    }
+
+    // ── Fullscreen video dialog ────────────────────────────────────────────
+    if (videoScope.showFullscreenVideo) {
+        FullScreenVideoDialog(
+            exoPlayer = videoScope.exoPlayer,
+            onDismiss = { videoScope.dismissFullscreen() },
         )
     }
 

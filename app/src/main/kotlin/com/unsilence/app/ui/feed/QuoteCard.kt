@@ -2,7 +2,9 @@ package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,9 +25,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ContentParser
@@ -54,17 +58,27 @@ private data class QuoteResolution(
  *
  * At [nestDepth] >= 1, renders text-only (no media, no further nested quotes)
  * to prevent infinite recursion and keep deeply nested quotes compact.
+ *
+ * Tap handling: a [pointerInput] gesture waits for an unconsumed UP event.
+ * Interactive children (LinkAnnotation for mentions/links/hashtags) consume
+ * their own taps; everything else falls through to [onNoteClick].
  */
 @Composable
 internal fun QuoteCard(
     segment: Segment.QuoteEvent,
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    exoPlayer: ExoPlayer? = null,
+    isActiveVideo: Boolean = false,
+    isMuted: Boolean = true,
+    onToggleMute: () -> Unit = {},
+    thumbnailCache: VideoThumbnailCache? = null,
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
@@ -96,7 +110,16 @@ internal fun QuoteCard(
             .fillMaxWidth()
             .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onNoteClick(segment.eventId) }
+            .pointerInput(segment.eventId) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    val up = waitForUpOrCancellation()
+                    if (up != null && !up.isConsumed) {
+                        up.consume()
+                        onNoteClick(segment.eventId)
+                    }
+                }
+            }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
         val loadedEvent = quoteData.event
@@ -141,11 +164,18 @@ internal fun QuoteCard(
                         role                = CardRole.Embedded,
                         onNoteClick         = onNoteClick,
                         onAuthorClick       = onAuthorClick,
+                        onHashtagClick      = onHashtagClick,
                         lookupProfile       = lookupProfile,
                         lookupEvent         = lookupEvent,
                         lookupModel         = lookupModel,
                         fetchOgMetadata     = fetchOgMetadata,
                         imageDimensionCache = imageDimensionCache,
+                        exoPlayer           = exoPlayer,
+                        isActiveVideo       = isActiveVideo,
+                        onOpenFullscreen    = { onNoteClick(segment.eventId) },
+                        isMuted             = isMuted,
+                        onToggleMute        = onToggleMute,
+                        thumbnailCache      = thumbnailCache,
                         nestDepth           = nestDepth + 1,
                     )
                 } else if (eventModel != null) {

@@ -209,11 +209,17 @@ internal fun ContentFlow(
                         segment         = seg,
                         onNoteClick     = onNoteClick,
                         onAuthorClick   = onAuthorClick,
+                        onHashtagClick  = onHashtagClick,
                         lookupEvent     = lookupEvent,
                         lookupProfile   = lookupProfile,
                         lookupModel     = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,
                         imageDimensionCache = imageDimensionCache,
+                        exoPlayer       = if (showVideo) exoPlayer else null,
+                        isActiveVideo   = if (showVideo) isActiveVideo else false,
+                        isMuted         = isMuted,
+                        onToggleMute    = onToggleMute,
+                        thumbnailCache  = thumbnailCache,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
                             .padding(horizontal = hPad)
