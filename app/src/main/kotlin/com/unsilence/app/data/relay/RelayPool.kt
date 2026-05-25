@@ -181,6 +181,11 @@ class RelayPool @Inject constructor(
     // arrive without needing a cold-start re-fetch.
     @Volatile private var liveMuteSubReq: String? = null
     private val liveMuteSubRelays = ConcurrentHashMap.newKeySet<String>()
+
+    // Persistent #p notification tail — forward-looking only (since:bootstrap_time).
+    // Catches new reactions/reposts/zaps/replies mentioning the user after bootstrap.
+    @Volatile private var liveNotifSubReq: String? = null
+    private val liveNotifSubRelays = ConcurrentHashMap.newKeySet<String>()
     private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
     // ── Paginated fetch state ─────────────────────────────────────────
@@ -1407,6 +1412,56 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Open a persistent subscription for events mentioning the user (#p tag).
+     * Forward-looking only: uses `since` so relays deliver only events created
+     * after bootstrap. Historical engagement is covered by ProfilePipeline step 4.
+     * Replayed automatically on relay reconnect.
+     */
+    fun subscribeOwnNotifications(pubkeyHex: String, sinceEpochSeconds: Long) {
+        val readRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { connections.containsKey(it) }
+            .ifEmpty {
+                connectedRelayUrls().mapNotNull { normalizeRelayUrl(it) }.take(4)
+            }
+        if (readRelayUrls.isEmpty()) return
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive("own-notif-live"))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))    // replies
+                    add(JsonPrimitive(6))    // reposts
+                    add(JsonPrimitive(7))    // reactions
+                    add(JsonPrimitive(9735)) // zap receipts
+                })
+                put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("since", JsonPrimitive(sinceEpochSeconds))
+            })
+        }.toString()
+        liveNotifSubReq = req
+        liveNotifSubRelays.clear()
+        liveNotifSubRelays.addAll(readRelayUrls)
+        for (url in readRelayUrls) {
+            connections[url]?.send(req)
+        }
+        Log.d(TAG, "subscribeOwnNotifications: ${readRelayUrls.size} relays, since=$sinceEpochSeconds")
+    }
+
+    /** Close the persistent notification subscription (teardown). */
+    fun closeLiveNotifSub() {
+        val urls = liveNotifSubRelays.toList()
+        liveNotifSubReq = null
+        liveNotifSubRelays.clear()
+        if (urls.isNotEmpty()) {
+            val close = """["CLOSE","own-notif-live"]"""
+            for (url in urls) {
+                connections[url]?.send(close)
+            }
+        }
+    }
+
+    /**
      * Fetch kind-30002 relay sets by coordinate (author + d-tags) from hint relays.
      * Used to resolve ["a", "30002:pubkey:dtag", "hint-relay"] references in kind-10012.
      * Connects to hint relays if not already connected, sends a single REQ with
@@ -2482,6 +2537,10 @@ class RelayPool @Inject constructor(
                     // Resend persistent own-mute-live subscription if this relay carries it
                     if (url in liveMuteSubRelays) {
                         liveMuteSubReq?.let { conn.send(it) }
+                    }
+                    // Resend persistent notification subscription if this relay carries it
+                    if (url in liveNotifSubRelays) {
+                        liveNotifSubReq?.let { conn.send(it) }
                     }
                     scope.launch { listenForEvents(conn) }
                     Log.d(TAG, "Reconnected $url")
