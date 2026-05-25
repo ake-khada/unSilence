@@ -98,7 +98,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         return ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizeBytes(48L * 1024 * 1024)  // 48MB hard cap
+                    .maxSizePercent(context, 0.15)
                     .build()
             }
             .bitmapFactoryMaxParallelism(3)
