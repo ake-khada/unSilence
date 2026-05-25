@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,7 +79,11 @@ internal fun EngagementDrawer(
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onProfileTap: (String) -> Unit,
 ) {
-    val stats = statsFlow?.invoke(eventId)?.collectAsState()?.value
+    val stats = if (statsFlow != null) {
+        key(eventId) {
+            statsFlow(eventId).collectAsState().value
+        }
+    } else null
 
     val drawerData = produceState(DrawerData(), eventId, stats) {
         val zaps = zapDetailsForEvent?.invoke(eventId)
