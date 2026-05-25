@@ -44,7 +44,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 9
+private const val SNAPSHOT_BINARY_VERSION = 10
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -799,16 +799,15 @@ class MemoryEventStore @Inject constructor(
 
         // Parse embedded kind-9734 zap request for sender pubkey + comment.
         val desc = parseZapDescription(event)
-        if (desc != null) {
-            zapDetailsByTarget
-                .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-                .add(ZapDetail(desc.senderPubkey, sats, desc.comment))
+        zapDetailsByTarget
+            .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
+            .add(ZapDetail(desc?.senderPubkey, sats, desc?.comment))
 
-            // Own-zap detection: signal VM to clear optimistic sats overlay.
-            val own = ownPubkey
-            if (own != null && desc.senderPubkey == own) {
-                _ownZapReceived.tryEmit(targetId)
-            }
+        // Own-zap detection: signal VM to clear optimistic sats overlay.
+        // desc == null → anonymous, can never be our own.
+        val own = ownPubkey
+        if (own != null && desc != null && desc.senderPubkey == own) {
+            _ownZapReceived.tryEmit(targetId)
         }
     }
 
@@ -2663,8 +2662,13 @@ class MemoryEventStore @Inject constructor(
             val event = eventsById[entry.id] ?: continue
             // Check #p tag for recipient match
             if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
-            // Exclude self-notifications
-            if (event.pubkey == recipientPubkey) continue
+            // Exclude self-notifications (for kind-9735, check real sender not LNURL service)
+            if (event.kind == 9735) {
+                val desc = parseZapDescription(event)
+                if (desc != null && desc.senderPubkey == recipientPubkey) continue
+            } else {
+                if (event.pubkey == recipientPubkey) continue
+            }
             // Following filter
             if (follows != null && event.pubkey !in follows) continue
             val item = buildNotificationItem(event, recipientPubkey) ?: continue
@@ -2683,7 +2687,12 @@ class MemoryEventStore @Inject constructor(
             for (id in ids) {
                 val event = eventsById[id] ?: continue
                 if (event.createdAt <= since) continue
-                if (event.pubkey == recipientPubkey) continue
+                if (event.kind == 9735) {
+                    val desc = parseZapDescription(event)
+                    if (desc != null && desc.senderPubkey == recipientPubkey) continue
+                } else {
+                    if (event.pubkey == recipientPubkey) continue
+                }
                 if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
                 count++
             }
@@ -2748,13 +2757,32 @@ class MemoryEventStore @Inject constructor(
             else -> return null
         }
 
+        // For kind-9735 zap receipts, event.pubkey is the LNURL service signer —
+        // resolve the real sender from the embedded kind-9734 description tag.
+        val actorPubkey: String
+        val actorFields: Map<String, String?>
+        if (event.kind == 9735) {
+            val desc = parseZapDescription(event)
+            if (desc != null) {
+                actorPubkey = desc.senderPubkey
+                actorFields = cachedProfileFields(desc.senderPubkey)
+            } else {
+                // Anonymous zap — still show it but with service pubkey
+                actorPubkey = event.pubkey
+                actorFields = fields
+            }
+        } else {
+            actorPubkey = event.pubkey
+            actorFields = fields
+        }
+
         return NotificationItem(
             id = event.id,
             notifType = notifType,
-            actorPubkey = event.pubkey,
-            actorName = fields["name"],
-            actorDisplayName = fields["display_name"],
-            actorPicture = fields["picture"],
+            actorPubkey = actorPubkey,
+            actorName = actorFields["name"],
+            actorDisplayName = actorFields["display_name"],
+            actorPicture = actorFields["picture"],
             targetNoteId = targetNoteId,
             targetNoteContent = targetNoteContent,
             parentNoteContent = parentNoteContent,
@@ -3177,7 +3205,7 @@ class MemoryEventStore @Inject constructor(
             for ((id, details) in zapContribs) {
                 d.writeStr(id); d.writeInt(details.size)
                 for (z in details) {
-                    d.writeStr(z.senderPubkey); d.writeLong(z.sats)
+                    d.writeStrOrNull(z.senderPubkey); d.writeLong(z.sats)
                     d.writeStrOrNull(z.comment)
                 }
             }
@@ -3434,7 +3462,8 @@ class MemoryEventStore @Inject constructor(
                 val id = input.readStr(); val n = input.readInt()
                 val list = java.util.Collections.synchronizedList(mutableListOf<ZapDetail>())
                 for (j in 0 until n) {
-                    list.add(ZapDetail(input.readStr(), input.readLong(), input.readStrOrNull()))
+                    val sender = if (version >= 10) input.readStrOrNull() else input.readStr()
+                    list.add(ZapDetail(sender, input.readLong(), input.readStrOrNull()))
                 }
                 zapDetailsByTarget[id] = list
             }

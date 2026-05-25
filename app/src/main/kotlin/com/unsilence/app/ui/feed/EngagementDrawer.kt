@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -57,6 +58,7 @@ private data class ReactionGroup(
 
 private data class DrawerData(
     val zaps: List<ZapDetail> = emptyList(),
+    val anonymousZapSats: Long = 0L,
     val reposts: List<String> = emptyList(),
     val reactionGroups: List<ReactionGroup> = emptyList(),
 )
@@ -86,8 +88,10 @@ internal fun EngagementDrawer(
     } else null
 
     val drawerData = produceState(DrawerData(), eventId, stats) {
-        val zaps = zapDetailsForEvent?.invoke(eventId)
-            ?.sortedByDescending { it.sats } ?: emptyList()
+        val rawZaps = zapDetailsForEvent?.invoke(eventId) ?: emptyList()
+        val (namedZaps, anonZaps) = rawZaps.partition { it.senderPubkey != null }
+        val zaps = namedZaps.sortedByDescending { it.sats }
+        val anonymousZapSats = anonZaps.sumOf { it.sats }
         val reposts = repostPubkeysForEvent?.invoke(eventId) ?: emptyList()
         val reactions = reactionsForEvent?.invoke(eventId) ?: emptyList()
         val groups = reactions
@@ -107,7 +111,7 @@ internal fun EngagementDrawer(
                 )
             }
             .sortedByDescending { it.pubkeys.size }
-        value = DrawerData(zaps, reposts, groups)
+        value = DrawerData(zaps, anonymousZapSats, reposts, groups)
     }.value
 
     Column(
@@ -115,8 +119,8 @@ internal fun EngagementDrawer(
             .fillMaxWidth()
             .padding(top = Spacing.micro, bottom = Spacing.small),
     ) {
-        // Zaps — one row per zap with optional comment
-        if (drawerData.zaps.isNotEmpty()) {
+        // Zaps — one row per named zap with optional comment, then anonymous aggregate
+        if (drawerData.zaps.isNotEmpty() || drawerData.anonymousZapSats > 0) {
             drawerData.zaps.forEachIndexed { index, zap ->
                 Row(
                     modifier = Modifier
@@ -145,7 +149,7 @@ internal fun EngagementDrawer(
                             zap = zap,
                             profileFlow = profileFlow,
                             lookupProfile = lookupProfile,
-                            onTap = { onProfileTap(zap.senderPubkey) },
+                            onTap = { zap.senderPubkey?.let { onProfileTap(it) } },
                         )
                     }
 
@@ -155,6 +159,37 @@ internal fun EngagementDrawer(
                         contentAlignment = Alignment.Center,
                     ) {
                         if (index == 0) {
+                            Icon(
+                                imageVector = Icons.Filled.ElectricBolt,
+                                contentDescription = null,
+                                tint = Zap,
+                                modifier = Modifier.size(Sizing.actionIcon),
+                            )
+                        }
+                    }
+                }
+            }
+            // Anonymous zap aggregate — single chip with QuestionMark icon
+            if (drawerData.anonymousZapSats > 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 1.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        modifier = Modifier.weight(4f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        AnonymousZapChip(sats = drawerData.anonymousZapSats)
+                    }
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        // Zap icon only if no named zaps above (otherwise already shown)
+                        if (drawerData.zaps.isEmpty()) {
                             Icon(
                                 imageVector = Icons.Filled.ElectricBolt,
                                 contentDescription = null,
@@ -313,20 +348,37 @@ private fun ZapChip(
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val sender = zap.senderPubkey
     Box(
         modifier = modifier
             .size(Sizing.avatar)
             .clip(CircleShape)
-            .clickable(onClick = onTap),
+            .then(if (sender != null) Modifier.clickable(onClick = onTap) else Modifier),
     ) {
-        AvatarImage(
-            pubkey = zap.senderPubkey,
-            picture = null,
-            sizeDp = Sizing.avatar,
-            profileFlow = profileFlow,
-            lookupProfile = lookupProfile,
-            modifier = Modifier.size(Sizing.avatar),
-        )
+        if (sender != null) {
+            AvatarImage(
+                pubkey = sender,
+                picture = null,
+                sizeDp = Sizing.avatar,
+                profileFlow = profileFlow,
+                lookupProfile = lookupProfile,
+                modifier = Modifier.size(Sizing.avatar),
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(Sizing.avatar)
+                    .background(Color(0xFF1A1A1A), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.QuestionMark,
+                    contentDescription = "Anonymous",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
         // Dark gradient covering lower 65% — strong enough for sats readability at 32dp
         Box(
             modifier = Modifier
@@ -345,6 +397,55 @@ private fun ZapChip(
         )
         Text(
             text = zap.sats.toCompactSats(),
+            color = Zap,
+            fontSize = AppType.caption,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 1.dp),
+        )
+    }
+}
+
+/** Anonymous zap aggregate: QuestionMark icon + total sats. Non-clickable. */
+@Composable
+private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(Sizing.avatar)
+            .clip(CircleShape),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(Sizing.avatar)
+                .background(Color(0xFF1A1A1A), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.QuestionMark,
+                contentDescription = "Anonymous zaps",
+                tint = TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.65f)
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.85f),
+                            Color.Black.copy(alpha = 0.9f),
+                        ),
+                    ),
+                ),
+        )
+        Text(
+            text = sats.toCompactSats(),
             color = Zap,
             fontSize = AppType.caption,
             fontWeight = FontWeight.Bold,
