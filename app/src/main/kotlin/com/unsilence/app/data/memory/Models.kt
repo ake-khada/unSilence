@@ -35,8 +35,13 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
     }
 }
 
-/** Per-zap breakdown for the engagement drawer: sender, amount, optional message. */
-data class ZapDetail(val senderPubkey: String, val sats: Long, val comment: String?)
+/**
+ * Per-zap breakdown for the engagement drawer.
+ * senderPubkey is null when the description tag is missing, malformed,
+ * or the zap was sent anonymously (one-time keypair, no resolvable actor).
+ * Anonymous entries are grouped into a single chip by the drawer.
+ */
+data class ZapDetail(val senderPubkey: String?, val sats: Long, val comment: String?)
 
 /** Reaction content — Unicode emoji (or "+"/"-") vs NIP-30 custom emoji with image URL. */
 sealed interface ReactionContent {
