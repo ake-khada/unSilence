@@ -214,9 +214,12 @@ fun rememberVideoPlaybackScope(
                 // visible item count changes are expected (items of different
                 // heights enter/leave viewport). While stationary, count changes
                 // indicate hydration-induced reflow — the actual flap trigger.
+                // Skip cooldown when no video is active yet — the cooldown
+                // prevents flapping of an existing active video, not initial
+                // activation (e.g. ThreadScreen loads items asynchronously).
                 val now = System.currentTimeMillis()
                 val visibleCount = layoutInfo.visibleItemsInfo.size
-                if (!listState.isScrollInProgress) {
+                if (!listState.isScrollInProgress && activeRef.value != null) {
                     if (visibleCount != scope.lastVisibleItemCount && scope.lastVisibleItemCount >= 0) {
                         scope.lastLayoutShiftAt = now
                     }
