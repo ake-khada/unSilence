@@ -17,7 +17,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -437,7 +441,9 @@ fun ComposeScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .imePadding()
+                            .windowInsetsPadding(
+                                WindowInsets.ime.union(WindowInsets.navigationBars)
+                            )
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -619,6 +625,9 @@ fun ComposeScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .windowInsetsPadding(
+                                WindowInsets.ime.union(WindowInsets.navigationBars)
+                            )
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -678,6 +687,7 @@ fun ComposeScreen(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
+                            .windowInsetsPadding(WindowInsets.navigationBars)
                             .padding(Spacing.medium),
                         verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally,
