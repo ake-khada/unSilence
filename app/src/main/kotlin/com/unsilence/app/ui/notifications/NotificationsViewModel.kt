@@ -1,16 +1,11 @@
 package com.unsilence.app.ui.notifications
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationItem
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
-import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPreferencesStore
-import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -22,8 +17,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-private const val TAG = "NotifVM"
-
 data class NotificationsUiState(
     val items: List<NotificationItem> = emptyList(),
     val loading: Boolean = true,
@@ -34,11 +27,9 @@ enum class NotifFilter { Following, Global }
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
     private val keyManager: KeyManager,
-    private val initGate: InitGate,
     private val memoryEventStore: MemoryEventStore,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
-    private val subscription: Subscription,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NotificationsUiState())
@@ -65,16 +56,9 @@ class NotificationsViewModel @Inject constructor(
     }
 
     private var collectJob: Job? = null
-    private var notifSubHandle: Subscription.Handle? = null
 
     init {
         keyManager.getPublicKeyHex()?.let { pubkey ->
-            // Defer subscription until relay connections are established —
-            // firing at T+0 before AppBootstrapper has no relay URLs to use.
-            viewModelScope.launch {
-                initGate.awaitFeedConnections()
-                startNotifSubscription(pubkey)
-            }
             startCollecting(pubkey)
         }
     }
@@ -112,44 +96,8 @@ class NotificationsViewModel @Inject constructor(
         }
     }
 
-    private fun startNotifSubscription(pubkey: String) {
-        notifSubHandle?.close()
-        viewModelScope.launch {
-            val readRelays = memoryEventStore.getReadWriteRelayConfigs(pubkey)
-                .filter { it.marker == null || it.marker == "read" }
-                .map { it.url }
-                .ifEmpty { GLOBAL_RELAY_URLS }
-
-            Log.d(TAG, "subscribing for mentions of ${pubkey.take(8)}, urls=${readRelays.size}")
-
-            // No `since` filter — relays return the most-recent N mentions
-            // regardless of age, which is what users actually want when they
-            // open the notifications screen. The previous 24h cap meant
-            // anything older than a day never loaded; combined with MES-only
-            // reads in notificationsFlow, that produced the user-visible bug
-            // where historical notifications were missing on a fresh install.
-            //
-            // The `limit = 100` is the bound — relays send the 100 most
-            // recent matching events. Live updates after EOSE flow through
-            // EventProcessor → MES → notificationsFlow; nothing else needs
-            // a since clause.
-            val filter = NostrFilter(
-                kinds = listOf(1, 6, 7, 9735),
-                tags = mapOf("p" to listOf(pubkey)),
-                limit = 100,
-            )
-
-            notifSubHandle = subscription.subscribe(
-                urls = readRelays,
-                filter = filter,
-                onevent = { /* events flow through EventProcessor → MES → notificationsFlow */ },
-            )
-            Log.d(TAG, "subscription handle obtained")
-        }
-    }
-
     override fun onCleared() {
-        notifSubHandle?.close()
+        collectJob?.cancel()
         super.onCleared()
     }
 }

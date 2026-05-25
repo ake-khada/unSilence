@@ -414,6 +414,12 @@ class AppBootstrapper @Inject constructor(
             )
         }
 
+        // Persistent notification tail: forward-looking only (since:now).
+        // Historical engagement is covered by ProfilePipeline step 4 above.
+        // New reactions/reposts/zaps/replies arrive via EventProcessor → MES
+        // and surface in NotificationsViewModel's MES flow.
+        relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000)
+
         // ═══════════════════════════════════════════════════════════════════
         // Phase 3 (2500ms): Maintenance + media preconnect
         // ═══════════════════════════════════════════════════════════════════
@@ -494,6 +500,7 @@ class AppBootstrapper @Inject constructor(
 
         // 1. Close persistent subscriptions + clear relay pool caches
         relayPool.closeLiveMuteSub()
+        relayPool.closeLiveNotifSub()
         relayPool.clearCaches()
 
         // 2. Disconnect all WebSockets
