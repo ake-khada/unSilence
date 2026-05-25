@@ -91,6 +91,7 @@ class AppBootstrapper @Inject constructor(
     private val initGate: InitGate,
     private val muteListRepository: MuteListRepository,
     private val cardHydrator: CardHydrator,
+    private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -399,6 +400,18 @@ class AppBootstrapper @Inject constructor(
             } else {
                 Log.d(TAG, "Phase2: NIP-30 no emoji list or empty set refs")
             }
+        }
+
+        // Own-profile pipeline: rebuild ref anchors from snapshot, then eager
+        // fetch notes + refs + engagement. Non-blocking — runs concurrently
+        // with Phase 3. Anchor rebuild is synchronous (pure MES scan, ~20ms).
+        scope.launch {
+            profilePipeline.rebuildOwnProfileAnchors(pubkeyHex)
+            profilePipeline.loadProfile(
+                pubkey = pubkeyHex,
+                isOwn = true,
+                anchorPolicy = com.unsilence.app.data.relay.AnchorPolicy.OWN,
+            )
         }
 
         // ═══════════════════════════════════════════════════════════════════

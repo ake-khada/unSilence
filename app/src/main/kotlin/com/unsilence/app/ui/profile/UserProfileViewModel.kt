@@ -9,7 +9,6 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -61,7 +60,7 @@ class UserProfileViewModel @Inject constructor(
     private val signingManager: SigningManager,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineService: TimelineService,
-    private val cardHydrator: CardHydrator,
+    private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -218,6 +217,20 @@ class UserProfileViewModel @Inject constructor(
             val count = relayPool.fetchFollowingCount(pubkey)
             if (count != null) followingCount.value = count
         }
+
+        // Eager pipeline: refs + engagement pre-fetched in batch.
+        // viewedPubkey is set above (line 181) BEFORE this call —
+        // the pipeline's eviction anchor relies on it being set so that
+        // events arriving during fetch are protected from mid-fetch eviction.
+        val isOwn = pubkey == myPubkey
+        viewModelScope.launch(Dispatchers.IO) {
+            profilePipeline.loadProfile(
+                pubkey = pubkey,
+                isOwn = isOwn,
+                anchorPolicy = if (isOwn) com.unsilence.app.data.relay.AnchorPolicy.OWN
+                    else com.unsilence.app.data.relay.AnchorPolicy.VIEWED,
+            )
+        }
     }
 
     // ── User actions ─────────────────────────────────────────────────────
@@ -225,14 +238,7 @@ class UserProfileViewModel @Inject constructor(
     fun onViewportChanged(first: Int, last: Int, isScrolling: Boolean = false) {
         val atTop = first <= 0
         if (_isAtTop.value != atTop) _isAtTop.value = atTop
-
-        // Skip engagement during flings — same settle guard as video autoplay.
-        if (isScrolling) return
-
-        // LazyColumn indices include header items (spacer, profile header, tab row).
-        val posts = tabPostsFlow.value
-        if (posts.isEmpty()) return
-        cardHydrator.hydrateEngagement(posts, first - PROFILE_HEADER_ITEMS, last - PROFILE_HEADER_ITEMS)
+        // Engagement pre-fetched by ProfilePipeline — no viewport-driven hydration needed.
     }
 
     fun loadMore(currentOldest: Long) {
@@ -384,8 +390,6 @@ class UserProfileViewModel @Inject constructor(
     private companion object {
         const val FEED_DISPLAY_CAP = 500
         const val FEED_SAMPLE_MS = 100L
-        /** Number of LazyColumn item{} blocks before the post list (spacer + header + tabs). */
-        const val PROFILE_HEADER_ITEMS = 3
 
         enum class SubGroup { NOTES_REPLIES, LONGFORM }
 
