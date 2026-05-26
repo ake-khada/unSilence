@@ -41,7 +41,12 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
  * or the zap was sent anonymously (one-time keypair, no resolvable actor).
  * Anonymous entries are grouped into a single chip by the drawer.
  */
-data class ZapDetail(val senderPubkey: String?, val sats: Long, val comment: String?)
+data class ZapDetail(
+    val senderPubkey: String?,
+    val sats: Long,
+    val comment: String?,
+    val eventId: String? = null,  // kind-9735 receipt id; null on V10 entries
+)
 
 /** Reaction content — Unicode emoji (or "+"/"-") vs NIP-30 custom emoji with image URL. */
 sealed interface ReactionContent {
