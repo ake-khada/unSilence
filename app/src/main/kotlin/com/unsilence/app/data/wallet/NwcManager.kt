@@ -278,6 +278,7 @@ class NwcManager @Inject constructor(
 
         val plaintext = buildJsonObject {
             put("method", "get_balance")
+            put("id",     nowSeconds.toString())
             put("params", buildJsonObject {})
         }.toString()
 
@@ -343,6 +344,9 @@ class NwcManager @Inject constructor(
             }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "NWC balance WS failure: ${t.message}")
+                if (!deferred.isCompleted) deferred.complete(null)
+            }
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 if (!deferred.isCompleted) deferred.complete(null)
             }
         }
