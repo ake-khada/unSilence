@@ -135,7 +135,7 @@ class MemoryEventStore @Inject constructor(
     // ─── NIP-57 private zap decrypt sidecar ─────────────────────────────────
     /**
      * Decrypted NIP-57 private zaps, keyed by kind-9735 event id.
-     * Populated by PrivateZapRepository after async NIP-44 decrypt completes.
+     * Populated by PrivateZapRepository after async decrypt completes.
      * Memory-only — re-decrypted on cold start via rescanPendingPrivateZapDecrypts.
      */
     private val privateZapDecryptedById = ConcurrentHashMap<String, DecryptedPrivateZap>()
@@ -828,9 +828,11 @@ class MemoryEventStore @Inject constructor(
         }
 
         // NIP-57 private zap detection. The embedded kind-9734's anon tag carries
-        // a NIP-44 ciphertext that, when decrypted with our key, reveals the real
-        // sender + real message. We only attempt decrypt for receipts addressed
-        // to our own pubkey — private zaps for others can't be decrypted by us.
+        // an encrypted blob (NIP-04 wire format from Quartz's PrivateZapRequestBuilder
+        // or PrivateZapEncryption). Decrypting with our key reveals the inner kind-9733
+        // containing the real sender + real message. We only attempt decrypt for
+        // receipts addressed to our own pubkey — private zaps for others can't be
+        // decrypted by us.
         if (own != null) {
             val recipientP = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.get(1)
             if (recipientP == own) {
@@ -861,9 +863,10 @@ class MemoryEventStore @Inject constructor(
     }
 
     /**
-     * Extract the NIP-44 ciphertext from the kind-9734's anon tag, along
+     * Extract the encrypted ciphertext from the kind-9734's anon tag, along
      * with the kind-9734 signer's pubkey (publicKey_a) — needed as the
-     * peerPubkey for NIP-44 decrypt.
+     * peerPubkey for decrypt. The wire format is NIP-04, but SigningManager.decrypt
+     * tries NIP-44 first as a defensive fallback for legacy senders.
      *
      * Returns (null, null) if no anon tag, no description tag, or malformed JSON.
      */
