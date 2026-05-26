@@ -30,6 +30,9 @@ private const val SLOW_TIER_WATCHDOG_MS = 2_000L
  *  wake up promptly when allEosed flips. */
 private const val SLOW_TIER_POLL_MS = 50L
 
+/** Max refs persisted per timeline to bound snapshot disk usage. */
+private const val PERSISTED_REFS_CAP = 500
+
 /**
  * EOSE-aware multi-relay timeline subscription with persistent ref cache.
  *
@@ -65,7 +68,7 @@ class TimelineService @Inject constructor(
 ) {
     /** Dispatcher for fire-and-forget subscribe coroutines. Tests override with Unconfined. */
     internal var subscribeDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO
-    private data class Timeline(
+    internal data class Timeline(
         val refs: List<TimelineRef>,
         val filter: NostrFilter,
         val urls: List<String>,
@@ -415,6 +418,47 @@ class TimelineService @Inject constructor(
             .sortedWith(compareEventsDesc)
             .take(limit)
         return combined
+    }
+
+    // ── Snapshot persistence ──────────────────────────────────────────────
+
+    /**
+     * Snapshot writer entry — returns a snapshot view of the cache with
+     * refs capped at PERSISTED_REFS_CAP. MES calls this during binary
+     * snapshot write.
+     */
+    internal fun snapshotData(): Map<String, Timeline> {
+        val result = HashMap<String, Timeline>(timelines.size)
+        for ((key, tl) in timelines) {
+            val refs = if (tl.refs.size > PERSISTED_REFS_CAP) {
+                tl.refs.take(PERSISTED_REFS_CAP)
+            } else {
+                tl.refs
+            }
+            result[key] = if (refs === tl.refs) tl else tl.copy(refs = refs)
+        }
+        return result
+    }
+
+    /**
+     * Snapshot reader entry. Validates each entry's key by recomputing
+     * from urls+filter; mismatches (schema drift) are skipped.
+     */
+    internal fun restoreFromSnapshot(entries: Map<String, Timeline>) {
+        for ((key, timeline) in entries) {
+            val recomputed = generateTimelineKey(timeline.urls, timeline.filter)
+            if (recomputed != key) {
+                Log.w(TAG, "timeline key mismatch persisted=${key.take(8)} recomputed=${recomputed.take(8)} — skipping")
+                continue
+            }
+            timelines[key] = timeline
+        }
+        Log.d(TAG, "restored ${timelines.size} timelines from snapshot")
+    }
+
+    fun clear() {
+        timelines.clear()
+        multiKeys.clear()
     }
 
     // ── Test helpers ────────────────────────────────────────────────────────
