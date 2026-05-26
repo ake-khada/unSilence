@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
@@ -88,22 +87,14 @@ fun FiltersScreen(
                     .background(Black)
                     .statusBarsPadding()
                     .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.small),
+                    .padding(horizontal = Spacing.medium),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White,
-                    )
-                }
                 Text(
                     text = "Filters",
                     color = Color.White,
                     fontSize = AppType.subheading,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(start = Spacing.small),
                 )
             }
 
@@ -118,25 +109,15 @@ fun FiltersScreen(
                         it.privatePubkeys.size + it.privateHashtags.size +
                             it.privateWords.size + it.privateEventIds.size
                     } ?: 0
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.large, vertical = Spacing.medium),
-                    ) {
-                        Text(
-                            text = "$total mutes",
-                            color = Color.White,
-                            fontSize = AppType.body,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        if (privateCount > 0) {
-                            Text(
-                                text = "$privateCount private",
-                                color = TextSecondary,
-                                fontSize = AppType.caption,
-                            )
-                        }
-                    }
+                    Text(
+                        text = "$total mutes" + if (privateCount > 0) " · $privateCount private" else "",
+                        color = TextSecondary,
+                        fontSize = AppType.caption,
+                        modifier = Modifier.padding(
+                            horizontal = Spacing.medium,
+                            vertical = Spacing.medium,
+                        ),
+                    )
                 }
 
                 // ── Mute sync warning ────────────────────────────────
