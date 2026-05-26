@@ -35,7 +35,7 @@ class PrivateZapRepository @Inject constructor(
         // Skip if already decrypted (rescans + live arrival can race).
         if (memoryEventStore.getDecryptedPrivateZap(pending.zapReceiptId) != null) return
 
-        val plaintext = signingManager.decrypt(
+        val plaintext = signingManager.decryptPrivateZap(
             ciphertext = pending.anonCiphertext,
             peerPubkeyHex = pending.anonSignerPubkey,
         )

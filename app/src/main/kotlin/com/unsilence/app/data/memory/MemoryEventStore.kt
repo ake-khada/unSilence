@@ -132,6 +132,101 @@ class MemoryEventStore @Inject constructor(
     private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<ReactionInfo>>()
     private val zapDetailsByTarget = ConcurrentHashMap<String, MutableList<ZapDetail>>()
 
+    // ─── Notification recipient index (M4) ────────────────────────────────
+
+    private data class NotifEntry(val createdAt: Long, val eventId: String)
+        : Comparable<NotifEntry> {
+        override fun compareTo(other: NotifEntry): Int {
+            val c = other.createdAt.compareTo(createdAt)
+            return if (c != 0) c else eventId.compareTo(other.eventId)
+        }
+    }
+
+    /**
+     * Per-recipient sorted notification index. Populated at insert time
+     * (insertCore + insertFromSnapshot + rebuildNotificationIndex on restore)
+     * for any kind-1/6/7/9735 event carrying p-tags. Iteration is in
+     * createdAt-DESC order; sort tiebreak by eventId for stability.
+     */
+    private val notifIdsByRecipient =
+        ConcurrentHashMap<String, ConcurrentSkipListSet<NotifEntry>>()
+
+    /**
+     * Per-recipient notification version signal. Drives notificationsFlow
+     * without bumping when irrelevant events arrive.
+     */
+    private val notificationSignalByRecipient =
+        ConcurrentHashMap<String, MutableStateFlow<Long>>()
+
+    private fun notificationSignalFor(recipient: String): MutableStateFlow<Long> =
+        notificationSignalByRecipient.computeIfAbsent(recipient) {
+            MutableStateFlow(0L)
+        }
+
+    private fun bumpNotificationSignal(recipient: String) {
+        notificationSignalFor(recipient).value = System.nanoTime()
+    }
+
+    /**
+     * Index every unique p-tag recipient of [event] and bump their
+     * notification signals. No-op for non-notification kinds.
+     */
+    private fun indexNotificationRecipients(event: NostrEvent) {
+        if (event.kind !in NOTIFICATION_KINDS) return
+        val seen = HashSet<String>(4)
+        for (tag in event.tags) {
+            if (tag.size < 2 || tag[0] != "p") continue
+            val recipient = tag[1]
+            if (recipient.length != 64) continue
+            if (!seen.add(recipient)) continue
+            notifIdsByRecipient
+                .computeIfAbsent(recipient) { ConcurrentSkipListSet() }
+                .add(NotifEntry(event.createdAt, event.id))
+            bumpNotificationSignal(recipient)
+        }
+    }
+
+    /**
+     * Remove [event] from any recipient indexes it currently appears in.
+     * Called during eviction.
+     */
+    private fun deindexNotificationRecipients(event: NostrEvent) {
+        if (event.kind !in NOTIFICATION_KINDS) return
+        val entry = NotifEntry(event.createdAt, event.id)
+        val seen = HashSet<String>(4)
+        for (tag in event.tags) {
+            if (tag.size < 2 || tag[0] != "p") continue
+            val recipient = tag[1]
+            if (!seen.add(recipient)) continue
+            val set = notifIdsByRecipient[recipient] ?: continue
+            if (set.remove(entry)) bumpNotificationSignal(recipient)
+        }
+    }
+
+    /**
+     * Rebuild [notifIdsByRecipient] from [eventsById]. Called once at the
+     * end of snapshot restore. Idempotent.
+     */
+    fun rebuildNotificationIndex() {
+        notifIdsByRecipient.clear()
+        for ((_, event) in eventsById) {
+            if (event.kind !in NOTIFICATION_KINDS) continue
+            val seen = HashSet<String>(4)
+            for (tag in event.tags) {
+                if (tag.size < 2 || tag[0] != "p") continue
+                val recipient = tag[1]
+                if (recipient.length != 64) continue
+                if (!seen.add(recipient)) continue
+                notifIdsByRecipient
+                    .computeIfAbsent(recipient) { ConcurrentSkipListSet() }
+                    .add(NotifEntry(event.createdAt, event.id))
+            }
+        }
+        for (recipient in notifIdsByRecipient.keys) {
+            bumpNotificationSignal(recipient)
+        }
+    }
+
     // ─── NIP-57 private zap decrypt sidecar ─────────────────────────────────
     /**
      * Decrypted NIP-57 private zaps, keyed by kind-9735 event id.
@@ -552,6 +647,9 @@ class MemoryEventStore @Inject constructor(
 
         // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
         indexRelayHints(event)
+
+        // 2c. Notification recipient index (M4)
+        indexNotificationRecipients(event)
 
         // 3. Update derived aggregates based on kind
         when (event.kind) {
@@ -1503,6 +1601,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun removeFromIndexes(event: NostrEvent) {
+        deindexNotificationRecipients(event)
         eventsById.remove(event.id)
         idsByKind[event.kind]?.remove(event.id)
         idsByPubkey[event.pubkey]?.remove(event.id)
@@ -1630,6 +1729,7 @@ class MemoryEventStore @Inject constructor(
 
         for (entry in toEvict) {
             val event = eventsById.remove(entry.id) ?: continue
+            deindexNotificationRecipients(event)
             recentByCreatedAt.remove(entry)
             idsByKind[event.kind]?.remove(entry.id)
             idsByPubkey[event.pubkey]?.remove(entry.id)
@@ -2014,8 +2114,11 @@ class MemoryEventStore @Inject constructor(
         privateZapDecryptedById[zapReceiptId] = decrypted
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
-        // Bump stats signal so notification flow re-derives rows.
         _statsSignal.value = System.nanoTime()
+        // Bump the recipient's notification signal so the row re-emits
+        // with the resolved real sender instead of "Anonymous".
+        val ownPk = ownPubkey
+        if (ownPk != null) bumpNotificationSignal(ownPk)
     }
 
     /**
@@ -2750,38 +2853,29 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Scan-based notification query. Walks idsByKind for notification-eligible
-     * kinds (1/6/7/9735), checks #p tags for recipient match, and returns up
-     * to [limit] items sorted by createdAt DESC.
+     * Notification query backed by the recipient-pubkey reverse index.
+     * Iterates the per-recipient sorted set in createdAt-DESC order until
+     * [limit] items are collected, applying self-exclusion (parses
+     * kind-9735 description for the real sender) and an optional
+     * followed-only filter at read time.
      *
-     * This mirrors Room's UNION ALL approach: no pre-built index, computed at
-     * query time. This ensures events loaded from snapshot, historical fetch,
-     * or feed sub all appear — not just events arriving after the handler was
-     * added.
-     *
-     * @param followedOnly If true, only show notifications from users the
-     *   recipient follows.
+     * @param limit Maximum rows to return. null = unlimited.
      */
     fun getNotifications(
         recipientPubkey: String,
         followedOnly: Boolean = false,
+        limit: Int? = null,
     ): List<NotificationItem> {
+        val entries = notifIdsByRecipient[recipientPubkey] ?: return emptyList()
         val follows = if (followedOnly) followsByPubkey[recipientPubkey] else null
-        // Collect candidate event IDs from kind indexes
-        val candidateIds = mutableListOf<String>()
-        for (kind in NOTIFICATION_KINDS) {
-            idsByKind[kind]?.let { candidateIds.addAll(it) }
-        }
-        // Filter, resolve, sort
-        val items = mutableListOf<NotificationItem>()
-        val sorted = candidateIds
-            .mapNotNull { id -> eventsById[id]?.let { EventEntry(id, it.createdAt) } }
-            .sortedWith(compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id })
+        val items = ArrayList<NotificationItem>(limit ?: 200)
+        val cap = limit ?: Int.MAX_VALUE
 
-        for (entry in sorted) {
-            val event = eventsById[entry.id] ?: continue
-            // Check #p tag for recipient match
-            if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
-            // Exclude self-notifications (for kind-9735, check real sender not LNURL service)
+        for (entry in entries) {
+            if (items.size >= cap) break
+            val event = eventsById[entry.eventId] ?: continue
+
+            // Self-exclusion: kind-9735 must use parsed sender, not LNURL service.
             if (event.kind == 9735) {
                 val decrypted = privateZapDecryptedById[event.id]
                 val effectiveSender = decrypted?.senderPubkey
@@ -2790,8 +2884,9 @@ class MemoryEventStore @Inject constructor(
             } else {
                 if (event.pubkey == recipientPubkey) continue
             }
-            // Following filter
+
             if (follows != null && event.pubkey !in follows) continue
+
             val item = buildNotificationItem(event, recipientPubkey) ?: continue
             items.add(item)
         }
@@ -2800,40 +2895,39 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Count notifications for [recipientPubkey] with createdAt > [since].
+     * Walks the sorted set and breaks early when entries drop below [since].
      */
     fun notificationCountSince(recipientPubkey: String, since: Long): Int {
+        val entries = notifIdsByRecipient[recipientPubkey] ?: return 0
         var count = 0
-        for (kind in NOTIFICATION_KINDS) {
-            val ids = idsByKind[kind] ?: continue
-            for (id in ids) {
-                val event = eventsById[id] ?: continue
-                if (event.createdAt <= since) continue
-                if (event.kind == 9735) {
-                    val decrypted = privateZapDecryptedById[event.id]
-                    val effectiveSender = decrypted?.senderPubkey
-                        ?: parseZapDescription(event)?.senderPubkey
-                    if (effectiveSender == recipientPubkey) continue
-                } else {
-                    if (event.pubkey == recipientPubkey) continue
-                }
-                if (!event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == recipientPubkey }) continue
-                count++
+        for (entry in entries) {
+            if (entry.createdAt <= since) break  // sorted DESC — done
+            val event = eventsById[entry.eventId] ?: continue
+            if (event.kind == 9735) {
+                val decrypted = privateZapDecryptedById[event.id]
+                val effectiveSender = decrypted?.senderPubkey
+                    ?: parseZapDescription(event)?.senderPubkey
+                if (effectiveSender == recipientPubkey) continue
+            } else {
+                if (event.pubkey == recipientPubkey) continue
             }
+            count++
         }
         return count
     }
 
     /**
-     * Reactive notification flow. Driven by _feedSignal (kinds 1/6) and
-     * _statsSignal (kinds 7/9735) — the same signals that fire when
-     * notification-eligible events are inserted.
+     * Reactive notification flow driven by per-recipient signal.
+     * Only re-emits when something affecting THIS recipient changes —
+     * not on every kind-1 insert globally.
      */
     fun notificationsFlow(
         recipientPubkey: String,
         followedOnly: Boolean = false,
+        limit: Int? = null,
     ): Flow<List<NotificationItem>> =
-        combine(_feedSignal, _statsSignal) { _, _ -> }
-            .map { getNotifications(recipientPubkey, followedOnly) }
+        notificationSignalFor(recipientPubkey)
+            .map { getNotifications(recipientPubkey, followedOnly, limit) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -3716,6 +3810,11 @@ class MemoryEventStore @Inject constructor(
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
 
+        // Rebuild notification recipient index from restored events.
+        // insertFromSnapshot already indexed each event, but rebuildNotificationIndex
+        // is idempotent and ensures consistency after any future restore-path changes.
+        rebuildNotificationIndex()
+
         // End-of-restore signal bumps (matches V2 reader)
         val now = System.nanoTime()
         _feedSignal.value = now
@@ -3879,6 +3978,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         indexRelayHints(event)
+        indexNotificationRecipients(event)
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
@@ -4171,6 +4271,8 @@ class MemoryEventStore @Inject constructor(
         engagementCapped.clear()
         profileAnchoredIds.clear()
         privateZapDecryptedById.clear()
+        notifIdsByRecipient.clear()
+        notificationSignalByRecipient.clear()
         _feedSignal.value = 0L
         _profileSignal.value = 0L
         _statsSignal.value = 0L
