@@ -2005,11 +2005,25 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Find the kind-10000 event content for a pubkey (for external decrypt).
+     * Returns content from the NEWEST kind-10000 event for that pubkey.
      */
     fun getMuteListContent(pubkey: String): String? {
-        return eventsById.values.firstOrNull {
-            it.pubkey == pubkey && it.kind == 10000 && it.content.isNotEmpty()
-        }?.content
+        var newest: NostrEvent? = null
+        for (event in eventsById.values) {
+            if (event.pubkey == pubkey && event.kind == 10000 && event.content.isNotEmpty()) {
+                if (newest == null || event.createdAt > newest.createdAt) newest = event
+            }
+        }
+        return newest?.content
+    }
+
+    /** True if [eventId] is the newest kind-10000 for [pubkey] in eventsById. */
+    fun isNewestMuteEvent(eventId: String, pubkey: String): Boolean {
+        val target = eventsById[eventId] ?: return false
+        return eventsById.values.none {
+            it.pubkey == pubkey && it.kind == 10000 && it.id != eventId &&
+                it.createdAt > target.createdAt
+        }
     }
 
     /** Optimistic local mute — feed refilters via _muteListSignal.
