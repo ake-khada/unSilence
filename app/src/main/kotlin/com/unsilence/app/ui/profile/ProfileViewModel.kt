@@ -1,10 +1,15 @@
 package com.unsilence.app.ui.profile
 
+import android.content.ContentResolver
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.blossom.BlossomClient
+import com.unsilence.app.data.blossom.BlossomServersStore
+import com.unsilence.app.data.blossom.ImageCompressor
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
@@ -57,12 +62,52 @@ class ProfileViewModel @Inject constructor(
     private val timelineService: TimelineService,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
+    private val blossomClient: BlossomClient,
+    private val imageCompressor: ImageCompressor,
+    private val blossomServersStore: BlossomServersStore,
+    private val contentResolver: ContentResolver,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
     val npub: String? = pubkeyHex?.let { hex ->
         runCatching { hex.hexToByteArray().toNpub() }.getOrNull()
+    }
+
+    private val _uploadingAvatar = MutableStateFlow(false)
+    val uploadingAvatar: StateFlow<Boolean> = _uploadingAvatar.asStateFlow()
+
+    private val _uploadingBanner = MutableStateFlow(false)
+    val uploadingBanner: StateFlow<Boolean> = _uploadingBanner.asStateFlow()
+
+    init {
+        viewModelScope.launch { blossomServersStore.initialize() }
+    }
+
+    fun uploadProfileImage(
+        uri: Uri,
+        onUrl: (String) -> Unit,
+        onError: (String) -> Unit,
+        isBanner: Boolean,
+    ) {
+        val loading = if (isBanner) _uploadingBanner else _uploadingAvatar
+        viewModelScope.launch(Dispatchers.IO) {
+            loading.value = true
+            try {
+                val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("Could not read image")
+                val maxDim = if (isBanner) 1600 else 512
+                val compressed = imageCompressor.compressImage(rawBytes, maxDim, 85)
+                val server = blossomServersStore.selectedServer.value
+                val blob = blossomClient.upload(compressed, "image/jpeg", server).getOrThrow()
+                launch(Dispatchers.Main) { onUrl(blob.url) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Profile image upload failed", e)
+                launch(Dispatchers.Main) { onError(e.message ?: "Upload failed") }
+            } finally {
+                loading.value = false
+            }
+        }
     }
 
     /** Live user metadata from MES (null until kind 0 arrives from relay). */
