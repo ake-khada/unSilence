@@ -2,8 +2,10 @@ package com.unsilence.app.data.auth
 
 import android.content.ContentResolver
 import android.content.Intent
+import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip19Bech32.bech32.Bech32
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
@@ -17,6 +19,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
+private const val TAG = "SigningManager"
 
 @Singleton
 class SigningManager @Inject constructor(
@@ -125,6 +128,65 @@ class SigningManager @Inject constructor(
         }
 
         return result
+    }
+
+    /**
+     * Decrypt a NIP-57 private zap anon-tag ciphertext. Tries NIP-44 → NIP-04
+     * via the standard path, then falls back to unwrapping Quartz's bech32
+     * pzap1…_iv1… format (used by Amethyst/Damus) into NIP-04 wire format
+     * and retrying decrypt. Works for both nsec and Amber modes.
+     *
+     * Returns null only when all formats fail.
+     */
+    suspend fun decryptPrivateZap(ciphertext: String, peerPubkeyHex: String): String? {
+        // Path 1+2: standard NIP-44/NIP-04.
+        decrypt(ciphertext, peerPubkeyHex)?.let { return it }
+
+        // Path 3: Quartz bech32 — unwrap to NIP-04 and decrypt directly.
+        // Must call nip04Decrypt without trying nip44 first, because Amber
+        // returns "Could not decrypt" as a non-null string from nip44Decrypt,
+        // which blocks the NIP-04 fallback in decrypt().
+        val nip04 = unwrapPzapBech32(ciphertext) ?: return null
+        val s = getOrCreateSigner() ?: return null
+        val result = try {
+            s.nip04Decrypt(nip04, peerPubkeyHex)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+        if (result.startsWith("Could not", ignoreCase = true) ||
+            result.startsWith("Error", ignoreCase = true)) {
+            return null
+        }
+        return result
+    }
+
+    /**
+     * Unwrap Quartz's bech32 private zap format (pzap1<ct>_iv1<iv>) into
+     * standard NIP-04 wire format (base64(ct)?iv=base64(iv)).
+     */
+    private fun unwrapPzapBech32(ciphertext: String): String? {
+        val sep = ciphertext.indexOf('_')
+        if (sep < 0) return null
+        val pzapPart = ciphertext.substring(0, sep)
+        val ivPart = ciphertext.substring(sep + 1)
+        if (!pzapPart.startsWith("pzap1", ignoreCase = true)) return null
+        if (!ivPart.startsWith("iv1", ignoreCase = true)) return null
+
+        val ctBytes = try {
+            Bech32.decodeBytes(pzapPart, false).second
+        } catch (e: Exception) {
+            Log.w(TAG, "pzap1 bech32 decode failed: ${e.message}")
+            return null
+        }
+        val ivBytes = try {
+            Bech32.decodeBytes(ivPart, false).second
+        } catch (e: Exception) {
+            Log.w(TAG, "iv1 bech32 decode failed: ${e.message}")
+            return null
+        }
+
+        val encoder = java.util.Base64.getEncoder()
+        return "${encoder.encodeToString(ctBytes)}?iv=${encoder.encodeToString(ivBytes)}"
     }
 
     /**
