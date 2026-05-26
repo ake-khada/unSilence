@@ -30,6 +30,9 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import com.unsilence.app.data.auth.MuteKeyProvider
+import com.unsilence.app.data.relay.NostrFilter
+import com.unsilence.app.data.relay.TimelineRef
+import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
@@ -45,7 +48,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 11
+private const val SNAPSHOT_BINARY_VERSION = 12
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -67,6 +70,7 @@ private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 @Singleton
 class MemoryEventStore @Inject constructor(
     private val keyProvider: MuteKeyProvider,
+    private val timelineServiceProvider: javax.inject.Provider<TimelineService>,
 ) : com.unsilence.app.data.relay.RelayMetadataSource {
 
     companion object {
@@ -3537,15 +3541,35 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
+        // ── Timelines (V12+) ────────────────────────────────────────────
+        val timelinesBuf = ByteArrayOutputStream(64 * 1024)
+        DataOutputStream(timelinesBuf).use { d ->
+            val timelineEntries = timelineServiceProvider.get().snapshotData()
+            d.writeInt(timelineEntries.size)
+            for ((key, timeline) in timelineEntries) {
+                d.writeStr(key)
+                d.writeInt(timeline.urls.size)
+                for (url in timeline.urls) d.writeStr(url)
+                d.writeFilter(timeline.filter)
+                d.writeInt(timeline.refs.size)
+                for (ref in timeline.refs) {
+                    d.writeStr(ref.id)
+                    d.writeLong(ref.createdAt)
+                }
+            }
+        }
+
         val followsBytes = followsBuf.toByteArray()
         val eventsBytes = eventsBuf.toByteArray()
         val aggregatesBytes = aggregatesBuf.toByteArray()
         val relayHealthBytes = relayHealthBuf.toByteArray()
+        val timelinesBytes = timelinesBuf.toByteArray()
 
         val followsOffset = SNAPSHOT_HEADER_SIZE
         val eventsOffset = followsOffset + followsBytes.size
         val aggregatesOffset = eventsOffset + eventsBytes.size
         val relayHealthOffset = aggregatesOffset + aggregatesBytes.size
+        val timelinesOffset = relayHealthOffset + relayHealthBytes.size
 
         // Header
         out.write(SNAPSHOT_BINARY_MAGIC)
@@ -3555,13 +3579,14 @@ class MemoryEventStore @Inject constructor(
         out.writeInt(aggregatesOffset)
         out.writeInt(relayHealthOffset)
         out.writeInt(totalEvents)
-        out.writeInt(0) // reserved
+        out.writeInt(timelinesOffset) // was reserved; V12+ carries timelines offset
 
         // Sections in offset order.
         out.write(followsBytes)
         out.write(eventsBytes)
         out.write(aggregatesBytes)
         out.write(relayHealthBytes)
+        out.write(timelinesBytes)
     }
 
     suspend fun restoreSnapshotBinary(input: DataInputStream) {
@@ -3828,6 +3853,27 @@ class MemoryEventStore @Inject constructor(
             )
         }
 
+        // ── Timelines (V12+) ────────────────────────────────────────────
+        if (version >= 12) {
+            val n = input.readInt()
+            if (n < 0 || n > 10_000) throw IOException("Invalid timeline count: $n")
+            val restored = HashMap<String, TimelineService.Timeline>(n)
+            for (i in 0 until n) {
+                val key = input.readStr()
+                val urlCount = input.readInt()
+                if (urlCount < 0 || urlCount > 1_000) throw IOException("Invalid timeline url count: $urlCount")
+                val urls = List(urlCount) { input.readStr() }
+                val filter = input.readFilter()
+                val refCount = input.readInt()
+                if (refCount < 0 || refCount > 100_000) throw IOException("Invalid timeline ref count: $refCount")
+                val refs = List(refCount) {
+                    TimelineRef(input.readStr(), input.readLong())
+                }
+                restored[key] = TimelineService.Timeline(refs = refs, filter = filter, urls = urls)
+            }
+            timelineServiceProvider.get().restoreFromSnapshot(restored)
+        }
+
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
@@ -3978,6 +4024,71 @@ class MemoryEventStore @Inject constructor(
 
     private fun DataInputStream.readIntOrNull(): Int? =
         if (readBoolean()) readInt() else null
+
+    private fun DataOutputStream.writeFilter(filter: NostrFilter) {
+        var flags = 0
+        if (filter.kinds   != null) flags = flags or 0x01
+        if (filter.authors != null) flags = flags or 0x02
+        if (filter.ids     != null) flags = flags or 0x04
+        if (filter.since   != null) flags = flags or 0x08
+        if (filter.until   != null) flags = flags or 0x10
+        if (filter.limit   != null) flags = flags or 0x20
+        if (filter.search  != null) flags = flags or 0x40
+        if (filter.tags    != null) flags = flags or 0x80
+        writeByte(flags)
+        if (filter.kinds != null) {
+            writeInt(filter.kinds.size)
+            for (k in filter.kinds) writeInt(k)
+        }
+        if (filter.authors != null) {
+            writeInt(filter.authors.size)
+            for (a in filter.authors) writeStr(a)
+        }
+        if (filter.ids != null) {
+            writeInt(filter.ids.size)
+            for (i in filter.ids) writeStr(i)
+        }
+        if (filter.since != null) writeLong(filter.since)
+        if (filter.until != null) writeLong(filter.until)
+        if (filter.limit != null) writeInt(filter.limit)
+        if (filter.search != null) writeStr(filter.search)
+        if (filter.tags != null) {
+            writeInt(filter.tags.size)
+            for ((tagName, values) in filter.tags) {
+                writeStr(tagName)
+                writeInt(values.size)
+                for (v in values) writeStr(v)
+            }
+        }
+    }
+
+    private fun DataInputStream.readFilter(): NostrFilter {
+        val flags = readByte().toInt() and 0xff
+        val kinds = if (flags and 0x01 != 0) {
+            val n = readInt(); List(n) { readInt() }
+        } else null
+        val authors = if (flags and 0x02 != 0) {
+            val n = readInt(); List(n) { readStr() }
+        } else null
+        val ids = if (flags and 0x04 != 0) {
+            val n = readInt(); List(n) { readStr() }
+        } else null
+        val since = if (flags and 0x08 != 0) readLong() else null
+        val until = if (flags and 0x10 != 0) readLong() else null
+        val limit = if (flags and 0x20 != 0) readInt() else null
+        val search = if (flags and 0x40 != 0) readStr() else null
+        val tags = if (flags and 0x80 != 0) {
+            val n = readInt()
+            val map = HashMap<String, List<String>>(n)
+            for (i in 0 until n) {
+                val tagName = readStr()
+                val vCount = readInt()
+                map[tagName] = List(vCount) { readStr() }
+            }
+            map
+        } else null
+        return NostrFilter(kinds, authors, ids, since, until, limit, search, tags)
+    }
 
     private fun insertFromSnapshot(event: NostrEvent) {
         val nowSec = System.currentTimeMillis() / 1000L
@@ -4319,6 +4430,7 @@ class MemoryEventStore @Inject constructor(
         _trustScoreSignal.value = 0L
         _relayMonitorSignal.value = 0L
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
+        timelineServiceProvider.get().clear()
     }
 }
 
