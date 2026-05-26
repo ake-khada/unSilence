@@ -45,7 +45,7 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 10
+private const val SNAPSHOT_BINARY_VERSION = 11
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -916,7 +916,7 @@ class MemoryEventStore @Inject constructor(
         val desc = parseZapDescription(event)
         zapDetailsByTarget
             .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            .add(ZapDetail(desc?.senderPubkey, sats, desc?.comment))
+            .add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = event.id))
 
         // Own-zap detection: signal VM to clear optimistic sats overlay.
         // desc == null → anonymous, can never be our own.
@@ -2112,6 +2112,25 @@ class MemoryEventStore @Inject constructor(
         targetId: String,
     ) {
         privateZapDecryptedById[zapReceiptId] = decrypted
+
+        // Patch the drawer entry — swap anon pubkey for real sender,
+        // upgrade comment from "" to the decrypted content. Matched by
+        // receipt id (the eventId we wrote in handleZapReceipt). V10
+        // entries have eventId=null and won't match — they stay anon.
+        val list = zapDetailsByTarget[targetId]
+        if (list != null) {
+            synchronized(list) {
+                val idx = list.indexOfFirst { it.eventId == zapReceiptId }
+                if (idx >= 0) {
+                    val old = list[idx]
+                    list[idx] = old.copy(
+                        senderPubkey = decrypted.senderPubkey,
+                        comment = decrypted.comment ?: old.comment,
+                    )
+                }
+            }
+        }
+
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
         _statsSignal.value = System.nanoTime()
@@ -2347,7 +2366,7 @@ class MemoryEventStore @Inject constructor(
     fun addOptimisticZapDetail(targetId: String, senderPubkey: String, sats: Long, comment: String?) {
         zapDetailsByTarget
             .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            .add(ZapDetail(senderPubkey, sats, comment))
+            .add(ZapDetail(senderPubkey, sats, comment, eventId = null))
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
     }
@@ -3438,7 +3457,7 @@ class MemoryEventStore @Inject constructor(
                 d.writeStr(id); d.writeInt(details.size)
                 for (z in details) {
                     d.writeStrOrNull(z.senderPubkey); d.writeLong(z.sats)
-                    d.writeStrOrNull(z.comment)
+                    d.writeStrOrNull(z.comment); d.writeStrOrNull(z.eventId)
                 }
             }
 
@@ -3695,7 +3714,10 @@ class MemoryEventStore @Inject constructor(
                 val list = java.util.Collections.synchronizedList(mutableListOf<ZapDetail>())
                 for (j in 0 until n) {
                     val sender = if (version >= 10) input.readStrOrNull() else input.readStr()
-                    list.add(ZapDetail(sender, input.readLong(), input.readStrOrNull()))
+                    val sats = input.readLong()
+                    val comment = input.readStrOrNull()
+                    val eventId = if (version >= 11) input.readStrOrNull() else null
+                    list.add(ZapDetail(sender, sats, comment, eventId))
                 }
                 zapDetailsByTarget[id] = list
             }
