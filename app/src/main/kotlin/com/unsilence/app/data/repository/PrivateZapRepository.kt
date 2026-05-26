@@ -44,8 +44,10 @@ class PrivateZapRepository @Inject constructor(
             return
         }
 
-        // Decrypted payload is a JSON kind-9734 event. Extract real sender
-        // pubkey + content. Validation: must have non-blank 64-char hex pubkey.
+        // Decrypted payload is a JSON Nostr event (kind-9733 from Quartz's
+        // PrivateZapRequestBuilder, or kind-9734 from legacy senders). Either
+        // shape exposes pubkey + content at the top level, so we just extract
+        // those without checking kind. Validation: must have non-blank 64-char hex pubkey.
         val parsed = try {
             val obj = NostrJson.parseToJsonElement(plaintext).jsonObject
             val realSender = obj["pubkey"]?.jsonPrimitive?.content

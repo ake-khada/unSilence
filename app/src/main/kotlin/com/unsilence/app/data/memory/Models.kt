@@ -332,8 +332,8 @@ data class EmojiSetRef(
 
 /**
  * Decrypted contents of a NIP-57 private zap. Populated asynchronously
- * by PrivateZapRepository after NIP-44 decryption succeeds against the
- * kind-9734's anon-tag ciphertext.
+ * by PrivateZapRepository after decrypt (NIP-44 attempted then NIP-04
+ * fallback) succeeds against the kind-9734's anon-tag ciphertext.
  *
  * senderPubkey is the recovered real sender (from the encrypted payload),
  * NOT the kind-9734 signer (which is the one-time anon keypair).
@@ -343,10 +343,10 @@ data class DecryptedPrivateZap(
     val comment: String?,
 )
 
-/** Emitted by MES to request async NIP-44 decrypt of an anon-tagged kind-9734. */
+/** Emitted by MES to request async decrypt of an anon-tagged kind-9734. */
 data class PendingPrivateZapDecrypt(
     val zapReceiptId: String,    // kind-9735 event id (sidecar key)
-    val anonCiphertext: String,  // NIP-44 v2 ciphertext from the anon tag
+    val anonCiphertext: String,  // Encrypted ciphertext (NIP-04 wire format)
     val anonSignerPubkey: String, // publicKey_a — pass as peerPubkey to decrypt
 )
 

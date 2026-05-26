@@ -26,6 +26,7 @@ docs/
 validation_logs/
 CLAUDE.md
 VALIDATION_PROTOCOL.md
+unsilence-backlog.md
 unsilence-sprint*.md
 unsilence-stabilization-sprint.md
 unsilence-session-*.md
