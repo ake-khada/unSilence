@@ -85,6 +85,38 @@ class MuteListRepository @Inject constructor(
         return MuteResult.Queued
     }
 
+    fun muteWord(word: String): MuteResult {
+        memoryEventStore.addPrivateWord(word)
+        snapshotScheduler.scheduleImmediate()
+        if (!_publishSafe.value) return MuteResult.LocalOnly
+        schedulePublish()
+        return MuteResult.Queued
+    }
+
+    fun unmuteWord(word: String): MuteResult {
+        memoryEventStore.removePrivateWord(word)
+        snapshotScheduler.scheduleImmediate()
+        if (!_publishSafe.value) return MuteResult.LocalOnly
+        schedulePublish()
+        return MuteResult.Queued
+    }
+
+    fun muteHashtag(tag: String): MuteResult {
+        memoryEventStore.addPrivateHashtag(tag)
+        snapshotScheduler.scheduleImmediate()
+        if (!_publishSafe.value) return MuteResult.LocalOnly
+        schedulePublish()
+        return MuteResult.Queued
+    }
+
+    fun unmuteHashtag(tag: String): MuteResult {
+        memoryEventStore.removePrivateHashtag(tag)
+        snapshotScheduler.scheduleImmediate()
+        if (!_publishSafe.value) return MuteResult.LocalOnly
+        schedulePublish()
+        return MuteResult.Queued
+    }
+
     /**
      * Unmute a user. Local unmute is ALWAYS applied.
      * Network publish gated on publishSafe — same rationale as muteUser.

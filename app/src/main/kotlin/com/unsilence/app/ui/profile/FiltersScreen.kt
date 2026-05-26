@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
@@ -31,10 +33,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +56,7 @@ import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
@@ -69,9 +74,20 @@ fun FiltersScreen(
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val publishSafe by viewModel.publishSafe.collectAsStateWithLifecycle()
+    val profileVersion by viewModel.profileVersion.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableStateOf(MuteTab.USERS) }
     var searchQuery by remember { mutableStateOf("") }
+    var addInput by remember { mutableStateOf("") }
+    var showAdded by remember { mutableStateOf(false) }
+
+    // Clear inputs on tab switch
+    LaunchedEffect(activeTab) { searchQuery = ""; addInput = ""; showAdded = false }
+
+    // Auto-clear checkmark after 1.2s
+    LaunchedEffect(showAdded) {
+        if (showAdded) { delay(1200); showAdded = false }
+    }
 
     Box(
         modifier = Modifier
@@ -150,9 +166,39 @@ fun FiltersScreen(
                     Spacer(Modifier.height(Spacing.small))
                 }
 
-                // ── Search bar ───────────────────────────────────────
+                // ── Search / Add bar ─────────────────────────────────
                 item {
-                    SearchBar(searchQuery) { searchQuery = it }
+                    when (activeTab) {
+                        MuteTab.USERS -> SearchBar(searchQuery) { searchQuery = it }
+                        MuteTab.WORDS -> AddBar(
+                            value = addInput,
+                            onValueChange = { addInput = it },
+                            onAdd = {
+                                val word = addInput.trim()
+                                if (word.isNotEmpty()) {
+                                    viewModel.muteWord(word)
+                                    addInput = ""
+                                    showAdded = true
+                                }
+                            },
+                            placeholder = "Add a word",
+                            showAdded = showAdded,
+                        )
+                        MuteTab.HASHTAGS -> AddBar(
+                            value = addInput,
+                            onValueChange = { addInput = it.removePrefix("#") },
+                            onAdd = {
+                                val tag = addInput.trim().removePrefix("#")
+                                if (tag.isNotEmpty()) {
+                                    viewModel.muteHashtag(tag)
+                                    addInput = ""
+                                    showAdded = true
+                                }
+                            },
+                            placeholder = "Add a hashtag",
+                            showAdded = showAdded,
+                        )
+                    }
                     Spacer(Modifier.height(Spacing.small))
                 }
 
@@ -174,7 +220,7 @@ fun FiltersScreen(
                             item { EmptyLabel(if (searchQuery.isBlank()) "No muted users" else "No matches") }
                         } else {
                             items(filtered, key = { it }) { pubkey ->
-                                val profile = remember(pubkey) { viewModel.getProfile(pubkey) }
+                                val profile = remember(pubkey, profileVersion) { viewModel.getProfile(pubkey) }
                                 MutedUserRow(
                                     pubkey = pubkey,
                                     profile = profile,
@@ -187,14 +233,15 @@ fun FiltersScreen(
                         val allWords = muteList?.let {
                             (it.words + it.privateWords).toList().sorted()
                         } ?: emptyList()
-                        val filtered = if (searchQuery.isBlank()) allWords
-                        else allWords.filter { it.contains(searchQuery, ignoreCase = true) }
 
-                        if (filtered.isEmpty()) {
-                            item { EmptyLabel(if (searchQuery.isBlank()) "No muted words" else "No matches") }
+                        if (allWords.isEmpty()) {
+                            item { EmptyLabel("No muted words") }
                         } else {
-                            items(filtered, key = { "w:$it" }) { word ->
-                                MutedTagRow(text = word)
+                            items(allWords, key = { "w:$it" }) { word ->
+                                MutedTagRow(
+                                    text = word,
+                                    onRemove = { viewModel.unmuteWord(word) },
+                                )
                             }
                         }
                     }
@@ -202,14 +249,15 @@ fun FiltersScreen(
                         val allHashtags = muteList?.let {
                             (it.hashtags + it.privateHashtags).toList().sorted()
                         } ?: emptyList()
-                        val filtered = if (searchQuery.isBlank()) allHashtags
-                        else allHashtags.filter { it.contains(searchQuery, ignoreCase = true) }
 
-                        if (filtered.isEmpty()) {
-                            item { EmptyLabel(if (searchQuery.isBlank()) "No muted hashtags" else "No matches") }
+                        if (allHashtags.isEmpty()) {
+                            item { EmptyLabel("No muted hashtags") }
                         } else {
-                            items(filtered, key = { "t:$it" }) { tag ->
-                                MutedTagRow(text = "#$tag")
+                            items(allHashtags, key = { "t:$it" }) { tag ->
+                                MutedTagRow(
+                                    text = "#$tag",
+                                    onRemove = { viewModel.unmuteHashtag(tag) },
+                                )
                             }
                         }
                     }
@@ -410,18 +458,89 @@ private fun MutedUserRow(
     )
 }
 
+// ── Add bar (Words / Hashtags tabs) ─────────────────────────────────────
+
+@Composable
+private fun AddBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onAdd: () -> Unit,
+    placeholder: String,
+    showAdded: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.large)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Surface2)
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Default.Add,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(Spacing.small))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            textStyle = TextStyle(color = Color.White, fontSize = AppType.body),
+            cursorBrush = SolidColor(Brand),
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                if (value.isEmpty()) {
+                    Text(placeholder, color = TextSecondary, fontSize = AppType.body)
+                }
+                inner()
+            },
+        )
+        if (showAdded) {
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = "Added",
+                tint = Mint,
+                modifier = Modifier.size(18.dp),
+            )
+        } else if (value.isNotBlank()) {
+            Text(
+                text = "Add",
+                color = Brand,
+                fontSize = AppType.bodySmall,
+                modifier = Modifier.clickable(onClick = onAdd),
+            )
+        }
+    }
+}
+
 // ── Muted tag/word row ──────────────────────────────────────────────────
 
 @Composable
-private fun MutedTagRow(text: String) {
-    Text(
-        text = text,
-        color = Color.White,
-        fontSize = AppType.body,
+private fun MutedTagRow(text: String, onRemove: () -> Unit) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.large, vertical = Spacing.medium),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = AppType.body,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Remove",
+                tint = TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
     HorizontalDivider(
         color = Color.White.copy(alpha = 0.06f),
         modifier = Modifier.padding(start = Spacing.large),
