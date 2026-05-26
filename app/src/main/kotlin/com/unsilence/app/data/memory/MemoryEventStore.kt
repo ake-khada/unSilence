@@ -1049,6 +1049,9 @@ class MemoryEventStore @Inject constructor(
 
     private fun handleMuteList(event: NostrEvent) {
         val isOwn = event.pubkey == ownPubkey
+        if (isOwn) {
+            Log.w("MES", "handleMuteList: own event id=${event.id.take(8)} content.len=${event.content.length} amber=${keyProvider.isAmberMode} callbackSet=${muteListDecryptCallback != null}")
+        }
 
         // Skip our own published events — we already have canonical local state.
         // The echo would clobber private fields (Amber can't decrypt inline).
@@ -1071,6 +1074,18 @@ class MemoryEventStore @Inject constructor(
                 // Relay event caught up — clear the floor
                 muteListOptimisticFloor = 0L
             }
+        }
+
+        // Replaceable event guard: skip if a newer kind-10000 for this pubkey
+        // already exists in MES. Prevents older relay echoes from clobbering
+        // the newest mute list (especially the async Amber decrypt callback).
+        val newerExists = eventsById.values.any {
+            it.pubkey == event.pubkey && it.kind == 10000 && it.id != event.id &&
+                it.createdAt > event.createdAt
+        }
+        if (newerExists) {
+            if (isOwn) Log.w("MES", "handleMuteList: skipping older event id=${event.id.take(8)} createdAt=${event.createdAt}")
+            return
         }
 
         // Parse public tags from this event
@@ -1117,30 +1132,16 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        muteListsByPubkey.compute(event.pubkey) { _, existing ->
-            if (existing != null) {
-                val existingEvent = eventsById.values.firstOrNull {
-                    it.pubkey == event.pubkey && it.kind == 10000 && it.id != event.id
-                }
-                if (existingEvent != null && existingEvent.createdAt > event.createdAt) {
-                    return@compute existing
-                }
-            }
-            // Always replace public fields from the new event.
-            // Replace private fields ONLY if we have new decrypted ones (nsec inline).
-            // Otherwise PRESERVE existing private fields — the async decryptor will
-            // update them later via updateMuteListPrivateTags.
-            MuteList(
-                pubkeys = pubkeys,
-                hashtags = hashtags,
-                words = words,
-                eventIds = eventIds,
-                privatePubkeys = inlinePrivPubkeys ?: existing?.privatePubkeys ?: emptySet(),
-                privateHashtags = inlinePrivHashtags ?: existing?.privateHashtags ?: emptySet(),
-                privateWords = inlinePrivWords ?: existing?.privateWords ?: emptySet(),
-                privateEventIds = inlinePrivEventIds ?: existing?.privateEventIds ?: emptySet(),
-            )
-        }
+        muteListsByPubkey[event.pubkey] = MuteList(
+            pubkeys = pubkeys,
+            hashtags = hashtags,
+            words = words,
+            eventIds = eventIds,
+            privatePubkeys = inlinePrivPubkeys ?: muteListsByPubkey[event.pubkey]?.privatePubkeys ?: emptySet(),
+            privateHashtags = inlinePrivHashtags ?: muteListsByPubkey[event.pubkey]?.privateHashtags ?: emptySet(),
+            privateWords = inlinePrivWords ?: muteListsByPubkey[event.pubkey]?.privateWords ?: emptySet(),
+            privateEventIds = inlinePrivEventIds ?: muteListsByPubkey[event.pubkey]?.privateEventIds ?: emptySet(),
+        )
         if (isOwn) _muteListSignal.value = System.nanoTime()
 
         // For Amber mode + own pubkey + non-empty content: fire async decrypt callback
@@ -2028,6 +2029,56 @@ class MemoryEventStore @Inject constructor(
                 words = emptySet(), eventIds = emptySet(),
                 privatePubkeys = setOf(targetPubkey),
             ) else existing.copy(privatePubkeys = existing.privatePubkeys + targetPubkey)
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
+    fun addPrivateWord(word: String) {
+        val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
+        muteListsByPubkey.compute(ownPk) { _, existing ->
+            if (existing == null) MuteList(
+                pubkeys = emptySet(), hashtags = emptySet(),
+                words = emptySet(), eventIds = emptySet(),
+                privateWords = setOf(word),
+            ) else existing.copy(privateWords = existing.privateWords + word)
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
+    fun removePrivateWord(word: String) {
+        val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
+        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
+            existing.copy(
+                words = existing.words - word,
+                privateWords = existing.privateWords - word,
+            )
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
+    fun addPrivateHashtag(tag: String) {
+        val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
+        muteListsByPubkey.compute(ownPk) { _, existing ->
+            if (existing == null) MuteList(
+                pubkeys = emptySet(), hashtags = emptySet(),
+                words = emptySet(), eventIds = emptySet(),
+                privateHashtags = setOf(tag),
+            ) else existing.copy(privateHashtags = existing.privateHashtags + tag)
+        }
+        _muteListSignal.value = System.nanoTime()
+    }
+
+    fun removePrivateHashtag(tag: String) {
+        val ownPk = ownPubkey ?: return
+        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
+        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
+            existing.copy(
+                hashtags = existing.hashtags - tag,
+                privateHashtags = existing.privateHashtags - tag,
+            )
         }
         _muteListSignal.value = System.nanoTime()
     }

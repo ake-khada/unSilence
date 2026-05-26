@@ -170,6 +170,16 @@ class AppBootstrapper @Inject constructor(
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
+        // Wire MES mute list callbacks BEFORE snapshot restore — snapshot may
+        // contain kind-10000 events that need Amber decrypt on restore.
+        memoryEventStore.isSelfPublishedCheck = { eventId ->
+            muteListRepository.isSelfPublished(eventId)
+        }
+        memoryEventStore.muteListDecryptCallback = { event ->
+            scope.launch { handleAmberMuteDecrypt(event) }
+        }
+        muteListRepository.markPublishUnsafe("bootstrap in progress")
+
         // Phase 1.5: Launch snapshot restore in background — does NOT block bootstrap.
         // Follows-first snapshot format fires _followsSignal early so downstream
         // steps can await follows via signal flows without waiting for full parse.
@@ -271,15 +281,6 @@ class AppBootstrapper @Inject constructor(
         }
         relayPool.connectAndAwait(globalUrls, timeoutMs = 5_000)
         initGate.signalFeedConnectionsReady()
-
-        // Wire MES callbacks BEFORE any kind-10000 REQ (fetchMuteList / subscribeOwnMuteList) goes out.
-        memoryEventStore.isSelfPublishedCheck = { eventId ->
-            muteListRepository.isSelfPublished(eventId)
-        }
-        memoryEventStore.muteListDecryptCallback = { event ->
-            scope.launch { handleAmberMuteDecrypt(event) }
-        }
-        muteListRepository.markPublishUnsafe("bootstrap in progress")
 
         Log.d(TAG, "Phase1 complete: relay connections active (${globalUrls.size} relays)")
 
@@ -633,8 +634,19 @@ class AppBootstrapper @Inject constructor(
      * MES contract: muteListDecryptCallback only fires when isOwn && content.isNotEmpty() && isAmberMode.
      */
     private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent) {
-        val plaintext = signingManager.decrypt(event.content, event.pubkey) ?: return
-        val parsed = parseMuteTags(plaintext) ?: return
+        Log.w(TAG, "handleAmberMuteDecrypt: entry, event.id=${event.id.take(8)} content.len=${event.content.length}")
+        val plaintext = signingManager.decrypt(event.content, event.pubkey)
+        if (plaintext == null) {
+            Log.w(TAG, "handleAmberMuteDecrypt: decrypt returned null")
+            return
+        }
+        Log.w(TAG, "handleAmberMuteDecrypt: decrypted, plaintext.len=${plaintext.length} first100=${plaintext.take(100)}")
+        val parsed = parseMuteTags(plaintext)
+        if (parsed == null) {
+            Log.w(TAG, "handleAmberMuteDecrypt: parseMuteTags returned null")
+            return
+        }
+        Log.w(TAG, "handleAmberMuteDecrypt: parsed ${parsed.pubkeys.size}p ${parsed.hashtags.size}t ${parsed.words.size}word ${parsed.eventIds.size}e")
         memoryEventStore.updateMuteListPrivateTags(
             event.pubkey,
             parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,

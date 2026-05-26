@@ -11,6 +11,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
+import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +26,7 @@ class FiltersViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val keyManager: KeyManager,
     private val appBootstrapper: AppBootstrapper,
+    private val userRepository: UserRepository,
 ) : ViewModel() {
 
     val muteList: StateFlow<MuteList?> =
@@ -37,11 +39,27 @@ class FiltersViewModel @Inject constructor(
 
     val publishSafe: StateFlow<Boolean> = muteListRepository.publishSafe
 
+    val profileVersion: StateFlow<Long> = memoryEventStore.profileSignalFlow
+
     val isAmberMode: Boolean get() = keyManager.isAmberMode
+
+    init {
+        viewModelScope.launch {
+            val ownPk = keyManager.getPublicKeyHex() ?: return@launch
+            val mutes = memoryEventStore.getMuteList(ownPk) ?: return@launch
+            val pubkeys = (mutes.pubkeys + mutes.privatePubkeys).toList()
+            if (pubkeys.isNotEmpty()) userRepository.fetchMissingProfiles(pubkeys)
+        }
+    }
 
     fun getProfile(pubkey: String): UserEntity? = memoryEventStore.getUserEntity(pubkey)
 
     fun unmuteUser(pubkey: String): MuteResult = muteListRepository.unmuteUser(pubkey)
+
+    fun muteWord(word: String): MuteResult = muteListRepository.muteWord(word)
+    fun unmuteWord(word: String): MuteResult = muteListRepository.unmuteWord(word)
+    fun muteHashtag(tag: String): MuteResult = muteListRepository.muteHashtag(tag)
+    fun unmuteHashtag(tag: String): MuteResult = muteListRepository.unmuteHashtag(tag)
 
     fun setSensitiveContentMode(mode: SensitiveContentMode) {
         viewModelScope.launch { relayPreferencesStore.setSensitiveContentMode(mode) }
