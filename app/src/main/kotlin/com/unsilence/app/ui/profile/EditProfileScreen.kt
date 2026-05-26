@@ -1,7 +1,12 @@
 package com.unsilence.app.ui.profile
 
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,11 +22,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,6 +66,9 @@ fun EditProfileScreen(
     onDismiss: () -> Unit,
 ) {
     val user by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
+    val uploadingAvatar by viewModel.uploadingAvatar.collectAsStateWithLifecycle()
+    val uploadingBanner by viewModel.uploadingBanner.collectAsStateWithLifecycle()
+    val showSnackbar = com.unsilence.app.ui.common.LocalShowSnackbar.current
 
     // Form state — pre-populated once when user data first arrives.
     var initialized  by remember { mutableStateOf(false) }
@@ -97,6 +105,32 @@ fun EditProfileScreen(
         lud16.trim()       != (user?.lud16       ?: "") ||
         website.isNotBlank()
     )
+
+    val avatarPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.uploadProfileImage(
+                uri = uri,
+                isBanner = false,
+                onUrl = { picture = it },
+                onError = { showSnackbar(it) },
+            )
+        }
+    }
+
+    val bannerPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.uploadProfileImage(
+                uri = uri,
+                isBanner = true,
+                onUrl = { bannerUrl = it },
+                onError = { showSnackbar(it) },
+            )
+        }
+    }
 
     BackHandler(onBack = onDismiss)
     Box(
@@ -158,29 +192,41 @@ fun EditProfileScreen(
             ) {
                 Spacer(Modifier.height(Spacing.medium))
 
-                // ── Banner placeholder ─────────────────────────────────────────
+                // ── Banner ─────────────────────────────────────────────────────
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(EDIT_BANNER_HEIGHT)
                         .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                        .background(Surface1),
+                        .background(Surface1)
+                        .clickable {
+                            bannerPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (picture.isNotBlank()) {
-                        // Show picture URL as banner preview for now; banner editing is v1.1
+                    if (bannerUrl.isNotBlank()) {
                         AsyncImage(
-                            model              = rememberFullWidthImageRequest(picture),
+                            model              = rememberFullWidthImageRequest(bannerUrl),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier.fillMaxSize(),
                         )
                     }
-                    Text(
-                        text     = "Banner (coming soon)",
-                        color    = TextSecondary,
-                        fontSize = 12.sp,
-                    )
+                    if (uploadingBanner) {
+                        CircularProgressIndicator(
+                            color = Brand,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    } else if (bannerUrl.isBlank()) {
+                        Text(
+                            text     = "Tap to set banner",
+                            color    = TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(Spacing.small))
@@ -190,7 +236,12 @@ fun EditProfileScreen(
                     modifier = Modifier
                         .size(EDIT_AVATAR_SIZE)
                         .clip(CircleShape)
-                        .border(2.dp, BorderSubtle, CircleShape),
+                        .border(2.dp, BorderSubtle, CircleShape)
+                        .clickable {
+                            avatarPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
                 ) {
                     viewModel.pubkeyHex?.let {
                         IdentIcon(pubkey = it, modifier = Modifier.fillMaxSize())
@@ -203,9 +254,21 @@ fun EditProfileScreen(
                             modifier           = Modifier.fillMaxSize(),
                         )
                     }
+                    if (uploadingAvatar) {
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(Black.copy(alpha = 0.5f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                color = Brand,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
                 }
                 Text(
-                    text     = "Tap to change (coming soon)",
+                    text     = "Tap to change",
                     color    = TextSecondary,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 4.dp),

@@ -634,19 +634,8 @@ class AppBootstrapper @Inject constructor(
      * MES contract: muteListDecryptCallback only fires when isOwn && content.isNotEmpty() && isAmberMode.
      */
     private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent) {
-        Log.w(TAG, "handleAmberMuteDecrypt: entry, event.id=${event.id.take(8)} content.len=${event.content.length}")
-        val plaintext = signingManager.decrypt(event.content, event.pubkey)
-        if (plaintext == null) {
-            Log.w(TAG, "handleAmberMuteDecrypt: decrypt returned null")
-            return
-        }
-        Log.w(TAG, "handleAmberMuteDecrypt: decrypted, plaintext.len=${plaintext.length} first100=${plaintext.take(100)}")
-        val parsed = parseMuteTags(plaintext)
-        if (parsed == null) {
-            Log.w(TAG, "handleAmberMuteDecrypt: parseMuteTags returned null")
-            return
-        }
-        Log.w(TAG, "handleAmberMuteDecrypt: parsed ${parsed.pubkeys.size}p ${parsed.hashtags.size}t ${parsed.words.size}word ${parsed.eventIds.size}e")
+        val plaintext = signingManager.decrypt(event.content, event.pubkey) ?: return
+        val parsed = parseMuteTags(plaintext) ?: return
         memoryEventStore.updateMuteListPrivateTags(
             event.pubkey,
             parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,

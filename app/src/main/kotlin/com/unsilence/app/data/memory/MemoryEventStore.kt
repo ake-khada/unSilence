@@ -1049,9 +1049,6 @@ class MemoryEventStore @Inject constructor(
 
     private fun handleMuteList(event: NostrEvent) {
         val isOwn = event.pubkey == ownPubkey
-        if (isOwn) {
-            Log.w("MES", "handleMuteList: own event id=${event.id.take(8)} content.len=${event.content.length} amber=${keyProvider.isAmberMode} callbackSet=${muteListDecryptCallback != null}")
-        }
 
         // Skip our own published events — we already have canonical local state.
         // The echo would clobber private fields (Amber can't decrypt inline).
@@ -1083,10 +1080,7 @@ class MemoryEventStore @Inject constructor(
             it.pubkey == event.pubkey && it.kind == 10000 && it.id != event.id &&
                 it.createdAt > event.createdAt
         }
-        if (newerExists) {
-            if (isOwn) Log.w("MES", "handleMuteList: skipping older event id=${event.id.take(8)} createdAt=${event.createdAt}")
-            return
-        }
+        if (newerExists) return
 
         // Parse public tags from this event
         val pubkeys = mutableSetOf<String>()
