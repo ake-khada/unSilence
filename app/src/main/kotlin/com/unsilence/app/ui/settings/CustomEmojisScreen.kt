@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
@@ -105,24 +104,15 @@ fun CustomEmojisScreen(onDismiss: () -> Unit) {
                     .background(Black)
                     .statusBarsPadding()
                     .height(Sizing.topBarHeight)
-                    .padding(horizontal = Spacing.small),
+                    .padding(horizontal = Spacing.medium),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White,
-                    )
-                }
                 Text(
                     text = "Custom Emojis",
                     color = Color.White,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = Spacing.small),
+                    modifier = Modifier.weight(1f),
                 )
             }
 

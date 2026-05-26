@@ -26,7 +26,6 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
@@ -128,16 +127,9 @@ fun RelayManagementScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(Sizing.topBarHeight)
-                        .padding(horizontal = 4.dp),
+                        .padding(horizontal = Spacing.medium),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint               = Color.White,
-                        )
-                    }
                     Text(
                         text       = "Relay Settings",
                         color      = Color.White,

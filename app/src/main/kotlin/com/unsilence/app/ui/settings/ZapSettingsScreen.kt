@@ -24,7 +24,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
@@ -91,15 +90,6 @@ fun ZapSettingsScreen(onDismiss: () -> Unit) {
                 .height(52.dp)
                 .padding(horizontal = Spacing.medium),
         ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-                tint = Color.White,
-                modifier = Modifier
-                    .size(24.dp)
-                    .clickable(onClick = onDismiss),
-            )
-            Spacer(Modifier.width(Spacing.small))
             Text(
                 "Zap settings",
                 color = Color.White,
