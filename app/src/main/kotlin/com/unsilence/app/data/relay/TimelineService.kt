@@ -33,6 +33,11 @@ private const val SLOW_TIER_POLL_MS = 50L
 /** Max refs persisted per timeline to bound snapshot disk usage. */
 private const val PERSISTED_REFS_CAP = 500
 
+/** Cap initial cache emit to viewport-relevant size. Remaining refs stay
+ *  in Timeline for loadMoreTimeline to page through on scroll. Prevents
+ *  burst-work that saturates the main thread on tab switch (ANR). */
+private const val INITIAL_CACHE_EMIT_CAP = 60
+
 /**
  * EOSE-aware multi-relay timeline subscription with persistent ref cache.
  *
@@ -219,9 +224,18 @@ class TimelineService @Inject constructor(
         if (cached != null && cached.refs.isNotEmpty()) {
             cachedEvents = eventLoader.getEvents(cached.refs.map { it.id })
             if (cachedEvents.isNotEmpty()) {
-                onPerSubEvents(cachedEvents, false)
-                since = (cachedEvents[0].createdAt + 1)
+                // Cap initial emit to viewport-relevant size. The remainder
+                // is still in cached.refs and will be retrieved by
+                // loadMoreTimeline as the user scrolls past the initial batch.
+                val initialEmit = if (cachedEvents.size > INITIAL_CACHE_EMIT_CAP) {
+                    cachedEvents.take(INITIAL_CACHE_EMIT_CAP)
+                } else {
+                    cachedEvents
+                }
+                onPerSubEvents(initialEmit, false)
+                since = (initialEmit[0].createdAt + 1)
                     .coerceAtMost(System.currentTimeMillis() / 1000L)
+                Log.d(TAG, "cache emit capped: ${initialEmit.size}/${cachedEvents.size} for $key")
             }
         }
 
