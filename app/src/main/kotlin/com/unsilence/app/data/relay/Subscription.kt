@@ -64,6 +64,7 @@ class Subscription @Inject constructor(
     private val transport: RelayTransport,
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
+    private val relayCapabilitiesStore: RelayCapabilitiesStore,
 ) {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
@@ -134,9 +135,13 @@ class Subscription @Inject constructor(
             // for already-connected relays.
             transport.connectAndAwait(urls, timeoutMs = 5_000)
 
-            // Send REQ to each relay.
+            // Send REQ to each relay, skipping those with known structural rejections.
             val failedUrls = mutableListOf<String>()
             for (url in urls) {
+                if (relayCapabilitiesStore.shouldSkip(url)) {
+                    handleRelayEose(subId, url) // count as done so EOSE threshold isn't blocked
+                    continue
+                }
                 if (!transport.sendToRelay(url, req)) {
                     failedUrls.add(url)
                 }
@@ -216,7 +221,9 @@ class Subscription @Inject constructor(
             state.eosedRelays.clear()
             state.closedRelays.clear()
             for (url in state.urls) {
-                transport.sendToRelay(url, state.reqPayload)
+                if (!relayCapabilitiesStore.shouldSkip(url)) {
+                    transport.sendToRelay(url, state.reqPayload)
+                }
             }
             startEoseWatchdog(subId, state.urls)
             count++
@@ -231,6 +238,7 @@ class Subscription @Inject constructor(
      */
     fun resumeRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
+        if (relayCapabilitiesStore.shouldSkip(normalized)) return
         var count = 0
         for (state in subs.values) {
             if (state.isPaused) continue
@@ -390,7 +398,7 @@ class Subscription @Inject constructor(
         buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
-            add(filter.toJsonObject())
+            add(filter.toWireJsonObject())
         }.toString()
 
     private fun buildCloseJson(subId: String): String =

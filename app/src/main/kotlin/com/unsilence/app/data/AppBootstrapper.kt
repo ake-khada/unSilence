@@ -84,6 +84,7 @@ class AppBootstrapper @Inject constructor(
     private val nwcManager: NwcManager,
     private val sharedPlayerHolder: SharedPlayerHolder,
     private val relayPreferencesStore: RelayPreferencesStore,
+    private val relayCapabilitiesStore: com.unsilence.app.data.relay.RelayCapabilitiesStore,
     private val profileResolver: ProfileResolver,
     private val okHttpClient: OkHttpClient,
     private val snapshotScheduler: SnapshotScheduler,
@@ -152,6 +153,9 @@ class AppBootstrapper @Inject constructor(
         if (existingIndexers.isEmpty()) {
             relayPreferencesStore.setIndexerUrls(DEFAULT_INDEXER_URLS)
         }
+
+        // Load per-relay learned capabilities before any REQs go out.
+        relayCapabilitiesStore.load()
 
         // Register indexer relays as PERSISTENT so sendOneShotBatch always reuses
         // them instead of opening ephemeral WebSockets. Indexers carry no feed

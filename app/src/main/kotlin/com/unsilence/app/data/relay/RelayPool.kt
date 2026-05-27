@@ -66,6 +66,7 @@ class RelayPool @Inject constructor(
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
+    private val relayCapabilitiesStore: RelayCapabilitiesStore,
 ) : RelayTransport, ReconnectSource {
     // WebSocket consume loops MUST not be starved by snapshot restore or
     // other heavy IO. limitedParallelism(8) reserves dedicated threads for
@@ -659,7 +660,7 @@ class RelayPool @Inject constructor(
     ) {
         val excluded = activeSingleRelayFeedUrl
         val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-            .filter { it !in blockedUrls && it != excluded }
+            .filter { it !in blockedUrls && it != excluded && !relayCapabilitiesStore.shouldSkip(it) }
         if (normalized.isEmpty() || reqs.isEmpty()) {
             if (excluded != null && urls.any { normalizeRelayUrl(it) == excluded }) {
                 Log.d(TAG, "one-shot skipped: only feedRelay in target set")
@@ -920,6 +921,10 @@ class RelayPool @Inject constructor(
                         // won't send EOSE, so don't let it force a full timeout.
                         if (isOneShotSubscription(closedSubId)) {
                             recordOneShotRelayCoverage(closedSubId, conn.url)
+                        }
+                        // Layer 2: learn from structural rejections for future REQs.
+                        if (reason.isNotEmpty()) {
+                            scope.launch { relayCapabilitiesStore.learnFromClosed(conn.url, reason) }
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to parse CLOSED message: ${e.message}")
@@ -2148,7 +2153,6 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
         // Broadened relay targeting: non-indexer relays first, then indexer relays
@@ -2157,8 +2161,12 @@ class RelayPool @Inject constructor(
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
         val excluded = activeSingleRelayFeedUrl
-        val nonIndexer = connections.values.filter { it.url !in indexerUrls && it.url != excluded }.shuffled()
-        val indexer = connections.values.filter { it.url in indexerUrls && it.url != excluded }
+        val nonIndexer = connections.values.filter {
+            it.url !in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+        }.shuffled()
+        val indexer = connections.values.filter {
+            it.url in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+        }
         val targets = (nonIndexer + indexer).take(6)
         if (targets.isEmpty()) {
             Log.d(TAG, "one-shot skipped: only feedRelay in target set")
@@ -2207,6 +2215,7 @@ class RelayPool @Inject constructor(
         if (eventIds.isEmpty()) return
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
+        if (relayCapabilitiesStore.shouldSkip(normalized)) return
         if (normalized == activeSingleRelayFeedUrl) {
             Log.d(TAG, "one-shot skipped: only feedRelay in target set")
             return
@@ -2239,7 +2248,6 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(novel.size))
             })
         }.toString()
         sendOneShotToRelay(conn, req)
@@ -2287,7 +2295,6 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
-                put("limit", JsonPrimitive(1))
             })
         }.toString()
 
@@ -2300,7 +2307,7 @@ class RelayPool @Inject constructor(
             // only to hint relays. No broadcast fallback — if all hints fail, the
             // event stays unfetched until the next hydration pass retries.
             val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
-                .filter { it !in indexerUrls && it !in blockedUrls && it != excluded }
+                .filter { it !in indexerUrls && it !in blockedUrls && it != excluded && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
                 connectAndAwait(hintTargets, timeoutMs = 2_000)
                 var sent = 0
@@ -2316,8 +2323,12 @@ class RelayPool @Inject constructor(
         }
 
         // No hints (or all hints were indexer/blocked/feedRelay) — broadened fallback.
-        val nonIndexer = connections.values.filter { it.url !in indexerUrls && it.url != excluded }.shuffled()
-        val indexer = connections.values.filter { it.url in indexerUrls && it.url != excluded }
+        val nonIndexer = connections.values.filter {
+            it.url !in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+        }.shuffled()
+        val indexer = connections.values.filter {
+            it.url in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+        }
         val fallbackTargets = (nonIndexer + indexer).take(6)
         if (fallbackTargets.isEmpty()) {
             Log.d(TAG, "one-shot skipped: only feedRelay in target set")
