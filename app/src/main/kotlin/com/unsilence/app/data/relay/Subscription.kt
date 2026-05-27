@@ -65,7 +65,7 @@ class Subscription @Inject constructor(
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
-) {
+) : ActiveSubsSource {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
         val urls: Set<String>,
@@ -80,6 +80,18 @@ class Subscription @Inject constructor(
     )
 
     private val subs = ConcurrentHashMap<String, SubState>()
+
+    /**
+     * URLs of relays with at least one non-paused active subscription.
+     * Consulted by RelayPool's sweep to avoid force-closing connections
+     * that subscriptions still need.
+     */
+    override fun activeRelayUrls(): Set<String> =
+        subs.values
+            .filterNot { it.isPaused }
+            .flatMap { it.urls }
+            .toSet()
+
     private val seqCounter = AtomicLong(0)
     private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
     private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

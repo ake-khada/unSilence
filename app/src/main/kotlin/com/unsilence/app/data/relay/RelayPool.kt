@@ -50,7 +50,22 @@ private const val TAG = "RelayPool"
 data class SearchResult(val token: Long, val eventId: String)
 
 /** Why a relay connection exists — a relay can hold multiple purposes simultaneously. */
-enum class ConnectionPurpose { PERSISTENT, BROWSE }
+enum class ConnectionPurpose {
+    /** Long-lived, bootstrap-tagged (indexers, global default relays). Never evicted by sweep. */
+    PERSISTENT,
+    /** User-initiated relay-browse session (RelayBrowseSession). Evicted when session ends. */
+    BROWSE,
+    /** Active single-relay feed source. Exempted from sweep while feed is active;
+     *  removed when user switches feed type. */
+    FEED_SUB,
+}
+
+/** Source of "which relays currently have a non-paused subscription."
+ *  Consulted by the pool sweep to avoid force-closing connections with
+ *  live subscriptions. Implemented by [Subscription]. */
+interface ActiveSubsSource {
+    fun activeRelayUrls(): Set<String>
+}
 
 /**
  * Manages multiple relay WebSocket connections for the global feed.
@@ -67,6 +82,7 @@ class RelayPool @Inject constructor(
     private val keyManager: com.unsilence.app.data.auth.KeyManager,
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
+    private val activeSubsSource: dagger.Lazy<ActiveSubsSource>,
 ) : RelayTransport, ReconnectSource {
     // WebSocket consume loops MUST not be starved by snapshot restore or
     // other heavy IO. limitedParallelism(8) reserves dedicated threads for
@@ -132,6 +148,14 @@ class RelayPool @Inject constructor(
     private val oneShotSubTargets = ConcurrentHashMap<String, Set<String>>()
     /** Per-subId set of relay URLs that have EOSE'd or CLOSED. */
     private val oneShotSubEosed = ConcurrentHashMap<String, MutableSet<String>>()
+    /** Per-subId set of relay URLs whose slot has already been released.
+     *  Idempotency guard for [releaseOneShotForRelay] — prevents double-decrement
+     *  when both handleEose and cleanupOneShotSub fire for the same (subId, url). */
+    private val oneShotReleased = ConcurrentHashMap<String, MutableSet<String>>()
+    /** Per-subId first-EOSE completion signal. Completed when ANY single relay
+     *  EOSE's the sub. Used by engagement dispatch (first-EOSE-wins) so callers
+     *  don't wait for all 4-6 outbox relays to respond. */
+    internal val oneShotFirstEose = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
 
     /** In-flight event fetch dedup — maps event ID to completion signal.
@@ -274,7 +298,7 @@ class RelayPool @Inject constructor(
         // Safety rail against runaway bugs. Not a resource policy.
         // BROWSE is session-scoped. If this fires, something is misbehaving — investigate.
         const val POOL_SAFETY_CAP = 50
-        const val POOL_SWEEP_CAP = 20
+        const val POOL_SWEEP_CAP = 40
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
@@ -485,21 +509,34 @@ class RelayPool @Inject constructor(
             while (true) {
                 delay(60_000)
                 logPoolState()
-                // Sweep unused connections
+                // Sweep unused connections (existing per-url release pass)
                 for (url in connections.keys.toList()) {
                     releaseIfUnused(url)
                 }
-                // Hard cap: if pool > 20, force-close oldest by activity
+                // Hard cap: if pool > POOL_SWEEP_CAP, force-close oldest evictable.
                 if (connections.size > POOL_SWEEP_CAP) {
-                    val byActivity = connections.keys
+                    val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
+                        .getOrDefault(emptySet())
+                    val candidates = connections.keys
+                        .filter { url ->
+                            !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
+                            !hasPurpose(url, ConnectionPurpose.FEED_SUB) &&
+                            url !in activeSubUrls
+                        }
                         .sortedBy { connectionLastActivity[it] ?: 0L }
-                    val toClose = connections.size - POOL_SWEEP_CAP
-                    for (url in byActivity.take(toClose)) {
+
+                    val toCloseTarget = connections.size - POOL_SWEEP_CAP
+                    val toCloseActual = candidates.size.coerceAtMost(toCloseTarget)
+                    for (url in candidates.take(toCloseActual)) {
                         connections[url]?.close()
                         connections.remove(url)
                         connectionPurposes.remove(url)
                         connectionLastActivity.remove(url)
                         Log.w(TAG, "Pool over cap, force-closed: $url")
+                    }
+                    if (toCloseActual < toCloseTarget) {
+                        Log.w(TAG, "Pool sweep couldn't reach cap: ${connections.size} > $POOL_SWEEP_CAP " +
+                            "(closed $toCloseActual of $toCloseTarget; all remaining are exempt)")
                     }
                 }
             }
@@ -917,9 +954,10 @@ class RelayPool @Inject constructor(
                         } else {
                             Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
                         }
-                        // Count this relay as done for EOSE coverage — a CLOSED relay
-                        // won't send EOSE, so don't let it force a full timeout.
+                        // A CLOSED relay won't send EOSE — release its slot and
+                        // count it as done for coverage so it doesn't force a full timeout.
                         if (isOneShotSubscription(closedSubId)) {
+                            releaseOneShotForRelay(closedSubId, conn.url)
                             recordOneShotRelayCoverage(closedSubId, conn.url)
                         }
                         // Layer 2: learn from structural rejections for future REQs.
@@ -972,6 +1010,29 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Idempotent slot release for a single (subId, url) pair.
+     *
+     * Both [handleEose] and [cleanupOneShotSub] funnel through here. The
+     * [oneShotReleased] guard ensures that even if both paths fire for the
+     * same relay URL, the slot is decremented exactly once.
+     *
+     * Sends CLOSE frame, decrements [relayOneShotCount], and flushes the
+     * per-relay queue so queued REQs can drain.
+     */
+    private fun releaseOneShotForRelay(subId: String, url: String) {
+        val released = oneShotReleased.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
+        if (!released.add(url)) return // already released — idempotent guard
+
+        connections[url]?.let { conn ->
+            conn.send("""["CLOSE","$subId"]""")
+            relayOneShotCount[url]?.let { count ->
+                val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
+                if (prev > 0) flushRelayQueue(conn)
+            }
+        }
+    }
+
+    /**
      * Fix 3: Subscription lifecycle — CLOSE after EOSE for one-shot subscriptions.
      *
      * One-shot subs (profiles, threads, search, notifications, kind 3/10002) are
@@ -990,28 +1051,37 @@ class RelayPool @Inject constructor(
         }
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
-            conn.send("""["CLOSE","$subId"]""")
+            // Single release path — idempotent, sends CLOSE + decrements slot + flushes queue
+            releaseOneShotForRelay(subId, conn.url)
             // Record this relay as done; complete deferred when all targets covered
             recordOneShotRelayCoverage(subId, conn.url)
-            // Free per-relay slot and flush queued REQs
-            relayOneShotCount[conn.url]?.let { count ->
-                val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
-                if (prev > 0) flushRelayQueue(conn)
-            }
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
     }
 
-    /** Remove a one-shot sub from all tracking maps (EOSE callbacks + coverage). */
+    /** Remove a one-shot sub from all tracking maps, release slots for every
+     *  target relay (idempotent — skips already-released), and clean up. */
     internal fun cleanupOneShotSub(subId: String) {
         oneShotEoseCallbacks.remove(subId)
-        oneShotSubTargets.remove(subId)
+        oneShotFirstEose.remove(subId)
+        val targets = oneShotSubTargets.remove(subId) ?: emptySet()
         oneShotSubEosed.remove(subId)
+
+        // Release slot for every target relay. releaseOneShotForRelay is idempotent —
+        // relays that already EOSE'd (and were released in handleEose) are skipped
+        // via the oneShotReleased guard. Only un-released relays get CLOSE + decrement.
+        for (url in targets) {
+            releaseOneShotForRelay(subId, url)
+        }
+
+        // Final cleanup of the released tracking set
+        oneShotReleased.remove(subId)
     }
 
     /**
-     * Record a relay as done for a one-shot sub. Completes the EOSE deferred
-     * when all target relays have responded (EOSE or CLOSED).
+     * Record a relay as done for a one-shot sub. Completes [oneShotFirstEose]
+     * on the first relay response and [oneShotEoseCallbacks] when ALL target
+     * relays have responded (EOSE or CLOSED).
      * Falls back to first-EOSE if no target set was registered.
      */
     private fun recordOneShotRelayCoverage(subId: String, relayUrl: String) {
@@ -1019,6 +1089,7 @@ class RelayPool @Inject constructor(
         if (targets == null) {
             // No target set registered — fall back to old behavior (complete on first)
             oneShotEoseCallbacks.remove(subId)?.complete(Unit)
+            oneShotFirstEose.remove(subId)?.complete(Unit)
             return
         }
         val eosed = oneShotSubEosed.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
@@ -1026,6 +1097,16 @@ class RelayPool @Inject constructor(
         val covered = eosed.size
         val total = targets.size
         Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
+
+        // First relay response: complete the first-EOSE deferred immediately.
+        // Engagement subs await this instead of full coverage.
+        if (covered == 1) {
+            oneShotFirstEose.remove(subId)?.complete(Unit)
+        }
+
+        // Full coverage: complete the main deferred and clean up tracking maps.
+        // oneShotReleased is NOT removed here — late duplicate EOSEs from flaky relays
+        // would recreate the set and double-decrement. cleanupOneShotSub does the bulk wipe.
         if (covered >= total) {
             oneShotEoseCallbacks.remove(subId)?.complete(Unit)
             oneShotSubTargets.remove(subId)

@@ -36,10 +36,12 @@ class UserRepository @Inject constructor(
         profileResolver.request(stale.toList())
     }
 
-    /** Profile screen variant: hits up to [maxRelays] indexer relays for better coverage. */
+    /** Profile screen variant: hits up to [maxRelays] indexer relays for better coverage.
+     *  Bypasses [ProfileResolver.filterUnresolved]: the user explicitly navigated here,
+     *  so always attempt the fetch. [ProfileResolver.processBatch] + [RelayPool.fetchProfiles]
+     *  already have their own dedup (staleness + 2-min attempt TTL). */
     suspend fun fetchProfilesWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
-        val stale = profileResolver.filterUnresolved(pubkeys.toSet())
-        if (stale.isEmpty()) return
-        profileResolver.requestWithFanout(stale.toList(), maxRelays)
+        if (pubkeys.isEmpty()) return
+        profileResolver.requestWithFanout(pubkeys, maxRelays)
     }
 }

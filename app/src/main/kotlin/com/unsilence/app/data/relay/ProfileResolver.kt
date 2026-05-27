@@ -82,24 +82,39 @@ class ProfileResolver @Inject constructor(
     }
 
     /**
-     * Profile-screen fetch: same dedup/staleness checks, but hits [maxRelays]
-     * indexer relays instead of the default 1 (scroll mode).
+     * Profile-screen fetch: bypasses [processBatch] staleness checks because the
+     * user explicitly navigated to this profile. Only [RelayPool.fetchProfiles]'s
+     * 2-minute attempt TTL gates redundant requests. Hits [maxRelays] indexer relays
+     * for better coverage than the default scroll mode.
      */
     fun requestWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
-        scope.launch { processBatch(pubkeys, maxRelays) }
+        relayPool.get().fetchProfiles(pubkeys, maxRelays)
     }
 
     /**
-     * Returns the subset of [pubkeys] that do NOT have a fresh profile in MemoryEventStore.
+     * Returns the subset of [pubkeys] that do NOT have a fresh, complete profile
+     * in MemoryEventStore.
+     *
      * "Fresh" = profile exists AND was cached locally within STALE_THRESHOLD_SECONDS (6h).
+     * "Complete" = profile has a non-blank picture. Profiles without a picture get a
+     * shorter 1h retry window — matches the same logic in [processBatch].
+     *
      * Uses profileUpdatedAt (local cache time), NOT event createdAt.
      * Used by CardHydrator to skip orchestration for already-resolved pubkeys.
      */
     fun filterUnresolved(pubkeys: Set<String>): Set<String> {
         if (pubkeys.isEmpty()) return emptySet()
-        val freshnessThreshold = System.currentTimeMillis() - STALE_THRESHOLD_SECONDS * 1000
+        val now = System.currentTimeMillis()
+        val freshnessThreshold = now - STALE_THRESHOLD_SECONDS * 1000
+        val noPictureThreshold = now - 3600_000L
         return pubkeys.filterTo(mutableSetOf()) { pk ->
-            memoryEventStore.getProfileLastUpdated(pk) < freshnessThreshold
+            val lastUpdated = memoryEventStore.getProfileLastUpdated(pk)
+            if (lastUpdated < freshnessThreshold) return@filterTo true
+            // Profile looks fresh by timestamp but may lack actual data.
+            // Re-fetch if no picture and last update was >1h ago.
+            val user = memoryEventStore.getUserEntity(pk)
+            if (user == null) return@filterTo true // timestamp set but no entity — defensive
+            user.picture.isNullOrBlank() && lastUpdated < noPictureThreshold
         }
     }
 

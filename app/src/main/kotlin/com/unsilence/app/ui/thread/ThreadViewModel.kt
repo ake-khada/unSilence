@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.memory.EventStats
@@ -45,6 +46,7 @@ class ThreadViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
     private val userRepository: UserRepository,
+    private val outboxResolver: OutboxRelayResolver,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ThreadUiState())
@@ -138,14 +140,29 @@ class ThreadViewModel @Inject constructor(
         _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
             val ownPubkey = pubkeyHex ?: ""
-            val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
+            val ownReadRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
                 .filter { it.marker == null || it.marker == "read" }
                 .mapNotNull { normalizeRelayUrl(it.url) }
-            val urls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+            val blockedRelays = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
 
             // Best-guess root from local MES — instant, no network
             val event = memoryEventStore.getEventEntity(eventId)
             val bestGuessRoot = event?.rootId ?: event?.replyToId ?: eventId
+
+            // Resolve relays based on the thread root's author. If we don't
+            // have the event yet (cold tap), fall back to own read + GLOBAL.
+            val rootAuthorPubkey = event?.pubkey
+                ?: memoryEventStore.getEventEntity(bestGuessRoot)?.pubkey
+
+            val urls = if (rootAuthorPubkey != null) {
+                outboxResolver.resolveEngagementRelays(
+                    authorPubkey = rootAuthorPubkey,
+                    ownReadRelays = ownReadRelays,
+                    blockedRelays = blockedRelays,
+                )
+            } else {
+                ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
+            }
 
             if (eventIdFlow.value == bestGuessRoot) return@launch
 
@@ -159,7 +176,20 @@ class ThreadViewModel @Inject constructor(
                 } ?: return@launch
                 if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
                     eventIdFlow.value = trueRoot
-                    relayPool.fetchThread(urls, trueRoot)
+
+                    // Re-resolve relays for the true root's author — may differ
+                    // from the tapped event's author.
+                    val trueRootEvent = memoryEventStore.getEventEntity(trueRoot)
+                    val trueRootAuthor = trueRootEvent?.pubkey
+                    val refinedUrls = if (trueRootAuthor != null && trueRootAuthor != rootAuthorPubkey) {
+                        outboxResolver.resolveEngagementRelays(
+                            authorPubkey = trueRootAuthor,
+                            ownReadRelays = ownReadRelays,
+                            blockedRelays = blockedRelays,
+                        )
+                    } else urls
+
+                    relayPool.fetchThread(refinedUrls, trueRoot)
                 }
             }
         }

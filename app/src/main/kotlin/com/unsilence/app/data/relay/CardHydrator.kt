@@ -77,6 +77,7 @@ class CardHydrator @Inject constructor(
     private val thumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
     private val profileResolver: ProfileResolver,
+    private val outboxResolver: OutboxRelayResolver,
 ) {
     // ── Per-phase hydrated-id memo ───────────────────────────────────────
     // hydrateVisibleCards re-fires on every viewport change (debounce 300ms).
@@ -153,16 +154,6 @@ class CardHydrator @Inject constructor(
     /** Debounce job for engagement fetch — cancelled and relaunched on each accumulation. */
     private var engagementDebounceJob: Job? = null
 
-    /** User's NIP-65 read relays, resolved once per dispatch batch and cached.
-     *  Matches the relay selection in ThreadViewModel.loadThread — guarantees
-     *  feed engagement counts query the same relays as the thread screen. */
-    private fun userReadRelayUrls(): List<String> {
-        val ownPk = memoryEventStore.ownPubkey ?: return GLOBAL_RELAY_URLS
-        val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPk)
-            .filter { it.marker == null || it.marker == "read" }
-            .mapNotNull { normalizeRelayUrl(it.url) }
-        return readRelays.ifEmpty { GLOBAL_RELAY_URLS }
-    }
 
     // ── Own-engagement backfill ─────────────────────────────────────────
     // Fetches the user's own kind-7/6 events targeting visible posts from
@@ -727,14 +718,16 @@ class CardHydrator @Inject constructor(
     }
 
     /**
-     * Dispatch per-post engagement REQs to the user's NIP-65 read relays.
+     * Dispatch per-post engagement REQs via outbox-routed relay resolution.
      *
      * Each post gets ONE combined REQ (kinds [1,6,7,9735]) with its own #e and
      * limit=ENGAGEMENT_LIMIT. Per-post dispatch is a spec invariant: the per-post
      * limit cap ensures bounded download per post.
      *
-     * Relay targeting: user's NIP-65 read relays (same as fetchThread), resolved
-     * once per batch. Guarantees feed counts == thread counts by construction.
+     * Relay targeting: post author's NIP-65 write relays (top 4 by trust+RTT) +
+     * user's read relays (top 2) as secondary catch-net. Reactors fan their
+     * kind-7/9735 broadcasts to the post author's write relays — that's where
+     * engagement propagates. GLOBAL fallback when neither kind-10002 is known.
      * EOSE-gated completion via oneShotEoseCallbacks.
      */
     private suspend fun dispatchEngagement() {
@@ -744,40 +737,83 @@ class CardHydrator @Inject constructor(
 
         batch.forEach { engagementInFlight.add(it) }
 
-        val targetUrls = userReadRelayUrls()
+        // Resolve own read relays + blocked relays once per batch.
+        val ownPk = memoryEventStore.ownPubkey
+        val ownReadRelays = if (ownPk != null) {
+            memoryEventStore.getReadWriteRelayConfigs(ownPk)
+                .filter { it.marker == null || it.marker == "read" }
+                .mapNotNull { normalizeRelayUrl(it.url) }
+        } else emptyList()
+        val blockedRelays = ownPk
+            ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
+            ?: emptySet()
+
         val nowMs = System.currentTimeMillis()
 
-        for (eventId in batch) {
-            val subId = "eng-${System.nanoTime()}"
-            val req = buildEngagementReq(subId, eventId)
+        for (engagementId in batch) {
+            // Resolve the author of the post whose engagement we're fetching.
+            // For kind-6 reposts, engagementId is the original event's id;
+            // we want the original author, not the reposter.
+            val authorPubkey = memoryEventStore.getEventEntity(engagementId)?.pubkey
 
-            // Register EOSE before dispatch so we don't miss a fast EOSE
+            val targetUrls = if (authorPubkey != null) {
+                outboxResolver.resolveEngagementRelays(
+                    authorPubkey = authorPubkey,
+                    ownReadRelays = ownReadRelays,
+                    blockedRelays = blockedRelays,
+                )
+            } else {
+                // Post not in MES (engagement requested before we have the event).
+                // Fall back to own read relays + GLOBAL — same shape as old behaviour.
+                ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
+            }
+
+            val subId = "eng-${System.nanoTime()}"
+            val req = buildEngagementReq(subId, engagementId)
+
+            // Register full-coverage EOSE (needed so sendOneShotBatch registers targets)
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
+
+            // First-EOSE-wins: complete as soon as ANY relay EOSE's.
+            // Engagement queries fan out to 4-6 diverse outbox relays — waiting for
+            // all of them is unrealistic and jams slots. One relay's worth of
+            // engagement data is sufficient for display; stragglers merge in later.
+            val firstEoseDeferred = CompletableDeferred<Unit>()
+            relayPool.oneShotFirstEose[subId] = firstEoseDeferred
 
             backfillScope.launch {
                 try {
                     relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
 
-                    val eoseReceived = withTimeoutOrNull(10_000) { eoseDeferred.await() } != null
+                    val eoseReceived = withTimeoutOrNull(10_000) { firstEoseDeferred.await() } != null
 
-                    val stats = memoryEventStore.currentStatsSnapshot(eventId)
+                    val stats = memoryEventStore.currentStatsSnapshot(engagementId)
                     val totalEngagement = stats.replyCount + stats.repostCount +
                         stats.reactionCount + stats.zapCount
                     val capped = totalEngagement >= ENGAGEMENT_LIMIT
-                    if (capped) memoryEventStore.markEngagementCapped(eventId)
+                    if (capped) memoryEventStore.markEngagementCapped(engagementId)
 
-                    engagementTracker[eventId] = EngagementFetchState(
+                    engagementTracker[engagementId] = EngagementFetchState(
                         lastFetchedAt = nowMs,
                         capped = capped,
                     )
 
                     if (!eoseReceived) {
                         relayPool.cleanupOneShotSub(subId)
-                        Log.w(TAG, "Engagement: ${eventId.take(12)} timed out (no EOSE)")
+                        Log.w(TAG, "Engagement: ${engagementId.take(12)} timed out (no EOSE)")
                     }
                 } finally {
-                    engagementInFlight.remove(eventId)
+                    engagementInFlight.remove(engagementId)
+                    // Absolute cleanup deadline for slow-EOSE stragglers.
+                    // First-EOSE-wins returns early but remaining relays keep running.
+                    // If one never EOSEs, tracking maps (oneShotSubTargets, oneShotSubEosed,
+                    // oneShotReleased) leak for that subId. 30s is generous enough for any
+                    // relay to respond; cleanupOneShotSub is idempotent.
+                    backfillScope.launch {
+                        delay(30_000)
+                        relayPool.cleanupOneShotSub(subId)
+                    }
                 }
             }
         }

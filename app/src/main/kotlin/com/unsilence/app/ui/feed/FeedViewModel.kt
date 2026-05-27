@@ -12,6 +12,7 @@ import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
@@ -141,6 +142,10 @@ class FeedViewModel @Inject constructor(
 
     private var currentHandle: TimelineService.TimelineHandle? = null
     private var lastFeedType: FeedType? = null
+
+    /** URL we tagged as FEED_SUB for the current single-relay feed.
+     *  Tracked so we can cleanly remove the tag when switching feeds. */
+    @Volatile private var feedSubPersistentUrl: String? = null
 
     // -- Content filter (must be before feedRows which references it) ----------
 
@@ -425,8 +430,19 @@ class FeedViewModel @Inject constructor(
     private suspend fun setupSubscription(key: ResubKey) {
         refreshTimeoutJob?.cancel()
         lastFeedType = key.type
-        relayPool.activeSingleRelayFeedUrl =
-            (key.type as? FeedType.SingleRelay)?.url?.let { normalizeRelayUrl(it) }
+
+        // Manage FEED_SUB tag: remove from previous, add to new.
+        val newSingleRelayUrl = (key.type as? FeedType.SingleRelay)?.url?.let { normalizeRelayUrl(it) }
+        val prev = feedSubPersistentUrl
+        if (prev != null && prev != newSingleRelayUrl) {
+            relayPool.removePurpose(prev, ConnectionPurpose.FEED_SUB)
+        }
+        if (newSingleRelayUrl != null && newSingleRelayUrl != prev) {
+            relayPool.addPurpose(newSingleRelayUrl, ConnectionPurpose.FEED_SUB)
+        }
+        feedSubPersistentUrl = newSingleRelayUrl
+
+        relayPool.activeSingleRelayFeedUrl = newSingleRelayUrl
 
         Log.d(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
 
@@ -787,6 +803,8 @@ class FeedViewModel @Inject constructor(
         super.onCleared()
         currentHandle?.close()
         currentHandle = null
+        feedSubPersistentUrl?.let { relayPool.removePurpose(it, ConnectionPurpose.FEED_SUB) }
+        feedSubPersistentUrl = null
         relayPool.activeSingleRelayFeedUrl = null
     }
 
