@@ -26,7 +26,7 @@ class EngagementFetchTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore(object : MuteKeyProvider {})
+        store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
     }
 
     // ── buildEngagementReq ──────────────────────────────────────────────

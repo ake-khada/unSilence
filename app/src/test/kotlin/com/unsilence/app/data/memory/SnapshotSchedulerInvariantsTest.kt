@@ -38,7 +38,7 @@ class SnapshotSchedulerInvariantsTest {
     fun setUp() {
         tmpDir = File(System.getProperty("java.io.tmpdir"), "snapshot-test-${System.nanoTime()}")
         tmpDir.mkdirs()
-        store = MemoryEventStore(object : MuteKeyProvider {})
+        store = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         scheduler = SnapshotScheduler(store, AtomicFile(File(tmpDir, "test.snapshot")))
     }
 
@@ -113,7 +113,7 @@ class SnapshotSchedulerInvariantsTest {
         scheduler.saveNow()
 
         // Restore into fresh store + scheduler
-        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -189,7 +189,7 @@ class SnapshotSchedulerInvariantsTest {
         jobs.forEach { it.join() }
 
         // Restore and verify — must be a valid snapshot regardless of ordering
-        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -217,7 +217,7 @@ class SnapshotSchedulerInvariantsTest {
         atomicFile.failWrite(stream)
 
         // Restore — should get the original valid snapshot, not the partial write
-        val restoredStore = MemoryEventStore(object : MuteKeyProvider {})
+        val restoredStore = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         val restoredScheduler = SnapshotScheduler(
             restoredStore, AtomicFile(File(tmpDir, "test.snapshot")),
         )
@@ -303,7 +303,7 @@ class SnapshotSchedulerInvariantsTest {
             // Restore from the bytes produced during the race. With the fix,
             // this must always succeed — the snapshot is internally
             // consistent regardless of what was added during the save.
-            val restored = MemoryEventStore(object : MuteKeyProvider {})
+            val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
             withContext(Dispatchers.IO) {
                 DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use { input ->
                     restored.restoreSnapshotBinary(input)
@@ -357,7 +357,7 @@ class SnapshotSchedulerInvariantsTest {
         scheduler.saveNow()
 
         // Restore into a fresh store
-        val restored = MemoryEventStore(object : MuteKeyProvider {})
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         restored.ownPubkey = myPk
         val actionBefore = restored.actionSignalFlow.value
 
@@ -394,7 +394,7 @@ class SnapshotSchedulerInvariantsTest {
         scheduler.saveNow()
 
         // Restore — should work even without engaged data
-        val restored = MemoryEventStore(object : MuteKeyProvider {})
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         restored.ownPubkey = myPk
         val restoredScheduler = SnapshotScheduler(
             restored, AtomicFile(File(tmpDir, "test.snapshot")),

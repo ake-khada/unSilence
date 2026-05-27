@@ -630,8 +630,9 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
+            if (relayCapabilitiesStore.shouldSkip(url)) continue
             if (!canOpenNewConnection()) continue
-            val candidate = RelayConnection(url, okHttpClient)
+            val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
             val existing = connections.putIfAbsent(url, candidate)
             if (existing != null) continue
             connectionLastActivity[url] = System.currentTimeMillis()
@@ -786,7 +787,7 @@ class RelayPool @Inject constructor(
         }
         if (!lastOpen.compareAndSet(prev, now)) return // CAS race — another caller won
 
-        val conn = RelayConnection(url, okHttpClient)
+        val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
         try {
             conn.connect()
             // Wait for WebSocket ready (max 2s)
@@ -871,8 +872,9 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
+            if (relayCapabilitiesStore.shouldSkip(url)) continue
             if (!canOpenNewConnection()) continue
-            val candidate = RelayConnection(url, okHttpClient)
+            val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
             val existing = connections.putIfAbsent(url, candidate)
             if (existing != null) continue
             connectionLastActivity[url] = System.currentTimeMillis()
@@ -1917,7 +1919,7 @@ class RelayPool @Inject constructor(
         val existing = connections[normalized]
         if (existing != null && existing.isConnected) return existing
         if (existing != null) connections.remove(normalized)
-        val conn = RelayConnection(normalized, okHttpClient)
+        val conn = RelayConnection(normalized, okHttpClient, relayCapabilitiesStore)
         connections[normalized] = conn
         connectionLastActivity[normalized] = System.currentTimeMillis()
         conn.connect()
@@ -2068,7 +2070,7 @@ class RelayPool @Inject constructor(
 
         for (url in searchRelayUrls) {
             val conn = connections.getOrPut(url) {
-                RelayConnection(url, okHttpClient).also { c ->
+                RelayConnection(url, okHttpClient, relayCapabilitiesStore).also { c ->
                     scope.launch { listenForEvents(c) }
                 }
             }
@@ -2151,7 +2153,7 @@ class RelayPool @Inject constructor(
 
         for (url in searchRelayUrls) {
             val conn = connections.getOrPut(url) {
-                RelayConnection(url, okHttpClient).also { c ->
+                RelayConnection(url, okHttpClient, relayCapabilitiesStore).also { c ->
                     scope.launch { listenForEvents(c) }
                 }
             }
@@ -2650,6 +2652,12 @@ class RelayPool @Inject constructor(
      * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
      */
     private fun reconnectWithBackoff(url: String, attempt: Int = 0) {
+        // Don't waste reconnect attempts on transport-skipped relays
+        if (relayCapabilitiesStore.shouldSkip(url)) {
+            Log.d(TAG, "Skipping reconnect for transport-skipped $url")
+            connections.remove(url)?.close()
+            return
+        }
         val guard = reconnecting.getOrPut(url) { AtomicBoolean(false) }
         if (!guard.compareAndSet(false, true)) return
 
@@ -2666,7 +2674,7 @@ class RelayPool @Inject constructor(
                 pendingChallenges.remove(url)
                 authFailedRelays.remove(url)
                 pendingAuthEventIds.values.removeAll { it == url }
-                val conn = RelayConnection(url, okHttpClient)
+                val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
                 connections[url] = conn
                 connectionLastActivity[url] = System.currentTimeMillis()
                 conn.connect()

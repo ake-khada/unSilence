@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import java.util.concurrent.CopyOnWriteArrayList
@@ -28,6 +29,29 @@ class FakeRelayTransport : RelayTransport {
 /** ReconnectSource fake: no-op SharedFlow, no emissions. */
 class FakeReconnectSource : ReconnectSource {
     override val onRelayReconnected: SharedFlow<String> = MutableSharedFlow()
+}
+
+/** Test-only [RelaySkipCheck] — never skips unless explicitly told. */
+class FakeRelayCapabilitiesStore : RelaySkipCheck {
+    private val skipped = mutableSetOf<String>()
+
+    override fun shouldSkip(relayUrl: String): Boolean = relayUrl in skipped
+
+    fun markSkipped(url: String) { skipped.add(url) }
+}
+
+/** No-op TimelineEventLoader for tests. */
+class StubEventLoader : TimelineEventLoader {
+    override suspend fun getEvents(ids: List<String>): List<NostrEvent> = emptyList()
+}
+
+/** Create a [javax.inject.Provider] of a no-op [TimelineService] for MES tests. */
+fun stubTimelineServiceProvider(): javax.inject.Provider<TimelineService> {
+    val svc = TimelineService(
+        Subscription(FakeRelayTransport(), FakeTapRegistration(), FakeReconnectSource(), FakeRelayCapabilitiesStore()),
+        StubEventLoader(),
+    )
+    return javax.inject.Provider { svc }
 }
 
 /** Trivial TapRegistration fake: records and exposes a fire() method. */

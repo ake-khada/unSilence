@@ -6,7 +6,10 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -28,6 +31,29 @@ private val TRANSIENT_PREFIXES = setOf("rate-limited", "pow", "duplicate")
 
 const val MAX_CAPABILITY_STRIKES = 3
 
+/** Why a relay is being skipped — covers both protocol (CLOSED) and transport (onFailure) reasons. */
+enum class SkipReason {
+    // Protocol-level (CLOSED structural rejections) — existing path via learnFromClosed
+    AUTH_REQUIRED,
+    BLOCKED,
+    RESTRICTED,
+    INVALID,
+    ERROR,
+    // Transport-level (RelayConnection.onFailure) — new path via recordTransportFailure
+    DNS_RESOLUTION,     // UnknownHostException — host doesn't resolve
+    CLEARTEXT_BLOCKED,  // Android NSP blocks ws:// (belt-and-suspenders after normalizeRelayUrl gate)
+    HTTP_UPGRADE_4XX,   // Relay refused upgrade with 4xx — auth/path/policy
+    HTTP_UPGRADE_5XX,   // Relay returned 5xx — server down or broken
+    SSL_ERROR,          // TLS handshake or read error
+    CONNECT_TIMEOUT,    // SocketTimeoutException / ConnectException — host unreachable
+    UNKNOWN_FAILURE,    // Anything else — don't strike aggressively
+}
+
+/** Read-side interface for relay capability checks. Testable without Android context. */
+interface RelaySkipCheck {
+    fun shouldSkip(relayUrl: String): Boolean
+}
+
 /**
  * Per-relay learned capabilities, persisted to DataStore. Read-mostly — every REQ
  * builder can consult [shouldSkip]; writes happen only on CLOSED with structural
@@ -39,7 +65,7 @@ const val MAX_CAPABILITY_STRIKES = 3
 @Singleton
 class RelayCapabilitiesStore @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : RelaySkipCheck {
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = MapSerializer(String.serializer(), RelayCapabilities.serializer())
 
@@ -63,9 +89,36 @@ class RelayCapabilitiesStore @Inject constructor(
     }
 
     /** True when the relay should be skipped for all REQs. */
-    fun shouldSkip(relayUrl: String): Boolean {
+    override fun shouldSkip(relayUrl: String): Boolean {
         val c = get(relayUrl) ?: return false
         return c.authRequired || c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES
+    }
+
+    /**
+     * Record a transport-level failure for [url]. After [MAX_CAPABILITY_STRIKES]
+     * weighted strikes, the URL is marked skippable for the capability TTL.
+     *
+     * Called from RelayConnection's onFailure handler.
+     */
+    fun recordTransportFailure(url: String, reason: SkipReason) {
+        val key = normalizeRelayUrl(url) ?: return
+        val weight = strikesForReason(reason)
+        val existing = caps[key] ?: RelayCapabilities()
+        val newStrikes = existing.strikes + weight
+        val updated = existing.copy(
+            strikes = newStrikes,
+            lastStrikeAt = System.currentTimeMillis(),
+            lastReason = reason.name.take(120),
+        )
+        caps[key] = updated
+
+        if (newStrikes >= MAX_CAPABILITY_STRIKES) {
+            Log.w(TAG, "Transport skip: $key ($reason, $newStrikes strikes)")
+        } else {
+            Log.d(TAG, "Transport strike: $key ($reason, $newStrikes/$MAX_CAPABILITY_STRIKES)")
+        }
+        // Fire-and-forget persist — don't block onFailure callback thread
+        GlobalScope.launch(Dispatchers.IO) { persist() }
     }
 
     /**
@@ -124,4 +177,13 @@ class RelayCapabilitiesStore @Inject constructor(
             .joinToString("\n") { (url, c) ->
                 "$url: strikes=${c.strikes} auth=${c.authRequired} restricted=${c.restricted} last='${c.lastReason}'"
             }
+
+    companion object {
+        /** DNS and cleartext failures are structurally permanent — instant skip (weight = threshold). */
+        internal fun strikesForReason(reason: SkipReason): Int = when (reason) {
+            SkipReason.DNS_RESOLUTION,
+            SkipReason.CLEARTEXT_BLOCKED -> MAX_CAPABILITY_STRIKES
+            else -> 1
+        }
+    }
 }
