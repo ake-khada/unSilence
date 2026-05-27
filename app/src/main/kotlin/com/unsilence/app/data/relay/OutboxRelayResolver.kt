@@ -9,6 +9,14 @@ import javax.inject.Singleton
 private const val TAG = "OutboxResolver"
 private const val MAX_WRITE_RELAYS_PER_AUTHOR = 4
 private const val MAX_OUTBOX_RELAYS = 10
+/** Max author write relays returned by [OutboxRelayResolver.resolveEngagementRelays].
+ *  Picked to match MAX_WRITE_RELAYS_PER_AUTHOR — same routing density
+ *  as the feed's outbox set-cover. */
+private const val MAX_AUTHOR_WRITE_RELAYS_FOR_ENGAGEMENT = 4
+/** Max own-read relays mixed into engagement targets. Small —
+ *  catches reactions from the user's network without ballooning
+ *  the connection pool per post. */
+private const val MAX_OWN_READ_RELAYS_FOR_ENGAGEMENT = 2
 /** Top-N write relays (by quality, post-set-cover) that should be opened
  *  immediately on feed subscribe. The remaining write relays are tagged
  *  [SubTier.SLOW] and only connected after the fast tier EOSEs / times out
@@ -248,5 +256,61 @@ class OutboxRelayResolver @Inject constructor(
                 ),
             )
         )
+    }
+
+    /**
+     * Resolve relays to query for engagement (replies/reactions/reposts/zaps)
+     * on a post authored by [authorPubkey].
+     *
+     * NIP-65 reactors fan their kind-7/9735 broadcasts to the post author's
+     * write relays — that's where engagement on a post propagates. User's
+     * read relays catch the subset of reactions from people in the user's
+     * own relay network. GLOBAL fallback handles the case where neither
+     * kind-10002 is known.
+     *
+     * @param authorPubkey  hex pubkey of the post author whose engagement
+     *                      we're querying. Required.
+     * @param ownReadRelays user's NIP-65 read relays (caller resolves from
+     *                      MES). Empty is fine — handled via fallback.
+     * @param blockedRelays normalized URLs to exclude (user's kind-10006).
+     *                      Empty is fine.
+     * @return ordered, deduped list of normalized relay URLs. Never empty
+     *         (falls back to GLOBAL_RELAY_URLS).
+     */
+    fun resolveEngagementRelays(
+        authorPubkey: String,
+        ownReadRelays: List<String>,
+        blockedRelays: Set<String> = emptySet(),
+    ): List<String> {
+        val authorWrite = metadata.writeRelaysFor(authorPubkey)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in blockedRelays }
+
+        val trustScores = metadata.getTrustScores()
+        val monitors = metadata.getRelayMonitors()
+        val byQuality = Comparator<String> { a, b ->
+            val sa = trustScores[a]?.score ?: DEFAULT_TRUST_SCORE
+            val sb = trustScores[b]?.score ?: DEFAULT_TRUST_SCORE
+            if (sa != sb) return@Comparator sb.compareTo(sa)
+            val ra = monitors[a]?.rttRead ?: DEFAULT_RTT_MS
+            val rb = monitors[b]?.rttRead ?: DEFAULT_RTT_MS
+            if (ra != rb) return@Comparator ra.compareTo(rb)
+            a.compareTo(b)
+        }
+
+        val rankedAuthorWrite = authorWrite
+            .distinct()
+            .sortedWith(byQuality)
+            .take(MAX_AUTHOR_WRITE_RELAYS_FOR_ENGAGEMENT)
+
+        val rankedOwnRead = ownReadRelays
+            .mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in blockedRelays }
+            .distinct()
+            .sortedWith(byQuality)
+            .take(MAX_OWN_READ_RELAYS_FOR_ENGAGEMENT)
+
+        val combined = (rankedAuthorWrite + rankedOwnRead).distinct()
+        return combined.ifEmpty { GLOBAL_RELAY_URLS }
     }
 }
