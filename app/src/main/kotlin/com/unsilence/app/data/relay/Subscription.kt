@@ -64,7 +64,7 @@ class Subscription @Inject constructor(
     private val transport: RelayTransport,
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
-    private val relayCapabilitiesStore: RelayCapabilitiesStore,
+    private val relayCapabilitiesStore: RelaySkipCheck,
 ) : ActiveSubsSource {
     /** Active subscription state, keyed by subId. */
     private data class SubState(

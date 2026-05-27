@@ -20,6 +20,52 @@ private const val TAG = "RelayConnection"
 enum class RelayState { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
 
 /**
+ * Categorize an OkHttp WebSocket failure into a [SkipReason] for
+ * [RelayCapabilitiesStore]. Returns null only for truly benign failures
+ * (e.g. normal close during shutdown).
+ */
+internal fun categorizeTransportFailure(t: Throwable, response: Response?): SkipReason? {
+    // Cleartext: Android wraps the exception class inconsistently — message is most reliable
+    if (t.message?.contains("CLEARTEXT communication", ignoreCase = true) == true) {
+        return SkipReason.CLEARTEXT_BLOCKED
+    }
+
+    // DNS: UnknownHostException is direct
+    if (t is java.net.UnknownHostException) {
+        return SkipReason.DNS_RESOLUTION
+    }
+
+    // SSL/TLS: javax.net.ssl.SSLException and subclasses
+    if (t is javax.net.ssl.SSLException) {
+        return SkipReason.SSL_ERROR
+    }
+
+    // HTTP upgrade failure: OkHttp may throw ProtocolException or attach the response
+    if (t is java.net.ProtocolException || response != null) {
+        val code = response?.code ?: parseHttpCodeFromMessage(t.message)
+        return when {
+            code != null && code in 400..499 -> SkipReason.HTTP_UPGRADE_4XX
+            code != null && code in 500..599 -> SkipReason.HTTP_UPGRADE_5XX
+            else -> SkipReason.UNKNOWN_FAILURE
+        }
+    }
+
+    // Connect timeout or general connect failure
+    if (t is java.net.SocketTimeoutException || t is java.net.ConnectException) {
+        return SkipReason.CONNECT_TIMEOUT
+    }
+
+    return SkipReason.UNKNOWN_FAILURE
+}
+
+/** Parse HTTP status code from OkHttp's "Expected HTTP 101 response but was '502 Bad Gateway'" message. */
+private fun parseHttpCodeFromMessage(msg: String?): Int? {
+    if (msg == null) return null
+    val match = """'(\d{3})\b""".toRegex().find(msg) ?: return null
+    return match.groupValues[1].toIntOrNull()
+}
+
+/**
  * Single WebSocket connection to one Nostr relay.
  *
  * Thread model: OkHttp calls listener methods on its own threads.
@@ -28,6 +74,7 @@ enum class RelayState { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
 class RelayConnection(
     val url: String,
     private val client: OkHttpClient,
+    private val capabilitiesStore: RelayCapabilitiesStore? = null,
 ) {
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
     val messages: ReceiveChannel<String> get() = _messages
@@ -87,6 +134,12 @@ class RelayConnection(
             _state.value = RelayState.FAILED
             connected.set(false)
             _messages.close()
+
+            // Record transport failure for capability tracking
+            val reason = categorizeTransportFailure(t, response)
+            if (reason != null) {
+                capabilitiesStore?.recordTransportFailure(url, reason)
+            }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

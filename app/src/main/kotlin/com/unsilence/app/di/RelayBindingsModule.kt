@@ -6,7 +6,9 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.ActiveSubsSource
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.MesEventLoader
+import com.unsilence.app.data.relay.RelayCapabilitiesStore
 import com.unsilence.app.data.relay.RelayMetadataSource
+import com.unsilence.app.data.relay.RelaySkipCheck
 import com.unsilence.app.data.relay.ReconnectSource
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayTransport
@@ -41,4 +43,7 @@ abstract class RelayBindingsModule {
 
     @Binds
     abstract fun bindTimelineEventLoader(impl: MesEventLoader): TimelineEventLoader
+
+    @Binds
+    abstract fun bindRelaySkipCheck(impl: RelayCapabilitiesStore): RelaySkipCheck
 }

@@ -1,18 +1,30 @@
 package com.unsilence.app.data.relay
 
+import android.util.Log
+
+private const val TAG = "RelayUrlUtil"
+
 /**
  * Normalize a relay URL for consistent storage and comparison.
- * Rules: trim → strip http(s):// → prepend wss:// if missing → validate domain has dot → strip trailing slash.
- * Returns null if the URL is blank or has no valid domain.
+ * Rules: trim → strip http(s):// → reject ws:// (cleartext blocked by Android NSP) →
+ * prepend wss:// if missing → validate domain has dot → strip trailing slash.
+ * Returns null if the URL is blank, cleartext, or has no valid domain.
  */
 fun normalizeRelayUrl(raw: String): String? {
     var url = raw.trim().removeSuffix("/")
     if (url.isBlank()) return null
     url = url.removePrefix("https://").removePrefix("http://")
-    if (!url.startsWith("wss://") && !url.startsWith("ws://")) {
+    // Reject cleartext WebSocket — Android Network Security Policy blocks ws://
+    // in release builds. No path to success; reject at the gate so the URL never
+    // reaches the connection layer, the pool, or RelayCapabilitiesStore.
+    if (url.startsWith("ws://")) {
+        Log.w(TAG, "Rejecting cleartext URL (Android NSP blocks): $url")
+        return null
+    }
+    if (!url.startsWith("wss://")) {
         url = "wss://$url"
     }
-    val host = url.removePrefix("wss://").removePrefix("ws://").split("/").firstOrNull() ?: return null
+    val host = url.removePrefix("wss://").split("/").firstOrNull() ?: return null
     if (!host.contains(".")) return null
     return url
 }

@@ -37,7 +37,7 @@ class EventProcessorInvariantsTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore(object : MuteKeyProvider {})
+        store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         processor = EventProcessor(store, SignatureVerifier())
         processor.setTestVerifier(passVerifier)
         // Stop drainers — tests use drainForTest() for synchronous channel drain.

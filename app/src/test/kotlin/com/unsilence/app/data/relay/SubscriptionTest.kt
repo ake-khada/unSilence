@@ -28,7 +28,7 @@ class SubscriptionTest {
     fun setUp() {
         transport = FakeRelayTransport()
         tapRegistry = FakeTapRegistration()
-        subscription = Subscription(transport, tapRegistry, FakeReconnectSource())
+        subscription = Subscription(transport, tapRegistry, FakeReconnectSource(), FakeRelayCapabilitiesStore())
     }
 
     @Test

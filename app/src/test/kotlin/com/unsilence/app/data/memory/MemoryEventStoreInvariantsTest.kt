@@ -29,7 +29,7 @@ class MemoryEventStoreInvariantsTest {
 
     @Before
     fun setUp() {
-        store = MemoryEventStore(object : MuteKeyProvider {})
+        store = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -570,7 +570,7 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Restore into fresh store
-            val restored = MemoryEventStore(object : MuteKeyProvider {})
+            val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Verify events (kind-3 is persisted in ---FOLLOWS--- section, not eventsById)
@@ -617,7 +617,7 @@ class MemoryEventStoreInvariantsTest {
             tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
 
             // Fresh store — subscribe to flows BEFORE restore
-            val restored = MemoryEventStore(object : MuteKeyProvider {})
+            val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
 
             // Before restore, feedEvents should be empty
             assertTrue(restored.feedEvents(defaultFilter).isEmpty())
@@ -798,7 +798,7 @@ class MemoryEventStoreInvariantsTest {
             val fileSizeKB = tmpFile.length() / 1024.0
 
             // Measure restore
-            val restored = MemoryEventStore(object : MuteKeyProvider {})
+            val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
             val restoreStart = System.nanoTime()
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
             val restoreMs = (System.nanoTime() - restoreStart) / 1_000_000.0
@@ -828,7 +828,7 @@ class MemoryEventStoreInvariantsTest {
         try {
             tmpFile.writeText("SNAPSHOT_V99\nsome garbage data\n")
 
-            val restored = MemoryEventStore(object : MuteKeyProvider {})
+            val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
             tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
 
             // Store should remain completely empty — no crash, no partial load
@@ -859,7 +859,7 @@ class MemoryEventStoreInvariantsTest {
     @Test
     fun `restoreSnapshotFrom is idempotent across multiple calls`() = runTest {
         // Populate a source store with events + engagement that produces aggregates
-        val source = MemoryEventStore(object : MuteKeyProvider {})
+        val source = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         source.insert(event(id = "e1", kind = 1))
         source.insert(event(id = "e2", kind = 1, replyToId = "e1", tags = listOf(listOf("e", "e1"))))
         source.insert(event(id = "r1", kind = 7, tags = listOf(listOf("e", "e1"))))
@@ -869,7 +869,7 @@ class MemoryEventStoreInvariantsTest {
         val snapshotData = snapshot.toString()
 
         // Restore once
-        val target = MemoryEventStore(object : MuteKeyProvider {})
+        val target = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         target.restoreSnapshotFrom(StringReader(snapshotData).buffered())
         val firstReplyCount = target.replyCount("e1")
         val firstReactionCount = target.reactionCount("e1")
@@ -3385,7 +3385,7 @@ class MemoryEventStoreInvariantsTest {
         sw.buffered().use { store.saveSnapshotTo(it) }
         val snapshotData = sw.toString()
 
-        val restored = MemoryEventStore(object : MuteKeyProvider {})
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
         restored.restoreSnapshotFrom(StringReader(snapshotData).buffered())
 
         // Verify kind-6 JSON content survived intact
