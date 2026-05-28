@@ -23,11 +23,14 @@ private val CAPS_KEY = stringPreferencesKey("caps_json")
 
 /** Structural rejection prefixes that teach us something reusable about the relay. */
 private val STRUCTURAL_PREFIXES = setOf(
-    "auth-required", "blocked", "restricted", "invalid", "error",
+    "blocked", "restricted", "invalid", "error",
 )
 
 /** Transient prefixes — don't record these, they don't predict future behavior. */
-private val TRANSIENT_PREFIXES = setOf("rate-limited", "pow", "duplicate")
+private val TRANSIENT_PREFIXES = setOf("auth-required", "rate-limited", "pow", "duplicate")
+
+/** Entries older than this are evicted on load — transient failures heal between sessions. */
+private const val STRIKE_TTL_MS = 24 * 60 * 60 * 1000L  // 24 hours
 
 const val MAX_CAPABILITY_STRIKES = 3
 
@@ -76,8 +79,29 @@ class RelayCapabilitiesStore @Inject constructor(
         val raw = context.relayCapsDataStore.data.first()[CAPS_KEY] ?: return
         runCatching { json.decodeFromString(serializer, raw) }
             .onSuccess { map ->
-                caps.putAll(map)
-                Log.d(TAG, "Loaded ${map.size} relay capabilities")
+                // Evict stale entries — transient failures shouldn't poison across sessions
+                val now = System.currentTimeMillis()
+                val fresh = map.filter { (_, c) ->
+                    c.restricted || (now - c.lastStrikeAt) < STRIKE_TTL_MS
+                }
+                val evicted = map.size - fresh.size
+                // Clear legacy authRequired flags — auth is handled by the auth pipeline
+                val cleaned = fresh.mapValues { (_, c) ->
+                    if (c.authRequired) c.copy(authRequired = false) else c
+                }
+                caps.putAll(cleaned)
+                Log.w(TAG, "Loaded ${cleaned.size} relay capabilities (evicted $evicted stale)")
+                // Dump skippable relays on load for diagnostics
+                val skippable = cleaned.filter { (_, c) -> c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES }
+                if (skippable.isNotEmpty()) {
+                    for ((url, c) in skippable) {
+                        Log.w(TAG, "  WILL-SKIP: $url restricted=${c.restricted} strikes=${c.strikes} reason='${c.lastReason}'")
+                    }
+                }
+                // Persist cleaned data so stale entries don't re-load
+                if (evicted > 0 || fresh.any { (k, _) -> map[k]?.authRequired == true }) {
+                    GlobalScope.launch(Dispatchers.IO) { persist() }
+                }
             }
             .onFailure { Log.w(TAG, "Failed to parse relay capabilities: ${it.message}") }
     }
@@ -91,7 +115,11 @@ class RelayCapabilitiesStore @Inject constructor(
     /** True when the relay should be skipped for all REQs. */
     override fun shouldSkip(relayUrl: String): Boolean {
         val c = get(relayUrl) ?: return false
-        return c.authRequired || c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES
+        val skip = c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES
+        if (skip) {
+            Log.w(TAG, "shouldSkip=true: $relayUrl restricted=${c.restricted} strikes=${c.strikes} reason='${c.lastReason}'")
+        }
+        return skip
     }
 
     /**
@@ -144,7 +172,7 @@ class RelayCapabilitiesStore @Inject constructor(
 
         caps[key] = updated
         persist()
-        Log.d(TAG, "Learned from $key: strikes=${updated.strikes} auth=${updated.authRequired} restricted=${updated.restricted} reason='${updated.lastReason}'")
+        Log.w(TAG, "Learned from $key: prefix='$effectivePrefix' strikes=${updated.strikes} auth=${updated.authRequired} restricted=${updated.restricted} reason='${updated.lastReason}'")
     }
 
     private fun applyRejection(
@@ -152,12 +180,10 @@ class RelayCapabilitiesStore @Inject constructor(
         prefix: String,
         reason: String,
     ): RelayCapabilities {
-        val authReq = existing.authRequired || prefix == "auth-required"
         val restricted = existing.restricted ||
             prefix == "restricted" ||
             reason.contains("white-list", ignoreCase = true)
         return existing.copy(
-            authRequired = authReq,
             restricted = restricted,
             strikes = existing.strikes + 1,
             lastStrikeAt = System.currentTimeMillis(),
@@ -171,6 +197,21 @@ class RelayCapabilitiesStore @Inject constructor(
         context.relayCapsDataStore.edit { it[CAPS_KEY] = encoded }
     }
 
+    /**
+     * Clear transport strikes for [url] on successful connection.
+     * Restricted relays stay restricted — only transient strike accumulation is forgiven.
+     */
+    fun clearTransportStrikes(url: String) {
+        val key = normalizeRelayUrl(url) ?: return
+        val existing = caps[key] ?: return
+        if (existing.restricted) return  // policy rejections are permanent
+        if (existing.strikes == 0) return // nothing to clear
+        val cleared = existing.copy(strikes = 0, lastReason = "")
+        caps[key] = cleared
+        Log.w(TAG, "Cleared transport strikes for $key (was ${existing.strikes}, reason='${existing.lastReason}')")
+        GlobalScope.launch(Dispatchers.IO) { persist() }
+    }
+
     fun dump(): String =
         caps.entries
             .sortedByDescending { it.value.strikes }
@@ -179,9 +220,9 @@ class RelayCapabilitiesStore @Inject constructor(
             }
 
     companion object {
-        /** DNS and cleartext failures are structurally permanent — instant skip (weight = threshold). */
+        /** Cleartext is a policy violation (Android NSP) — instant skip.
+         *  Everything else accumulates gradually so transient failures heal. */
         internal fun strikesForReason(reason: SkipReason): Int = when (reason) {
-            SkipReason.DNS_RESOLUTION,
             SkipReason.CLEARTEXT_BLOCKED -> MAX_CAPABILITY_STRIKES
             else -> 1
         }

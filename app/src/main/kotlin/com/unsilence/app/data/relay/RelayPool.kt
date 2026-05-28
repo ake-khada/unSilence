@@ -35,6 +35,7 @@ import kotlinx.serialization.json.put
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.PaginatedFetchResult
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
@@ -65,6 +66,7 @@ enum class ConnectionPurpose {
  *  live subscriptions. Implemented by [Subscription]. */
 interface ActiveSubsSource {
     fun activeRelayUrls(): Set<String>
+    fun activeSubIds(): Set<String>
 }
 
 /**
@@ -192,6 +194,20 @@ class RelayPool @Inject constructor(
     /** Auth event IDs awaiting OK response — maps eventId → relay URL. */
     private val pendingAuthEventIds = ConcurrentHashMap<String, String>()
 
+    /** Consecutive auth-required rejections per relay since last real OK.
+     *  Reset on real OK. */
+    private val authRejectionStreak = ConcurrentHashMap<String, Int>()
+
+    /** Relays whose auth repeatedly failed — excluded from fan-out.
+     *  Session-scoped (in-memory). Cleared on logout via disconnectAll(). */
+    private val authUnavailableRelays = ConcurrentHashMap.newKeySet<String>()
+
+    /** Emitted when a relay is determined to require auth we can't satisfy. */
+    private val _relayAuthUnavailable = MutableSharedFlow<String>(
+        replay = 0, extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val relayAuthUnavailable: SharedFlow<String> = _relayAuthUnavailable.asSharedFlow()
+
     /** Publish OK callbacks — maps eventId → callback receiving (relayUrl, success, message). */
     private val publishOkCallbacks = ConcurrentHashMap<String, (String, Boolean, String) -> Unit>()
 
@@ -306,6 +322,7 @@ class RelayPool @Inject constructor(
         const val RELAY_MONITOR_URL = "wss://relay.nostr.watch"
         const val RELAY_MONITOR_PUBKEY =
             "9bbbb845e5b6c831c29789900769843ab43bb5047abe697870cb50b6fc9bf923"
+        const val MAX_AUTH_REJECTIONS = 3
     }
 
     /** Active one-shot sub count per relay URL. */
@@ -413,7 +430,7 @@ class RelayPool @Inject constructor(
                 }
             }
         }
-        Log.d(TAG, "Pool: total=${connections.size} $purposeCounts")
+        Log.w(TAG, "Pool: total=${connections.size} $purposeCounts")
     }
 
     /**
@@ -528,10 +545,11 @@ class RelayPool @Inject constructor(
                     val toCloseTarget = connections.size - POOL_SWEEP_CAP
                     val toCloseActual = candidates.size.coerceAtMost(toCloseTarget)
                     for (url in candidates.take(toCloseActual)) {
-                        connections[url]?.close()
-                        connections.remove(url)
+                        // Map-before-close: remove first so listenForEvents.finally sees identity mismatch
+                        val conn = connections.remove(url) ?: continue
                         connectionPurposes.remove(url)
                         connectionLastActivity.remove(url)
+                        conn.close()
                         Log.w(TAG, "Pool over cap, force-closed: $url")
                     }
                     if (toCloseActual < toCloseTarget) {
@@ -604,6 +622,10 @@ class RelayPool @Inject constructor(
         return null
     }
 
+    /** True when a relay has been marked auth-unavailable this session. */
+    override fun isAuthUnavailable(url: String): Boolean =
+        normalizeRelayUrl(url)?.let { it in authUnavailableRelays } ?: false
+
     private fun updateConnectionStates() {
         _connectionStates.value = connections.mapValues { it.value.state.value }
     }
@@ -630,15 +652,45 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
-            if (relayCapabilitiesStore.shouldSkip(url)) continue
-            if (!canOpenNewConnection()) continue
+            if (relayCapabilitiesStore.shouldSkip(url)) {
+                val caps = relayCapabilitiesStore.get(url)
+                Log.w(TAG, "connectAndAwait GATE-SKIP: $url auth=${caps?.authRequired} restricted=${caps?.restricted} strikes=${caps?.strikes} reason='${caps?.lastReason}'")
+                continue
+            }
+            // Read-decide-write: check existing entry state before creating new
+            val existing = connections[url]
+            if (existing != null) {
+                val s = existing.state.value
+                if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
+                    Log.w(TAG, "connectAndAwait REUSE: $url state=$s")
+                    continue
+                }
+                // Stale (DISCONNECTED/FAILED) — evict and replace
+                if (!canOpenNewConnection()) {
+                    // Still counts as evict: we're replacing, not adding
+                }
+                val replacement = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+                connections[url] = replacement  // map-before-close
+                existing.close()
+                connectionLastActivity[url] = System.currentTimeMillis()
+                replacement.connect()
+                scope.launch { listenForEvents(replacement) }
+                newConns.add(replacement)
+                Log.w(TAG, "connectAndAwait REPLACE: $url (was $s, pool=${connections.size})")
+                continue
+            }
+            // No existing entry — create new (subject to pool cap)
+            if (!canOpenNewConnection()) {
+                Log.w(TAG, "connectAndAwait GATE-CAP: $url blocked by pool cap (${connections.size}/$POOL_SAFETY_CAP)")
+                continue
+            }
             val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-            val existing = connections.putIfAbsent(url, candidate)
-            if (existing != null) continue
+            connections[url] = candidate
             connectionLastActivity[url] = System.currentTimeMillis()
             candidate.connect()
             scope.launch { listenForEvents(candidate) }
             newConns.add(candidate)
+            Log.w(TAG, "connectAndAwait NEW: $url (pool=${connections.size})")
         }
         if (newConns.isEmpty()) {
             // All URLs already in pool — wait for at least one to be connected.
@@ -669,12 +721,14 @@ class RelayPool @Inject constructor(
         while (System.currentTimeMillis() < deadline) {
             val ready = newConns.count { it.isConnected }
             if (ready > 0) {
+                newConns.filter { it.isConnected }.forEach { relayCapabilitiesStore.clearTransportStrikes(it.url) }
                 Log.d(TAG, "connectAndAwait: $ready/${newConns.size} relay(s) ready")
                 return ready
             }
             delay(50)
         }
         val ready = newConns.count { it.isConnected }
+        newConns.filter { it.isConnected }.forEach { relayCapabilitiesStore.clearTransportStrikes(it.url) }
         Log.w(TAG, "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready")
         return ready
     }
@@ -872,22 +926,49 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
-            if (relayCapabilitiesStore.shouldSkip(url)) continue
-            if (!canOpenNewConnection()) continue
+            if (relayCapabilitiesStore.shouldSkip(url)) {
+                val caps = relayCapabilitiesStore.get(url)
+                Log.w(TAG, "connect GATE-SKIP: $url auth=${caps?.authRequired} restricted=${caps?.restricted} strikes=${caps?.strikes} reason='${caps?.lastReason}'")
+                continue
+            }
+            // Read-decide-write: check existing entry state before creating new
+            val existing = connections[url]
+            if (existing != null) {
+                val s = existing.state.value
+                if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
+                    Log.w(TAG, "connect REUSE: $url state=$s")
+                    continue
+                }
+                // Stale (DISCONNECTED/FAILED) — evict and replace
+                val replacement = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+                connections[url] = replacement  // map-before-close
+                existing.close()
+                connectionLastActivity[url] = System.currentTimeMillis()
+                scope.launch {
+                    replacement.connect()
+                    listenForEvents(replacement)
+                }
+                Log.w(TAG, "connect REPLACE: $url (was $s, pool=${connections.size})")
+                continue
+            }
+            // No existing entry — create new (subject to pool cap)
+            if (!canOpenNewConnection()) {
+                Log.w(TAG, "connect GATE-CAP: $url blocked by pool cap (${connections.size}/$POOL_SAFETY_CAP)")
+                continue
+            }
             val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-            val existing = connections.putIfAbsent(url, candidate)
-            if (existing != null) continue
+            connections[url] = candidate
             connectionLastActivity[url] = System.currentTimeMillis()
             scope.launch {
                 candidate.connect()
                 listenForEvents(candidate)
             }
         }
-        Log.d(TAG, "Pool has ${connections.size} connections")
+        Log.w(TAG, "Pool has ${connections.size} connections")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
-        try {
+        try { try {
             conn.messages.consumeEach { raw ->
                 connectionLastActivity[conn.url] = System.currentTimeMillis()
                 // Fire taps for ALL message types (EVENT/EOSE/CLOSED).
@@ -923,7 +1004,7 @@ class RelayPool @Inject constructor(
                 if (raw.startsWith("[\"AUTH\"")) {
                     val challenge = raw.substringAfter("[\"AUTH\",\"", "").substringBefore("\"")
                     if (challenge.isNotEmpty()) {
-                        Log.d(TAG, "AUTH challenge from ${conn.url}: ${challenge.take(20)}…")
+                        Log.w(TAG, "AUTH challenge from ${conn.url}: ${challenge.take(20)}…")
                         handleAuthChallenge(conn, challenge)
                     }
                     return@consumeEach
@@ -934,27 +1015,61 @@ class RelayPool @Inject constructor(
                         val arr = NostrJson.parseToJsonElement(raw).jsonArray
                         val closedSubId = arr[1].jsonPrimitive.content
                         val reason = arr.getOrNull(2)?.jsonPrimitive?.content ?: ""
+                        val category = when {
+                            isOneShotSubscription(closedSubId) -> "one-shot"
+                            closedSubId.startsWith("browse-") -> "browse"
+                            else -> "live"
+                        }
                         if (reason.startsWith("auth-required")) {
-                            Log.d(TAG, "CLOSED auth-required for sub '$closedSubId' on ${conn.url}: $reason")
-                            val challenge = pendingChallenges[conn.url]
-                            if (challenge != null && conn.url !in authenticatedRelays) {
-                                handleAuthChallenge(conn, challenge)
-                            } else if (conn.url in authenticatedRelays) {
-                                // Already authed — notify browse session to resend.
-                                if (closedSubId.startsWith("browse-")) {
-                                    _onRelayReconnected.tryEmit(conn.url)
-                                    Log.d(TAG, "Notified subscribers to resend closed sub '$closedSubId' on ${conn.url}")
+                            Log.w(TAG, "CLOSED auth-required $category sub '$closedSubId' on ${conn.url}: $reason " +
+                                "(hasPendingChallenge=${pendingChallenges.containsKey(conn.url)} " +
+                                "authenticated=${conn.url in authenticatedRelays} " +
+                                "authInFlight=${conn.url in authInFlight} " +
+                                "streak=${authRejectionStreak[conn.url] ?: 0} " +
+                                "unavailable=${conn.url in authUnavailableRelays})")
+                            when {
+                                conn.url in authUnavailableRelays -> {
+                                    Log.d(TAG, "auth-required on unavailable relay ${conn.url} for '$closedSubId' — ignoring")
                                 }
-                            } else if (conn.url !in authFailedRelays) {
-                                Log.w(TAG, "CLOSED auth-required for '$closedSubId' on ${conn.url} but no challenge cached (suppressing future warnings)")
-                                authFailedRelays.add(conn.url)
+                                else -> {
+                                    val streak = authRejectionStreak.merge(conn.url, 1, Int::plus) ?: 1
+                                    authenticatedRelays.remove(conn.url)
+                                    if (streak >= MAX_AUTH_REJECTIONS) {
+                                        authUnavailableRelays.add(conn.url)
+                                        authInFlight.remove(conn.url)
+                                        pendingAuthEventIds.values.removeAll { it == conn.url }
+                                        _relayAuthUnavailable.tryEmit(conn.url)
+                                        Log.w(TAG, "AUTH: ${conn.url} rejected $streak times — marking unavailable")
+                                    } else {
+                                        val challenge = pendingChallenges[conn.url]
+                                        if (challenge != null) {
+                                            Log.w(TAG, "AUTH: rejected on ${conn.url} (streak=$streak) — re-authenticating")
+                                            handleAuthChallenge(conn, challenge)
+                                        } else {
+                                            Log.w(TAG, "AUTH: rejected on ${conn.url} (streak=$streak) but no challenge cached")
+                                        }
+                                    }
+                                }
                             }
                         } else if (reason.contains("rate-limit", ignoreCase = true) ||
                                reason.contains("too many", ignoreCase = true)) {
                             markRelayRateLimited(conn.url)
-                            Log.w(TAG, "CLOSED rate-limited sub '$closedSubId' on ${conn.url}: $reason")
+                            Log.w(TAG, "CLOSED rate-limited $category sub '$closedSubId' on ${conn.url}: $reason")
                         } else {
-                            Log.d(TAG, "CLOSED sub '$closedSubId' on ${conn.url}: $reason")
+                            Log.w(TAG, "CLOSED $category sub '$closedSubId' on ${conn.url}: reason='$reason'")
+                        }
+                        // Mechanism S: relay closed sub without dropping WS. For live subs
+                        // (still active in Subscription), emit reconnect signal so
+                        // Subscription.resumeRelay re-issues the REQ. Skip one-shot and
+                        // auth-required (already handled above).
+                        if (!isOneShotSubscription(closedSubId) &&
+                            !reason.startsWith("auth-required")) {
+                            val activeIds = runCatching { activeSubsSource.get().activeSubIds() }
+                                .getOrDefault(emptySet())
+                            if (closedSubId in activeIds) {
+                                _onRelayReconnected.tryEmit(conn.url)
+                                Log.w(TAG, "RESUB: live sub '$closedSubId' closed on ${conn.url}, notified resub")
+                            }
                         }
                         // A CLOSED relay won't send EOSE — release its slot and
                         // count it as done for coverage so it doesn't force a full timeout.
@@ -1008,6 +1123,38 @@ class RelayPool @Inject constructor(
             }
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
+        }
+        } finally {
+            // Loop exited — connection dropped or closed. Decide whether to revive.
+            val url = conn.url
+            val current = connections[url]
+
+            // Identity check: if map already points to a different conn (replaced by
+            // reconnectWithBackoff, sweep, etc.), don't race the new connection.
+            if (current !== conn) {
+                Log.w(TAG, "listenForEvents exit: $url replaced, no reconnect")
+                return
+            }
+
+            val purposes = connectionPurposes[url]
+            val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
+                .getOrDefault(emptySet())
+            val lastActivity = connectionLastActivity[url] ?: 0L
+            val recentlyActive = (System.currentTimeMillis() - lastActivity) < 300_000L
+            val stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls || recentlyActive
+            val notSkipped = !relayCapabilitiesStore.shouldSkip(url)
+
+            Log.w(TAG, "listenForEvents exit: $url state=${conn.state.value} " +
+                "purposes=$purposes inActiveSubs=${url in activeSubUrls} " +
+                "recentlyActive=$recentlyActive shouldSkip=${!notSkipped} " +
+                "→ reconnect=${stillNeeded && notSkipped}")
+
+            if (stillNeeded && notSkipped) {
+                reconnectWithBackoff(url)
+            } else {
+                // No purpose, not in active subs, not recent — clean up the dead entry
+                connections.remove(url, conn)
+            }
         }
     }
 
@@ -2652,9 +2799,12 @@ class RelayPool @Inject constructor(
      * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
      */
     private fun reconnectWithBackoff(url: String, attempt: Int = 0) {
-        // Don't waste reconnect attempts on transport-skipped relays
-        if (relayCapabilitiesStore.shouldSkip(url)) {
-            Log.d(TAG, "Skipping reconnect for transport-skipped $url")
+        // Only block reconnect for permanent policy rejections (restricted).
+        // Transport strikes heal on successful connection — let the 8-attempt
+        // backoff handle transient failures without the strike system killing it.
+        val caps = relayCapabilitiesStore.get(url)
+        if (caps?.restricted == true) {
+            Log.w(TAG, "Skipping reconnect for restricted relay $url")
             connections.remove(url)?.close()
             return
         }
@@ -2669,13 +2819,17 @@ class RelayPool @Inject constructor(
                     delay(delayMs)
                 }
 
-                connections[url]?.close()
+                // Map-before-close: put new entry first so listenForEvents.finally
+                // on the old conn sees identity mismatch and skips reconnect
+                val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+                val old = connections.put(url, conn)
                 authenticatedRelays.remove(url)
                 pendingChallenges.remove(url)
                 authFailedRelays.remove(url)
+                authRejectionStreak.remove(url)
+                authUnavailableRelays.remove(url)
                 pendingAuthEventIds.values.removeAll { it == url }
-                val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-                connections[url] = conn
+                old?.close()
                 connectionLastActivity[url] = System.currentTimeMillis()
                 conn.connect()
 
@@ -2688,6 +2842,7 @@ class RelayPool @Inject constructor(
 
                 if (conn.state.value == RelayState.CONNECTED) {
                     guard.set(false)
+                    relayCapabilitiesStore.clearTransportStrikes(url)
                     updateConnectionStates()
                     _onRelayReconnected.tryEmit(url)
                     // Resend persistent own-mute-live subscription if this relay carries it
@@ -2699,7 +2854,7 @@ class RelayPool @Inject constructor(
                         liveNotifSubReq?.let { conn.send(it) }
                     }
                     scope.launch { listenForEvents(conn) }
-                    Log.d(TAG, "Reconnected $url")
+                    Log.w(TAG, "Reconnected $url (attempt=$attempt)")
                 } else {
                     guard.set(false)
                     if (attempt < 8) {
@@ -2720,59 +2875,80 @@ class RelayPool @Inject constructor(
 
     /**
      * NIP-42: Sign and send an AUTH response for the given relay challenge.
-     * After successful auth, notifies browse sessions for re-subscription.
+     * A fresh challenge supersedes any prior auth — the relay is the authority
+     * on our auth state, not our local set.
      */
     private fun handleAuthChallenge(conn: RelayConnection, challenge: String) {
         val url = conn.url
         pendingChallenges[url] = challenge
 
-        // Skip if already authenticated or auth is in flight
-        if (url in authenticatedRelays) {
-            Log.d(TAG, "AUTH: already authenticated to $url, skipping")
+        if (url in authUnavailableRelays) {
+            Log.d(TAG, "AUTH: $url marked unavailable, not retrying")
             return
         }
+
+        // A fresh challenge supersedes any prior (possibly optimistic) auth.
+        if (url in authenticatedRelays) {
+            Log.w(TAG, "AUTH: re-challenged by $url — clearing stale auth, re-authenticating")
+            authenticatedRelays.remove(url)
+        }
+
         if (!authInFlight.add(url)) {
-            Log.d(TAG, "AUTH: already in flight for $url, skipping")
+            Log.w(TAG, "AUTH: already in flight for $url, skipping")
             return
         }
 
         scope.launch {
             try {
-                val normalizedUrl = NormalizedRelayUrl(url)
+                // Use Quartz's normalizer — it adds trailing slash for root-path
+                // relays (wss://host/ not wss://host), matching how relays
+                // validate the relay tag in NIP-42 auth events.
+                val normalizedUrl = RelayUrlNormalizer.normalize(url)
                 val template = RelayAuthEvent.build(normalizedUrl, challenge)
                 val signed = signingManager.sign(template)
 
                 if (signed == null) {
                     Log.w(TAG, "AUTH: signing failed for $url (signer returned null)")
+                    authInFlight.remove(url)
                     return@launch
                 }
 
-                // Send ["AUTH", {signed event JSON}]
                 val authJson = """["AUTH",${signed.toJson()}]"""
                 val sent = conn.send(authJson)
 
                 if (sent) {
-                    // Track event ID — relay will respond with ["OK", eventId, true/false, "..."]
                     pendingAuthEventIds[signed.id] = url
-                    Log.d(TAG, "AUTH: sent auth response to $url (eventId=${signed.id.take(8)}…)")
+                    Log.w(TAG, "AUTH: sent auth response to $url (eventId=${signed.id.take(8)}…)")
 
-                    // 10s fallback: if the relay never sends OK, optimistically mark as authenticated.
-                    // Prevents indefinite auth-pending state for non-compliant relays.
-                    scope.launch {
-                        delay(10_000)
-                        if (pendingAuthEventIds.remove(signed.id) != null) {
-                            Log.w(TAG, "AUTH: OK timeout for $url — falling back to optimistic auth")
-                            completeAuth(conn, url)
+                    // Optimistic fallback ONLY for relays with a clean record.
+                    // Once a relay has rejected us (streak > 0), require a real OK.
+                    val streak = authRejectionStreak[url] ?: 0
+                    if (streak == 0) {
+                        scope.launch {
+                            delay(10_000)
+                            if (pendingAuthEventIds.remove(signed.id) != null) {
+                                Log.w(TAG, "AUTH: OK timeout for $url — optimistic auth (clean record)")
+                                completeAuth(conn, url, real = false)
+                            }
+                        }
+                    } else {
+                        // No optimism — require real OK. Clean up after grace period.
+                        scope.launch {
+                            delay(10_000)
+                            if (pendingAuthEventIds.remove(signed.id) != null) {
+                                authInFlight.remove(url)
+                                Log.w(TAG, "AUTH: no OK for $url (streak=$streak), not optimistic")
+                            }
                         }
                     }
                 } else {
                     Log.w(TAG, "AUTH: failed to send auth to $url (connection closed?)")
+                    authInFlight.remove(url)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "AUTH: error authenticating to $url", e)
                 authInFlight.remove(url)
             }
-            // authInFlight removed by handleOk/completeAuth/timeout, not here
         }
     }
 
@@ -2793,8 +2969,8 @@ class RelayPool @Inject constructor(
             // Check if this OK is for a pending auth event
             val url = pendingAuthEventIds.remove(eventId) ?: return
             if (success) {
-                Log.d(TAG, "AUTH OK: relay $url accepted auth (eventId=${eventId.take(8)}…)")
-                completeAuth(conn, url)
+                Log.w(TAG, "AUTH OK: relay $url accepted auth (eventId=${eventId.take(8)}…)")
+                completeAuth(conn, url, real = true)
             } else {
                 Log.w(TAG, "AUTH REJECTED: relay $url rejected auth: $message")
                 authInFlight.remove(url)
@@ -2805,14 +2981,18 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Mark relay as authenticated and notify browse sessions.
-     * Shared by OK handler and timeout fallback.
+     * Mark relay as authenticated and replay all live subs.
+     * @param real true when confirmed by relay OK; false for optimistic timeout.
+     *             Real OK resets the rejection streak; optimistic does not.
      */
-    private fun completeAuth(conn: RelayConnection, url: String) {
+    private fun completeAuth(conn: RelayConnection, url: String, real: Boolean) {
         authenticatedRelays.add(url)
         authInFlight.remove(url)
+        if (real) {
+            authRejectionStreak.remove(url)
+        }
         _onRelayReconnected.tryEmit(url)
-        Log.d(TAG, "AUTH: completed for $url — notified subscribers")
+        Log.w(TAG, "AUTH: completed for $url (real=$real) — notified subscribers")
     }
 
     // ── Reconnect signal ──────────────────────────────────────────────────
@@ -2841,15 +3021,17 @@ class RelayPool @Inject constructor(
         if (purposes != null && purposes.isNotEmpty()) return  // still in use
         val lastActivity = connectionLastActivity[url] ?: 0L
         if (System.currentTimeMillis() - lastActivity < 60_000L) return  // recent
-        connections[url]?.close()
-        connections.remove(url)
+        // Map-before-close: remove first so listenForEvents.finally sees identity mismatch
+        val conn = connections.remove(url) ?: return
         connectionLastActivity.remove(url)
         connectionPurposes.remove(url)
+        conn.close()
         Log.d(TAG, "Released unused connection: $url")
     }
 
     fun disconnectAll() {
-        connections.values.forEach { it.close() }
+        // Map-before-close: snapshot then clear so listenForEvents.finally sees empty map
+        val snapshot = ArrayList(connections.values)
         connections.clear()
         connectionPurposes.clear()
         profileFetchAttempted.clear()
@@ -2862,9 +3044,13 @@ class RelayPool @Inject constructor(
         pendingChallenges.clear()
         authFailedRelays.clear()
         pendingAuthEventIds.clear()
+        authRejectionStreak.clear()
+        authUnavailableRelays.clear()
         relayOneShotCount.clear()
         relayReqQueue.clear()
         connectionLastActivity.clear()
+        // Close after all maps are cleared
+        snapshot.forEach { it.close() }
         Log.d(TAG, "disconnectAll: all connections, purposes, and auth state cleared")
     }
 }

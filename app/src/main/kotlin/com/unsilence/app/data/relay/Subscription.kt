@@ -92,6 +92,12 @@ class Subscription @Inject constructor(
             .flatMap { it.urls }
             .toSet()
 
+    override fun activeSubIds(): Set<String> =
+        subs.entries
+            .filterNot { (_, s) -> s.isPaused }
+            .map { it.key }
+            .toSet()
+
     private val seqCounter = AtomicLong(0)
     private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
     private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -139,6 +145,7 @@ class Subscription @Inject constructor(
             onclose = onclose,
         )
         subs[subId] = state
+        Log.w(TAG, "SUB-DISPATCH: $subId to ${urls.size} relays, filter=${filter.toJsonObject()}")
 
         try {
             // Connection establishment is the caller's responsibility for
@@ -149,14 +156,26 @@ class Subscription @Inject constructor(
 
             // Send REQ to each relay, skipping those with known structural rejections.
             val failedUrls = mutableListOf<String>()
+            var skippedCount = 0
             for (url in urls) {
                 if (relayCapabilitiesStore.shouldSkip(url)) {
+                    skippedCount++
+                    Log.w(TAG, "SUB-SKIP: $subId skipping $url (cap store)")
                     handleRelayEose(subId, url) // count as done so EOSE threshold isn't blocked
+                    continue
+                }
+                if (transport.isAuthUnavailable(url)) {
+                    skippedCount++
+                    Log.w(TAG, "SUB-SKIP: $subId skipping $url (auth unavailable)")
+                    handleRelayEose(subId, url)
                     continue
                 }
                 if (!transport.sendToRelay(url, req)) {
                     failedUrls.add(url)
                 }
+            }
+            if (skippedCount > 0) {
+                Log.w(TAG, "SUB-DISPATCH: $subId skipped $skippedCount/${urls.size} relays due to capabilities")
             }
 
             // Retry failed sends — connections may still be establishing after
@@ -251,6 +270,7 @@ class Subscription @Inject constructor(
     fun resumeRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         if (relayCapabilitiesStore.shouldSkip(normalized)) return
+        if (transport.isAuthUnavailable(normalized)) return
         var count = 0
         for (state in subs.values) {
             if (state.isPaused) continue
@@ -260,7 +280,8 @@ class Subscription @Inject constructor(
             transport.sendToRelay(normalized, state.reqPayload)
             count++
         }
-        if (count > 0) Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+        if (count > 0) Log.w(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+        else Log.w(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
     }
 
     // ── Internals ───────────────────────────────────────────────────────────
@@ -324,6 +345,7 @@ class Subscription @Inject constructor(
         if (state.isPaused) return  // ignore EOSE during lifecycle pause
         if (!state.eosedRelays.add(relayUrl)) return  // already EOSE'd this relay
         val allEosed = state.eosedRelays.size >= state.urls.size
+        Log.w(TAG, "EOSE: $subId from $relayUrl (${state.eosedRelays.size}/${state.urls.size} allEosed=$allEosed events=${state.knownIds.size})")
         try {
             state.oneose(allEosed)
         } catch (t: Throwable) {
