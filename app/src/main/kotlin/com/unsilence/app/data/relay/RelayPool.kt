@@ -21,7 +21,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -399,7 +402,9 @@ class RelayPool @Inject constructor(
     private fun flushRelayQueue(conn: RelayConnection) {
         val count = relayOneShotCount[conn.url] ?: return
         val queue = relayReqQueue[conn.url] ?: return
-        while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY) {
+        while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
+               queue.isNotEmpty() &&
+               canSendToRelay(conn.url)) {
             val req = queue.poll() ?: break
             count.incrementAndGet()
             conn.send(req)
@@ -721,14 +726,12 @@ class RelayPool @Inject constructor(
         while (System.currentTimeMillis() < deadline) {
             val ready = newConns.count { it.isConnected }
             if (ready > 0) {
-                newConns.filter { it.isConnected }.forEach { relayCapabilitiesStore.clearTransportStrikes(it.url) }
                 Log.d(TAG, "connectAndAwait: $ready/${newConns.size} relay(s) ready")
                 return ready
             }
             delay(50)
         }
         val ready = newConns.count { it.isConnected }
-        newConns.filter { it.isConnected }.forEach { relayCapabilitiesStore.clearTransportStrikes(it.url) }
         Log.w(TAG, "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready")
         return ready
     }
@@ -1121,39 +1124,42 @@ class RelayPool @Inject constructor(
                 }
                 // NOTE: processor.process already called at top of consumeEach
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
         }
         } finally {
-            // Loop exited — connection dropped or closed. Decide whether to revive.
-            val url = conn.url
-            val current = connections[url]
+            // Skip the reconnect decision if we're being cancelled (scope teardown).
+            // A `return` here would swallow the propagating CancellationException, so
+            // gate with `if (isActive)` and use NO `return` statements in this block.
+            if (currentCoroutineContext().isActive) {
+                val url = conn.url
+                val current = connections[url]
+                if (current !== conn) {
+                    // Map already points elsewhere (replaced by reconnect/sweep) — don't race.
+                    Log.w(TAG, "listenForEvents exit: $url replaced, no reconnect")
+                } else {
+                    val purposes = connectionPurposes[url]
+                    val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
+                        .getOrDefault(emptySet())
+                    val lastActivity = connectionLastActivity[url] ?: 0L
+                    val recentlyActive = (System.currentTimeMillis() - lastActivity) < 300_000L
+                    val stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls || recentlyActive
+                    val notSkipped = !relayCapabilitiesStore.shouldSkip(url)
 
-            // Identity check: if map already points to a different conn (replaced by
-            // reconnectWithBackoff, sweep, etc.), don't race the new connection.
-            if (current !== conn) {
-                Log.w(TAG, "listenForEvents exit: $url replaced, no reconnect")
-                return
-            }
+                    Log.w(TAG, "listenForEvents exit: $url state=${conn.state.value} " +
+                        "purposes=$purposes inActiveSubs=${url in activeSubUrls} " +
+                        "recentlyActive=$recentlyActive shouldSkip=${!notSkipped} " +
+                        "→ reconnect=${stillNeeded && notSkipped}")
 
-            val purposes = connectionPurposes[url]
-            val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
-                .getOrDefault(emptySet())
-            val lastActivity = connectionLastActivity[url] ?: 0L
-            val recentlyActive = (System.currentTimeMillis() - lastActivity) < 300_000L
-            val stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls || recentlyActive
-            val notSkipped = !relayCapabilitiesStore.shouldSkip(url)
-
-            Log.w(TAG, "listenForEvents exit: $url state=${conn.state.value} " +
-                "purposes=$purposes inActiveSubs=${url in activeSubUrls} " +
-                "recentlyActive=$recentlyActive shouldSkip=${!notSkipped} " +
-                "→ reconnect=${stillNeeded && notSkipped}")
-
-            if (stillNeeded && notSkipped) {
-                reconnectWithBackoff(url)
-            } else {
-                // No purpose, not in active subs, not recent — clean up the dead entry
-                connections.remove(url, conn)
+                    if (stillNeeded && notSkipped) {
+                        reconnectWithBackoff(url)
+                    } else {
+                        // No purpose, not in active subs, not recent — clean up the dead entry
+                        connections.remove(url, conn)
+                    }
+                }
             }
         }
     }
@@ -2065,7 +2071,10 @@ class RelayPool @Inject constructor(
         val normalized = normalizeRelayUrl(url) ?: return null
         val existing = connections[normalized]
         if (existing != null && existing.isConnected) return existing
-        if (existing != null) connections.remove(normalized)
+        if (existing != null) {
+            connections.remove(normalized)   // map-before-close
+            existing.close()
+        }
         val conn = RelayConnection(normalized, okHttpClient, relayCapabilitiesStore)
         connections[normalized] = conn
         connectionLastActivity[normalized] = System.currentTimeMillis()
@@ -2216,23 +2225,12 @@ class RelayPool @Inject constructor(
         }.toString()
 
         for (url in searchRelayUrls) {
-            val conn = connections.getOrPut(url) {
-                RelayConnection(url, okHttpClient, relayCapabilitiesStore).also { c ->
-                    scope.launch { listenForEvents(c) }
-                }
-            }
-            if (!conn.isConnected) conn.connect()
-
+            if (relayCapabilitiesStore.shouldSkip(url)) continue
             scope.launch {
-                try {
-                    conn.awaitConnected()
-                    Log.d(TAG, "Search relay ready: $url")
-                    conn.send(profileReq)
-                    conn.send(notesReq)
-                    Log.d(TAG, "Search REQs sent to $url")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Search relay $url failed: ${e.message}")
-                }
+                val conn = getOrCreateConnection(url) ?: return@launch
+                conn.send(profileReq)
+                conn.send(notesReq)
+                Log.d(TAG, "Search REQs sent to $url")
             }
         }
         // Safety-net timeout: unconditionally force-close after 10s.
@@ -2299,21 +2297,11 @@ class RelayPool @Inject constructor(
         }.toString()
 
         for (url in searchRelayUrls) {
-            val conn = connections.getOrPut(url) {
-                RelayConnection(url, okHttpClient, relayCapabilitiesStore).also { c ->
-                    scope.launch { listenForEvents(c) }
-                }
-            }
-            if (!conn.isConnected) conn.connect()
-
+            if (relayCapabilitiesStore.shouldSkip(url)) continue
             scope.launch {
-                try {
-                    conn.awaitConnected()
-                    conn.send(notesReq)
-                    Log.d(TAG, "Hashtag search REQ (#$tag) sent to $url")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Hashtag search relay $url failed: ${e.message}")
-                }
+                val conn = getOrCreateConnection(url) ?: return@launch
+                conn.send(notesReq)
+                Log.d(TAG, "Hashtag search REQ (#$tag) sent to $url")
             }
         }
         searchTimeoutJobs[token] = scope.launch {
@@ -2842,7 +2830,6 @@ class RelayPool @Inject constructor(
 
                 if (conn.state.value == RelayState.CONNECTED) {
                     guard.set(false)
-                    relayCapabilitiesStore.clearTransportStrikes(url)
                     updateConnectionStates()
                     _onRelayReconnected.tryEmit(url)
                     // Resend persistent own-mute-live subscription if this relay carries it

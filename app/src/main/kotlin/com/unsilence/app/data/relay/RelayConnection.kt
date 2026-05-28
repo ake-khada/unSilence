@@ -122,6 +122,7 @@ class RelayConnection(
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             _state.value = RelayState.CONNECTED
+            capabilitiesStore?.clearTransportStrikes(url)
             Log.w(TAG, "Connected: $url")
         }
 
