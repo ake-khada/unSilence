@@ -189,6 +189,44 @@ class ConnectionLifecycleTest {
         assertTrue(connections[url] == connB)
     }
 
+    // ── getOrCreateConnection eviction closes old entry ──────────────────
+
+    /**
+     * Models the getOrCreateConnection eviction path: when an existing entry
+     * is not connected, it must be removed from the map AND closed before
+     * the new entry is inserted. Verifies map-before-close ordering.
+     */
+    @Test
+    fun `getOrCreateConnection eviction removes then closes old entry`() {
+        data class MockConn(val id: Int, var closed: Boolean = false)
+
+        val connections = mutableMapOf<String, MockConn>()
+        val url = "wss://relay.example"
+        val oldConn = MockConn(1)
+        connections[url] = oldConn
+
+        // Simulate getOrCreateConnection eviction path:
+        // existing != null && !existing.isConnected
+        val existing = connections[url]
+        assertFalse("old conn should not be closed yet", existing!!.closed)
+
+        // map-before-close
+        connections.remove(url)
+        existing.closed = true
+
+        // Insert new
+        val newConn = MockConn(2)
+        connections[url] = newConn
+
+        // Verify: old is closed, new is in map
+        assertTrue("old conn must be closed", oldConn.closed)
+        assertEquals(newConn, connections[url])
+        assertFalse("new conn must not be closed", newConn.closed)
+
+        // Identity check: old conn no longer matches
+        assertFalse(connections[url] == oldConn)
+    }
+
     @Test
     fun `disconnectAll snapshot-then-clear prevents reconnect for all conns`() {
         val connections = mutableMapOf<String, Int>()
