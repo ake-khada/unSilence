@@ -122,7 +122,7 @@ class RelayConnection(
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             _state.value = RelayState.CONNECTED
-            Log.d(TAG, "Connected: $url")
+            Log.w(TAG, "Connected: $url")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -143,7 +143,7 @@ class RelayConnection(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "Closed $url: $code $reason")
+            Log.w(TAG, "WS closed by remote: url=$url code=$code reason='$reason' (was state=${_state.value})")
             _state.value = RelayState.DISCONNECTED
             connected.set(false)
             _messages.close()

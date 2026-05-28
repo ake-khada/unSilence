@@ -136,6 +136,10 @@ class FeedViewModel @Inject constructor(
     private val _liveArrivalIds = MutableStateFlow<Set<String>>(emptySet())
     val liveArrivalIds: StateFlow<Set<String>> = _liveArrivalIds.asStateFlow()
 
+    /** Non-null when the current SingleRelay feed's relay is auth-unavailable. */
+    private val _authUnavailableRelay = MutableStateFlow<String?>(null)
+    val authUnavailableRelay: StateFlow<String?> = _authUnavailableRelay.asStateFlow()
+
     fun clearLiveArrival(id: String) {
         _liveArrivalIds.update { it - id }
     }
@@ -262,6 +266,8 @@ class FeedViewModel @Inject constructor(
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
     fun setFeedType(type: FeedType) {
+        Log.w(TAG, "setFeedType: ${_feedType.value} → $type")
+        _authUnavailableRelay.value = null
         _feedType.value = type
         if (_coldStartState.value == ColdStartState.LOADING) {
             _coldStartState.value = if (type is FeedType.Following)
@@ -273,6 +279,7 @@ class FeedViewModel @Inject constructor(
 
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
+        Log.w(TAG, "setContentFilter: ${_contentFilter.value} → $f")
         _contentFilter.value = f
         // Pure client-side projection — feedRows recomposes via its own
         // combine on _contentFilter. NO subscription restart. See CG-R1.
@@ -444,7 +451,7 @@ class FeedViewModel @Inject constructor(
 
         relayPool.activeSingleRelayFeedUrl = newSingleRelayUrl
 
-        Log.d(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
+        Log.w(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
 
         // Close previous handle (= useEffect cleanup)
         currentHandle?.close()
@@ -487,7 +494,7 @@ class FeedViewModel @Inject constructor(
             },
             onNew    = { event -> handleNew(event) },
         )
-        Log.d(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
+        Log.w(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
 
         if (_isRefreshing.value) {
             refreshTimeoutJob = viewModelScope.launch {
@@ -506,6 +513,7 @@ class FeedViewModel @Inject constructor(
      *   if (eosed)    setInitialLoading(false)
      */
     private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
+        Log.w(TAG, "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_events.value.size}")
         if (batch.isNotEmpty()) {
             if (since == null) {
                 // First load — merge into current (which may be empty or
@@ -620,6 +628,17 @@ class FeedViewModel @Inject constructor(
     init {
         Log.d(TAG, "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}")
 
+        // Surface auth-unavailable for SingleRelay feeds
+        viewModelScope.launch {
+            relayPool.relayAuthUnavailable.collect { unavailableUrl ->
+                val current = _feedType.value
+                if (current is FeedType.SingleRelay &&
+                    normalizeRelayUrl(current.url) == normalizeRelayUrl(unavailableUrl)) {
+                    _authUnavailableRelay.value = unavailableUrl
+                }
+            }
+        }
+
         val ownPubkey = keyManager.getPublicKeyHex()
 
         // Cold-start: figure out initial feed type FIRST (no resubscribe yet),
@@ -707,7 +726,7 @@ class FeedViewModel @Inject constructor(
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
             val cached = loadCachedEvents(_feedType.value)
             if (cached.isNotEmpty() && _events.value.size < SNAPSHOT_MERGE_CEILING) {
-                Log.d(TAG, "snapshot restored: merging ${cached.size} cached events")
+                Log.w(TAG, "snapshot restored: merging ${cached.size} cached events into ${_events.value.size} current")
                 _events.update { current -> TimelineMerge.merge(current, cached) }
             }
         }

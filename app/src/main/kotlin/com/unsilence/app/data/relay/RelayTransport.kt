@@ -20,4 +20,7 @@ interface RelayTransport {
      * exists for that URL.
      */
     fun sendToRelay(url: String, msg: String): Boolean
+
+    /** True when the relay has been marked auth-unavailable this session. */
+    fun isAuthUnavailable(url: String): Boolean = false
 }

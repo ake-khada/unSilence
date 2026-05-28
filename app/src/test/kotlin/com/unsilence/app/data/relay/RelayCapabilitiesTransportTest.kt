@@ -15,8 +15,8 @@ class RelayCapabilitiesTransportTest {
     // ── Strike weight tests ────────────────────────────────────────────
 
     @Test
-    fun `DNS failure has instant-skip weight`() {
-        assertEquals(MAX_CAPABILITY_STRIKES, RelayCapabilitiesStore.strikesForReason(SkipReason.DNS_RESOLUTION))
+    fun `DNS failure has single-strike weight`() {
+        assertEquals(1, RelayCapabilitiesStore.strikesForReason(SkipReason.DNS_RESOLUTION))
     }
 
     @Test
@@ -60,9 +60,16 @@ class RelayCapabilitiesTransportTest {
     }
 
     @Test
-    fun `DNS reaches threshold in 1 occurrence`() {
-        val strikes = simulateStrikes(SkipReason.DNS_RESOLUTION)
-        assertTrue("DNS should instant-skip", strikes >= MAX_CAPABILITY_STRIKES)
+    fun `DNS needs 3 occurrences to reach threshold`() {
+        assertFalse(simulateStrikes(SkipReason.DNS_RESOLUTION) >= MAX_CAPABILITY_STRIKES)
+        assertFalse(simulateStrikes(SkipReason.DNS_RESOLUTION, SkipReason.DNS_RESOLUTION) >= MAX_CAPABILITY_STRIKES)
+        assertTrue(
+            simulateStrikes(
+                SkipReason.DNS_RESOLUTION,
+                SkipReason.DNS_RESOLUTION,
+                SkipReason.DNS_RESOLUTION,
+            ) >= MAX_CAPABILITY_STRIKES
+        )
     }
 
     @Test
