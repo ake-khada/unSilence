@@ -94,6 +94,7 @@ class AppBootstrapper @Inject constructor(
     private val cardHydrator: CardHydrator,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
     private val privateZapRepository: com.unsilence.app.data.repository.PrivateZapRepository,
+    private val outboxRelayResolver: com.unsilence.app.data.relay.OutboxRelayResolver,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -325,6 +326,17 @@ class AppBootstrapper @Inject constructor(
             } else {
                 Log.d(TAG, "Phase2: kind-10002 cached for all ${followsToFetchRelayLists.size} follows")
             }
+            // Build the coverage-ranked outbox allowlist. Ephemeral connections
+            // to relays outside this set are skipped to shrink the DNS failure
+            // surface. Must run AFTER kind-10002 is fetched/cached so
+            // writeRelaysFor() returns real data for each author.
+            // Blocked relays are enforced at shouldSkip/connectAndAwait level —
+            // pass empty here, the allowlist is coverage-only.
+            val allowlist = outboxRelayResolver.selectOutboxRelays(
+                follows = follows ?: emptySet(),
+                blockedRelays = relayPool.getBlockedUrls(),
+            )
+            relayPool.setOutboxAllowlist(allowlist)
         }
 
         // Settle the mute list: wait for the relay fetch to complete (or timeout)

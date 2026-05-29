@@ -95,6 +95,15 @@ class RelayPool @Inject constructor(
     private val wsDispatcher = Dispatchers.IO.limitedParallelism(8)
     private val scope = CoroutineScope(SupervisorJob() + wsDispatcher)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
+
+    /** Relay URLs deferred during network-down/DNS-degraded. Drained with jitter
+     *  when the network recovers (checked in the 60s sweep). */
+    private val pendingReconnect: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Coverage-ranked global outbox relay allowlist. Ephemeral connections to relays
+     *  NOT in this set (and not in the persistent pool) are skipped to shrink the DNS
+     *  failure surface. Populated by [updateOutboxAllowlist] after kind-10002 is fetched. */
+    @Volatile private var outboxAllowlist: Set<String> = emptySet()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
@@ -106,6 +115,16 @@ class RelayPool @Inject constructor(
     fun setIntegralRelays(urls: Collection<String>) {
         integralRelayUrls = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
     }
+
+    /** Update the coverage-ranked outbox allowlist. Ephemeral connections to relays
+     *  outside this set (and not in the persistent pool) are skipped. */
+    fun setOutboxAllowlist(urls: Set<String>) {
+        outboxAllowlist = urls
+        Log.w(TAG, "Outbox allowlist updated: ${urls.size} relays")
+    }
+
+    /** Read-only access to blocked relay URLs for allowlist construction. */
+    fun getBlockedUrls(): Set<String> = blockedUrls
 
     /**
      * Set by FeedViewModel when the user is viewing a SingleRelay feed.
@@ -329,6 +348,7 @@ class RelayPool @Inject constructor(
         const val RATE_LIMIT_MAX_TOKENS = 5
         const val RATE_LIMIT_REFILL_MS = 1000L
         const val RATE_LIMIT_COOLDOWN_MS = 30_000L
+        const val RECONNECT_JITTER_WINDOW_MS = 8_000L
         const val SEARCH_TIMEOUT_MS = 10_000L
         const val RELAY_MONITOR_URL = "wss://relay.nostr.watch"
         const val RELAY_MONITOR_PUBKEY =
@@ -434,6 +454,13 @@ class RelayPool @Inject constructor(
         if (conn != null) {
             sendOneShotToRelay(conn, req)
         } else {
+            // Outbox allowlist gate: don't open ephemeral connections to relays
+            // outside the coverage-ranked set. Shrinks the DNS failure surface.
+            // Allowlist empty = not yet populated (bootstrap) → allow all.
+            if (outboxAllowlist.isNotEmpty() && clean !in outboxAllowlist) {
+                Log.d(TAG, "Ephemeral skipped (not in outbox allowlist): ${clean.take(60)}")
+                return
+            }
             scope.launch { openEphemeral(clean, listOf(req), setOf(subId), timeoutMs) }
         }
     }
@@ -604,6 +631,20 @@ class RelayPool @Inject constructor(
                             "(closed $toCloseActual of $toCloseTarget; all remaining are exempt)")
                     }
                 }
+                // Drain deferred reconnects after network recovery.
+                // Spread with jitter to avoid spiking the DNS resolver.
+                if (!relayCapabilitiesStore.isNetworkDown && pendingReconnect.isNotEmpty()) {
+                    val deferred = pendingReconnect.toList()
+                    pendingReconnect.clear()
+                    Log.w(TAG, "Network recovered — draining ${deferred.size} deferred reconnects with jitter")
+                    for (url in deferred) {
+                        scope.launch {
+                            delay(kotlin.random.Random.nextLong(RECONNECT_JITTER_WINDOW_MS))
+                            reconnectWithBackoff(url)
+                        }
+                    }
+                }
+
                 // Heal integral relays: re-attempt any configured integral relay that
                 // is disconnected and past its skip cooldown. A transient DNS blip
                 // strikes indexers/read/write/search past the threshold; without this
@@ -2847,6 +2888,12 @@ class RelayPool @Inject constructor(
             connections.remove(url)?.close()
             return
         }
+        // Don't hammer a dead pipe — defer until the network recovers.
+        if (relayCapabilitiesStore.isNetworkDown) {
+            pendingReconnect.add(url)
+            Log.w(TAG, "reconnectWithBackoff: network down, deferring $url (${pendingReconnect.size} pending)")
+            return
+        }
         val guard = reconnecting.getOrPut(url) { AtomicBoolean(false) }
         if (!guard.compareAndSet(false, true)) return
 
@@ -2856,6 +2903,14 @@ class RelayPool @Inject constructor(
                     val delayMs = minOf(1000L * (1L shl minOf(attempt - 1, 4)), 30_000L)
                     Log.d(TAG, "Backoff $url: attempt $attempt, delay ${delayMs}ms")
                     delay(delayMs)
+                }
+
+                // Re-check after delay — network may have gone down during backoff
+                if (relayCapabilitiesStore.isNetworkDown) {
+                    pendingReconnect.add(url)
+                    guard.set(false)
+                    Log.w(TAG, "reconnectWithBackoff: network down after delay, deferring $url")
+                    return@launch
                 }
 
                 // Map-before-close: put new entry first so listenForEvents.finally

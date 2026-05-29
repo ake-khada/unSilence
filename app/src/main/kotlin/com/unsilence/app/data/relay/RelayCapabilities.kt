@@ -26,4 +26,13 @@ data class RelayCapabilities(
 
     /** Last CLOSED reason tail — for debugging, doesn't influence behavior. */
     val lastReason: String = "",
+
+    /** Cross-session consecutive connect/DNS failures (NOT during network-down).
+     *  At [DEAD_RELAY_THRESHOLD], the relay is considered dead and excluded from
+     *  fanout / shouldSkip. Reset on any successful connection (onOpen). */
+    val deadFailCount: Int = 0,
+
+    /** Epoch ms of last successful reprobe attempt for a dead relay.
+     *  Dead relays are re-probed once per [DEAD_RELAY_REPROBE_MS]. */
+    val lastProbeAt: Long = 0L,
 )
