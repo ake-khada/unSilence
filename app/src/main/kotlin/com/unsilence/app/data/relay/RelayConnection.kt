@@ -104,7 +104,18 @@ class RelayConnection(
     fun connect() {
         if (connected.getAndSet(true)) return
         _state.value = RelayState.CONNECTING
-        val request = Request.Builder().url(url).build()
+        val request = try {
+            Request.Builder().url(url).build()
+        } catch (e: IllegalArgumentException) {
+            // Malformed URL — must never crash the app. Mark permanently invalid
+            // so shouldSkip prevents all future attempts.
+            Log.w(TAG, "connect: rejected invalid relay url ${url.take(80)} — ${e.message}")
+            capabilitiesStore?.markStructurallyInvalid(url)
+            _state.value = RelayState.FAILED
+            connected.set(false)
+            _messages.close()
+            return
+        }
         ws = client.newWebSocket(request, Listener())
         Log.d(TAG, "Connecting to $url")
     }

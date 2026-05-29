@@ -13,6 +13,12 @@ private const val TAG = "RelayUrlUtil"
 fun normalizeRelayUrl(raw: String): String? {
     var url = raw.trim().removeSuffix("/")
     if (url.isBlank()) return null
+    // Reject internal whitespace or control chars — "nostr.wine\twss" must never
+    // reach okhttp's URL builder (crash: IllegalArgumentException on invalid host).
+    if (url.any { it.isWhitespace() || it.isISOControl() }) {
+        Log.w(TAG, "Rejecting URL with internal whitespace/control chars: ${url.take(80)}")
+        return null
+    }
     url = url.removePrefix("https://").removePrefix("http://")
     // Reject cleartext WebSocket — Android Network Security Policy blocks ws://
     // in release builds. No path to success; reject at the gate so the URL never

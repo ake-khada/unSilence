@@ -243,6 +243,26 @@ class RelayCapabilitiesStore @Inject constructor(
     }
 
     /**
+     * Permanently mark [url] as structurally invalid (malformed URL that will never
+     * resolve). Uses `restricted = true` so [shouldSkip] returns true immediately
+     * with no half-open retry — a malformed URL cannot heal.
+     */
+    fun markStructurallyInvalid(url: String) {
+        // normalizeRelayUrl may itself reject url — use raw as key if so
+        val key = normalizeRelayUrl(url) ?: url.trim().take(200)
+        val existing = caps[key] ?: RelayCapabilities()
+        val updated = existing.copy(
+            restricted = true,
+            strikes = MAX_CAPABILITY_STRIKES,
+            lastStrikeAt = System.currentTimeMillis(),
+            lastReason = "structurally-invalid-url",
+        )
+        caps[key] = updated
+        Log.w(TAG, "Marked structurally invalid: ${key.take(80)}")
+        GlobalScope.launch(Dispatchers.IO) { persist() }
+    }
+
+    /**
      * Clear transport strikes for [url] on successful connection.
      * Restricted relays stay restricted — only transient strike accumulation is forgiven.
      */
