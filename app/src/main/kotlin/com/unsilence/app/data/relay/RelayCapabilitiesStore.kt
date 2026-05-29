@@ -34,6 +34,13 @@ private const val STRIKE_TTL_MS = 24 * 60 * 60 * 1000L  // 24 hours
 
 const val MAX_CAPABILITY_STRIKES = 3
 
+/** Transport-strike retry cooldowns. Once a relay passes MAX_CAPABILITY_STRIKES,
+ *  it's skipped only within this window since the last strike — then a single
+ *  retry is allowed (half-open). Replaces the old "permanent until 24h TTL". */
+private const val TRANSPORT_RETRY_BASE_MS = 60_000L            // 1 min — first retry after threshold
+private const val TRANSPORT_RETRY_MAX_MS  = 30 * 60_000L       // 30 min cap (non-integral, dead relays)
+private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min flat — integral relays heal fast
+
 /** Why a relay is being skipped — covers both protocol (CLOSED) and transport (onFailure) reasons. */
 enum class SkipReason {
     // Protocol-level (CLOSED structural rejections) — existing path via learnFromClosed
@@ -74,6 +81,20 @@ class RelayCapabilitiesStore @Inject constructor(
 
     private val caps = ConcurrentHashMap<String, RelayCapabilities>()
 
+    /** URLs of integral relays (indexer / own read / own write / search). These heal on
+     *  a short flat cooldown rather than exponential backoff. */
+    @Volatile private var integralUrls: Set<String> = emptySet()
+
+    fun setIntegralRelays(urls: Collection<String>) {
+        integralUrls = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+        Log.d(TAG, "Integral relay set updated: ${integralUrls.size} relays")
+    }
+
+    private fun isIntegral(url: String): Boolean {
+        val key = normalizeRelayUrl(url) ?: return false
+        return key in integralUrls
+    }
+
     /** Load persisted capabilities from DataStore. Call once at bootstrap before first REQ. */
     suspend fun load() {
         val raw = context.relayCapsDataStore.data.first()[CAPS_KEY] ?: return
@@ -112,14 +133,38 @@ class RelayCapabilitiesStore @Inject constructor(
         return caps[key]
     }
 
-    /** True when the relay should be skipped for all REQs. */
+    /** True when the relay should be skipped for all REQs.
+     *  Half-open: past MAX_CAPABILITY_STRIKES, skip only within a retry cooldown
+     *  since lastStrikeAt. After cooldown, allow one retry — success clears strikes
+     *  (onOpen.clearTransportStrikes), failure re-strikes and extends the window. */
     override fun shouldSkip(relayUrl: String): Boolean {
         val c = get(relayUrl) ?: return false
-        val skip = c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES
-        if (skip) {
-            Log.w(TAG, "shouldSkip=true: $relayUrl restricted=${c.restricted} strikes=${c.strikes} reason='${c.lastReason}'")
+        if (c.restricted) {
+            Log.w(TAG, "shouldSkip=true: $relayUrl restricted=true reason='${c.lastReason}'")
+            return true
         }
-        return skip
+        if (c.strikes < MAX_CAPABILITY_STRIKES) return false
+
+        // Half-open: struck past threshold, skip only within cooldown
+        val now = System.currentTimeMillis()
+        val cooldown = retryCooldownMs(relayUrl, c.strikes)
+        val elapsed = now - c.lastStrikeAt
+        return if (elapsed < cooldown) {
+            Log.w(TAG, "shouldSkip=true: $relayUrl strikes=${c.strikes} reason='${c.lastReason}' " +
+                "(retry in ${(cooldown - elapsed) / 1000}s${if (isIntegral(relayUrl)) ", integral" else ""})")
+            true
+        } else {
+            Log.w(TAG, "shouldSkip=false (half-open): $relayUrl strikes=${c.strikes} — cooldown elapsed, allowing retry")
+            false
+        }
+    }
+
+    /** Cooldown before a struck relay becomes retry-eligible.
+     *  Integral relays: short flat window. Others: exponential backoff, capped. */
+    internal fun retryCooldownMs(url: String, strikes: Int): Long {
+        if (isIntegral(url)) return INTEGRAL_RETRY_COOLDOWN_MS
+        val overage = (strikes - MAX_CAPABILITY_STRIKES).coerceIn(0, 6)
+        return (TRANSPORT_RETRY_BASE_MS shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
     }
 
     /**

@@ -99,6 +99,14 @@ class RelayPool @Inject constructor(
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
+    /** Integral relay URLs (indexer/read/write/search) — re-attempted by the heal
+     *  pass when disconnected and past their skip cooldown. */
+    @Volatile private var integralRelayUrls: Set<String> = emptySet()
+
+    fun setIntegralRelays(urls: Collection<String>) {
+        integralRelayUrls = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+    }
+
     /**
      * Set by FeedViewModel when the user is viewing a SingleRelay feed.
      * One-shot dispatch paths exclude this URL from their relay sets to prevent
@@ -580,6 +588,23 @@ class RelayPool @Inject constructor(
                     if (toCloseActual < toCloseTarget) {
                         Log.w(TAG, "Pool sweep couldn't reach cap: ${connections.size} > $POOL_SWEEP_CAP " +
                             "(closed $toCloseActual of $toCloseTarget; all remaining are exempt)")
+                    }
+                }
+                // Heal integral relays: re-attempt any configured integral relay that
+                // is disconnected and past its skip cooldown. A transient DNS blip
+                // strikes indexers/read/write/search past the threshold; without this
+                // they stay skipped until the 24h TTL on next cold start.
+                for (url in integralRelayUrls) {
+                    if (connections.containsKey(url)) continue
+                    if (url in blockedUrls) continue
+                    if (relayCapabilitiesStore.shouldSkip(url)) continue   // still in cooldown
+                    scope.launch {
+                        val ready = connectAndAwait(listOf(url), timeoutMs = 3_000)
+                        if (ready > 0 && connections[url] != null) {
+                            addPurpose(url, ConnectionPurpose.PERSISTENT)
+                            _onRelayReconnected.tryEmit(url)
+                            Log.w(TAG, "Healed integral relay: $url")
+                        }
                     }
                 }
             }
