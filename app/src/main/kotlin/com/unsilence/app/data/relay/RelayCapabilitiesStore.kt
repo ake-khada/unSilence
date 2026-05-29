@@ -14,6 +14,7 @@ import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -40,6 +41,18 @@ const val MAX_CAPABILITY_STRIKES = 3
 private const val TRANSPORT_RETRY_BASE_MS = 60_000L            // 1 min — first retry after threshold
 private const val TRANSPORT_RETRY_MAX_MS  = 30 * 60_000L       // 30 min cap (non-integral, dead relays)
 private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min flat — integral relays heal fast
+
+/** DNS-degraded detection: ≥ THRESHOLD distinct relays failing DNS within WINDOW_MS
+ *  means the pipe is down, not the relays. Strikes are suppressed until a relay resolves. */
+internal const val NETWORK_DOWN_DNS_THRESHOLD = 4
+internal const val NETWORK_DOWN_WINDOW_MS = 3_000L
+
+/** Cross-session dead-relay denylist. Distinct from transient strikes (in-memory,
+ *  24h TTL, half-open) — this is long-term, persisted, DataStore-backed.
+ *  A relay is dead when it fails [DEAD_RELAY_THRESHOLD] consecutive connects/DNS
+ *  outside of network-down (Phase 1 gate wraps the increment — critical). */
+internal const val DEAD_RELAY_THRESHOLD = 10
+internal const val DEAD_RELAY_REPROBE_MS = 7L * 24 * 3600 * 1000  // weekly
 
 /** Why a relay is being skipped — covers both protocol (CLOSED) and transport (onFailure) reasons. */
 enum class SkipReason {
@@ -75,6 +88,7 @@ interface RelaySkipCheck {
 @Singleton
 class RelayCapabilitiesStore @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val networkMonitor: NetworkMonitor,
 ) : RelaySkipCheck {
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = MapSerializer(String.serializer(), RelayCapabilities.serializer())
@@ -84,6 +98,69 @@ class RelayCapabilitiesStore @Inject constructor(
     /** URLs of integral relays (indexer / own read / own write / search). These heal on
      *  a short flat cooldown rather than exponential backoff. */
     @Volatile private var integralUrls: Set<String> = emptySet()
+
+    // ── DNS-degraded detection ────────────────────────────────────────
+    // Ring of recent DNS-failure timestamps keyed by relay URL. When
+    // ≥ NETWORK_DOWN_DNS_THRESHOLD distinct relays fail within
+    // NETWORK_DOWN_WINDOW_MS, the pipe is down — don't strike relays.
+
+    /** relay URL → timestamp of most recent DNS failure. */
+    private val recentDnsFailures = ConcurrentHashMap<String, Long>()
+
+    /** True while we believe the network is DNS-degraded (multiple distinct relays
+     *  failing within a short window). Cleared on first successful connection. */
+    @Volatile var dnsDegraded: Boolean = false
+        private set
+
+    /** Epoch ms when dnsDegraded was set. Used to scope the heal on recovery. */
+    private val dnsDegradedOnsetAt = AtomicLong(0L)
+
+    /** Relay URLs that received a DNS failure while degraded — cleared on heal. */
+    private val dnsFailedDuringDegradation: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+
+    /** True when the network is down (ConnectivityManager OFFLINE) or DNS is
+     *  degraded (multiple distinct relays failing). Used by RelayPool to gate
+     *  reconnect attempts and by this class to gate strikes. */
+    val isNetworkDown: Boolean
+        get() = networkMonitor.state.value == NetworkState.OFFLINE || dnsDegraded
+
+    /** Record a DNS failure for degraded-detection. Called before the strike gate. */
+    private fun recordDnsFailure(url: String) {
+        val now = System.currentTimeMillis()
+        recentDnsFailures[url] = now
+
+        // Prune stale entries
+        val cutoff = now - NETWORK_DOWN_WINDOW_MS
+        recentDnsFailures.entries.removeIf { it.value < cutoff }
+
+        if (!dnsDegraded && recentDnsFailures.size >= NETWORK_DOWN_DNS_THRESHOLD) {
+            dnsDegraded = true
+            dnsDegradedOnsetAt.set(now)
+            Log.w(TAG, "DNS-degraded: ${recentDnsFailures.size} distinct relays failed DNS within ${NETWORK_DOWN_WINDOW_MS}ms")
+        }
+
+        if (dnsDegraded) {
+            dnsFailedDuringDegradation.add(url)
+        }
+    }
+
+    /** Called on any successful relay connection. Clears DNS-degraded state and
+     *  heals strikes accrued during the degraded period. */
+    private fun healDnsDegraded() {
+        if (!dnsDegraded) return
+        dnsDegraded = false
+        recentDnsFailures.clear()
+        val healed = dnsFailedDuringDegradation.toSet()
+        dnsFailedDuringDegradation.clear()
+        if (healed.isNotEmpty()) {
+            Log.w(TAG, "DNS-degraded cleared — healing ${healed.size} relay(s) struck during outage")
+            for (url in healed) {
+                clearTransportStrikesInternal(url)
+            }
+            GlobalScope.launch(Dispatchers.IO) { persist() }
+        }
+    }
 
     fun setIntegralRelays(urls: Collection<String>) {
         integralUrls = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
@@ -113,10 +190,10 @@ class RelayCapabilitiesStore @Inject constructor(
                 caps.putAll(cleaned)
                 Log.w(TAG, "Loaded ${cleaned.size} relay capabilities (evicted $evicted stale)")
                 // Dump skippable relays on load for diagnostics
-                val skippable = cleaned.filter { (_, c) -> c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES }
+                val skippable = cleaned.filter { (_, c) -> c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES || c.deadFailCount >= DEAD_RELAY_THRESHOLD }
                 if (skippable.isNotEmpty()) {
                     for ((url, c) in skippable) {
-                        Log.w(TAG, "  WILL-SKIP: $url restricted=${c.restricted} strikes=${c.strikes} reason='${c.lastReason}'")
+                        Log.w(TAG, "  WILL-SKIP: $url restricted=${c.restricted} strikes=${c.strikes} dead=${c.deadFailCount} reason='${c.lastReason}'")
                     }
                 }
                 // Persist cleaned data so stale entries don't re-load
@@ -142,6 +219,16 @@ class RelayCapabilitiesStore @Inject constructor(
         if (c.restricted) {
             Log.w(TAG, "shouldSkip=true: $relayUrl restricted=true reason='${c.lastReason}'")
             return true
+        }
+        // Dead relay: skip unless weekly reprobe window has elapsed
+        if (c.deadFailCount >= DEAD_RELAY_THRESHOLD) {
+            val now = System.currentTimeMillis()
+            if (now - c.lastProbeAt < DEAD_RELAY_REPROBE_MS) {
+                return true  // still dead, not yet time to reprobe
+            }
+            // Reprobe window — allow one attempt
+            Log.w(TAG, "shouldSkip=false (dead reprobe): $relayUrl deadFails=${c.deadFailCount}")
+            return false
         }
         if (c.strikes < MAX_CAPABILITY_STRIKES) return false
 
@@ -175,20 +262,54 @@ class RelayCapabilitiesStore @Inject constructor(
      */
     fun recordTransportFailure(url: String, reason: SkipReason) {
         val key = normalizeRelayUrl(url) ?: return
+
+        // DNS failures feed the degraded-detection heuristic BEFORE the gate check.
+        if (reason == SkipReason.DNS_RESOLUTION) {
+            recordDnsFailure(key)
+        }
+
+        // Gate: don't strike relays for failures that are the network's fault.
+        // A relay is only struck for failures that are ITS fault.
+        if (reason == SkipReason.DNS_RESOLUTION && isNetworkDown) {
+            Log.w(TAG, "DNS fail on $key ignored — network down/degraded, not striking")
+            return
+        }
+
         val weight = strikesForReason(reason)
         val existing = caps[key] ?: RelayCapabilities()
         val newStrikes = existing.strikes + weight
+        // Dead-relay increment: AFTER the network-down gate (critical — if we're
+        // network-down, this line is unreachable, so dead-count is never incremented
+        // during outages). Only DNS and connect failures count toward dead-relay.
+        val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION ||
+            reason == SkipReason.CONNECT_TIMEOUT
+        ) {
+            existing.deadFailCount + 1
+        } else {
+            existing.deadFailCount
+        }
+        val now = System.currentTimeMillis()
         val updated = existing.copy(
             strikes = newStrikes,
-            lastStrikeAt = System.currentTimeMillis(),
+            lastStrikeAt = now,
             lastReason = reason.name.take(120),
+            deadFailCount = newDeadCount,
+            lastProbeAt = if (newDeadCount >= DEAD_RELAY_THRESHOLD && existing.deadFailCount < DEAD_RELAY_THRESHOLD) {
+                now  // just crossed threshold — set initial probe time
+            } else if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
+                now  // reprobe failed — update probe time
+            } else {
+                existing.lastProbeAt
+            },
         )
         caps[key] = updated
 
-        if (newStrikes >= MAX_CAPABILITY_STRIKES) {
-            Log.w(TAG, "Transport skip: $key ($reason, $newStrikes strikes)")
+        if (newDeadCount >= DEAD_RELAY_THRESHOLD && existing.deadFailCount < DEAD_RELAY_THRESHOLD) {
+            Log.w(TAG, "Dead relay: $key ($newDeadCount consecutive failures, reprobe in ${DEAD_RELAY_REPROBE_MS / 86_400_000}d)")
+        } else if (newStrikes >= MAX_CAPABILITY_STRIKES) {
+            Log.w(TAG, "Transport skip: $key ($reason, $newStrikes strikes, dead=$newDeadCount)")
         } else {
-            Log.d(TAG, "Transport strike: $key ($reason, $newStrikes/$MAX_CAPABILITY_STRIKES)")
+            Log.d(TAG, "Transport strike: $key ($reason, $newStrikes/$MAX_CAPABILITY_STRIKES, dead=$newDeadCount/$DEAD_RELAY_THRESHOLD)")
         }
         // Fire-and-forget persist — don't block onFailure callback thread
         GlobalScope.launch(Dispatchers.IO) { persist() }
@@ -265,15 +386,29 @@ class RelayCapabilitiesStore @Inject constructor(
     /**
      * Clear transport strikes for [url] on successful connection.
      * Restricted relays stay restricted — only transient strike accumulation is forgiven.
+     * Also triggers DNS-degraded heal: if we were degraded and a relay just resolved,
+     * the network is back — clear all strikes from the degraded period.
      */
     fun clearTransportStrikes(url: String) {
         val key = normalizeRelayUrl(url) ?: return
+        clearTransportStrikesInternal(key)
+        // A successful connection means the network can resolve at least one host.
+        // If we were DNS-degraded, this is the heal trigger.
+        healDnsDegraded()
+    }
+
+    /** Internal strike-clear without the degraded-heal trigger (avoids recursion). */
+    private fun clearTransportStrikesInternal(key: String) {
         val existing = caps[key] ?: return
         if (existing.restricted) return  // policy rejections are permanent
-        if (existing.strikes == 0) return // nothing to clear
-        val cleared = existing.copy(strikes = 0, lastReason = "")
+        if (existing.strikes == 0 && existing.deadFailCount == 0) return // nothing to clear
+        val cleared = existing.copy(strikes = 0, lastReason = "", deadFailCount = 0)
         caps[key] = cleared
-        Log.w(TAG, "Cleared transport strikes for $key (was ${existing.strikes}, reason='${existing.lastReason}')")
+        if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
+            Log.w(TAG, "Dead relay revived: $key (was dead with ${existing.deadFailCount} failures)")
+        } else if (existing.strikes > 0) {
+            Log.w(TAG, "Cleared transport strikes for $key (was ${existing.strikes}, reason='${existing.lastReason}')")
+        }
         GlobalScope.launch(Dispatchers.IO) { persist() }
     }
 

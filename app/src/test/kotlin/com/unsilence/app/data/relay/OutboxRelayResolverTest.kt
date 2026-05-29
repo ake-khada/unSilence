@@ -317,6 +317,62 @@ class OutboxRelayResolverTest {
         assertEquals(1, result.size)
         assertEquals(listOf("wss://r.example"), result[0].urls)
     }
+
+    // ── selectOutboxRelays ──────────────────────────────────────────────
+
+    @Test
+    fun `selectOutboxRelays caps at maxRelays`() {
+        // 100 follows, each with a unique write relay → 100 candidates
+        for (i in 0 until 100) {
+            metadata.setWriteRelays(hexPubkey(i), listOf("wss://relay-$i.example"))
+        }
+        val result = resolver.selectOutboxRelays(
+            follows = (0 until 100).map { hexPubkey(it) }.toSet(),
+            blockedRelays = emptySet(),
+            maxRelays = 40,
+        )
+        assertTrue("should be capped at 40, was ${result.size}", result.size <= 40)
+    }
+
+    @Test
+    fun `selectOutboxRelays achieves 95 percent coverage`() {
+        // 20 follows, 5 relays — each relay covers 4 unique follows
+        for (i in 0 until 20) {
+            metadata.setWriteRelays(hexPubkey(i), listOf("wss://relay-${i / 4}.example"))
+        }
+        val result = resolver.selectOutboxRelays(
+            follows = (0 until 20).map { hexPubkey(it) }.toSet(),
+            blockedRelays = emptySet(),
+            maxRelays = 40,
+        )
+        // 5 relays cover all 20 follows → should select all 5
+        assertEquals(5, result.size)
+    }
+
+    @Test
+    fun `selectOutboxRelays prefers high-coverage relays`() {
+        // relay-big covers 10 follows, relay-small covers 1
+        for (i in 0 until 10) {
+            metadata.setWriteRelays(hexPubkey(i), listOf("wss://relay-big.example"))
+        }
+        metadata.setWriteRelays(hexPubkey(10), listOf("wss://relay-small.example"))
+
+        val result = resolver.selectOutboxRelays(
+            follows = (0 until 11).map { hexPubkey(it) }.toSet(),
+            blockedRelays = emptySet(),
+            maxRelays = 2,
+        )
+        assertTrue("relay-big should be selected", "wss://relay-big.example" in result)
+    }
+
+    @Test
+    fun `selectOutboxRelays empty follows returns empty`() {
+        val result = resolver.selectOutboxRelays(
+            follows = emptySet(),
+            blockedRelays = emptySet(),
+        )
+        assertTrue(result.isEmpty())
+    }
 }
 
 class FakeMetadata : RelayMetadataSource {

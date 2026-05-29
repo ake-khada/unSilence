@@ -313,4 +313,86 @@ class OutboxRelayResolver @Inject constructor(
         val combined = (rankedAuthorWrite + rankedOwnRead).distinct()
         return combined.ifEmpty { GLOBAL_RELAY_URLS }
     }
+
+    /**
+     * Select the top-N relay URLs by follow coverage using greedy set-cover.
+     * Used to build the global "allowed outbox relay" set — ephemeral
+     * connections to relays outside this set are skipped to shrink the DNS
+     * failure surface.
+     *
+     * @param follows  the full follows set
+     * @param blockedRelays  normalized URLs to exclude
+     * @param maxRelays  hard cap on the output set
+     * @param coverageTarget  stop early if this fraction of follows is covered
+     * @return coverage-ranked list of normalized relay URLs, capped at [maxRelays]
+     */
+    fun selectOutboxRelays(
+        follows: Set<String>,
+        blockedRelays: Set<String>,
+        maxRelays: Int = MAX_GLOBAL_OUTBOX_RELAYS,
+        coverageTarget: Double = OUTBOX_COVERAGE_TARGET,
+    ): Set<String> {
+        if (follows.isEmpty()) return emptySet()
+
+        val trustScores = metadata.getTrustScores()
+        val monitors = metadata.getRelayMonitors()
+
+        // Build relay → covered-authors map
+        val relayCoverage = HashMap<String, MutableSet<String>>()
+        for (author in follows) {
+            val authorRelays = metadata.writeRelaysFor(author)
+                .mapNotNull { normalizeRelayUrl(it) }
+                .filter { it !in blockedRelays }
+                .distinct()
+                .take(MAX_WRITE_RELAYS_PER_AUTHOR)
+            for (relay in authorRelays) {
+                relayCoverage.getOrPut(relay) { mutableSetOf() }.add(author)
+            }
+        }
+
+        // Quality comparator (same as resolveFollowing)
+        val relayQuality = Comparator<String> { a, b ->
+            val sa = trustScores[a]?.score ?: DEFAULT_TRUST_SCORE
+            val sb = trustScores[b]?.score ?: DEFAULT_TRUST_SCORE
+            if (sa != sb) return@Comparator sb.compareTo(sa)
+            val ra = monitors[a]?.rttRead ?: DEFAULT_RTT_MS
+            val rb = monitors[b]?.rttRead ?: DEFAULT_RTT_MS
+            if (ra != rb) return@Comparator ra.compareTo(rb)
+            a.compareTo(b)
+        }
+
+        // Greedy set-cover: pick by max remaining coverage, quality tiebreak.
+        val uncovered = follows.toMutableSet()
+        val selected = mutableListOf<String>()
+        val remaining = relayCoverage.keys.toMutableList()
+        val targetCount = (follows.size * coverageTarget).toInt()
+
+        while (selected.size < maxRelays && uncovered.isNotEmpty() && remaining.isNotEmpty()) {
+            val best = remaining
+                .map { url -> url to (relayCoverage[url]?.count { it in uncovered } ?: 0) }
+                .filter { it.second > 0 }
+                .maxWithOrNull(Comparator<Pair<String, Int>> { a, b ->
+                    val cov = a.second.compareTo(b.second)
+                    if (cov != 0) cov
+                    else relayQuality.compare(b.first, a.first)
+                })
+                ?.first ?: break
+            selected.add(best)
+            uncovered.removeAll(relayCoverage[best] ?: emptySet())
+            remaining.remove(best)
+            // Early exit if coverage target met
+            if (follows.size - uncovered.size >= targetCount) break
+        }
+
+        Log.d(TAG, "selectOutboxRelays: ${follows.size} follows → ${selected.size} relays " +
+            "(${follows.size - uncovered.size}/${follows.size} covered, " +
+            "${relayCoverage.size} candidates)")
+        return selected.toSet()
+    }
+
+    companion object {
+        /** Cap for the global outbox relay set (ephemeral + persistent). */
+        const val MAX_GLOBAL_OUTBOX_RELAYS = 40
+        const val OUTBOX_COVERAGE_TARGET = 0.95
+    }
 }
