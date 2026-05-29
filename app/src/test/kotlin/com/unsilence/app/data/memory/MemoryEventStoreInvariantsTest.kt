@@ -3108,8 +3108,8 @@ class MemoryEventStoreInvariantsTest {
 
     // ── Notification recipient-side queries (A.5.2) ─────────────────────────
 
-    private val myPubkey = "my-pubkey-hex"
-    private val otherPubkey = "other-pubkey-hex"
+    private val myPubkey = "aa".repeat(32)     // valid 64-char hex pubkey
+    private val otherPubkey = "bb".repeat(32)  // valid 64-char hex pubkey
 
     @Test
     fun `kind-7 reaction with p-tag appears in recipient notifications`() = runTest {
