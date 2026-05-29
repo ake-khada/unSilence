@@ -424,11 +424,17 @@ class RelayPool @Inject constructor(
         subId: String,
         timeoutMs: Long = 2_000,
     ) {
-        val conn = connections[url]
+        // Belt-and-suspenders: callers normalize, but guard here so a malformed URL
+        // never reaches openEphemeral → RelayConnection.connect → okhttp crash.
+        val clean = normalizeRelayUrl(url) ?: run {
+            Log.w(TAG, "sendOneShotPooledOrEphemeral: skipping invalid relay url: ${url.take(80)}")
+            return
+        }
+        val conn = connections[clean]
         if (conn != null) {
             sendOneShotToRelay(conn, req)
         } else {
-            scope.launch { openEphemeral(url, listOf(req), setOf(subId), timeoutMs) }
+            scope.launch { openEphemeral(clean, listOf(req), setOf(subId), timeoutMs) }
         }
     }
 
