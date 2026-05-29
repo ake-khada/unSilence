@@ -456,6 +456,18 @@ class AppBootstrapper @Inject constructor(
         }.toList()
         Log.d(TAG, "Phase3: fetching relay health for ${userRelayUrls.size} configured relays")
 
+        // Wire the integral relay set for half-open circuit breaker recovery.
+        // Integral = indexer + own read/write + search — essentials that heal on
+        // a short cooldown after transient DNS/network blips.
+        val integralUrls = buildSet {
+            addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
+            addAll(memoryEventStore.getSearchRelayUrls(pubkeyHex))
+            addAll(memoryEventStore.readRelaysFor(pubkeyHex))
+            addAll(memoryEventStore.writeRelaysFor(pubkeyHex))
+        }
+        relayCapabilitiesStore.setIntegralRelays(integralUrls)
+        relayPool.setIntegralRelays(integralUrls)
+
         // Fetch trust scores + relay monitors concurrently, targeted to user's relays only.
         // Snapshot-persisted so data is available immediately on next restart.
         val trustJob = scope.launch { relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls) }
