@@ -764,66 +764,42 @@ class CardHydrator @Inject constructor(
 
         val nowMs = System.currentTimeMillis()
 
-        for (engagementId in batch) {
-            // Resolve the author of the post whose engagement we're fetching.
-            // For kind-6 reposts, engagementId is the original event's id;
-            // we want the original author, not the reposter.
-            val authorPubkey = memoryEventStore.getEventEntity(engagementId)?.pubkey
-
-            val targetUrls = if (authorPubkey != null) {
+        // 1. Resolve each post's outbox relays (same resolution — same coverage).
+        val idToRelays: Map<String, List<String>> = batch.associateWith { engId ->
+            val authorPubkey = memoryEventStore.getEventEntity(engId)?.pubkey
+            if (authorPubkey != null) {
                 outboxResolver.resolveEngagementRelays(
                     authorPubkey = authorPubkey,
                     ownReadRelays = ownReadRelays,
                     blockedRelays = blockedRelays,
                 )
             } else {
-                // Post not in MES (engagement requested before we have the event).
-                // Fall back to own read relays + GLOBAL — same shape as old behaviour.
                 ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
             }
+        }
 
+        // 2. Invert → one chunked REQ per relay (coverage-ranked, capped).
+        val relayBatches = coalesceByRelay(idToRelays, MAX_ENGAGEMENT_RELAYS, ENGAGEMENT_BATCH_CHUNK)
+        if (relayBatches.isEmpty()) {
+            batch.forEach { engagementInFlight.remove(it) }
+            return
+        }
+
+        // 3. Fire one sub per (relay, chunk).
+        for ((relay, ids) in relayBatches) {
             val subId = "eng-${System.nanoTime()}"
-            val req = buildEngagementReq(subId, engagementId)
+            val req = buildBatchedEngagementReq(subId, ids)
 
-            // Register full-coverage EOSE (needed so sendOneShotBatch registers targets)
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
 
-            // First-EOSE-wins: complete as soon as ANY relay EOSE's.
-            // Engagement queries fan out to 4-6 diverse outbox relays — waiting for
-            // all of them is unrealistic and jams slots. One relay's worth of
-            // engagement data is sufficient for display; stragglers merge in later.
-            val firstEoseDeferred = CompletableDeferred<Unit>()
-            relayPool.oneShotFirstEose[subId] = firstEoseDeferred
-
             backfillScope.launch {
                 try {
-                    relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
-
-                    val eoseReceived = withTimeoutOrNull(10_000) { firstEoseDeferred.await() } != null
-
-                    val stats = memoryEventStore.currentStatsSnapshot(engagementId)
-                    val totalEngagement = stats.replyCount + stats.repostCount +
-                        stats.reactionCount + stats.zapCount
-                    val capped = totalEngagement >= ENGAGEMENT_LIMIT
-                    if (capped) memoryEventStore.markEngagementCapped(engagementId)
-
-                    engagementTracker[engagementId] = EngagementFetchState(
-                        lastFetchedAt = nowMs,
-                        capped = capped,
-                    )
-
-                    if (!eoseReceived) {
-                        relayPool.cleanupOneShotSub(subId)
-                        Log.w(TAG, "Engagement: ${engagementId.take(12)} timed out (no EOSE)")
-                    }
+                    relayPool.sendOneShotBatch(listOf(relay), listOf(req), listOf(subId))
+                    val eosed = withTimeoutOrNull(ENGAGEMENT_BATCH_TIMEOUT_MS) { eoseDeferred.await() } != null
+                    markEngagementFetched(ids, nowMs)
+                    if (!eosed) relayPool.cleanupOneShotSub(subId)
                 } finally {
-                    engagementInFlight.remove(engagementId)
-                    // Absolute cleanup deadline for slow-EOSE stragglers.
-                    // First-EOSE-wins returns early but remaining relays keep running.
-                    // If one never EOSEs, tracking maps (oneShotSubTargets, oneShotSubEosed,
-                    // oneShotReleased) leak for that subId. 30s is generous enough for any
-                    // relay to respond; cleanupOneShotSub is idempotent.
                     backfillScope.launch {
                         delay(30_000)
                         relayPool.cleanupOneShotSub(subId)
@@ -832,7 +808,27 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        Log.d(TAG, "Engagement: dispatched ${batch.size} posts")
+        // 4. Backstop: flush any post not marked by a covering sub within the window.
+        backfillScope.launch {
+            delay(ENGAGEMENT_BATCH_TIMEOUT_MS + 500)
+            markEngagementFetched(batch.filter { it in engagementInFlight }, nowMs)
+        }
+
+        Log.d(TAG, "Engagement: ${batch.size} posts → ${relayBatches.size} REQ(s) across " +
+            "${relayBatches.map { it.first }.distinct().size} relay(s)")
+    }
+
+    /** Per-post completion: snapshot stats, set capped, update freshness tracker, clear in-flight. Idempotent. */
+    private fun markEngagementFetched(ids: List<String>, nowMs: Long) {
+        for (id in ids) {
+            if (id !in engagementInFlight) continue
+            val stats = memoryEventStore.currentStatsSnapshot(id)
+            val total = stats.replyCount + stats.repostCount + stats.reactionCount + stats.zapCount
+            val capped = total >= ENGAGEMENT_LIMIT
+            if (capped) memoryEventStore.markEngagementCapped(id)
+            engagementTracker[id] = EngagementFetchState(lastFetchedAt = nowMs, capped = capped)
+            engagementInFlight.remove(id)
+        }
     }
 }
 
@@ -880,8 +876,53 @@ internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
     else                      -> Long.MAX_VALUE // ≥7d → fetch once
 }
 
-/** Build per-post engagement REQ: all engagement kinds, single #e, bounded by ENGAGEMENT_LIMIT. */
-internal fun buildEngagementReq(subId: String, eventId: String): String =
+/** Min interval between full hydration passes when novel count is small.
+ *  Picked so worst-case profile/ref latency on a slow trickle of new events
+ *  stays under ~2s — within the per-card avatar autofetch debounce window. */
+private const val COALESCE_COOLDOWN_MS = 2_000L
+
+/** Novel-event threshold below which a pass within COALESCE_COOLDOWN_MS is
+ *  deferred. 3 lets tiny live-tail batches (1-2 events) coalesce while still
+ *  firing immediately for fast scrolls / feed swaps where ≥4 cards are new. */
+private const val COALESCE_NOVEL_THRESHOLD = 3
+
+private const val MAX_ENGAGEMENT_RELAYS = 25
+// per-post engagement budget = ENGAGEMENT_BATCH_LIMIT / ENGAGEMENT_BATCH_CHUNK.
+// 500 / 5 = 100 events/post/relay — identical to the pre-Sprint-C per-post limit.
+// DO NOT raise this without raising the limit proportionally, or posts in a chunk
+// starve each other (counts silently drop to 0). Relays widely honor limit=500 but
+// often cap higher values, so the budget is tuned via chunk size, not limit.
+private const val ENGAGEMENT_BATCH_CHUNK = 5
+private const val ENGAGEMENT_BATCH_LIMIT = 500
+private const val ENGAGEMENT_BATCH_TIMEOUT_MS = 10_000L
+
+/**
+ * Invert a per-item → relays map into a minimal set of per-relay REQ batches.
+ * Ranks relays by coverage (how many items list them) desc, keeps the top
+ * [maxRelays], chunks each kept relay's id list into [chunkSize]. High-coverage
+ * relays (own read relays appear for every item) sort first and are always kept,
+ * so capping only trims long-tail single-item relays.
+ *
+ * @return (relayUrl, idsChunk) pairs — one REQ per element. Order: high-coverage first.
+ */
+internal fun coalesceByRelay(
+    itemToRelays: Map<String, List<String>>,
+    maxRelays: Int,
+    chunkSize: Int,
+): List<Pair<String, List<String>>> {
+    if (itemToRelays.isEmpty()) return emptyList()
+    val relayToIds = HashMap<String, MutableList<String>>()
+    for ((id, relays) in itemToRelays) {
+        for (r in relays.distinct()) relayToIds.getOrPut(r) { mutableListOf() }.add(id)
+    }
+    return relayToIds.entries
+        .sortedByDescending { it.value.size }
+        .take(maxRelays)
+        .flatMap { (relay, ids) -> ids.chunked(chunkSize).map { relay to it } }
+}
+
+/** Build batched engagement REQ: engagement kinds, multiple #e ids, shared limit. */
+internal fun buildBatchedEngagementReq(subId: String, eventIds: List<String>): String =
     buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive(subId))
@@ -892,20 +933,10 @@ internal fun buildEngagementReq(subId: String, eventId: String): String =
                 add(JsonPrimitive(7))
                 add(JsonPrimitive(9735))
             })
-            put("#e", buildJsonArray { add(JsonPrimitive(eventId)) })
-            put("limit", JsonPrimitive(ENGAGEMENT_LIMIT))
+            put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
+            put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
         })
     }.toString()
-
-/** Min interval between full hydration passes when novel count is small.
- *  Picked so worst-case profile/ref latency on a slow trickle of new events
- *  stays under ~2s — within the per-card avatar autofetch debounce window. */
-private const val COALESCE_COOLDOWN_MS = 2_000L
-
-/** Novel-event threshold below which a pass within COALESCE_COOLDOWN_MS is
- *  deferred. 3 lets tiny live-tail batches (1-2 events) coalesce while still
- *  firing immediately for fast scrolls / feed swaps where ≥4 cards are new. */
-private const val COALESCE_NOVEL_THRESHOLD = 3
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
 fun extractRepostTargetRelay(tagsJson: String): String? {
