@@ -351,6 +351,14 @@ class RelayPool @Inject constructor(
     /** Log cooldown drops once per relay per cooldown window. */
     private val cooldownLogged = ConcurrentHashMap<String, Long>()
 
+    /** True when the relay is NOT in a CLOSED-triggered cooldown window.
+     *  Unlike [canSendToRelay], this does NOT consume a rate-limit token — used by
+     *  [flushRelayQueue] where REQs were already rate-gated on entry. */
+    private fun isRelayOutOfCooldown(url: String): Boolean {
+        val state = rateLimiters[url] ?: return true
+        return System.currentTimeMillis() >= state.cooldownUntil.get()
+    }
+
     private fun canSendToRelay(url: String): Boolean {
         val state = rateLimiters.getOrPut(url) { RateLimitState() }
         val now = System.currentTimeMillis()
@@ -432,7 +440,7 @@ class RelayPool @Inject constructor(
         val queue = relayReqQueue[conn.url] ?: return
         while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
                queue.isNotEmpty() &&
-               canSendToRelay(conn.url)) {
+               isRelayOutOfCooldown(conn.url)) {
             val req = queue.poll() ?: break
             count.incrementAndGet()
             conn.send(req)
