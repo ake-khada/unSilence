@@ -1862,6 +1862,43 @@ class MemoryEventStore @Inject constructor(
         return result
     }
 
+    /**
+     * Recent events for Global, scanning recentByCreatedAt until [floor] *displayable*
+     * roots are collected OR [scanCap] events examined OR the index is exhausted.
+     * Returns the full scanned slice (roots + interleaved replies, muted included) so
+     * the NOTES↔REPLIES toggle and mute-reactivity in feedRows still work.
+     *
+     * "Displayable root" = (kind-6 OR no reply/root markers) AND isDisplayable(event).
+     * isDisplayable is injected by the caller (mute + sensitive-if-HIDE) so MES holds
+     * no view state. Zero network: reads only events already in MES.
+     */
+    fun recentEventsWithDisplayableFloor(
+        kinds: Set<Int>,
+        isDisplayable: (NostrEvent) -> Boolean,
+        floor: Int = 100,
+        scanCap: Int = 1000,
+    ): List<NostrEvent> {
+        val result = mutableListOf<NostrEvent>()
+        var displayable = 0
+        var scanned = 0
+        var hitFloor = false
+        var hitCap = false
+        for (entry in recentByCreatedAt) {
+            if (displayable >= floor) { hitFloor = true; break }
+            if (scanned >= scanCap) { hitCap = true; break }
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in kinds) continue
+            scanned++
+            result.add(event)
+            val isRoot = event.kind == 6 || (event.replyToId == null && event.rootId == null)
+            if (isRoot && isDisplayable(event)) displayable++
+        }
+        val bound = when { hitFloor -> "floor"; hitCap -> "cap"; else -> "exhausted" }
+        Log.d("MES", "displayableFloor: ${result.size} events ($displayable displayable, $scanned scanned, " +
+            "$bound-bound, displayable-ratio ${if (scanned > 0) displayable * 100 / scanned else 0}%)")
+        return result
+    }
+
     /** Events seen on a specific relay, sorted by createdAt desc. Used for SingleRelay feed cache hydration. */
     fun eventsByRelay(relayUrl: String, kinds: Set<Int>, limit: Int = 300): List<NostrEvent> {
         val result = mutableListOf<NostrEvent>()

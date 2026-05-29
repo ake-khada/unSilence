@@ -596,7 +596,7 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch {
             _isLoadingMore.value = true
             try {
-                val older = timelineService.loadMoreTimeline(handle.timelineKey, until, 100)
+                val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
                 if (older.isNotEmpty()) {
                     _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
                 }
@@ -742,7 +742,15 @@ class FeedViewModel @Inject constructor(
                 if (follows.isEmpty()) emptyList()
                 else memoryEventStore.eventsByAuthors(follows, kinds)
             }
-            is FeedType.Global -> memoryEventStore.recentEvents(kinds)
+            is FeedType.Global -> {
+                val muteList = keyManager.getPublicKeyHex()
+                    ?.let { memoryEventStore.getMuteList(it) }
+                val hideSensitive = sensitiveContentMode.value == SensitiveContentMode.HIDE
+                memoryEventStore.recentEventsWithDisplayableFloor(
+                    kinds = kinds,
+                    isDisplayable = { e -> !isMuted(e, muteList) && (!hideSensitive || !e.hasContentWarning) },
+                )
+            }
             is FeedType.SingleRelay -> memoryEventStore.eventsByRelay(type.url, kinds)
             is FeedType.RelaySet -> {
                 val members = keyManager.getPublicKeyHex()
