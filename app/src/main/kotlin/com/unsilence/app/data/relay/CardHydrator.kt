@@ -40,6 +40,11 @@ private const val TAG = "CardHydrator"
  *  headroom; oldest IDs evict FIFO when the set exceeds this. */
 private const val HYDRATED_CAP = 500
 
+/** Max distinct hint relays a single hydration pass will fan out to. The broadcast
+ *  (fetchEventsByIds → 6 relays) covers the common case; this bounds the supplementary
+ *  hint loop. Long-tail single-ref relays retry next pass. */
+internal const val MAX_HINT_RELAYS_PER_PASS = 12
+
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
@@ -300,9 +305,18 @@ class CardHydrator @Inject constructor(
                 val hint = relayHints[id] ?: continue
                 hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
             }
-            for ((hint, ids) in hintBatches) {
-                if (hint == feedRelay) continue
-                relayPool.fetchEventsByIdsFromRelay(hint, ids, bypassDedup = true)
+            // Cap fan-out: take the highest-value hint relays (most missing refs).
+            // The broadcast already hit the 6 connected relays; the long tail of
+            // single-ref obscure relays retries on the next hydration pass.
+            val cappedHints = hintBatches.entries
+                .filter { it.key != feedRelay }
+                .sortedByDescending { it.value.size }
+                .take(MAX_HINT_RELAYS_PER_PASS)
+            if (hintBatches.size > cappedHints.size) {
+                Log.d(TAG, "hint fan-out capped: ${hintBatches.size} → ${cappedHints.size} relays")
+            }
+            for (entry in cappedHints) {
+                relayPool.fetchEventsByIdsFromRelay(entry.key, entry.value, bypassDedup = true)
             }
         }
 

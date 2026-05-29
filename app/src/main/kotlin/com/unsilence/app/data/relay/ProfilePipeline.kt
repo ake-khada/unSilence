@@ -262,8 +262,14 @@ class ProfilePipeline @Inject constructor(
                 val hint = relayHints[id] ?: continue
                 hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
             }
-            for ((hint, ids) in hintBatches) {
-                relayPool.fetchEventsByIdsFromRelay(hint, ids, bypassDedup = true)
+            val cappedHints = hintBatches.entries
+                .sortedByDescending { it.value.size }
+                .take(MAX_HINT_RELAYS_PER_PASS)
+            if (hintBatches.size > cappedHints.size) {
+                Log.d(TAG, "hint fan-out capped: ${hintBatches.size} → ${cappedHints.size} relays")
+            }
+            for (entry in cappedHints) {
+                relayPool.fetchEventsByIdsFromRelay(entry.key, entry.value, bypassDedup = true)
             }
 
             // Wait for responses

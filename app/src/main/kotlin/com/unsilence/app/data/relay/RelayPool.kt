@@ -397,6 +397,26 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Dispatch a one-shot REQ to [url]: reuse the pooled connection if one exists,
+     * otherwise open an ephemeral connection (no pool slot, no cap, auto-closes
+     * after EOSE/timeout). NEVER connectAndAwait — transient hint/ref fetches must
+     * not occupy pool slots (Slice 8: 192-relay hint fan-out exhausted the pool).
+     */
+    private fun sendOneShotPooledOrEphemeral(
+        url: String,
+        req: String,
+        subId: String,
+        timeoutMs: Long = 2_000,
+    ) {
+        val conn = connections[url]
+        if (conn != null) {
+            sendOneShotToRelay(conn, req)
+        } else {
+            scope.launch { openEphemeral(url, listOf(req), setOf(subId), timeoutMs) }
+        }
+    }
+
+    /**
      * Flush queued REQs for a relay after a slot frees up.
      */
     private fun flushRelayQueue(conn: RelayConnection) {
@@ -444,11 +464,11 @@ class RelayPool @Inject constructor(
      */
     private fun evictIdleConnection(): Boolean {
         val now = System.currentTimeMillis()
-        // Only BROWSE-only connections are evictable. PERSISTENT is exempt.
+        // BROWSE and purpose-less (NONE) connections are evictable. PERSISTENT is exempt.
         val candidate = connections.entries
             .filter { (url, _) ->
                 !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                hasPurpose(url, ConnectionPurpose.BROWSE)
+                (hasPurpose(url, ConnectionPurpose.BROWSE) || !hasAnyPurpose(url))
             }
             .filter { (url, _) ->
                 val lastActive = connectionLastActivity[url] ?: 0L
@@ -2418,9 +2438,10 @@ class RelayPool @Inject constructor(
      *    completed batch already determined the id is unresolvable, retrying won't
      *    help.
      *
-     * `connectAndAwait` runs first when no connection exists (hint-relay fetches
-     * frequently target obscure relays not in the persistent pool). 2s budget so
-     * unreachable hints don't block the hydrator.
+     * Dispatches via [sendOneShotPooledOrEphemeral]: reuses a pooled connection if
+     * one exists, otherwise opens an ephemeral WebSocket (no pool slot, no cap).
+     * NEVER connectAndAwait — hint relays are transient and must not squat in the
+     * pool (Slice 8: 192-relay hint fan-out exhausted the pool and starved feed).
      *
      * One REQ per call regardless of how many ids are passed — the wire form is
      * `{"ids":[...]}` so a list of N ids is a single subscription, not N.
@@ -2438,10 +2459,8 @@ class RelayPool @Inject constructor(
             Log.d(TAG, "one-shot skipped: only feedRelay in target set")
             return
         }
-        if (connections[normalized] == null) {
-            connectAndAwait(listOf(normalized), timeoutMs = 2_000)
-        }
-        val conn = connections[normalized] ?: return
+        // Dedup BEFORE dispatch — don't open any connection (pooled or ephemeral)
+        // for ids already in-flight, unresolved, or negative-cached.
         val novel = mutableListOf<String>()
         for (id in eventIds) {
             if (isEventUnresolved(id)) continue
@@ -2468,11 +2487,12 @@ class RelayPool @Inject constructor(
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
             })
         }.toString()
-        sendOneShotToRelay(conn, req)
+        val pooled = connections.containsKey(normalized)
+        sendOneShotPooledOrEphemeral(normalized, req, subId)
         if (bypassDedup) {
-            Log.d(TAG, "fetchByIdsFromRelay (hint-batch): ${novel.size} events → $normalized")
+            Log.d(TAG, "fetchByIdsFromRelay (hint-batch): ${novel.size} events → $normalized (${if (pooled) "pooled" else "ephemeral"})")
         } else {
-            Log.d(TAG, "prefetch: ${novel.size} events → $normalized")
+            Log.d(TAG, "prefetch: ${novel.size} events → $normalized (${if (pooled) "pooled" else "ephemeral"})")
         }
     }
 
@@ -2521,21 +2541,13 @@ class RelayPool @Inject constructor(
         val excluded = activeSingleRelayFeedUrl
 
         if (relayHints.isNotEmpty()) {
-            // Hints-first: connect and wait for WebSocket readiness, then send REQ
-            // only to hint relays. No broadcast fallback — if all hints fail, the
-            // event stays unfetched until the next hydration pass retries.
+            // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
+            // No connectAndAwait — transient hints must not occupy pool slots.
             val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
                 .filter { it !in indexerUrls && it !in blockedUrls && it != excluded && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
-                connectAndAwait(hintTargets, timeoutMs = 2_000)
-                var sent = 0
-                hintTargets.forEach { url ->
-                    connections[url]?.let { conn ->
-                        sendOneShotToRelay(conn, req)
-                        sent++
-                    }
-                }
-                Log.d(TAG, "fetchEventById: $eventId → $sent hint relay(s)")
+                hintTargets.forEach { url -> sendOneShotPooledOrEphemeral(url, req, subId) }
+                Log.d(TAG, "fetchEventById: $eventId → ${hintTargets.size} hint relay(s) (pooled-or-ephemeral)")
                 return
             }
         }
