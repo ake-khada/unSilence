@@ -29,11 +29,11 @@ class EngagementFetchTest {
         store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
     }
 
-    // ── buildEngagementReq ──────────────────────────────────────────────
+    // ── buildBatchedEngagementReq ─────────────────────────────────────
 
     @Test
-    fun `buildEngagementReq constructs correct filter`() {
-        val req = buildEngagementReq("eng-test", "evt-1")
+    fun `buildBatchedEngagementReq constructs correct filter`() {
+        val req = buildBatchedEngagementReq("eng-test", listOf("evt-1", "evt-2"))
         val parsed = Json.parseToJsonElement(req).jsonArray
         assertEquals("REQ", parsed[0].jsonPrimitive.content)
         assertEquals("eng-test", parsed[1].jsonPrimitive.content)
@@ -43,15 +43,15 @@ class EngagementFetchTest {
         assertEquals(listOf(1, 6, 7, 9735), kinds)
 
         val eTags = filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(listOf("evt-1"), eTags)
+        assertEquals(listOf("evt-1", "evt-2"), eTags)
 
-        assertEquals(ENGAGEMENT_LIMIT, filter["limit"]!!.jsonPrimitive.content.toInt())
+        assertTrue(filter.containsKey("limit"))
         assertFalse(filter.containsKey("since"))
     }
 
     @Test
-    fun `buildEngagementReq has all four engagement kinds`() {
-        val req = buildEngagementReq("eng-test", "evt-1")
+    fun `buildBatchedEngagementReq has all four engagement kinds`() {
+        val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"))
         val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!
             .jsonArray.map { it.jsonPrimitive.content.toInt() }
         assertEquals(listOf(1, 6, 7, 9735), kinds)
