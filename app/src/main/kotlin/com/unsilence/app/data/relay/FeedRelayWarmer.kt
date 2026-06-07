@@ -5,6 +5,7 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -21,36 +22,50 @@ private const val WARM_CAP = 10
  *
  * Warm set: pinned SingleRelay URLs + user's read relays + GLOBAL_RELAY_URLS,
  * deduped, skip-checked, capped at [WARM_CAP]. Reactive: recomputes when
- * pinned relays or read-relay config change.
+ * pinned relays change.
  *
- * Network-gated: no-ops when DNS-degraded or offline. Bounded: stays far
- * under POOL_SAFETY_CAP. Sockets only — never sends REQ to warm relays.
+ * Network-gated via [RelayCapabilitiesStore.isNetworkDown] (OFFLINE || DNS-degraded).
+ * Bounded: stays far under POOL_SAFETY_CAP. Sockets only — never sends REQ.
  */
 @Singleton
 class FeedRelayWarmer @Inject constructor(
     private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
-    private val networkMonitor: NetworkMonitor,
     private val keyManager: KeyManager,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var activeWarmUrls: Set<String> = emptySet()
+    private var job: Job? = null
+    @Volatile private var activeWarmUrls: Set<String> = emptySet()
 
     /**
-     * Start reactive warming. Call once after bootstrap completes.
-     * Recomputes warm set when pinned relays or relay metadata change.
+     * Start the singular reactive collector. Cancel-relaunches on re-login (new pk).
+     * Call from AppBootstrapper after bootstrap completes. Only ONE collector lives
+     * at a time — safe to call multiple times (cancel-relaunch pattern).
      */
     fun start() {
         val pk = keyManager.getPublicKeyHex() ?: return
-        scope.launch {
+        job?.cancel()
+        job = scope.launch {
             relayPreferencesStore.pinnedRelaysFlow(pk)
                 .collectLatest { pinned ->
-                    if (networkMonitor.state.value == NetworkState.OFFLINE) return@collectLatest
+                    if (relayCapabilitiesStore.isNetworkDown) return@collectLatest
                     recompute(pk, pinned.map { it.url })
                 }
         }
+    }
+
+    /**
+     * Re-warm sockets dropped during background. Idempotent — [relayPool.connect]
+     * is REUSE for live sockets, NEW only for reaped ones. No purpose/diff changes.
+     * Call from UnsilenceApp ON_START.
+     */
+    fun onForeground() {
+        if (relayCapabilitiesStore.isNetworkDown) return
+        val urls = activeWarmUrls.toList()
+        if (urls.isEmpty()) return
+        relayPool.connect(urls)
     }
 
     private fun recompute(pk: String, pinnedUrls: List<String>) {
@@ -75,9 +90,9 @@ class FeedRelayWarmer @Inject constructor(
         }
         if (added.isNotEmpty()) {
             relayPool.connect(added.toList())
-            Log.d(TAG, "Warmed ${added.size} relay(s), total warm=${candidates.size}")
         }
 
         activeWarmUrls = candidates
+        Log.w(TAG, "warmed +${added.size} -${removed.size} total=${candidates.size}")
     }
 }
