@@ -269,18 +269,19 @@ class RelayCapabilitiesStore @Inject constructor(
         }
 
         // Gate: don't strike relays for failures that are the network's fault.
-        // A relay is only struck for failures that are ITS fault.
-        if (reason == SkipReason.DNS_RESOLUTION && isNetworkDown) {
-            Log.w(TAG, "DNS fail on $key ignored — network down/degraded, not striking")
+        // A relay is only struck for failures that are ITS fault. Both DNS_RESOLUTION
+        // and CONNECT_TIMEOUT are retryable transport failures that fire during outages.
+        if ((reason == SkipReason.DNS_RESOLUTION || reason == SkipReason.CONNECT_TIMEOUT) && isNetworkDown) {
+            Log.w(TAG, "$reason on $key ignored — network down/degraded, not striking")
             return
         }
 
         val weight = strikesForReason(reason)
         val existing = caps[key] ?: RelayCapabilities()
         val newStrikes = existing.strikes + weight
-        // Dead-relay increment: AFTER the network-down gate (critical — if we're
-        // network-down, this line is unreachable, so dead-count is never incremented
-        // during outages). Only DNS and connect failures count toward dead-relay.
+        // Dead-relay increment: AFTER the network-down gate. If we're network-down,
+        // both DNS and connect-timeout paths are unreachable above, so dead-count is
+        // never incremented during outages.
         val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION ||
             reason == SkipReason.CONNECT_TIMEOUT
         ) {
