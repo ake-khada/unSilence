@@ -13,7 +13,7 @@ object SubscriptionRules {
     /**
      * One-shot subscription prefixes: relay sends CLOSE after EOSE.
      *
-     * 27 prefixes (emoji/hint-batch/setref added for slot leak fix).
+     * 28 prefixes (emoji/hint-batch/setref added for slot leak fix).
      */
     private val oneShotPrefixes = listOf(
         "kind3-",
