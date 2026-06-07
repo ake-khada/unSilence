@@ -317,22 +317,24 @@ class FeedViewModel @Inject constructor(
 
     // -- Profile lookup for repost original authors ----------------------------
 
-    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
+    private val profileCache = androidx.collection.LruCache<String, StateFlow<UserEntity?>>(500)
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        profileCache.getOrPut(pubkey) {
-            userRepository.userFlow(pubkey)
+        synchronized(profileCache) {
+            profileCache.get(pubkey) ?: userRepository.userFlow(pubkey)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+                .also { profileCache.put(pubkey, it) }
         }
 
     // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
 
-    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
+    private val statsCache = androidx.collection.LruCache<String, StateFlow<com.unsilence.app.data.memory.EventStats>>(500)
 
     fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
-        statsCache.getOrPut(eventId) {
-            memoryEventStore.statsFlow(eventId)
+        synchronized(statsCache) {
+            statsCache.get(eventId) ?: memoryEventStore.statsFlow(eventId)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
+                .also { statsCache.put(eventId, it) }
         }
 
     // -- Engagement contributor accessors (delegates to MES indexes) ------------
