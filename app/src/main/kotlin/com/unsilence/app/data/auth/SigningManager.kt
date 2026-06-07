@@ -215,6 +215,7 @@ class SigningManager @Inject constructor(
         (signer as? NostrSignerExternal)?.newResponse(data)
     }
 
+    @Synchronized
     fun clear() {
         // Intentionally keep registeredLaunchers — the Activity composition
         // stays alive across logout/relogin, so DisposableEffect won't re-fire.
