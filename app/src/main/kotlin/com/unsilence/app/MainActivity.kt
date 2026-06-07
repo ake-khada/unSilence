@@ -9,8 +9,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.unsilence.app.data.AppBootstrapper
@@ -18,7 +16,6 @@ import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.SensitiveContentMode
-import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.MuteListRepository
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +29,6 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    @Inject lateinit var relayPool: RelayPool
     @Inject lateinit var signingManager: SigningManager
     @Inject lateinit var relayPreferencesStore: RelayPreferencesStore
     @Inject lateinit var muteListRepository: MuteListRepository
@@ -84,14 +80,6 @@ class MainActivity : ComponentActivity() {
                 CoroutineScope(Dispatchers.IO).launch { relayPreferencesStore.setSensitiveContentMode(scm) }
             }
         }
-
-        ProcessLifecycleOwner.get().lifecycle.addObserver(
-            LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_START) {
-                    relayPool.reconnectAll()
-                }
-            }
-        )
 
         val amberSignLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
