@@ -77,7 +77,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             override fun onStart(owner: LifecycleOwner) {
                 relayPool.reconnectAll()
                 subscription.resumeAll()
-                feedRelayWarmer.start()
+                feedRelayWarmer.onForeground()
             }
         })
         registerComponentCallbacks(object : ComponentCallbacks2 {
