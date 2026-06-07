@@ -434,7 +434,7 @@ class FeedViewModel @Inject constructor(
      *   3. Capture `since` from existing events (= jumble's `const since = events[0]?.created_at`)
      *   4. Subscribe; route batched events via handleBatch, live-tail via handleNew
      */
-    private suspend fun setupSubscription(key: ResubKey) {
+    private suspend fun setupSubscription(key: ResubKey, resetView: Boolean) {
         refreshTimeoutJob?.cancel()
         lastFeedType = key.type
 
@@ -459,13 +459,16 @@ class FeedViewModel @Inject constructor(
 
         // Pre-load MES cached events for instant render (mirrors Jumble's
         // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
-        // Every resubscribe — feed switch, refresh, metaVer — reloads from MES.
         val cachedEvents = loadCachedEvents(key.type)
-        _events.value = cachedEvents
-        _newEvents.value = emptyList()
-        _liveArrivalIds.value = emptySet()
-        // Reset at-top: feed switch/refresh means we're back at the live edge.
-        setAtTop(true)
+        if (resetView) {
+            _events.value = cachedEvents
+            _newEvents.value = emptyList()
+            _liveArrivalIds.value = emptySet()
+            setAtTop(true)
+        } else {
+            // Background metaVer resubscribe: widen relay coverage, keep scroll position
+            _events.update { TimelineMerge.merge(it, cachedEvents) }
+        }
 
         // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
         val subRequests = buildSubRequests(key.type)
@@ -475,12 +478,13 @@ class FeedViewModel @Inject constructor(
             return
         }
 
-        _isLoading.value = cachedEvents.isEmpty()
+        _isLoading.value = resetView && cachedEvents.isEmpty()
 
         // since from cached events head — relay data newer than this merges
         // on top; null → bulk replace on first onEvents call.
         // Clamped to now — defense against poisoned future-dated events in snapshot.
-        val since: Long? = cachedEvents.firstOrNull()?.createdAt
+        val sinceSource = if (resetView) cachedEvents else _events.value
+        val since: Long? = sinceSource.firstOrNull()?.createdAt
             ?.coerceAtMost(System.currentTimeMillis() / 1000L)
 
         currentHandle = timelineService.subscribeTimeline(
@@ -697,6 +701,7 @@ class FeedViewModel @Inject constructor(
         // (audit finding CG-R1). Pull-to-refresh (triggerRefresh) is the
         // explicit refresh mechanism.
         viewModelScope.launch {
+            var prevKey: ResubKey? = null
             combine(
                 _coldStartState,
                 _feedType,
@@ -717,7 +722,11 @@ class FeedViewModel @Inject constructor(
                     Triple(it.type, it.ver to it.refresh, it.filter)
                 }
                 .collectLatest { key ->
-                    setupSubscription(key)
+                    val userInitiated = prevKey?.let {
+                        key.type != it.type || key.filter != it.filter || key.refresh != it.refresh
+                    } ?: true   // first emission = cold start = load at top
+                    prevKey = key
+                    setupSubscription(key, resetView = userInitiated)
                 }
         }
 
