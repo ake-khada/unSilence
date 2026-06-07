@@ -22,6 +22,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "Subscription"
+private const val EOSE_QUIESCENCE_MS = 2_500L   // silence after ≥1 event ⇒ backfill done ⇒ flip live
+private const val EOSE_CEILING_MS    = 30_000L  // relay accepted REQ but sent nothing at all
+private const val EOSE_POLL_MS       = 500L
 
 /**
  * Low-level Nostr REQ subscription primitive.
@@ -77,6 +80,7 @@ class Subscription @Inject constructor(
         val eosedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val closedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         @Volatile var isPaused: Boolean = false,
+        @Volatile var lastEventAt: Long = 0L,   // SystemClock.elapsedRealtime() of most recent event
     )
 
     private val subs = ConcurrentHashMap<String, SubState>()
@@ -331,6 +335,7 @@ class Subscription @Inject constructor(
         // before paying for the full streaming decode.
         val eventId = extractEventIdFromRaw(raw) ?: return
         if (!state.knownIds.add(eventId)) return
+        state.lastEventAt = android.os.SystemClock.elapsedRealtime()
 
         val event = parseEvent(raw, eventId, relayUrl) ?: return
         try {
@@ -452,12 +457,22 @@ class Subscription @Inject constructor(
         watchdogScopes[subId] = scope
         for (url in urlSet) {
             scope.launch {
-                delay(30_000L)
-                val s = subs[subId] ?: return@launch
-                if (s.isPaused) return@launch
-                if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
-                Log.d(TAG, "EOSE watchdog: synthesizing for sub=$subId relay=$url")
-                handleRelayEose(subId, url)
+                val deadline = android.os.SystemClock.elapsedRealtime() + EOSE_CEILING_MS
+                while (true) {
+                    val s = subs[subId] ?: return@launch
+                    if (s.isPaused) return@launch
+                    if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val quiesced = s.lastEventAt > 0L && (now - s.lastEventAt) >= EOSE_QUIESCENCE_MS
+                    val ceilingHit = now >= deadline
+                    if (quiesced || ceilingHit) {
+                        Log.d(TAG, "EOSE watchdog: synthesizing sub=$subId relay=$url " +
+                            "(${if (quiesced) "quiescent" else "ceiling"})")
+                        handleRelayEose(subId, url)
+                        return@launch
+                    }
+                    delay(EOSE_POLL_MS)
+                }
             }
         }
     }
