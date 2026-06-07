@@ -117,6 +117,7 @@ class VideoThumbnailCache @Inject constructor(
                         cache[videoUrl] = thumb
                         lastAccessedAt[videoUrl] = System.nanoTime()
                         resolvedAspectRatios[videoUrl] = ratio
+                        inFlight.remove(videoUrl)
                         evictIfNeeded()
                         thumb
                     } else {
