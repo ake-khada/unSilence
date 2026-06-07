@@ -13,8 +13,7 @@ object SubscriptionRules {
     /**
      * One-shot subscription prefixes: relay sends CLOSE after EOSE.
      *
-     * 19 prefixes (was 21 before engagement consolidation merged
-     * engagement-{replies,reactions,zaps}- into single "engagement-").
+     * 27 prefixes (emoji/hint-batch/setref added for slot leak fix).
      */
     private val oneShotPrefixes = listOf(
         "kind3-",
@@ -23,6 +22,7 @@ object SubscriptionRules {
         "hint-profiles-",
         "src-profiles-",
         "hint-event-",
+        "hint-batch-",
         "search-",
         "older-",
         "relay-ecosystem-",
@@ -40,6 +40,10 @@ object SubscriptionRules {
         "mute-",
         "own-eng-",
         "eng-",
+        "emoji-list-",
+        "emoji-set-",
+        "emoji-discover-",
+        "setref-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =
