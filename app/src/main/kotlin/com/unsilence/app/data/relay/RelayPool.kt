@@ -1134,6 +1134,11 @@ class RelayPool @Inject constructor(
                                 conn.url in authUnavailableRelays -> {
                                     Log.d(TAG, "auth-required on unavailable relay ${conn.url} for '$closedSubId' — ignoring")
                                 }
+                                conn.url in authInFlight -> {
+                                    // CLOSED because our REQ raced the in-flight auth handshake — NOT a rejection.
+                                    // completeAuth() will replay this sub on OK; don't pollute the streak.
+                                    Log.d(TAG, "auth-required on ${conn.url} while auth in flight — awaiting OK, not penalizing")
+                                }
                                 else -> {
                                     val streak = authRejectionStreak.merge(conn.url, 1, Int::plus) ?: 1
                                     authenticatedRelays.remove(conn.url)
