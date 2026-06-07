@@ -95,6 +95,7 @@ class AppBootstrapper @Inject constructor(
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
     private val privateZapRepository: com.unsilence.app.data.repository.PrivateZapRepository,
     private val outboxRelayResolver: com.unsilence.app.data.relay.OutboxRelayResolver,
+    private val feedRelayWarmer: com.unsilence.app.data.relay.FeedRelayWarmer,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapMutex = Mutex()
@@ -503,6 +504,10 @@ class AppBootstrapper @Inject constructor(
         // supervisorScope inside warmUp waits for all HEAD requests; if one hangs
         // the entire bootstrap stalls (measured: 2m27s in production).
         scope.launch { MediaPreconnect.warmUp(okHttpClient) }
+
+        // Pre-warm feed-switcher relays (pinned + read relays). Fire-and-forget —
+        // reactive flow recomputes when pinned relays change.
+        feedRelayWarmer.start()
 
         scheduleBackgroundSync()
 

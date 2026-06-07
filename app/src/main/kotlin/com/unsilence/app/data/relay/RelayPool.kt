@@ -62,6 +62,9 @@ enum class ConnectionPurpose {
     /** Active single-relay feed source. Exempted from sweep while feed is active;
      *  removed when user switches feed type. */
     FEED_SUB,
+    /** Pre-warmed feed-switcher relay. Connected socket, no subscription.
+     *  Exempt from sweep; dropped when no longer a switch target. */
+    FEED_WARM,
 }
 
 /** Source of "which relays currently have a non-paused subscription."
