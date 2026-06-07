@@ -478,7 +478,7 @@ class MemoryEventStore @Inject constructor(
     val ownZapReceivedFlow: Flow<String> get() = _ownZapReceived
 
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
-    private var insertsSinceLastEviction = 0
+    private val insertsSinceLastEviction = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ─── Signal-bump coalescing ───────────────────────────────────────────
     // Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
@@ -684,9 +684,8 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun evictionTickAfterInsert(count: Int = 1) {
-        insertsSinceLastEviction += count
-        if (insertsSinceLastEviction >= 500) {
-            insertsSinceLastEviction = 0
+        if (insertsSinceLastEviction.addAndGet(count) >= 500) {
+            insertsSinceLastEviction.set(0)
             evictOldContentEvents()
         }
     }
