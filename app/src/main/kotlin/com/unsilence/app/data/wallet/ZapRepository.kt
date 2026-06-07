@@ -52,7 +52,7 @@ class ZapRepository @Inject constructor(
     private val okHttpClient: OkHttpClient,
 ) {
     /** LNURL metadata cache: lud16 → (callbackUrl, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
-    private val lnurlCache = mutableMapOf<String, Pair<String, Long>>()
+    private val lnurlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
     private val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 minutes
 
     private fun getCachedCallback(lud16: String): String? {

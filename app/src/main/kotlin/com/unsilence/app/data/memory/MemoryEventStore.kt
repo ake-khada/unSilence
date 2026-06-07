@@ -958,7 +958,8 @@ class MemoryEventStore @Inject constructor(
             ?.get(1) ?: return null
         return try {
             val obj = NostrJson.parseToJsonElement(descJson).jsonObject
-            val pubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return null
+            val pubkey = obj["pubkey"]?.jsonPrimitive?.content
+                ?.takeIf { it.length == 64 } ?: return null
             val comment = obj["content"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
             ZapDescription(pubkey, comment)
         } catch (_: Exception) { null }
@@ -2995,16 +2996,17 @@ class MemoryEventStore @Inject constructor(
             val event = eventsById[entry.eventId] ?: continue
 
             // Self-exclusion: kind-9735 must use parsed sender, not LNURL service.
-            if (event.kind == 9735) {
+            val effectivePubkey = if (event.kind == 9735) {
                 val decrypted = privateZapDecryptedById[event.id]
-                val effectiveSender = decrypted?.senderPubkey
+                decrypted?.senderPubkey
                     ?: parseZapDescription(event)?.senderPubkey
-                if (effectiveSender == recipientPubkey) continue
+                    ?: event.pubkey
             } else {
-                if (event.pubkey == recipientPubkey) continue
+                event.pubkey
             }
+            if (effectivePubkey == recipientPubkey) continue
 
-            if (follows != null && event.pubkey !in follows) continue
+            if (follows != null && effectivePubkey !in follows) continue
 
             val item = buildNotificationItem(event, recipientPubkey) ?: continue
             items.add(item)
@@ -3211,7 +3213,11 @@ class MemoryEventStore @Inject constructor(
 
     private fun trimFeedRowCacheIfNeeded() {
         if (feedRowCache.size <= FEED_ROW_CACHE_CAP) return
-        val candidates = feedRowAccessedAt.entries.sortedBy { it.value }
+        // Snapshot accessed-at values before sorting — feedRowAccessedAt is concurrently
+        // mutated by the touch path. Without snapshot, TimSort throws IllegalArgumentException.
+        val accessSnapshot = HashMap<String, Long>(feedRowAccessedAt.size)
+        for ((k, v) in feedRowAccessedAt) accessSnapshot[k] = v
+        val candidates = accessSnapshot.entries.sortedBy { it.value }
         var removed = 0
         for (entry in candidates) {
             if (feedRowCache.size <= FEED_ROW_CACHE_CAP * 4 / 5) break
