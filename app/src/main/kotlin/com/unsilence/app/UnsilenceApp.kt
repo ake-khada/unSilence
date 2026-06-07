@@ -23,6 +23,7 @@ import coil3.request.allowRgb565
 import coil3.request.crossfade
 import com.unsilence.app.data.memory.MesMetricsLogger
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import dagger.hilt.android.HiltAndroidApp
@@ -35,6 +36,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var snapshotScheduler: SnapshotScheduler
     @Inject lateinit var mesMetricsLogger: MesMetricsLogger
+    @Inject lateinit var relayPool: RelayPool
     @Inject lateinit var sharedPlayerHolder: SharedPlayerHolder
     @Inject lateinit var subscription: Subscription
 
@@ -71,6 +73,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
                 sharedPlayerHolder.releaseForLifecycle("app backgrounded")
             }
             override fun onStart(owner: LifecycleOwner) {
+                relayPool.reconnectAll()
                 subscription.resumeAll()
             }
         })
