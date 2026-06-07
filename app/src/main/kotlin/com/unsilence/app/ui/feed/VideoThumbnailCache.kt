@@ -1,14 +1,13 @@
 package com.unsilence.app.ui.feed
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,7 +36,8 @@ data class VideoThumbnail(
  *
  * Bounded: LRU eviction at [MAX_ENTRIES] entries OR [MAX_BITMAP_BYTES] total bitmap bytes,
  * whichever hits first. URLs in [visibleUrls] are never evicted.
- * Bitmaps are downsampled via [BitmapFactory.Options.inSampleSize] = [DOWNSAMPLE].
+ * Bitmaps are decoded at half source dimensions via [MediaMetadataRetriever.getScaledFrameAtTime]
+ * (API 27+) or [Bitmap.createScaledBitmap] fallback — no JPEG round-trip.
  */
 @Singleton
 @androidx.compose.runtime.Stable
@@ -110,11 +110,10 @@ class VideoThumbnailCache @Inject constructor(
             try {
                 MediaMetadataRetriever().use { retriever ->
                     retriever.setDataSource(videoUrl, HashMap<String, String>())
-                    val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    val frame = decodeScaledFrame(retriever)
                     if (frame != null) {
                         val ratio = frame.width.toFloat() / frame.height
-                        val downsampled = downsample(frame)
-                        val thumb = VideoThumbnail(bitmap = downsampled, aspectRatio = ratio)
+                        val thumb = VideoThumbnail(bitmap = frame, aspectRatio = ratio)
                         cache[videoUrl] = thumb
                         lastAccessedAt[videoUrl] = System.nanoTime()
                         resolvedAspectRatios[videoUrl] = ratio
@@ -136,25 +135,34 @@ class VideoThumbnailCache @Inject constructor(
     }
 
     /**
-     * Downsample a bitmap by re-encoding to JPEG and decoding with inSampleSize.
-     * Preserves aspect ratio. If the source is already small, returns it as-is.
+     * Decode the first keyframe already downsampled. On API 27+ the codec emits the
+     * frame at target size — the full-res bitmap is NEVER allocated (no ~33MB transient
+     * for a 4K source) and there is no JPEG encode/decode round-trip. dstW/dstH are a
+     * bounding box; the result keeps the source aspect ratio, so a transposed box on a
+     * rotated video is still correct. API 26 / missing-metadata path falls back to one
+     * native bilinear downscale — still no round-trip.
      */
-    private fun downsample(source: Bitmap): Bitmap {
-        if (DOWNSAMPLE <= 1) return source
-        // Skip downsampling for already-small bitmaps (under 200KB)
-        if (source.allocationByteCount < 200 * 1024) return source
-
-        val baos = ByteArrayOutputStream(source.allocationByteCount / 4)
-        source.compress(Bitmap.CompressFormat.JPEG, 80, baos)
-        source.recycle()
-
-        val bytes = baos.toByteArray()
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = DOWNSAMPLE
-            inPreferredConfig = Bitmap.Config.RGB_565
+    private fun decodeScaledFrame(retriever: MediaMetadataRetriever): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (w > 0 && h > 0) {
+                retriever.getScaledFrameAtTime(
+                    0,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    (w / DOWNSAMPLE).coerceAtLeast(1),
+                    (h / DOWNSAMPLE).coerceAtLeast(1),
+                )?.let { return it }
+            }
         }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            ?: BitmapFactory.decodeByteArray(bytes, 0, bytes.size) // fallback without downsample
+        val full = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+        if (full.allocationByteCount < 200 * 1024) return full
+        return Bitmap.createScaledBitmap(
+            full,
+            (full.width / DOWNSAMPLE).coerceAtLeast(1),
+            (full.height / DOWNSAMPLE).coerceAtLeast(1),
+            true,
+        ).also { if (it !== full) full.recycle() }
     }
 
     /**
