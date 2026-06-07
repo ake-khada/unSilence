@@ -2484,18 +2484,20 @@ class RelayPool @Inject constructor(
         // Broadened relay targeting: non-indexer relays first, then indexer relays
         // for coverage. Previously limited to 3 non-indexer relays which missed
         // events on less-replicated relays.
+        // NOTE: do NOT exclude activeSingleRelayFeedUrl — targeted {"ids":[…]} fetches
+        // never overlap the feed filter. The target event may live only on the feed relay
+        // (bridged reposts). See fetchEventById for the same rationale.
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
-        val excluded = activeSingleRelayFeedUrl
         val nonIndexer = connections.values.filter {
-            it.url !in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
         }.shuffled()
         val indexer = connections.values.filter {
-            it.url in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
         }
         val targets = (nonIndexer + indexer).take(6)
         if (targets.isEmpty()) {
-            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            Log.d(TAG, "fetchEventsByIds: 0 targets (pool empty)")
             return
         }
         targets.forEach { sendOneShotToRelay(it, req) }
@@ -2543,10 +2545,8 @@ class RelayPool @Inject constructor(
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
         if (relayCapabilitiesStore.shouldSkip(normalized)) return
-        if (normalized == activeSingleRelayFeedUrl) {
-            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
-            return
-        }
+        // NOTE: do NOT exclude activeSingleRelayFeedUrl — targeted id-fetches
+        // never overlap the feed filter (distinct subId, different filter shape).
         // Dedup BEFORE dispatch — don't open any connection (pooled or ephemeral)
         // for ids already in-flight, unresolved, or negative-cached.
         val novel = mutableListOf<String>()
@@ -2626,13 +2626,15 @@ class RelayPool @Inject constructor(
 
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
-        val excluded = activeSingleRelayFeedUrl
 
         if (relayHints.isNotEmpty()) {
             // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
             // No connectAndAwait — transient hints must not occupy pool slots.
+            // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted {"ids":[id]}
+            // fetch never overlaps the feed filter, and the target may live only there
+            // (bridged Ditto reposts). The one-shot sub uses a distinct subId.
             val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
-                .filter { it !in indexerUrls && it !in blockedUrls && it != excluded && !relayCapabilitiesStore.shouldSkip(it) }
+                .filter { it !in indexerUrls && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
                 hintTargets.forEach { url -> sendOneShotPooledOrEphemeral(url, req, subId) }
                 Log.d(TAG, "fetchEventById: $eventId → ${hintTargets.size} hint relay(s) (pooled-or-ephemeral)")
@@ -2640,16 +2642,16 @@ class RelayPool @Inject constructor(
             }
         }
 
-        // No hints (or all hints were indexer/blocked/feedRelay) — broadened fallback.
+        // No hints (or all hints were indexer/blocked) — broadened fallback.
         val nonIndexer = connections.values.filter {
-            it.url !in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
         }.shuffled()
         val indexer = connections.values.filter {
-            it.url in indexerUrls && it.url != excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
         }
         val fallbackTargets = (nonIndexer + indexer).take(6)
         if (fallbackTargets.isEmpty()) {
-            Log.d(TAG, "one-shot skipped: only feedRelay in target set")
+            Log.d(TAG, "fetchEventById: $eventId → 0 targets (pool empty)")
             return
         }
         fallbackTargets.forEach { sendOneShotToRelay(it, req) }
