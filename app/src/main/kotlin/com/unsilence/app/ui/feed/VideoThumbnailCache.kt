@@ -14,7 +14,7 @@ import javax.inject.Singleton
 
 private const val TAG = "VideoThumbCache"
 private const val MAX_ENTRIES = 30
-private const val MAX_BITMAP_BYTES = 64L * 1024 * 1024 // 64MB
+private const val MAX_BITMAP_BYTES = 48L * 1024 * 1024 // 48MB
 private const val DOWNSAMPLE = 2 // inSampleSize — halves each dimension → ~4x smaller bitmaps
 
 /**
