@@ -1251,20 +1251,17 @@ class RelayPool @Inject constructor(
                     val purposes = connectionPurposes[url]
                     val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
                         .getOrDefault(emptySet())
-                    val lastActivity = connectionLastActivity[url] ?: 0L
-                    val recentlyActive = (System.currentTimeMillis() - lastActivity) < 300_000L
-                    val stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls || recentlyActive
+                    val stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls
                     val notSkipped = !relayCapabilitiesStore.shouldSkip(url)
 
                     Log.w(TAG, "listenForEvents exit: $url state=${conn.state.value} " +
                         "purposes=$purposes inActiveSubs=${url in activeSubUrls} " +
-                        "recentlyActive=$recentlyActive shouldSkip=${!notSkipped} " +
-                        "→ reconnect=${stillNeeded && notSkipped}")
+                        "shouldSkip=${!notSkipped} → reconnect=${stillNeeded && notSkipped}")
 
                     if (stillNeeded && notSkipped) {
                         reconnectWithBackoff(url)
                     } else {
-                        // No purpose, not in active subs, not recent — clean up the dead entry
+                        // No purpose, not in active subs — clean up the dead entry
                         connections.remove(url, conn)
                     }
                 }
