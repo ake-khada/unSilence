@@ -66,6 +66,7 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
+private val DERIVED_ONLY_KINDS = setOf(30166)
 
 @Singleton
 class MemoryEventStore @Inject constructor(
@@ -623,6 +624,10 @@ class MemoryEventStore @Inject constructor(
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
     private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
+        if (event.kind in DERIVED_ONLY_KINDS) {
+            return insertDerivedOnly(event, dirty)
+        }
+
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
         if (existing != null) {
@@ -680,6 +685,15 @@ class MemoryEventStore @Inject constructor(
             30385 -> handleTrustScore(event, dirty)
         }
 
+        return true
+    }
+
+    private fun insertDerivedOnly(event: NostrEvent, dirty: InsertDirty): Boolean {
+        pendingRelays.remove(event.id)
+        when (event.kind) {
+            30166 -> handleRelayMonitor(event, dirty)
+            else -> return false
+        }
         return true
     }
 
@@ -4194,6 +4208,10 @@ class MemoryEventStore @Inject constructor(
     private fun insertFromSnapshot(event: NostrEvent) {
         val nowSec = System.currentTimeMillis() / 1000L
         if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return
+        if (event.kind in DERIVED_ONLY_KINDS) {
+            insertDerivedOnly(event, snapshotDirtySink)
+            return
+        }
 
         eventsById[event.id] = event
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
