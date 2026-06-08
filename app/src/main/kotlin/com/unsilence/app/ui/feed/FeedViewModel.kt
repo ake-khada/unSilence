@@ -50,7 +50,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 private const val TAG = "FeedVM"
@@ -158,8 +157,8 @@ class FeedViewModel @Inject constructor(
 
     // ── feedRows derivation (incremental row cache) ────────────────────────────
 
-    /** Per-feed-type row cache. Only IDs not in cache trigger feedRowsByIds. */
-    private val feedRowCache = ConcurrentHashMap<String, FeedRow>()
+    /** Bounded row cache — retains rows across slice swaps so pull-refresh hits instead of re-synth. */
+    private val feedRowCache = androidx.collection.LruCache<String, FeedRow>(FEED_ROW_CACHE_SIZE)
 
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentModeFlow()
@@ -173,7 +172,7 @@ class FeedViewModel @Inject constructor(
             relayPreferencesStore.sensitiveContentModeFlow(),
         ) { events, cf, muteList, scm ->
             if (events.isEmpty()) {
-                feedRowCache.clear()
+                feedRowCache.evictAll()
                 return@combine emptyList()
             }
             val hideSensitive = scm == SensitiveContentMode.HIDE
@@ -184,7 +183,7 @@ class FeedViewModel @Inject constructor(
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) {
-                feedRowCache.clear()
+                feedRowCache.evictAll()
                 return@combine emptyList()
             }
 
@@ -195,7 +194,7 @@ class FeedViewModel @Inject constructor(
             // active timeline must stay in MES for EventModel resolution.
             memoryEventStore.markTouched(displayedIds)
 
-            val missingIds = displayedIds.filter { !feedRowCache.containsKey(it) }
+            val missingIds = displayedIds.filter { feedRowCache.get(it) == null }
             val hitCount = displayedIds.size - missingIds.size
             Log.d(TAG, "feedRowCache hit=${hitCount} miss=${missingIds.size}")
 
@@ -204,23 +203,20 @@ class FeedViewModel @Inject constructor(
                 val missingSet = missingIds.toSet()
                 val newRows = memoryEventStore.feedRowsByIds(missingSet)
                 for (row in newRows) {
-                    feedRowCache[row.id] = row
+                    feedRowCache.put(row.id, row)
                 }
                 // Synthesize fallback for any still-missing (race with MES insert)
                 for (id in missingIds) {
-                    if (!feedRowCache.containsKey(id)) {
+                    if (feedRowCache.get(id) == null) {
                         val evt = displayed.first { it.id == id }
-                        feedRowCache[id] = memoryEventStore.synthesizeFeedRow(evt)
+                        feedRowCache.put(id, memoryEventStore.synthesizeFeedRow(evt))
                     }
                 }
             }
 
-            // Evict cache entries no longer displayed
-            val evictKeys = feedRowCache.keys.filter { it !in displayedIds }
-            for (key in evictKeys) feedRowCache.remove(key)
-
+            // LRU bounds the cache — no manual eviction needed
             // Build ordered result from cache
-            displayed.mapNotNull { evt -> feedRowCache[evt.id] }
+            displayed.mapNotNull { evt -> feedRowCache.get(evt.id) }
         }
             .conflate()
             .flowOn(Dispatchers.Default)
@@ -504,7 +500,7 @@ class FeedViewModel @Inject constructor(
 
         if (_isRefreshing.value) {
             refreshTimeoutJob = viewModelScope.launch {
-                delay(4_000)
+                delay(8_000)
                 _isRefreshing.value = false
             }
         }
@@ -621,10 +617,14 @@ class FeedViewModel @Inject constructor(
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
     private var refreshTimeoutJob: Job? = null
+    private var lastRefreshAt = 0L
 
-    /** Pull-to-refresh gesture entry point. */
+    /** Pull-to-refresh entry. Debounce collapses mashing; deliberate retries pass. */
     fun triggerRefresh() {
+        val now = System.currentTimeMillis()
         if (_isRefreshing.value) return
+        if (now - lastRefreshAt < REFRESH_DEBOUNCE_MS) return
+        lastRefreshAt = now
         _isRefreshing.value = true
         _refreshCounter.value = _refreshCounter.value + 1
     }
@@ -898,5 +898,10 @@ class FeedViewModel @Inject constructor(
         const val VIEWPORT_SIZE = 8
         const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
+        /** Debounce window — collapses frantic mashing, not deliberate retries. */
+        const val REFRESH_DEBOUNCE_MS = 1_500L
+        /** Retain synthesized rows across slice swaps (pull-refresh, feed switch) so they hit
+         *  instead of re-synthesizing. Covers the EVENTS_CAP window with headroom. */
+        const val FEED_ROW_CACHE_SIZE = 1000
     }
 }
