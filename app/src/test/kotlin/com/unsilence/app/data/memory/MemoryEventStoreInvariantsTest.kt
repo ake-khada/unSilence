@@ -87,6 +87,61 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(19, events[0].relaysSeen.size)
     }
 
+    // ── Derived-only relay monitors ─────────────────────────────────────────
+
+    @Test
+    fun `kind 30166 relay monitors are stored only as compact derived state`() {
+        val evt = event(
+            id = "monitor-1",
+            pubkey = "monitor-pk",
+            kind = 30166,
+            content = """{"icon":"https://cdn.example/icon.png"}""",
+            createdAt = 1_000,
+            tags = listOf(
+                listOf("d", "wss://relay.example.com"),
+                listOf("rtt-open", "42"),
+                listOf("rtt-read", "7"),
+                listOf("rtt-write", "9"),
+                listOf("N", "1"),
+                listOf("N", "11"),
+                listOf("R", "auth"),
+            ),
+        )
+
+        assertTrue(store.insert(evt))
+
+        assertTrue(store.eventsByIds(setOf("monitor-1")).isEmpty())
+        assertNull(store.getNostrEvent("monitor-1"))
+        assertNull(store.snapshotSize().eventsByKind[30166])
+
+        val monitor = store.getRelayMonitors()["wss://relay.example.com"]!!
+        assertEquals(42, monitor.rttOpen)
+        assertEquals(7, monitor.rttRead)
+        assertEquals(9, monitor.rttWrite)
+        assertEquals(listOf(1, 11), monitor.supportedNips)
+        assertEquals(listOf("auth"), monitor.requirements)
+        assertEquals("https://cdn.example/icon.png", monitor.iconUrl)
+    }
+
+    @Test
+    fun `snapshot restore migrates raw kind 30166 events to compact monitor state`() = runTest {
+        val snapshot = """
+            SNAPSHOT_V2
+            ---EVENTS---
+            monitor-old	monitor-pk	30166	{"icon":"https://cdn.example/icon.png"}	1000	d,wss://relay.example.com;rtt-open,42;N,11	sig	wss://relay.nostr.watch			false		100000	wss://relay.nostr.watch
+        """.trimIndent()
+
+        store.restoreSnapshotFrom(StringReader(snapshot).buffered())
+
+        assertTrue(store.eventsByIds(setOf("monitor-old")).isEmpty())
+        assertNull(store.snapshotSize().eventsByKind[30166])
+
+        val monitor = store.getRelayMonitors()["wss://relay.example.com"]!!
+        assertEquals(42, monitor.rttOpen)
+        assertEquals(listOf(11), monitor.supportedNips)
+        assertEquals("monitor-pk", monitor.monitorPubkey)
+    }
+
     // ── Kind 6 repost stats ─────────────────────────────────────────────────
 
     @Test
