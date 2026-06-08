@@ -690,11 +690,10 @@ class MemoryEventStore @Inject constructor(
 
     private fun insertDerivedOnly(event: NostrEvent, dirty: InsertDirty): Boolean {
         pendingRelays.remove(event.id)
-        when (event.kind) {
+        return when (event.kind) {
             30166 -> handleRelayMonitor(event, dirty)
-            else -> return false
+            else -> false
         }
-        return true
     }
 
     private fun evictionTickAfterInsert(count: Int = 1) {
@@ -1500,13 +1499,14 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
-    private fun handleRelayMonitor(event: NostrEvent, dirty: InsertDirty? = null) {
+    /** @return true iff the monitor was novel or newer than the existing entry. */
+    private fun handleRelayMonitor(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
 
-        val rawUrl = tag("d") ?: return
-        val relayUrl = normalizeRelayUrl(rawUrl) ?: return
+        val rawUrl = tag("d") ?: return false
+        val relayUrl = normalizeRelayUrl(rawUrl) ?: return false
 
         val rttOpen = tag("rtt-open")?.toIntOrNull()
         val rttRead = tag("rtt-read")?.toIntOrNull()
@@ -1532,24 +1532,31 @@ class MemoryEventStore @Inject constructor(
             .filter { it.size >= 2 && it[0] == "R" }
             .map { it[1] }
 
+        var changed = false
         relayMonitorsByUrl.compute(relayUrl) { _, existing ->
             if (existing != null && existing.createdAt >= event.createdAt) existing
-            else RelayMonitorEntity(
-                relayUrl = relayUrl,
-                rttOpen = rttOpen,
-                rttRead = rttRead,
-                rttWrite = rttWrite,
-                supportedNips = supportedNips,
-                network = network,
-                requirements = requirements,
-                geohash = geohash,
-                iconUrl = iconUrl,
-                monitorPubkey = event.pubkey,
-                createdAt = event.createdAt,
-            )
+            else {
+                changed = true
+                RelayMonitorEntity(
+                    relayUrl = relayUrl,
+                    rttOpen = rttOpen,
+                    rttRead = rttRead,
+                    rttWrite = rttWrite,
+                    supportedNips = supportedNips,
+                    network = network,
+                    requirements = requirements,
+                    geohash = geohash,
+                    iconUrl = iconUrl,
+                    monitorPubkey = event.pubkey,
+                    createdAt = event.createdAt,
+                )
+            }
         }
-        if (dirty != null) dirty.relayMonitor = true
-        else _relayMonitorSignal.value = System.nanoTime()
+        if (changed) {
+            if (dirty != null) dirty.relayMonitor = true
+            else _relayMonitorSignal.value = System.nanoTime()
+        }
+        return changed
     }
 
     private fun handleRelaySetMaterialized(event: NostrEvent, dirty: InsertDirty? = null) {
