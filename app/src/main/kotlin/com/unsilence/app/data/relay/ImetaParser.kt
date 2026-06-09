@@ -9,6 +9,7 @@ data class ImetaMedia(
     val width: Int?,
     val height: Int?,
     val thumb: String?,
+    val image: String?,  // NIP-92 poster image for video entries
 )
 
 object ImetaParser {
@@ -36,6 +37,7 @@ object ImetaParser {
                     width = w,
                     height = h,
                     thumb = kvMap["thumb"],
+                    image = kvMap["image"],
                 )
             }
     }.getOrElse { emptyList() }
@@ -61,6 +63,7 @@ object ImetaParser {
                     width = w,
                     height = h,
                     thumb = kvMap["thumb"],
+                    image = kvMap["image"],
                 )
             }
 
