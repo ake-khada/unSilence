@@ -27,12 +27,23 @@ import com.unsilence.app.data.relay.FeedRelayWarmer
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.ui.feed.SharedPlayerHolder
+import com.unsilence.app.di.ImageClient
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.android.HiltAndroidApp
+import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
 import javax.inject.Inject
 
 @HiltAndroidApp
 class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.Configuration.Provider {
+
+    @EntryPoint
+    @InstallIn(SingletonComponent::class)
+    interface ImageClientEntryPoint {
+        @ImageClient fun imageClient(): OkHttpClient
+    }
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var snapshotScheduler: SnapshotScheduler
@@ -101,6 +112,9 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             .setWorkerFactory(workerFactory)
             .build()
     override fun newImageLoader(context: coil3.PlatformContext): ImageLoader {
+        val imageClient = EntryPointAccessors
+            .fromApplication(this, ImageClientEntryPoint::class.java)
+            .imageClient()
         return ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
@@ -112,21 +126,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             .allowRgb565(true)
             .crossfade(false)
             .components {
-                add(
-                    OkHttpNetworkFetcherFactory(
-                        callFactory = {
-                            OkHttpClient.Builder()
-                                .addInterceptor { chain ->
-                                    chain.proceed(
-                                        chain.request().newBuilder()
-                                            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-                                            .build()
-                                    )
-                                }
-                                .build()
-                        }
-                    )
-                )
+                add(OkHttpNetworkFetcherFactory(callFactory = { imageClient }))
                 if (Build.VERSION.SDK_INT >= 28) {
                     add(AnimatedImageDecoder.Factory())
                 } else {
