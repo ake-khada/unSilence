@@ -19,6 +19,10 @@ import javax.inject.Singleton
 @Retention(AnnotationRetention.BINARY)
 annotation class MediaClient
 
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class ImageClient
+
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
@@ -47,6 +51,29 @@ object AppModule {
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)  // no overall call timeout for streaming
             .pingInterval(0, TimeUnit.SECONDS) // no keep-alive needed for media HTTP
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    @ImageClient
+    fun provideImageClient(baseClient: OkHttpClient): OkHttpClient {
+        val imageDispatcher = Dispatcher().apply {
+            maxRequests = 12
+            maxRequestsPerHost = 6
+        }
+        return baseClient.newBuilder()
+            .dispatcher(imageDispatcher)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .pingInterval(0, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                chain.proceed(
+                    chain.request().newBuilder()
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+                        .build()
+                )
+            }
             .build()
     }
 
