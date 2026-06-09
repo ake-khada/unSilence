@@ -2479,6 +2479,9 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
+                put("kinds", buildJsonArray {
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                })
             })
         }.toString()
         // Broadened relay targeting: non-indexer relays first, then indexer relays
@@ -2573,6 +2576,11 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
+                // Include kinds so relays that require them don't reject with
+                // "filters must specify at least one kind" (purplepag.es, others).
+                put("kinds", buildJsonArray {
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                })
             })
         }.toString()
         val pooled = connections.containsKey(normalized)
