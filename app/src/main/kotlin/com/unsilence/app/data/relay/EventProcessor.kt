@@ -80,7 +80,6 @@ private const val DEDUP_TRIM = 2_000
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val signatureVerifier: com.unsilence.app.data.auth.SignatureVerifier,
-    private val keyManager: com.unsilence.app.data.auth.KeyManager,
 ) : TapRegistration {
     // CPU-bound work (JSON parse, MES insert, kind handlers).
     // Belongs on Default not IO. limitedParallelism(2) keeps this from
@@ -88,22 +87,6 @@ class EventProcessor @Inject constructor(
     private val processDispatcher = Dispatchers.Default.limitedParallelism(2)
     private var scope = CoroutineScope(SupervisorJob() + processDispatcher)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
-
-    // ── FOLLOWDBG: cached follow set for wire-arrival probe ──────────────────
-    @Volatile private var followDbgSet: Set<String> = emptySet()
-    @Volatile private var followDbgPk: String? = null
-    private val FOLLOW_CONTENT_KINDS = setOf(1, 6, 20, 21, 30023)
-    private val WATCHED_AUTHORS = setOf(
-        "f1725586a402c06aec818d1478a45aaa0dc16c7a9c4869d97c350336d16f8e43", // Rusty Russell
-        "91c9a5e1a9744114c6fe2d61ae4de82629eaaa0fb52f48288093c7e7e036f832", // Uncle Rockstar
-        "b7b51cc25216d4c10bc85ae27055c9a945fe77cafd463cf23b20917e39ce6816", // Adam O'Brien
-    )
-
-    private fun refreshFollowDbg() {
-        val pk = keyManager.getPublicKeyHex() ?: return
-        followDbgPk = pk
-        followDbgSet = memoryEventStore.getFollows(pk) ?: emptySet()
-    }
 
     // ── Subscription tap registry ─────────────────────────────────────────────
     // Subscriptions register a tap to receive raw relay messages (EVENT/EOSE/
@@ -405,13 +388,6 @@ class EventProcessor @Inject constructor(
         // subscriptions or MES.
         if (!verifySig(nostrEvent)) return
 
-        // ── FOLLOWDBG: wire arrival for followed-author content events ───────
-        if (followDbgSet.isEmpty()) refreshFollowDbg()
-        if (dto.kind in FOLLOW_CONTENT_KINDS && dto.pubkey in followDbgSet) {
-            Log.w("FOLLOWDBG", "wire: author=${dto.pubkey.take(8)} kind=${dto.kind} " +
-                "createdAt=${dto.createdAt} relay=${relayUrl} id=${dto.id.take(8)}")
-        }
-
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES
         // proper. Snapshot persists followsByPubkey so this is reconstructible.
@@ -422,7 +398,6 @@ class EventProcessor @Inject constructor(
                 .toSet()
             memoryEventStore.updateFollows(dto.pubkey, follows, dto.createdAt)
             Log.d(TAG, "Kind-3 direct path: pubkey=${dto.pubkey.take(8)}… ${follows.size} follows (createdAt=${dto.createdAt})")
-            if (dto.pubkey == followDbgPk || followDbgSet.isEmpty()) refreshFollowDbg()
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
         // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
@@ -545,14 +520,6 @@ class EventProcessor @Inject constructor(
             }
         }
         memoryEventStore.insertBatch(events.values.toList())
-        // ── FOLLOWDBG: post-insert check for watched authors ─────────────────
-        for (e in events.values) {
-            if (e.pubkey in WATCHED_AUTHORS) {
-                val mesCount = memoryEventStore.userEvents(e.pubkey, FOLLOW_CONTENT_KINDS, 1000).size
-                Log.w("FOLLOWDBG", "inserted: author=${e.pubkey.take(8)} id=${e.id.take(8)} " +
-                    "createdAt=${e.createdAt} mesCount=$mesCount")
-            }
-        }
 
         // Kind-10012 favorites may reference relay sets via "a" tags that
         // need a follow-up fetch from a hint relay. Resolve outside the
@@ -580,14 +547,6 @@ class EventProcessor @Inject constructor(
         // Batch insert with coalesced signal bumps: ≤5 bumps instead of N.
         val eventList = events.values.toList()
         memoryEventStore.insertBatch(eventList)
-        // ── FOLLOWDBG: post-insert check for watched authors ─────────────────
-        for (e in eventList) {
-            if (e.pubkey in WATCHED_AUTHORS) {
-                val mesCount = memoryEventStore.userEvents(e.pubkey, FOLLOW_CONTENT_KINDS, 1000).size
-                Log.w("FOLLOWDBG", "inserted: author=${e.pubkey.take(8)} id=${e.id.take(8)} " +
-                    "createdAt=${e.createdAt} mesCount=$mesCount")
-            }
-        }
 
         // Pre-compute media metadata at insert time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.

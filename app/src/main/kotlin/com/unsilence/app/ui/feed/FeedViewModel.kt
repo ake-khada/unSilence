@@ -500,20 +500,6 @@ class FeedViewModel @Inject constructor(
         )
         Log.w(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
 
-        // ── FOLLOWDBG: MES state + since for watched authors ─────────────────
-        if (key.type is FeedType.Following) {
-            val contentKinds = setOf(1, 6, 20, 21, 30023)
-            for (pk in WATCHED_AUTHORS) {
-                val count = memoryEventStore.userEvents(pk, contentKinds, 1000).size
-                val newest = memoryEventStore.latestEventTimestampForAuthor(pk, contentKinds)
-                val inEvents = _events.value.any { it.pubkey == pk }
-                Log.w("FOLLOWDBG", "watch mes: author=${pk.take(8)} count=$count " +
-                    "newestCreatedAt=${newest ?: "none"} inEvents=$inEvents")
-                Log.w("FOLLOWDBG", "watch since: author=${pk.take(8)} " +
-                    "subSince=${since ?: "null"} initialLoadSince=${cachedEvents.firstOrNull()?.createdAt ?: "null"}")
-            }
-        }
-
         if (_isRefreshing.value) {
             refreshTimeoutJob = viewModelScope.launch {
                 delay(8_000)
@@ -532,22 +518,11 @@ class FeedViewModel @Inject constructor(
      */
     private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
         Log.w(TAG, "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_events.value.size}")
-        // ── FOLLOWDBG: watched authors in batch ──────────────────────────────
-        val watched = batch.filter { it.pubkey in WATCHED_AUTHORS }
-        if (watched.isNotEmpty()) {
-            Log.w("FOLLOWDBG", "feed batch: watched=${watched.map { "${it.pubkey.take(8)}:${it.createdAt}" }} " +
-                "since=$since current=${_events.value.size}")
-        }
         if (batch.isNotEmpty()) {
             if (since == null) {
                 _events.update { current -> TimelineMerge.merge(current, batch) }
             } else {
                 val newer = batch.filter { it.createdAt >= since }
-                // ── FOLLOWDBG: watched filtered by since ─────────────────────
-                val watchedFiltered = watched.filter { it.createdAt < (since ?: 0) }
-                if (watchedFiltered.isNotEmpty()) {
-                    Log.w("FOLLOWDBG", "feed sinceFilter: DROPPED ${watchedFiltered.map { "${it.pubkey.take(8)}:${it.createdAt}" }} since=$since")
-                }
                 if (newer.isNotEmpty()) {
                     handleNewBatch(newer)
                 }
@@ -559,14 +534,6 @@ class FeedViewModel @Inject constructor(
         if (_events.value.isNotEmpty()) {
             _isLoading.value = false
         }
-        // ── FOLLOWDBG: after merge state ─────────────────────────────────────
-        if (watched.isNotEmpty()) {
-            for (pk in WATCHED_AUTHORS) {
-                Log.w("FOLLOWDBG", "feed afterMerge: author=${pk.take(8)} " +
-                    "inEvents=${_events.value.any { it.pubkey == pk }} " +
-                    "tail=${_events.value.lastOrNull()?.createdAt}")
-            }
-        }
     }
 
     /**
@@ -575,10 +542,6 @@ class FeedViewModel @Inject constructor(
      *   - Scrolled: buffer in newEvents (blue-dot)
      */
     private fun handleNew(event: NostrEvent) {
-        if (event.pubkey in WATCHED_AUTHORS) {
-            Log.w("FOLLOWDBG", "feed handleNew: author=${event.pubkey.take(8)} " +
-                "createdAt=${event.createdAt} isAtTop=${_isAtTop.value} current=${_events.value.size}")
-        }
         if (_isAtTop.value) {
             _liveArrivalIds.update { it + event.id }
             _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
@@ -926,12 +889,6 @@ class FeedViewModel @Inject constructor(
     )
 
     private companion object {
-        // FOLLOWDBG: watched authors for missing-post diagnosis
-        val WATCHED_AUTHORS = setOf(
-            "f1725586a402c06aec818d1478a45aaa0dc16c7a9c4869d97c350336d16f8e43", // Rusty Russell
-            "91c9a5e1a9744114c6fe2d61ae4de82629eaaa0fb52f48288093c7e7e036f832", // Uncle Rockstar
-            "b7b51cc25216d4c10bc85ae27055c9a945fe77cafd463cf23b20917e39ce6816", // Adam O'Brien
-        )
         const val WARM_ZONE_ABOVE = 10
         const val WARM_ZONE_BELOW = 50
         /** Churny feeds (Global, SingleRelay) — narrower warm zone to reduce speculative fetches. */
