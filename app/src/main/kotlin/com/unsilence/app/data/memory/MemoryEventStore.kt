@@ -745,7 +745,9 @@ class MemoryEventStore @Inject constructor(
         // contract bug as evictOldContentEvents. profileAccessedAt is mutated
         // concurrently by handleProfile and cachedProfileFields. See CLAUDE.md
         // rule #24.
-        val candidateKeys = profileAccessedAt.keys.filter { it !in anchors }
+        // Also anchor pubkeys that have events in MES — don't evict a profile
+        // if its author's content is still stored (evict-then-refetch is wasted work).
+        val candidateKeys = profileAccessedAt.keys.filter { it !in anchors && !idsByPubkey.containsKey(it) }
         val accessSnapshot = HashMap<String, Long>(candidateKeys.size)
         for (k in candidateKeys) accessSnapshot[k] = profileAccessedAt[k] ?: 0L
         val candidates = candidateKeys.sortedBy { accessSnapshot[it] ?: 0L }

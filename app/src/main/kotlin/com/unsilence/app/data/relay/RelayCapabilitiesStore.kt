@@ -24,11 +24,13 @@ private val CAPS_KEY = stringPreferencesKey("caps_json")
 
 /** Structural rejection prefixes that teach us something reusable about the relay. */
 private val STRUCTURAL_PREFIXES = setOf(
-    "blocked", "restricted", "invalid", "error",
+    "restricted", "invalid", "error",
 )
 
-/** Transient prefixes — don't record these, they don't predict future behavior. */
-private val TRANSIENT_PREFIXES = setOf("auth-required", "rate-limited", "pow", "duplicate")
+/** Transient prefixes — don't record these, they don't predict future behavior.
+ *  "blocked" is per-REQ policy rejection (e.g. "filters must specify at least one kind"),
+ *  not relay-level unhealthiness — must not strike toward shouldSkip (H19a). */
+private val TRANSIENT_PREFIXES = setOf("auth-required", "rate-limited", "pow", "duplicate", "blocked")
 
 /** Entries older than this are evicted on load — transient failures heal between sessions. */
 private const val STRIKE_TTL_MS = 24 * 60 * 60 * 1000L  // 24 hours
@@ -445,6 +447,9 @@ class RelayCapabilitiesStore @Inject constructor(
         }
         GlobalScope.launch(Dispatchers.IO) { persist() }
     }
+
+    /** Current strike count for [url], or 0 if no entry. For diagnostics only. */
+    fun strikesFor(url: String): Int = caps[normalizeRelayUrl(url) ?: url]?.strikes ?: 0
 
     fun dump(): String =
         caps.entries
