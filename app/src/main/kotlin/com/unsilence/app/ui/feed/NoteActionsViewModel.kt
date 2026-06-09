@@ -15,7 +15,9 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.OgMetadata
@@ -382,6 +384,15 @@ class NoteActionsViewModel @Inject constructor(
         val outboxHints = authorPubkey?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList()
         val allHints = (relayHints + outboxHints).distinct()
 
+        // Curated fallback: own read relays, else GLOBAL — matches ThreadViewModel
+        val curatedFallback by lazy {
+            val ownPk = pubkeyHex ?: ""
+            val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPk)
+                .filter { it.marker == null || it.marker == "read" }
+                .mapNotNull { normalizeRelayUrl(it.url) }
+            readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+        }
+
         // Guard concurrent lookups for the same event — cleared after completion
         // so evicted events can be re-fetched on next recomposition.
         val shouldFetch = synchronized(fetchingQuoteIds) { fetchingQuoteIds.add(eventId) }
@@ -391,7 +402,7 @@ class NoteActionsViewModel @Inject constructor(
                     if (allHints.isNotEmpty()) {
                         relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
                     } else {
-                        relayPool.fetchEventById(eventId)
+                        relayPool.fetchEventById(eventId, curatedFallback, bypassDedup = true)
                     }
                 }
             }

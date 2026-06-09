@@ -329,6 +329,7 @@ object ContentParser {
                 Segment.QuoteEvent(
                     eventId = entity.hex,
                     hints = (entity.relay.map { it.url } + extraHints).distinct(),
+                    author = entity.author,
                 )
             }
             is NNote -> {
