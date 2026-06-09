@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
+import com.unsilence.app.data.relay.RelayCapabilitiesStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -31,6 +32,7 @@ class RelayManagementViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val relayPool: RelayPool,
+    private val relayCapabilitiesStore: RelayCapabilitiesStore,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
 ) : ViewModel() {
@@ -73,6 +75,7 @@ class RelayManagementViewModel @Inject constructor(
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addReadWriteRelay(pk, RelayConfig(normalized, null))
             publishChanges(10002)
         }
@@ -180,6 +183,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addIndexerRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            relayCapabilitiesStore.clearCooldownForRelay(normalized)
             relayPreferencesStore.addIndexerUrl(normalized)
         }
     }

@@ -100,8 +100,10 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - **NIP-42 auth is relay-authoritative** — fresh challenge supersedes prior auth; never short-circuit
 - **Auth give-up:** 3 consecutive `auth-required` CLOSEDs → `authUnavailableRelays`, exclude from fan-out
 - **`clearTransportStrikes(url)` in `RelayConnection.onOpen`** — single site covers all connect paths
-- **Half-open circuit breaker:** `shouldSkip` cooldown-gated past MAX_CAPABILITY_STRIKES (integral 60s, others exponential 1m→30m). `restricted` permanent
+- **Half-open circuit breaker:** `shouldSkip` cooldown-gated past MAX_CAPABILITY_STRIKES (integral 60s, DNS 5m→30m, timeout/TLS 1m→30m). `restricted` permanent
+- **Dead-relay denylist: DNS only** — only `DNS_RESOLUTION` increments `deadFailCount`. `CONNECT_TIMEOUT` is transient and must never contribute to the permanent denylist (H18.4)
 - **`isNetworkDown` gates both strike paths** — DNS strikes suppressed when OFFLINE || dnsDegraded
+- **No app-level DoH or DNS override** — the app uses the OS/VPN resolver. DNS failures handled by relay health/backoff (TTL + categorized cooldown). Bypass risks leaking DNS past the user's VPN/Tor
 - **`reconnectWithBackoff` defers when `isNetworkDown`** — `pendingReconnect` set, 60s sweep drains with jitter
 - **Hint/ref one-shot:** `sendOneShotPooledOrEphemeral` — NEVER `connectAndAwait` (Slice 8 pool exhaustion)
 - **Hint fan-out capped:** `MAX_HINT_RELAYS_PER_PASS` (12) per hydration pass

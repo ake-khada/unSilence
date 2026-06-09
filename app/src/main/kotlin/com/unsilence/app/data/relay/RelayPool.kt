@@ -637,6 +637,9 @@ class RelayPool @Inject constructor(
                 // Drain deferred reconnects after network recovery.
                 // Spread with jitter to avoid spiking the DNS resolver.
                 if (!relayCapabilitiesStore.isNetworkDown && pendingReconnect.isNotEmpty()) {
+                    // Network changed — DNS resolvability may have changed (VPN toggle).
+                    // Clear DNS-dead state so those relays get a fresh resolve attempt.
+                    relayCapabilitiesStore.clearDnsDeadOnNetworkChange()
                     val deferred = pendingReconnect.toList()
                     pendingReconnect.clear()
                     Log.w(TAG, "Network recovered — draining ${deferred.size} deferred reconnects with jitter")
