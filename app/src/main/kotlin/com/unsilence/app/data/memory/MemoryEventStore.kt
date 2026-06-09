@@ -67,11 +67,6 @@ private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
 private val DERIVED_ONLY_KINDS = setOf(30166)
-// FOLLOWDBG: watched authors for pipeline tracing
-private val WATCHED_AUTHORS_MES = setOf(
-    "f1725586a402c06aec818d1478a45aaa0dc16c7a9c4869d97c350336d16f8e43",
-    "91c9a5e1a9744114c6fe2d61ae4de82629eaaa0fb52f48288093c7e7e036f832",
-)
 
 @Singleton
 class MemoryEventStore @Inject constructor(
@@ -638,9 +633,6 @@ class MemoryEventStore @Inject constructor(
         if (existing != null) {
             // Duplicate — just record the relay
             existing.relaysSeen.addAll(event.relaysSeen)
-            if (event.pubkey in WATCHED_AUTHORS_MES) {
-                Log.w("FOLLOWDBG", "reject: author=${event.pubkey.take(8)} id=${event.id.take(8)} reason=dedup-hit")
-            }
             return false
         }
 

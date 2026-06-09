@@ -58,13 +58,6 @@ interface RelayMetadataSource {
 class OutboxRelayResolver @Inject constructor(
     private val metadata: RelayMetadataSource,
 ) {
-    // FOLLOWDBG: watched authors for targeted relay-routing probe
-    private val WATCHED_AUTHORS = setOf(
-        "f1725586a402c06aec818d1478a45aaa0dc16c7a9c4869d97c350336d16f8e43", // Rusty Russell
-        "91c9a5e1a9744114c6fe2d61ae4de82629eaaa0fb52f48288093c7e7e036f832", // Uncle Rockstar
-        "b7b51cc25216d4c10bc85ae27055c9a945fe77cafd463cf23b20917e39ce6816", // Adam O'Brien
-    )
-
     data class Config(
         val kinds: List<Int>,
         val limit: Int,
@@ -169,36 +162,6 @@ class OutboxRelayResolver @Inject constructor(
             writeRelayUrls.sortedWith(relayQuality)
         }
 
-        // ── FOLLOWDBG: coverage audit ────────────────────────────────────────
-        val allSubRelays = baseUrlSet + selectedWriteRelays.toSet()
-        val noRelayList = mutableListOf<String>()
-        val uncoveredAuthors = mutableListOf<String>()
-        for (author in sortedAuthors) {
-            val raw = metadata.writeRelaysFor(author)
-            if (raw.isEmpty()) { noRelayList.add(author.take(8)); continue }
-            val authorUrls = raw.mapNotNull { normalizeRelayUrl(it) }.filter { it !in blockedRelays }.toSet()
-            if (authorUrls.intersect(allSubRelays).isEmpty()) uncoveredAuthors.add(author.take(8))
-        }
-        Log.w("FOLLOWDBG", "coverage: follows=${sortedAuthors.size} subRelays=${allSubRelays.size} " +
-            "uncovered=${uncoveredAuthors.size} [${uncoveredAuthors.take(20).joinToString()}] " +
-            "norelaylist=${noRelayList.size} [${noRelayList.take(20).joinToString()}]")
-
-        // ── FOLLOWDBG: targeted relay-routing for watched authors ────────────
-        for (author in WATCHED_AUTHORS.filter { it in authors }) {
-            val rawWriteRelays = metadata.writeRelaysFor(author)
-            val normalizedWrite = rawWriteRelays.mapNotNull { normalizeRelayUrl(it) }
-            val afterBlocked = normalizedWrite.filter { it !in blockedRelays }
-            val inSelected = afterBlocked.filter { it in selectedWriteRelays.toSet() }
-            val inFallback = afterBlocked.filter { it in baseUrlSet }
-            val cappedOut = afterBlocked.filter { it !in allSubRelays }
-            Log.w("FOLLOWDBG", "watch route: author=${author.take(8)} " +
-                "writeRelays=${normalizedWrite.size} afterBlocked=${afterBlocked.size} " +
-                "inSelected=${inSelected.size}${inSelected.map { " $it" }.joinToString("")} " +
-                "inFallback=${inFallback.size}${inFallback.map { " $it" }.joinToString("")} " +
-                "cappedOut=${cappedOut.size}${cappedOut.map { " $it" }.joinToString("")}")
-        }
-        // ─────────────────────────────────────────────────────────────────────
-
         val subRequests = mutableListOf<SubRequest>()
 
         // Fallback relays: each gets all authors. Always FAST tier — these
@@ -243,19 +206,6 @@ class OutboxRelayResolver @Inject constructor(
 
         Log.d(TAG, "resolveFollowing: ${authors.size} authors -> ${subRequests.size} SubRequests " +
             "(${baseUrlSet.size} fallback + ${selectedWriteRelays.size} write)")
-
-        // ── FOLLOWDBG: final SubRequests containing watched authors ──────────
-        for (author in WATCHED_AUTHORS.filter { it in authors }) {
-            for (sr in subRequests) {
-                if (author in (sr.filter.authors ?: emptyList())) {
-                    Log.w("FOLLOWDBG", "sub: author=${author.take(8)} " +
-                        "relay=${sr.urls.firstOrNull()} tier=${sr.tier} " +
-                        "since=${sr.filter.since} limit=${sr.filter.limit} " +
-                        "kinds=${sr.filter.kinds}")
-                }
-            }
-        }
-        // ─────────────────────────────────────────────────────────────────────
 
         return subRequests
     }
