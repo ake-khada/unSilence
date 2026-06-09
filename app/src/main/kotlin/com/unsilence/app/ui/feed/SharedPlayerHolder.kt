@@ -2,9 +2,13 @@ package com.unsilence.app.ui.feed
 
 import android.content.Context
 import android.util.Log
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.unsilence.app.di.MediaClient
 import dagger.hilt.android.qualifiers.ApplicationContext
+import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -13,6 +17,7 @@ private const val TAG = "SharedPlayerHolder"
 @Singleton
 class SharedPlayerHolder @Inject constructor(
     @ApplicationContext private val context: Context,
+    @MediaClient private val mediaClient: OkHttpClient,
 ) {
     private var _player: ExoPlayer? = null
     private var _currentOwner: String? = null
@@ -26,11 +31,16 @@ class SharedPlayerHolder @Inject constructor(
         )
         .build()
 
+    private val mediaSourceFactory = DefaultMediaSourceFactory(
+        OkHttpDataSource.Factory(mediaClient)
+    )
+
     val player: ExoPlayer
         get() {
             if (_player == null) {
                 _player = ExoPlayer.Builder(context)
                     .setLoadControl(loadControl)
+                    .setMediaSourceFactory(mediaSourceFactory)
                     .build().apply {
                         volume = 0f
                         repeatMode = ExoPlayer.REPEAT_MODE_ALL

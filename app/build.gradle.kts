@@ -99,6 +99,7 @@ dependencies {
     implementation(libs.media3.transformer)     // Video transcode (H.264/AAC re-encode for upload)
     implementation(libs.media3.effect)          // Presentation.createForHeight (resolution scaling)
     implementation(libs.media3.ui)
+    implementation(libs.media3.datasource.okhttp)
 
     // Other
     implementation(libs.security.crypto)    // NWC key storage (Android Keystore)
