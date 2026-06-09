@@ -409,7 +409,7 @@ object ContentParser {
         return VideoRenderModel(
             videoUrl = url,
             aspectRatio = aspect,
-            posterUrl = meta?.thumb,
+            posterUrl = meta?.thumb ?: meta?.image,
             widthPx = meta?.width,
             heightPx = meta?.height,
         )
