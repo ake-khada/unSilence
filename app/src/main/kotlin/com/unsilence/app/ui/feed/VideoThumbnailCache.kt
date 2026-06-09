@@ -45,8 +45,10 @@ class VideoThumbnailCache @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val cache = ConcurrentHashMap<String, VideoThumbnail?>()
+    private val failedUrls = ConcurrentHashMap.newKeySet<String>() // negative cache — skip re-stall
     private val inFlight = ConcurrentHashMap<String, Boolean>()
     private val lastAccessedAt = ConcurrentHashMap<String, Long>()
+    private val remoteMmrSemaphore = kotlinx.coroutines.sync.Semaphore(1) // max 1 concurrent remote MMR
 
     /**
      * URLs currently bound to a visible video cell. Protected from eviction.
@@ -105,34 +107,54 @@ class VideoThumbnailCache @Inject constructor(
             return it
         }
         if (inFlight.putIfAbsent(videoUrl, true) != null) return null
+        // Negative cache: skip URLs that already failed (DNS-blocked, timeout)
+        if (videoUrl in failedUrls) { inFlight.remove(videoUrl); return null }
+
+        val isRemote = !videoUrl.startsWith("file://") && !videoUrl.startsWith("/")
 
         return withContext(Dispatchers.IO) {
             try {
-                MediaMetadataRetriever().use { retriever ->
-                    retriever.setDataSource(videoUrl, HashMap<String, String>())
-                    val frame = decodeScaledFrame(retriever)
-                    if (frame != null) {
-                        val ratio = frame.width.toFloat() / frame.height
-                        val thumb = VideoThumbnail(bitmap = frame, aspectRatio = ratio)
-                        cache[videoUrl] = thumb
-                        lastAccessedAt[videoUrl] = System.nanoTime()
-                        resolvedAspectRatios[videoUrl] = ratio
-                        inFlight.remove(videoUrl)
-                        evictIfNeeded()
-                        thumb
-                    } else {
-                        inFlight.remove(videoUrl)
-                        null
+                if (isRemote) {
+                    // Remote MMR: serialize (max 1 concurrent) + 8s timeout
+                    val result = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                        remoteMmrSemaphore.acquire()
+                        try { extractFrame(videoUrl) } finally { remoteMmrSemaphore.release() }
                     }
+                    inFlight.remove(videoUrl)
+                    if (result == null) { failedUrls.add(videoUrl) }
+                    result
+                } else {
+                    // Local file: no concurrency limit, no timeout
+                    val result = extractFrame(videoUrl)
+                    inFlight.remove(videoUrl)
+                    result
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 inFlight.remove(videoUrl)
                 throw e
             } catch (_: Exception) {
                 inFlight.remove(videoUrl)
+                if (isRemote) failedUrls.add(videoUrl)
                 null
             }
         }
+    }
+
+    private fun extractFrame(videoUrl: String): VideoThumbnail? {
+        MediaMetadataRetriever().use { retriever ->
+            retriever.setDataSource(videoUrl, HashMap<String, String>())
+            val frame = decodeScaledFrame(retriever)
+            if (frame != null) {
+                val ratio = frame.width.toFloat() / frame.height
+                val thumb = VideoThumbnail(bitmap = frame, aspectRatio = ratio)
+                cache[videoUrl] = thumb
+                lastAccessedAt[videoUrl] = System.nanoTime()
+                resolvedAspectRatios[videoUrl] = ratio
+                evictIfNeeded()
+                return thumb
+            }
+        }
+        return null
     }
 
     /**
