@@ -54,6 +54,7 @@ media3-exoplayer-hls        = { group = "androidx.media3",             name = "m
 media3-transformer          = { group = "androidx.media3",             name = "media3-transformer",              version.ref = "media3" }
 media3-effect               = { group = "androidx.media3",             name = "media3-effect",                   version.ref = "media3" }
 media3-ui                   = { group = "androidx.media3",             name = "media3-ui",                       version.ref = "media3" }
+media3-datasource-okhttp    = { group = "androidx.media3",             name = "media3-datasource-okhttp",        version.ref = "media3" }
 
 # Other
 security-crypto             = { group = "androidx.security",           name = "security-crypto",                 version.ref = "security-crypto" }
