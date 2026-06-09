@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,6 +43,7 @@ import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 
 /** Single-phase embedded quote resolution data. */
@@ -47,6 +51,7 @@ private data class QuoteResolution(
     val event: EventEntity? = null,
     val author: UserEntity? = null,
     val model: EventModel? = null,
+    val unresolved: Boolean = false,
 )
 
 /**
@@ -83,7 +88,11 @@ internal fun QuoteCard(
     nestDepth: Int = 0,
 ) {
     val quoteData by produceState(QuoteResolution(), segment.eventId, segment.hints) {
-        val ev = lookupEvent?.invoke(segment.eventId, segment.hints) ?: return@produceState
+        val ev = lookupEvent?.invoke(segment.eventId, segment.hints)
+        if (ev == null) {
+            value = QuoteResolution(unresolved = true)
+            return@produceState
+        }
         val auth = lookupProfile?.invoke(ev.pubkey)
         // Try cached EventModel first, fall back to on-the-fly parse
         val cachedModel = lookupModel?.invoke(ev.id)
@@ -209,8 +218,31 @@ internal fun QuoteCard(
                     }
                 }
             }
+        } else if (quoteData.unresolved) {
+            // Terminal failure — compact fallback chip (tap opens thread via outer pointerInput)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(SurfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            ) {
+                Text(
+                    text = "Quoted note unavailable",
+                    color = TextSecondary,
+                    fontSize = AppType.footnote,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
+                    contentDescription = "Tap to open",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         } else {
-            // Loading skeleton
+            // Loading skeleton (bounded ≤5s by lookupEvent timeout)
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(24.dp).clip(CircleShape).background(Surface1))

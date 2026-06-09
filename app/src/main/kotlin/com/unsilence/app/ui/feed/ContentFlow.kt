@@ -50,6 +50,7 @@ internal fun ContentFlow(
     onHashtagClick: (String) -> Unit = {},
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
+    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     imageDimensionCache: ImageDimensionCache?,
@@ -210,7 +211,9 @@ internal fun ContentFlow(
                         onNoteClick     = onNoteClick,
                         onAuthorClick   = onAuthorClick,
                         onHashtagClick  = onHashtagClick,
-                        lookupEvent     = lookupEvent,
+                        lookupEvent     = if (seg.author != null && lookupEventWithAuthor != null) {
+                            { id, hints -> lookupEventWithAuthor.invoke(id, hints, seg.author) }
+                        } else lookupEvent,
                         lookupProfile   = lookupProfile,
                         lookupModel     = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,

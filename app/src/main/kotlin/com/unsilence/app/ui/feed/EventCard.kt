@@ -322,6 +322,7 @@ fun EventCard(
                     onHashtagClick      = onHashtagClick,
                     lookupProfile       = lookupProfile,
                     lookupEvent         = lookupEvent,
+                    lookupEventWithAuthor = lookupEventWithAuthor,
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,
                     imageDimensionCache = imageDimensionCache,

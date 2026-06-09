@@ -73,6 +73,7 @@ sealed class Segment {
     data class QuoteEvent(
         val eventId: String,
         val hints: List<String>,         // relay hints from nevent1 + q-tags
+        val author: String? = null,      // nevent author pubkey (hex) — enables outbox fetch
     ) : Segment()
 
     @Immutable
