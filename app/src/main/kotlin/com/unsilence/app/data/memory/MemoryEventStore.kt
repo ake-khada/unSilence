@@ -128,7 +128,7 @@ class MemoryEventStore @Inject constructor(
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
     private val replyCounts = ConcurrentHashMap<String, Int>()
     private val repostCounts = ConcurrentHashMap<String, Int>()
-    private val reactionCounts = ConcurrentHashMap<String, Int>()
+    private val reactionCounts = ConcurrentHashMap<String, Int>() // legacy persisted aggregate; display reads reactionsByTarget — remove in cleanup pass
     private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
 
@@ -822,15 +822,19 @@ class MemoryEventStore @Inject constructor(
         val targetId = event.tags
             .lastOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
-        reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
+        reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 } // legacy aggregate; not read for display
         val contentStr = event.content.ifBlank { "+" }
         val reactionContent = parseReactionContent(contentStr, event.tags)
-        reactionsByTarget
-            .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
-            .add(ReactionInfo(event.pubkey, reactionContent))
+        // NIP-25 "-" is a downvote — don't index as a displayable reaction
+        if (reactionContent != ReactionContent.Standard("-")) {
+            reactionsByTarget
+                .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+                .add(ReactionInfo(event.pubkey, reactionContent))
+        }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reacted to
+        // TODO(cleanup): "-" still hits reactedTargetsByActor; harmless (no dislike UI) but inconsistent
         addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
     }
 
@@ -840,11 +844,12 @@ class MemoryEventStore @Inject constructor(
      * that were persisted with the old narrower regex.
      */
     private fun reindexReactionsFromEvents() {
+        reactionsByTarget.clear()
         val kind7Ids = idsByKind[7] ?: return
         if (kind7Ids.isEmpty()) return
-        reactionsByTarget.clear()
         var customCount = 0
         var standardCount = 0
+        var dislikeCount = 0
         var noETagCount = 0
         for (id in kind7Ids) {
             val event = eventsById[id] ?: continue
@@ -853,12 +858,14 @@ class MemoryEventStore @Inject constructor(
                 ?.get(1) ?: run { noETagCount++; continue }
             val contentStr = event.content.ifBlank { "+" }
             val reactionContent = parseReactionContent(contentStr, event.tags)
+            // NIP-25 "-" is a downvote — don't index as a displayable reaction
+            if (reactionContent == ReactionContent.Standard("-")) { dislikeCount++; continue }
             if (reactionContent is ReactionContent.Custom) customCount++ else standardCount++
             reactionsByTarget
                 .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
                 .add(ReactionInfo(event.pubkey, reactionContent))
         }
-        Log.d("MES", "Reindexed ${kind7Ids.size} kind-7 reactions (custom=$customCount, standard=$standardCount, noETag=$noETagCount)")
+        Log.d("MES", "Reindexed ${kind7Ids.size} kind-7 reactions (custom=$customCount, standard=$standardCount, dislikes=$dislikeCount, noETag=$noETagCount)")
     }
 
     private fun handleZapRequest(event: NostrEvent) {
@@ -2189,7 +2196,13 @@ class MemoryEventStore @Inject constructor(
 
     fun replyCount(eventId: String): Int = replyCounts[eventId] ?: 0
     fun repostCount(eventId: String): Int = repostCounts[eventId] ?: 0
-    fun reactionCount(eventId: String): Int = reactionCounts[eventId] ?: 0
+    /**
+     * Displayed reaction count for [eventId]: distinct (pubkey, content) entries,
+     * excluding NIP-25 "-" dislikes. Equals the total avatars the engagement
+     * drawer renders (grouped by emoji) — same source, by construction.
+     * Per-entry, NOT per-reactor: one pubkey reacting with two emoji counts as 2.
+     */
+    fun reactionCount(eventId: String): Int = reactionsByTarget[eventId]?.size ?: 0
     fun zapStats(eventId: String): ZapAggregate = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
     fun statsLastUpdated(eventId: String): Long = statsUpdatedAt[eventId] ?: 0L
 
@@ -3430,6 +3443,9 @@ class MemoryEventStore @Inject constructor(
                 }
             }
         }
+
+        // Rebuild reaction set from raw kind-7 events (same as binary path)
+        reindexReactionsFromEvents()
 
         // Bump all signals once (follows signal fires again — idempotent,
         // consumers use distinctUntilChanged or one-shot .first())

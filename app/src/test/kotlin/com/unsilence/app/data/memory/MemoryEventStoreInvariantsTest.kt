@@ -234,6 +234,7 @@ class MemoryEventStoreInvariantsTest {
             store.insert(
                 event(
                     id = "reaction-$i",
+                    pubkey = "pk-$i",
                     kind = 7,
                     content = "+",
                     tags = listOf(listOf("e", targetId)),
@@ -242,6 +243,60 @@ class MemoryEventStoreInvariantsTest {
         }
 
         assertEquals(5, store.reactionCount(targetId))
+    }
+
+    @Test
+    fun `reaction count equals drawer count — invariant`() {
+        val targetId = "invariant-target"
+        store.insert(event(id = targetId, kind = 1))
+
+        // Mixed reactions: distinct pubkeys, mixed emoji, one dislike, one dup
+        store.insert(event(id = "r1", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "r2", pubkey = "bob", kind = 7, content = "\u2764\uFE0F", tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "r3", pubkey = "carol", kind = 7, content = "-", tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "r4", pubkey = "alice", kind = 7, content = "\uD83D\uDC4D", tags = listOf(listOf("e", targetId)))) // alice 2nd emoji
+        store.insert(event(id = "r5", pubkey = "bob", kind = 7, content = "+", tags = listOf(listOf("e", targetId)))) // bob dup (pubkey, +)… different emoji though
+        store.insert(event(id = "r6", pubkey = "dave", kind = 7, content = "+", tags = listOf(listOf("e", targetId)))) // dave dup same (pubkey,emoji) as r5? No, different pubkey
+
+        // Drawer: reactionsForEvent drops "-" (it's not in the set at all)
+        val drawerReactions = store.reactionsForEvent(targetId)
+        val drawerCount = drawerReactions.size
+
+        // Action bar: reactionCount — must equal drawer
+        assertEquals(drawerCount, store.reactionCount(targetId))
+    }
+
+    @Test
+    fun `dislike reaction excluded from count and set`() {
+        val targetId = "dislike-target"
+        store.insert(event(id = targetId, kind = 1))
+        store.insert(event(id = "dislike-1", pubkey = "alice", kind = 7, content = "-", tags = listOf(listOf("e", targetId))))
+
+        assertEquals(0, store.reactionCount(targetId))
+        assertTrue(store.reactionsForEvent(targetId).isEmpty())
+    }
+
+    @Test
+    fun `duplicate pubkey+emoji deduplicates in reaction count`() {
+        val targetId = "dedup-target"
+        store.insert(event(id = targetId, kind = 1))
+        // Same pubkey, same emoji, two events (re-publish / multi-relay)
+        store.insert(event(id = "dup-1", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "dup-2", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+
+        assertEquals(1, store.reactionCount(targetId))
+        assertEquals(1, store.reactionsForEvent(targetId).size)
+    }
+
+    @Test
+    fun `same pubkey different emoji counts as two reactions`() {
+        val targetId = "multi-emoji-target"
+        store.insert(event(id = targetId, kind = 1))
+        store.insert(event(id = "me-1", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "me-2", pubkey = "alice", kind = 7, content = "\u2764\uFE0F", tags = listOf(listOf("e", targetId))))
+
+        assertEquals(2, store.reactionCount(targetId))
+        assertEquals(2, store.reactionsForEvent(targetId).size)
     }
 
     // ── Zap stats ───────────────────────────────────────────────────────────
