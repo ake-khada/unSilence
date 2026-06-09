@@ -162,6 +162,21 @@ class OutboxRelayResolver @Inject constructor(
             writeRelayUrls.sortedWith(relayQuality)
         }
 
+        // ── FOLLOWDBG: coverage audit ────────────────────────────────────────
+        val allSubRelays = baseUrlSet + selectedWriteRelays.toSet()
+        val noRelayList = mutableListOf<String>()
+        val uncoveredAuthors = mutableListOf<String>()
+        for (author in sortedAuthors) {
+            val raw = metadata.writeRelaysFor(author)
+            if (raw.isEmpty()) { noRelayList.add(author.take(8)); continue }
+            val authorUrls = raw.mapNotNull { normalizeRelayUrl(it) }.filter { it !in blockedRelays }.toSet()
+            if (authorUrls.intersect(allSubRelays).isEmpty()) uncoveredAuthors.add(author.take(8))
+        }
+        Log.w("FOLLOWDBG", "coverage: follows=${sortedAuthors.size} subRelays=${allSubRelays.size} " +
+            "uncovered=${uncoveredAuthors.size} [${uncoveredAuthors.take(20).joinToString()}] " +
+            "norelaylist=${noRelayList.size} [${noRelayList.take(20).joinToString()}]")
+        // ─────────────────────────────────────────────────────────────────────
+
         val subRequests = mutableListOf<SubRequest>()
 
         // Fallback relays: each gets all authors. Always FAST tier — these

@@ -80,6 +80,7 @@ private const val DEDUP_TRIM = 2_000
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val signatureVerifier: com.unsilence.app.data.auth.SignatureVerifier,
+    private val keyManager: com.unsilence.app.data.auth.KeyManager,
 ) : TapRegistration {
     // CPU-bound work (JSON parse, MES insert, kind handlers).
     // Belongs on Default not IO. limitedParallelism(2) keeps this from
@@ -87,6 +88,17 @@ class EventProcessor @Inject constructor(
     private val processDispatcher = Dispatchers.Default.limitedParallelism(2)
     private var scope = CoroutineScope(SupervisorJob() + processDispatcher)
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
+
+    // ── FOLLOWDBG: cached follow set for wire-arrival probe ──────────────────
+    @Volatile private var followDbgSet: Set<String> = emptySet()
+    @Volatile private var followDbgPk: String? = null
+    private val FOLLOW_CONTENT_KINDS = setOf(1, 6, 20, 21, 30023)
+
+    private fun refreshFollowDbg() {
+        val pk = keyManager.getPublicKeyHex() ?: return
+        followDbgPk = pk
+        followDbgSet = memoryEventStore.getFollows(pk) ?: emptySet()
+    }
 
     // ── Subscription tap registry ─────────────────────────────────────────────
     // Subscriptions register a tap to receive raw relay messages (EVENT/EOSE/
@@ -388,6 +400,13 @@ class EventProcessor @Inject constructor(
         // subscriptions or MES.
         if (!verifySig(nostrEvent)) return
 
+        // ── FOLLOWDBG: wire arrival for followed-author content events ───────
+        if (followDbgSet.isEmpty()) refreshFollowDbg()
+        if (dto.kind in FOLLOW_CONTENT_KINDS && dto.pubkey in followDbgSet) {
+            Log.w("FOLLOWDBG", "wire: author=${dto.pubkey.take(8)} kind=${dto.kind} " +
+                "createdAt=${dto.createdAt} relay=${relayUrl} id=${dto.id.take(8)}")
+        }
+
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES
         // proper. Snapshot persists followsByPubkey so this is reconstructible.
@@ -398,6 +417,7 @@ class EventProcessor @Inject constructor(
                 .toSet()
             memoryEventStore.updateFollows(dto.pubkey, follows, dto.createdAt)
             Log.d(TAG, "Kind-3 direct path: pubkey=${dto.pubkey.take(8)}… ${follows.size} follows (createdAt=${dto.createdAt})")
+            if (dto.pubkey == followDbgPk || followDbgSet.isEmpty()) refreshFollowDbg()
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
         // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
