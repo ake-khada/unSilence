@@ -404,13 +404,15 @@ class FeedViewModel @Inject constructor(
                 .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
                 .collectLatest { (events, first) ->
                     if (events.isEmpty()) return@collectLatest
+                    val warmBelow = if (_feedType.value is FeedType.Following) WARM_ZONE_BELOW else WARM_ZONE_BELOW_CHURNY
                     val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
-                    val zoneEnd = (first + WARM_ZONE_BELOW).coerceAtMost(events.size)
+                    val zoneEnd = (first + warmBelow).coerceAtMost(events.size)
                     if (zoneStart >= zoneEnd) return@collectLatest
                     val warmEvents = events.subList(zoneStart, zoneEnd)
                     val vpStart = (first - zoneStart).coerceAtLeast(0)
                     val vpEnd = (vpStart + VIEWPORT_SIZE).coerceAtMost(warmEvents.size)
-                    val engEnd = (vpEnd + ENGAGEMENT_LOOKAHEAD).coerceAtMost(warmEvents.size)
+                    val lookahead = if (_feedType.value is FeedType.Following) ENGAGEMENT_LOOKAHEAD else ENGAGEMENT_LOOKAHEAD_CHURNY
+                    val engEnd = (vpEnd + lookahead).coerceAtMost(warmEvents.size)
                     val viewportIds = warmEvents.subList(vpStart, engEnd).map { it.id }.toSet()
                     val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
                     if (rows.isNotEmpty()) {
@@ -894,8 +896,11 @@ class FeedViewModel @Inject constructor(
     private companion object {
         const val WARM_ZONE_ABOVE = 10
         const val WARM_ZONE_BELOW = 50
+        /** Churny feeds (Global, SingleRelay) — narrower warm zone to reduce speculative fetches. */
+        const val WARM_ZONE_BELOW_CHURNY = 30
         /** Approximate on-screen post count — engagement fetch scoped to this. */
         const val VIEWPORT_SIZE = 8
+        const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
         const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
         /** Debounce window — collapses frantic mashing, not deliberate retries. */
