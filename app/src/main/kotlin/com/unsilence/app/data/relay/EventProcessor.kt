@@ -93,6 +93,11 @@ class EventProcessor @Inject constructor(
     @Volatile private var followDbgSet: Set<String> = emptySet()
     @Volatile private var followDbgPk: String? = null
     private val FOLLOW_CONTENT_KINDS = setOf(1, 6, 20, 21, 30023)
+    private val WATCHED_AUTHORS = setOf(
+        "f1725586a402c06aec818d1478a45aaa0dc16c7a9c4869d97c350336d16f8e43", // Rusty Russell
+        "91c9a5e1a9744114c6fe2d61ae4de82629eaaa0fb52f48288093c7e7e036f832", // Uncle Rockstar
+        "b7b51cc25216d4c10bc85ae27055c9a945fe77cafd463cf23b20917e39ce6816", // Adam O'Brien
+    )
 
     private fun refreshFollowDbg() {
         val pk = keyManager.getPublicKeyHex() ?: return
@@ -540,6 +545,14 @@ class EventProcessor @Inject constructor(
             }
         }
         memoryEventStore.insertBatch(events.values.toList())
+        // ── FOLLOWDBG: post-insert check for watched authors ─────────────────
+        for (e in events.values) {
+            if (e.pubkey in WATCHED_AUTHORS) {
+                val mesCount = memoryEventStore.userEvents(e.pubkey, FOLLOW_CONTENT_KINDS, 1000).size
+                Log.w("FOLLOWDBG", "inserted: author=${e.pubkey.take(8)} id=${e.id.take(8)} " +
+                    "createdAt=${e.createdAt} mesCount=$mesCount")
+            }
+        }
 
         // Kind-10012 favorites may reference relay sets via "a" tags that
         // need a follow-up fetch from a hint relay. Resolve outside the
@@ -567,6 +580,14 @@ class EventProcessor @Inject constructor(
         // Batch insert with coalesced signal bumps: ≤5 bumps instead of N.
         val eventList = events.values.toList()
         memoryEventStore.insertBatch(eventList)
+        // ── FOLLOWDBG: post-insert check for watched authors ─────────────────
+        for (e in eventList) {
+            if (e.pubkey in WATCHED_AUTHORS) {
+                val mesCount = memoryEventStore.userEvents(e.pubkey, FOLLOW_CONTENT_KINDS, 1000).size
+                Log.w("FOLLOWDBG", "inserted: author=${e.pubkey.take(8)} id=${e.id.take(8)} " +
+                    "createdAt=${e.createdAt} mesCount=$mesCount")
+            }
+        }
 
         // Pre-compute media metadata at insert time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
