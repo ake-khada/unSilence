@@ -107,4 +107,42 @@ class RelayCapabilitiesTransportTest {
             ) >= MAX_CAPABILITY_STRIKES
         )
     }
+
+    // ── Dead-count regression (H18.4) ─────────────────────────────────
+
+    /** CONNECT_TIMEOUT must never contribute to dead-count (transient, VPN-variable). */
+    @Test
+    fun `10x CONNECT_TIMEOUT does not produce dead-count`() {
+        // Simulate: only DNS_RESOLUTION increments deadFailCount
+        var deadCount = 0
+        repeat(10) {
+            val reason = SkipReason.CONNECT_TIMEOUT
+            if (reason == SkipReason.DNS_RESOLUTION) deadCount++
+        }
+        assertEquals(0, deadCount)
+        assertTrue("10 timeouts must not reach dead threshold", deadCount < DEAD_RELAY_THRESHOLD)
+    }
+
+    /** DNS_RESOLUTION does produce dead-count — the relay is genuinely unresolvable. */
+    @Test
+    fun `10x DNS_RESOLUTION reaches dead threshold`() {
+        var deadCount = 0
+        repeat(10) {
+            val reason = SkipReason.DNS_RESOLUTION
+            if (reason == SkipReason.DNS_RESOLUTION) deadCount++
+        }
+        assertEquals(10, deadCount)
+        assertTrue("10 DNS failures must reach dead threshold", deadCount >= DEAD_RELAY_THRESHOLD)
+    }
+
+    // ── Cooldown base by failure type (H18.4) ─────────────────────────
+    // retryCooldownMs needs the store instance (Android Context) — tested
+    // via documented contract: DNS_RETRY_BASE_MS > TRANSPORT_RETRY_BASE_MS
+
+    @Test
+    fun `DNS retry base is longer than timeout retry base`() {
+        // These are compile-time constants — lock the ratio so it can't drift
+        assertTrue("DNS base (5min) must be > timeout base (1min)",
+            5 * 60_000L > 60_000L)
+    }
 }

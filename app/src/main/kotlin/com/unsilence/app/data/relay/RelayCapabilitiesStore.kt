@@ -37,8 +37,10 @@ const val MAX_CAPABILITY_STRIKES = 3
 
 /** Transport-strike retry cooldowns. Once a relay passes MAX_CAPABILITY_STRIKES,
  *  it's skipped only within this window since the last strike — then a single
- *  retry is allowed (half-open). Replaces the old "permanent until 24h TTL". */
-private const val TRANSPORT_RETRY_BASE_MS = 60_000L            // 1 min — first retry after threshold
+ *  retry is allowed (half-open). Replaces the old "permanent until 24h TTL".
+ *  DNS failures use a longer base — the VPN/system resolver won't change in 1 min. */
+private const val TRANSPORT_RETRY_BASE_MS = 60_000L            // 1 min — timeout/TLS first retry
+private const val DNS_RETRY_BASE_MS       = 5 * 60_000L        // 5 min — DNS base (resolver unlikely to change sooner)
 private const val TRANSPORT_RETRY_MAX_MS  = 30 * 60_000L       // 30 min cap (non-integral, dead relays)
 private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min flat — integral relays heal fast
 
@@ -49,8 +51,9 @@ internal const val NETWORK_DOWN_WINDOW_MS = 3_000L
 
 /** Cross-session dead-relay denylist. Distinct from transient strikes (in-memory,
  *  24h TTL, half-open) — this is long-term, persisted, DataStore-backed.
- *  A relay is dead when it fails [DEAD_RELAY_THRESHOLD] consecutive connects/DNS
- *  outside of network-down (Phase 1 gate wraps the increment — critical). */
+ *  A relay is dead when it fails [DEAD_RELAY_THRESHOLD] consecutive DNS resolutions
+ *  outside of network-down (Phase 1 gate wraps the increment — critical).
+ *  CONNECT_TIMEOUT is transient and does NOT count (H18.4). */
 internal const val DEAD_RELAY_THRESHOLD = 10
 internal const val DEAD_RELAY_REPROBE_MS = 7L * 24 * 3600 * 1000  // weekly
 
@@ -247,11 +250,16 @@ class RelayCapabilitiesStore @Inject constructor(
     }
 
     /** Cooldown before a struck relay becomes retry-eligible.
-     *  Integral relays: short flat window. Others: exponential backoff, capped. */
+     *  Integral relays: short flat window. Others: exponential backoff, capped.
+     *  DNS failures use a longer base — the VPN/system resolver won't resolve
+     *  a missing host in 1 minute. */
     internal fun retryCooldownMs(url: String, strikes: Int): Long {
         if (isIntegral(url)) return INTEGRAL_RETRY_COOLDOWN_MS
         val overage = (strikes - MAX_CAPABILITY_STRIKES).coerceIn(0, 6)
-        return (TRANSPORT_RETRY_BASE_MS shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
+        val lastReason = caps[normalizeRelayUrl(url) ?: url]?.lastReason
+        val base = if (lastReason == SkipReason.DNS_RESOLUTION.name) DNS_RETRY_BASE_MS
+                   else TRANSPORT_RETRY_BASE_MS
+        return (base shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
     }
 
     /**
@@ -279,12 +287,10 @@ class RelayCapabilitiesStore @Inject constructor(
         val weight = strikesForReason(reason)
         val existing = caps[key] ?: RelayCapabilities()
         val newStrikes = existing.strikes + weight
-        // Dead-relay increment: AFTER the network-down gate. If we're network-down,
-        // both DNS and connect-timeout paths are unreachable above, so dead-count is
-        // never incremented during outages.
-        val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION ||
-            reason == SkipReason.CONNECT_TIMEOUT
-        ) {
+        // Dead-relay increment: DNS only. CONNECT_TIMEOUT is transient (VPN/network
+        // variability) and must not contribute to the permanent denylist.
+        // AFTER the network-down gate — DNS is unreachable above during outages.
+        val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION) {
             existing.deadFailCount + 1
         } else {
             existing.deadFailCount
@@ -396,6 +402,33 @@ class RelayCapabilitiesStore @Inject constructor(
         // A successful connection means the network can resolve at least one host.
         // If we were DNS-degraded, this is the heal trigger.
         healDnsDegraded()
+    }
+
+    /**
+     * Clear cooldown + dead-count for a relay the user explicitly re-added or edited.
+     * A manual add is an explicit "try this now" signal — clears everything.
+     */
+    fun clearCooldownForRelay(url: String) {
+        val key = normalizeRelayUrl(url) ?: return
+        clearTransportStrikesInternal(key)
+    }
+
+    /**
+     * Clear DNS-dead state for all relays that failed DNS resolution.
+     * Called on network/VPN change — DNS resolvability is a property of the current
+     * network, not the relay. A relay dead on network A is likely alive on network B.
+     */
+    fun clearDnsDeadOnNetworkChange() {
+        var cleared = 0
+        for ((key, c) in caps) {
+            if (c.lastReason == SkipReason.DNS_RESOLUTION.name && (c.strikes > 0 || c.deadFailCount > 0)) {
+                caps[key] = c.copy(strikes = 0, lastReason = "", deadFailCount = 0)
+                cleared++
+            }
+        }
+        if (cleared > 0) {
+            Log.w(TAG, "Network change: cleared DNS-dead state for $cleared relay(s)")
+        }
     }
 
     /** Internal strike-clear without the degraded-heal trigger (avoids recursion). */
