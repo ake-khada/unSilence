@@ -69,7 +69,7 @@ class ImageDimensionCache @Inject constructor(
                 val request = Request.Builder()
                     .url(url)
                     .header("Range", "bytes=0-32767")
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36")
+                    .header("User-Agent", com.unsilence.app.data.BROWSER_USER_AGENT)
                     .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful && response.code != 206) {
