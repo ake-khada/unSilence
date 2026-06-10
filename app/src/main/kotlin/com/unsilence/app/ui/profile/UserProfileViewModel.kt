@@ -10,7 +10,6 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.toEventJson
-import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
@@ -42,10 +41,6 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
@@ -101,7 +96,7 @@ class UserProfileViewModel @Inject constructor(
         }
             .sample(FEED_SAMPLE_MS)
             .flowOn(Dispatchers.Default)
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // ── Profile tabs ─────────────────────────────────────────────────────
 
@@ -189,27 +184,9 @@ class UserProfileViewModel @Inject constructor(
             userRepository.fetchProfilesWithFanout(listOf(pubkey))
         }
 
-        // Fetch follower count via NIP-45 COUNT
+        // Fetch follower count via NIP-45 COUNT (MES-cached, deduped in ProfilePipeline)
         viewModelScope.launch(Dispatchers.IO) {
-            val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkey)
-            val oneDayAgo = System.currentTimeMillis() / 1000 - MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS
-
-            if (cached != null && cachedAt != null && cachedAt > oneDayAgo) {
-                followerCount.value = cached
-                return@launch
-            }
-            relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
-            val count = relayPool.sendCount(
-                relayUrl = ANTIPRIMAL_RELAY_URL,
-                filter = buildJsonObject {
-                    put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                    put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                },
-            )
-            if (count != null) {
-                followerCount.value = count
-                memoryEventStore.cacheFollowerCount(pubkey, count)
-            }
+            profilePipeline.fetchFollowerCount(pubkey)?.let { followerCount.value = it }
         }
 
         // Fetch following count
