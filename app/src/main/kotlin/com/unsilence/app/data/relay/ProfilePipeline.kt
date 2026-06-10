@@ -5,7 +5,15 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -13,6 +21,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -58,9 +67,23 @@ class ProfilePipeline @Inject constructor(
         private const val DELTA_THRESHOLD_DAYS = 7L
     }
 
+    /** Owns deduped pipeline work — survives individual callers so cancelling
+     *  one waiter (e.g. a ViewModel clearing) doesn't kill another's join. */
+    private val pipelineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Per-pubkey in-flight loadProfile runs. */
+    private val inFlight = ConcurrentHashMap<String, Job>()
+
+    /** Per-pubkey in-flight follower-count fetches — concurrent callers share one result. */
+    private val followerCountInFlight = ConcurrentHashMap<String, Deferred<Long?>>()
+
     /**
      * Load a full profile: notes, refs, engagement, own-engagement.
      * Each step is fail-soft — a network error in one step doesn't abort subsequent steps.
+     *
+     * In-flight dedup per pubkey: AppBootstrapper Phase 2 and the profile
+     * ViewModels can race the same pubkey — the second caller joins the first
+     * run instead of duplicating paginated fetches + engagement sweeps.
      *
      * @param pubkey hex pubkey of the profile to load.
      * @param isOwn true if this is the logged-in user's own profile.
@@ -72,6 +95,29 @@ class ProfilePipeline @Inject constructor(
         isOwn: Boolean,
         anchorPolicy: AnchorPolicy,
         maxPages: Int = 5,
+    ) {
+        val newJob = pipelineScope.launch(start = CoroutineStart.LAZY) {
+            runLoadProfile(pubkey, isOwn, anchorPolicy, maxPages)
+        }
+        // Atomic register-or-adopt: keep an existing active run, else install ours.
+        val job = inFlight.compute(pubkey) { _, existing ->
+            if (existing?.isActive == true) existing else newJob
+        }!!
+        if (job === newJob) {
+            job.invokeOnCompletion { inFlight.remove(pubkey, job) }
+            job.start()
+        } else {
+            newJob.cancel()
+            Log.d(TAG, "loadProfile: joining in-flight run for ${pubkey.take(8)}…")
+        }
+        job.join()
+    }
+
+    private suspend fun runLoadProfile(
+        pubkey: String,
+        isOwn: Boolean,
+        anchorPolicy: AnchorPolicy,
+        maxPages: Int,
     ) {
         val startMs = System.currentTimeMillis()
         Log.d(TAG, "loadProfile: ${pubkey.take(8)}… isOwn=$isOwn anchor=$anchorPolicy")
@@ -124,6 +170,44 @@ class ProfilePipeline @Inject constructor(
 
         val elapsed = System.currentTimeMillis() - startMs
         Log.d(TAG, "loadProfile: ${pubkey.take(8)}… completed in ${elapsed}ms (${noteEvents.size} notes, ${refIds.size} refs)")
+    }
+
+    /**
+     * Approximate follower count via NIP-45 COUNT on the antiprimal relay,
+     * cached in MES with [MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS].
+     *
+     * Centralized here because the antiprimal connect uses `forceEvict = true` —
+     * concurrent runs from ProfileViewModel and UserProfileViewModel could evict
+     * each other's connection mid-flight. Per-pubkey in-flight dedup shares one
+     * result among concurrent callers.
+     */
+    suspend fun fetchFollowerCount(pubkey: String): Long? {
+        val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkey)
+        val ttlFloor = System.currentTimeMillis() / 1000 - MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS
+        if (cached != null && cachedAt != null && cachedAt > ttlFloor) return cached
+
+        val newDeferred = pipelineScope.async(start = CoroutineStart.LAZY) {
+            relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
+            val count = relayPool.sendCount(
+                relayUrl = ANTIPRIMAL_RELAY_URL,
+                filter = buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                    put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                },
+            )
+            if (count != null) memoryEventStore.cacheFollowerCount(pubkey, count)
+            count
+        }
+        val deferred = followerCountInFlight.compute(pubkey) { _, existing ->
+            if (existing?.isActive == true) existing else newDeferred
+        }!!
+        if (deferred === newDeferred) {
+            deferred.invokeOnCompletion { followerCountInFlight.remove(pubkey, deferred) }
+            deferred.start()
+        } else {
+            newDeferred.cancel()
+        }
+        return deferred.await()
     }
 
     /**
