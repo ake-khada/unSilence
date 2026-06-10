@@ -27,11 +27,24 @@ class DnsDegradedDetectionTest {
             private set
         val failedDuringDegradation = mutableSetOf<String>()
 
+        /** Mirrors RelayCapabilitiesStore.dnsDegradedActive() — the TTL decision itself
+         *  delegates to the REAL production pure function, not a duplicate. Lazily clears
+         *  an expired latch so a fresh burst re-arms with a new onset. (H20a) */
+        fun active(now: Long): Boolean {
+            if (!degraded) return false
+            if (RelayCapabilitiesStore.isDegradedActive(true, onsetAt, now)) return true
+            degraded = false
+            recentDnsFailures.clear()
+            failedDuringDegradation.clear()
+            return false
+        }
+
         fun recordDnsFailure(url: String, now: Long) {
+            val wasActive = active(now)  // clears an expired latch first
             recentDnsFailures[url] = now
             val cutoff = now - NETWORK_DOWN_WINDOW_MS
             recentDnsFailures.entries.removeIf { it.value < cutoff }
-            if (!degraded && recentDnsFailures.size >= NETWORK_DOWN_DNS_THRESHOLD) {
+            if (!wasActive && recentDnsFailures.size >= NETWORK_DOWN_DNS_THRESHOLD) {
                 degraded = true
                 onsetAt = now
             }
@@ -159,5 +172,71 @@ class DnsDegradedDetectionTest {
         assertFalse(d.degraded)
         val healed = d.heal()
         assertTrue(healed.isEmpty())
+    }
+
+    // ── TTL latch breaker (H20a) — production pure function tested directly ───
+
+    @Test
+    fun `isDegradedActive is false when not armed`() {
+        assertFalse(RelayCapabilitiesStore.isDegradedActive(armed = false, onsetAtMs = 0L, nowMs = 50_000L))
+    }
+
+    @Test
+    fun `isDegradedActive is true within TTL`() {
+        val onset = 1000L
+        assertTrue(RelayCapabilitiesStore.isDegradedActive(true, onset, onset))
+        assertTrue(RelayCapabilitiesStore.isDegradedActive(true, onset, onset + DNS_DEGRADED_TTL_MS - 1))
+    }
+
+    @Test
+    fun `isDegradedActive expires at and past TTL`() {
+        val onset = 1000L
+        assertFalse(RelayCapabilitiesStore.isDegradedActive(true, onset, onset + DNS_DEGRADED_TTL_MS))
+        assertFalse(RelayCapabilitiesStore.isDegradedActive(true, onset, onset + DNS_DEGRADED_TTL_MS + 60_000L))
+    }
+
+    @Test
+    fun `armed latch reports inactive once TTL elapses`() {
+        val d = DegradedDetector()
+        val t = 1000L
+        repeat(4) { d.recordDnsFailure("wss://r$it.com", t + it) }
+        assertTrue("4 distinct failures arm the latch", d.degraded)
+        val onset = d.onsetAt
+        assertTrue("active just before TTL", d.active(onset + DNS_DEGRADED_TTL_MS - 1))
+        assertFalse("inactive at TTL — gate can't block its own exit", d.active(onset + DNS_DEGRADED_TTL_MS + 1))
+    }
+
+    @Test
+    fun `fresh DNS burst re-arms after TTL expiry with a new onset`() {
+        val d = DegradedDetector()
+        val t = 1000L
+        repeat(4) { d.recordDnsFailure("wss://a$it.com", t + it) }
+        assertTrue(d.degraded)
+        val firstOnset = d.onsetAt
+
+        // Long past the TTL — the heuristic must stay useful: a fresh burst re-arms,
+        // it just can't ride the stale latch.
+        val t2 = t + DNS_DEGRADED_TTL_MS + 60_000L
+        d.recordDnsFailure("wss://b0.com", t2)
+        assertFalse("single fresh failure after expiry does not re-arm", d.degraded)
+        d.recordDnsFailure("wss://b1.com", t2 + 1)
+        d.recordDnsFailure("wss://b2.com", t2 + 2)
+        d.recordDnsFailure("wss://b3.com", t2 + 3)
+        assertTrue("fresh distinct burst re-arms", d.degraded)
+        assertTrue("re-arm carries a new onset", d.onsetAt > firstOnset)
+    }
+
+    @Test
+    fun `heal clears the latch before TTL (probe-success path)`() {
+        val d = DegradedDetector()
+        val t = 1000L
+        repeat(4) { d.recordDnsFailure("wss://r$it.com", t + it) }
+        assertTrue(d.degraded)
+        // A probe connects well within the TTL → heal clears the latch immediately,
+        // long before the 90s backstop would.
+        val healed = d.heal()
+        assertFalse("latch cleared by heal, not by TTL", d.degraded)
+        assertTrue("relays struck during degradation are healed", healed.isNotEmpty())
+        assertFalse("post-heal latch reads inactive", d.active(t + 5))
     }
 }
