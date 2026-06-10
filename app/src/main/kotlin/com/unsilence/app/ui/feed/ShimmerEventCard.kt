@@ -6,7 +6,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.ui.theme.Sizing
@@ -48,7 +48,9 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
         ),
         label = "shimmer-progress",
     )
-    val shimmerColor = lerp(Surface1, Surface2, progress)
+    // Animated color read happens INSIDE the draw lambda — reading `progress`
+    // in composition recomposed the whole skeleton every animation frame.
+    val shimmer = Modifier.drawBehind { drawRect(lerp(Surface1, Surface2, progress)) }
 
     Column(
         modifier = modifier
@@ -61,7 +63,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .size(Sizing.avatar)
                     .clip(CircleShape)
-                    .background(shimmerColor),
+                    .then(shimmer),
             )
             Spacer(Modifier.width(Spacing.small))
             Box(
@@ -69,7 +71,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                     .width(120.dp)
                     .height(14.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(shimmerColor),
+                    .then(shimmer),
             )
             Spacer(Modifier.weight(1f))
             Box(
@@ -77,7 +79,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                     .width(32.dp)
                     .height(12.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(shimmerColor),
+                    .then(shimmer),
             )
         }
         Spacer(Modifier.height(Spacing.small))
@@ -88,7 +90,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                 .fillMaxWidth()
                 .height(14.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(shimmerColor),
+                .then(shimmer),
         )
         Spacer(Modifier.height(6.dp))
         Box(
@@ -96,7 +98,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                 .fillMaxWidth(0.75f)
                 .height(14.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(shimmerColor),
+                .then(shimmer),
         )
         Spacer(Modifier.height(6.dp))
         Box(
@@ -104,7 +106,7 @@ fun ShimmerEventCard(modifier: Modifier = Modifier) {
                 .fillMaxWidth(0.5f)
                 .height(14.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(shimmerColor),
+                .then(shimmer),
         )
     }
 }

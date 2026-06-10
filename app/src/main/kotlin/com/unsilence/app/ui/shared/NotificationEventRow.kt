@@ -38,6 +38,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.NotificationItem
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Like
@@ -47,10 +48,6 @@ import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 /**
  * Unified notification row that renders actor info + notification type icon +
@@ -211,13 +208,3 @@ private fun notifMeta(notifType: String): NotifMeta = when (notifType) {
     else -> NotifMeta(Icons.Filled.AlternateEmail, TextSecondary, "mentioned you")
 }
 
-private fun relativeTime(createdAtSeconds: Long): String {
-    val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
-    return when {
-        diffMs < TimeUnit.MINUTES.toMillis(1) -> "now"
-        diffMs < TimeUnit.HOURS.toMillis(1) -> "${TimeUnit.MILLISECONDS.toMinutes(diffMs)}m"
-        diffMs < TimeUnit.DAYS.toMillis(1) -> "${TimeUnit.MILLISECONDS.toHours(diffMs)}h"
-        diffMs < TimeUnit.DAYS.toMillis(7) -> "${TimeUnit.MILLISECONDS.toDays(diffMs)}d"
-        else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(createdAtSeconds * 1000L))
-    }
-}

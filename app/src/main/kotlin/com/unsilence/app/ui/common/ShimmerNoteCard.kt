@@ -5,7 +5,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -31,6 +31,20 @@ import com.unsilence.app.ui.theme.Surface2
 
 private val ShimmerDark = Surface1
 private val ShimmerLight = Surface2
+private val ShimmerColors = listOf(ShimmerDark, ShimmerLight, ShimmerDark)
+
+/** Draws the animated shimmer gradient at draw time — reading [offset] inside
+ *  the draw lambda keeps the per-frame animation out of composition. */
+private fun Modifier.shimmerBackground(offset: () -> Float): Modifier = drawBehind {
+    val x = offset()
+    drawRect(
+        Brush.linearGradient(
+            colors = ShimmerColors,
+            start = Offset(x, 0f),
+            end = Offset(x + 300f, 0f),
+        ),
+    )
+}
 
 @Composable
 fun ShimmerNoteCard(showMedia: Boolean = true) {
@@ -45,12 +59,6 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
         label = "shimmerOffset",
     )
 
-    val brush = Brush.linearGradient(
-        colors = listOf(ShimmerDark, ShimmerLight, ShimmerDark),
-        start = Offset(offset, 0f),
-        end = Offset(offset + 300f, 0f),
-    )
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -62,7 +70,7 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(brush),
+                    .shimmerBackground { offset },
             )
 
             Spacer(Modifier.width(Spacing.small))
@@ -74,7 +82,7 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
                         .width(120.dp)
                         .height(12.dp)
                         .clip(RoundedCornerShape(4.dp))
-                        .background(brush),
+                        .shimmerBackground { offset },
                 )
                 Spacer(Modifier.height(Spacing.small))
                 // Content line 1
@@ -83,7 +91,7 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
                         .fillMaxWidth()
                         .height(12.dp)
                         .clip(RoundedCornerShape(4.dp))
-                        .background(brush),
+                        .shimmerBackground { offset },
                 )
                 Spacer(Modifier.height(Spacing.small))
                 // Content line 2
@@ -92,7 +100,7 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
                         .fillMaxWidth(0.8f)
                         .height(12.dp)
                         .clip(RoundedCornerShape(4.dp))
-                        .background(brush),
+                        .shimmerBackground { offset },
                 )
             }
         }
@@ -105,7 +113,7 @@ fun ShimmerNoteCard(showMedia: Boolean = true) {
                     .fillMaxWidth()
                     .height(180.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(brush),
+                    .shimmerBackground { offset },
             )
         }
 

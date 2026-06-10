@@ -13,6 +13,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -47,6 +48,9 @@ internal fun AuthorHeader(
 ) {
     val authorLabel = displayName
         ?: "${pubkey.take(6)}…${pubkey.takeLast(4)}"
+    val parsedNip05 = remember(nip05) {
+        if (nip05.isNullOrBlank()) null else parseNip05(nip05)
+    }
 
     Row(
         modifier = modifier
@@ -82,7 +86,7 @@ internal fun AuthorHeader(
                     overflow   = TextOverflow.Ellipsis,
                     modifier   = Modifier.weight(1f, fill = false),
                 )
-                if (!nip05.isNullOrBlank() && parseNip05(nip05) != null) {
+                if (parsedNip05 != null) {
                     Spacer(Modifier.width(4.dp))
                     Icon(
                         imageVector        = Icons.Filled.Verified,
@@ -92,7 +96,7 @@ internal fun AuthorHeader(
                     )
                     Spacer(Modifier.width(3.dp))
                     Text(
-                        text     = nip05Domain(nip05),
+                        text     = parsedNip05.second,
                         color    = TextSecondary,
                         fontSize = AppType.caption,
                         maxLines = 1,

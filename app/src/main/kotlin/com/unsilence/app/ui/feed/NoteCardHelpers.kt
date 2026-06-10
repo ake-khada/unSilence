@@ -6,15 +6,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -37,18 +34,14 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -56,10 +49,6 @@ import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -73,24 +62,16 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
-import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.Nip19FailureCache
-import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
-import com.unsilence.app.ui.common.rememberFullWidthImageRequest
-import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.Surface1
-import com.unsilence.app.ui.theme.SurfaceVariant
-import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -104,15 +85,15 @@ import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 internal val ActionTint = Text3
-private val MediaPlaceholder = Surface1
 
 // Matches URLs ending in image extensions, or from known Nostr/Bluesky image hosts.
 internal val IMAGE_URL_REGEX = Regex(
@@ -160,11 +141,11 @@ internal fun parseNip05(nip05: String): Pair<String, String>? {
     }
 }
 
-/** "user@domain.com" → "domain.com"; "_@domain.com" → "domain.com"; "domain.com" → "domain.com". */
-internal fun nip05Domain(nip05: String): String = parseNip05(nip05)?.second ?: nip05
-
 /** True if [s] is a 64-char hex string (i.e. a raw pubkey, not a human name). */
 internal fun looksLikeHexPubkey(s: String): Boolean = HEX_PUBKEY_REGEX.matches(s)
+
+// Immutable + thread-safe (unlike SimpleDateFormat) — safe to share across calls.
+private val MONTH_DAY_FORMAT = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
 
 internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
@@ -173,7 +154,9 @@ internal fun relativeTime(createdAtSeconds: Long): String {
         diffMs < TimeUnit.HOURS.toMillis(1)   -> "${TimeUnit.MILLISECONDS.toMinutes(diffMs)}m"
         diffMs < TimeUnit.DAYS.toMillis(1)    -> "${TimeUnit.MILLISECONDS.toHours(diffMs)}h"
         diffMs < TimeUnit.DAYS.toMillis(7)    -> "${TimeUnit.MILLISECONDS.toDays(diffMs)}d"
-        else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(createdAtSeconds * 1000L))
+        else -> MONTH_DAY_FORMAT.format(
+            Instant.ofEpochMilli(createdAtSeconds * 1000L).atZone(ZoneId.systemDefault()),
+        )
     }
 }
 
@@ -357,145 +340,6 @@ internal fun NostrRichText(
         textAlign  = textAlign,
         modifier   = modifier.clickable { onTextClick() },
     )
-}
-
-/** OpenGraph link preview card. Falls back to a simple domain chip if OG fetch fails. */
-@Composable
-internal fun LinkPreviewCard(
-    url: String,
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
-) {
-    val uriHandler = LocalUriHandler.current
-    val domain = remember(url) {
-        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
-    }
-
-    var ogLoaded by remember(url) { mutableStateOf(fetchOgMetadata == null) }
-    val og by produceState<OgMetadata?>(null, url) {
-        if (fetchOgMetadata != null) {
-            value = fetchOgMetadata(url)
-            ogLoaded = true
-        }
-    }
-
-    val loadedOg = og
-    if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
-        // Rich preview card — image on top, text below (standard OG card layout)
-        var imageLoadFailed by remember { mutableStateOf(false) }
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(SurfaceVariant)
-                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
-                .clickable { runCatching { uriHandler.openUri(url) } },
-        ) {
-            if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
-                val density = LocalDensity.current
-                val config = LocalConfiguration.current
-                val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
-                val heightPx = (widthPx * 9) / 16
-                SubcomposeAsyncImage(
-                    model              = rememberSizedImageRequest(loadedOg.imageUrl, widthPx, heightPx),
-                    contentDescription = null,
-                    contentScale       = ContentScale.Fit,
-                    loading            = {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(16f / 9f)
-                                .background(MediaPlaceholder),
-                        )
-                    },
-                    error              = { imageLoadFailed = true },
-                    modifier           = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(
-                            topStart = Sizing.mediaCornerRadius,
-                            topEnd = Sizing.mediaCornerRadius,
-                        ))
-                        .background(MediaPlaceholder),
-                )
-            }
-            Column(modifier = Modifier.padding(Spacing.small)) {
-                if (!loadedOg.title.isNullOrBlank()) {
-                    Text(
-                        text       = loadedOg.title,
-                        color      = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize   = AppType.bodySmall,
-                        lineHeight = 17.sp,
-                        maxLines   = 2,
-                        overflow   = TextOverflow.Ellipsis,
-                    )
-                }
-                if (!loadedOg.description.isNullOrBlank()) {
-                    Text(
-                        text     = loadedOg.description,
-                        color    = TextSecondary,
-                        fontSize = AppType.footnote,
-                        lineHeight = 16.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                Text(
-                    text     = loadedOg.siteName ?: domain,
-                    color    = TextSecondary,
-                    fontSize = AppType.caption,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-        }
-    } else if (!ogLoaded) {
-        // Loading state — fixed height placeholder matching rich preview card.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(SurfaceVariant)
-                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
-                .clickable { runCatching { uriHandler.openUri(url) } },
-        ) {
-            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MediaPlaceholder))
-            Column(modifier = Modifier.padding(Spacing.small)) {
-                Box(Modifier.fillMaxWidth(0.8f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
-                Spacer(Modifier.height(4.dp))
-                Box(Modifier.fillMaxWidth(0.5f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
-            }
-        }
-    } else {
-        // OG fetch returned nothing useful — compact chip
-        LinkChip(url = url)
-    }
-}
-
-/** Clickable URL chip shown for non-media links in note content. */
-@Composable
-private fun LinkChip(url: String) {
-    val uriHandler = LocalUriHandler.current
-    val domain     = remember(url) {
-        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
-    }
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { runCatching { uriHandler.openUri(url) } }
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    ) {
-        Text(
-            text     = domain,
-            color    = Brand,
-            fontSize = AppType.footnote,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
 }
 
 // ── Action bar primitives (used by ArticleReaderScreen) ─────────────────────
