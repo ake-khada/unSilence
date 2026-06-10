@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import com.unsilence.app.data.BROWSER_USER_AGENT
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -160,8 +161,7 @@ class OgFetcher @Inject constructor(
 
     companion object {
         private const val TAG = "OgFetcher"
-        // Realistic browser UA — many sites (yahoo.co.jp, etc.) 403 bot-like UAs.
-        private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+        private const val UA = BROWSER_USER_AGENT
         private const val MAX_BODY_SIZE = 50_000L
 
         // Matches property= or name= with og: prefix, in either order with content=.
