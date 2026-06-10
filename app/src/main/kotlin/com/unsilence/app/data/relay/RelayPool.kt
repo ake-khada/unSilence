@@ -621,6 +621,7 @@ class RelayPool @Inject constructor(
                 missingRefCache.entries.removeIf { it.value < cutoff } // same 5-min TTL
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
                 profileFallbackNegCache.entries.removeIf { it.value < cutoff }
+                sourceProfileAttempted.entries.removeIf { it.value < cutoff }
             }
         }
         // Periodic pool state logging + connection sweep — every 60s.
@@ -662,9 +663,8 @@ class RelayPool @Inject constructor(
                 // Drain deferred reconnects after network recovery.
                 // Spread with jitter to avoid spiking the DNS resolver.
                 if (!relayCapabilitiesStore.isNetworkDown && pendingReconnect.isNotEmpty()) {
-                    // Network changed — DNS resolvability may have changed (VPN toggle).
-                    // Clear DNS-dead state so those relays get a fresh resolve attempt.
-                    relayCapabilitiesStore.clearDnsDeadOnNetworkChange()
+                    // DNS-dead state is cleared by the networkChanged collector (H18.4b);
+                    // doing it here too caused a duplicate DataStore persist.
                     val deferred = pendingReconnect.toList()
                     pendingReconnect.clear()
                     Log.w(TAG, "Network recovered — draining ${deferred.size} deferred reconnects with jitter")
@@ -1473,9 +1473,18 @@ class RelayPool @Inject constructor(
                     .ifEmpty { connections.values.take(3).toList() }
                 targets.forEach { it.send(req) }
 
+                // Raw send bypasses the one-shot EOSE auto-close path — without an
+                // explicit CLOSE the relay streams future kind-3 updates until socket drop.
+                val close = """["CLOSE","$subId"]"""
+
                 val tagsJson = withTimeoutOrNull(10_000) { deferred.await() }
-                    ?: run { eventTagsCallbacks.remove(subId); return@withContext null }
+                    ?: run {
+                        eventTagsCallbacks.remove(subId)
+                        targets.forEach { conn -> runCatching { conn.send(close) } }
+                        return@withContext null
+                    }
                 eventTagsCallbacks.remove(subId)
+                targets.forEach { conn -> runCatching { conn.send(close) } }
 
                 // Count p-tags in the tags array
                 runCatching {
@@ -1519,7 +1528,7 @@ class RelayPool @Inject constructor(
         SubscriptionRules.isOneShotSubscription(subId)
 
     /**
-     * Send a one-time REQ for the user's kind 3 (follow list) to all connected relays.
+     * Send a one-time REQ for the user's kind 3 (follow list) to indexer relays.
      * The response flows through EventProcessor → MemoryEventStore direct-path insert.
      */
     fun fetchFollowList(pubkeyHex: String) {
@@ -1532,8 +1541,13 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(1))
             })
         }.toString()
-        connections.values.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${connections.size} relay(s)")
+        // Kind 3 is replaceable — indexers suffice; broadcasting to every
+        // connection just duplicates the same latest event.
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+        val targets = indexerUrls.mapNotNull { connections[it] }
+            .ifEmpty { connections.values.take(3).toList() }
+        targets.forEach { sendOneShotToRelay(it, req) }
+        Log.d(TAG, "Fetching kind 3 for $pubkeyHex from ${targets.size} relay(s)")
     }
 
     /**
@@ -2550,9 +2564,13 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // Fallback to all connected relays when relayUrls is empty (e.g. Following feed)
-        val targets = if (relayUrls.isEmpty()) connections.values.toList()
-            else relayUrls.mapNotNull { connections[it] }
+        // Fallback when relayUrls is empty (e.g. Following feed): capped subset —
+        // skip indexers (no general timeline content) and cap fan-out at 6.
+        val targets = if (relayUrls.isEmpty()) {
+            val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+                .mapNotNull { normalizeRelayUrl(it) }.toSet()
+            connections.values.filter { it.url !in indexerUrls }.take(6)
+        } else relayUrls.mapNotNull { connections[it] }
         targets.forEach { sendOneShotToRelay(it, req) }
         Log.d(TAG, "Fetching older events until $untilTimestamp from ${targets.size} relay(s)")
     }
@@ -2736,6 +2754,11 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+                // Include kinds so relays that require them don't reject with
+                // "filters must specify at least one kind" (purplepag.es, others).
+                put("kinds", buildJsonArray {
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                })
             })
         }.toString()
 
@@ -2907,12 +2930,13 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("user-posts-$ts"))
             add(buildJsonObject {
+                // 30023 deliberately absent — user-longform below is the sole
+                // kind-30023 path (own limit so kind-1 doesn't crowd articles out).
                 put("kinds", buildJsonArray {
                     add(JsonPrimitive(1))
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
-                    add(JsonPrimitive(30023))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
                 put("limit", JsonPrimitive(200))
