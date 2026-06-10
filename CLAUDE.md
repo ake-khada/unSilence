@@ -79,10 +79,13 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 
 - **NIP-42 auth relay-authoritative** — fresh challenge supersedes prior. **Give-up:** 3 `auth-required` CLOSEDs → `authUnavailableRelays`
 - **`clearTransportStrikes(url)` in `RelayConnection.onOpen`** — single site covers all connect paths
-- **Half-open breaker:** `shouldSkip` cooldown-gated past MAX_CAPABILITY_STRIKES (integral 60s, DNS 5m→30m, timeout/TLS 1m→30m). `restricted` permanent
-- **Dead-relay denylist: DNS only** — `CONNECT_TIMEOUT` never increments `deadFailCount` (H18.4). `isNetworkDown` gates both strike paths
+- **Half-open breaker:** `shouldSkip` cooldown-gated past MAX_CAPABILITY_STRIKES (integral 60s→5m after 5 consec fails (H20b), DNS 5m→30m, timeout/TLS 1m→30m). `restricted` permanent
+- **Network heuristics must never gate their own exit evidence** — degraded/down states TTL out (`dnsDegraded` 90s) and probe-drain `pendingReconnect` while still degraded; clearing requires a successful connect, so the gate can't block the connect that clears it (H20a)
+- **User-initiated actions (publish, manual refresh) bypass network-state gates** — explicit intent ⇒ try NOW; `connectAndAwait` ignores `isNetworkDown`; honest failure beats refused attempt (H20c, cf. H18.4b)
+- **Dead-relay denylist: DNS only** — `CONNECT_TIMEOUT` never increments `deadFailCount` (H18.4). `isNetworkDown` gates both strike paths. `consecutiveFailures` (any reason, reset on success) drives integral escalation (H20b)
 - **No app-level DoH/DNS override** — OS/VPN resolver only; leak risk past VPN/Tor
-- **`reconnectWithBackoff` defers when `isNetworkDown`** — `pendingReconnect` set, 60s sweep drains with jitter
+- **`reconnectWithBackoff` defers when `isNetworkDown`** — `pendingReconnect` set, 60s sweep drains with jitter; while degraded, sweep still probe-drains 1-2 (DNS-failed preferred) so a probe-success clears the latch (H20a)
+- **Publish is outbox-targeted** — `publish(eventJson, targetRelays)` sends to own write relays ONLY, not `connections.values`. Broadcast `publish(eventJson)` (reactions/reposts/profile/zap) still over-broadcasts — tracked follow-up (H20c)
 - **One-shot:** `sendOneShotPooledOrEphemeral`, NEVER `connectAndAwait` (pool exhaustion). `MAX_HINT_RELAYS_PER_PASS` = 12
 - **Map-before-close:** all close paths remove/replace map entry BEFORE `conn.close()`
 - **`listenForEvents`:** rethrows `CancellationException`; finally gates `isActive`. Reconnect: `stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls` — never `recentlyActive` (H8)
