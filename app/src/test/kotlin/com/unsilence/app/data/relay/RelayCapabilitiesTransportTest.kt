@@ -188,4 +188,34 @@ class RelayCapabilitiesTransportTest {
         assertEquals(30 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 6))  // cap
         assertEquals(30 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 100))
     }
+
+    // ── Integral cooldown escalation (H20b) ──────────────────────────
+
+    @Test
+    fun `integral cooldown is 60s base below the escalation threshold`() {
+        for (fails in 0 until 5) {
+            assertEquals(
+                "consecutiveFailures=$fails should stay at base 60s",
+                60_000L,
+                RelayCapabilitiesStore.computeIntegralCooldownMs(fails),
+            )
+        }
+    }
+
+    @Test
+    fun `integral cooldown escalates to 5min at and past the threshold`() {
+        assertEquals(5 * 60_000L, RelayCapabilitiesStore.computeIntegralCooldownMs(5))
+        assertEquals(5 * 60_000L, RelayCapabilitiesStore.computeIntegralCooldownMs(6))
+        assertEquals(5 * 60_000L, RelayCapabilitiesStore.computeIntegralCooldownMs(100))
+    }
+
+    @Test
+    fun `computeRetryCooldownMs routes integral through escalation, ignoring reason and strikes`() {
+        val dns = SkipReason.DNS_RESOLUTION.name
+        // Below threshold → base 60s; at threshold → escalated 5min. Strikes/reason irrelevant for integral.
+        assertEquals(60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(true, dns, 10, 4))
+        assertEquals(5 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(true, dns, 10, 5))
+        // Default consecutiveFailures (0) keeps the legacy flat-60s behavior intact.
+        assertEquals(60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(true, dns, 10))
+    }
 }

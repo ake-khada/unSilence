@@ -44,7 +44,9 @@ const val MAX_CAPABILITY_STRIKES = 3
 private const val TRANSPORT_RETRY_BASE_MS = 60_000L            // 1 min — timeout/TLS first retry
 private const val DNS_RETRY_BASE_MS       = 5 * 60_000L        // 5 min — DNS base (resolver unlikely to change sooner)
 private const val TRANSPORT_RETRY_MAX_MS  = 30 * 60_000L       // 30 min cap (non-integral, dead relays)
-private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min flat — integral relays heal fast
+private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min base — integral relays heal fast
+private const val INTEGRAL_ESCALATED_COOLDOWN_MS = 5 * 60_000L // 5 min after a failure streak (H20b)
+private const val INTEGRAL_ESCALATION_THRESHOLD = 5            // consecutive fails before escalating (H20b)
 
 /** DNS-degraded detection: ≥ THRESHOLD distinct relays failing DNS within WINDOW_MS
  *  means the pipe is down, not the relays. Strikes are suppressed until a relay resolves. */
@@ -294,7 +296,8 @@ class RelayCapabilitiesStore @Inject constructor(
      *  Delegates to [computeRetryCooldownMs] — see companion for testable pure logic. */
     internal fun retryCooldownMs(url: String, strikes: Int): Long {
         val key = normalizeRelayUrl(url) ?: url
-        return computeRetryCooldownMs(isIntegral(url), caps[key]?.lastReason, strikes)
+        val c = caps[key]
+        return computeRetryCooldownMs(isIntegral(url), c?.lastReason, strikes, c?.consecutiveFailures ?: 0)
     }
 
     /**
@@ -343,6 +346,9 @@ class RelayCapabilitiesStore @Inject constructor(
             } else {
                 existing.lastProbeAt
             },
+            // Escalation counter (H20b): counts every recorded failure (incl. CONNECT_TIMEOUT,
+            // which deadFailCount excludes). Reset on success in clearTransportStrikesInternal.
+            consecutiveFailures = existing.consecutiveFailures + 1,
         )
         caps[key] = updated
 
@@ -471,8 +477,8 @@ class RelayCapabilitiesStore @Inject constructor(
     private fun clearTransportStrikesInternal(key: String) {
         val existing = caps[key] ?: return
         if (existing.restricted) return  // policy rejections are permanent
-        if (existing.strikes == 0 && existing.deadFailCount == 0) return // nothing to clear
-        val cleared = existing.copy(strikes = 0, lastReason = "", deadFailCount = 0)
+        if (existing.strikes == 0 && existing.deadFailCount == 0 && existing.consecutiveFailures == 0) return // nothing to clear
+        val cleared = existing.copy(strikes = 0, lastReason = "", deadFailCount = 0, consecutiveFailures = 0)
         caps[key] = cleared
         if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
             Log.w(TAG, "Dead relay revived: $key (was dead with ${existing.deadFailCount} failures)")
@@ -504,13 +510,29 @@ class RelayCapabilitiesStore @Inject constructor(
          *  Integral relays: short flat window. Others: exponential backoff, capped.
          *  DNS failures use a longer base — the VPN/system resolver won't resolve
          *  a missing host in 1 minute. */
-        internal fun computeRetryCooldownMs(isIntegral: Boolean, lastReason: String?, strikes: Int): Long {
-            if (isIntegral) return INTEGRAL_RETRY_COOLDOWN_MS
+        internal fun computeRetryCooldownMs(
+            isIntegral: Boolean,
+            lastReason: String?,
+            strikes: Int,
+            consecutiveFailures: Int = 0,
+        ): Long {
+            if (isIntegral) return computeIntegralCooldownMs(consecutiveFailures)
             val overage = (strikes - MAX_CAPABILITY_STRIKES).coerceIn(0, 6)
             val base = if (lastReason == SkipReason.DNS_RESOLUTION.name) DNS_RETRY_BASE_MS
                        else TRANSPORT_RETRY_BASE_MS
             return (base shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
         }
+
+        /** Integral-relay retry cooldown with consecutive-failure escalation (H20b).
+         *  Base 60s keeps healthy integrals healing fast; after
+         *  [INTEGRAL_ESCALATION_THRESHOLD] consecutive failures (e.g. a TCP-blackholed
+         *  relay the 60s heal loop probes forever) it backs off to 5 min — ~5× less
+         *  bandwidth/battery burn with zero yield. Reset on success (consecutiveFailures→0).
+         *  The heal loop stays UNGATED by design (H20a lesson: gates blocked recovery);
+         *  escalation alone calms the hammer while recovery paths still multiply. Testable directly. */
+        internal fun computeIntegralCooldownMs(consecutiveFailures: Int): Long =
+            if (consecutiveFailures >= INTEGRAL_ESCALATION_THRESHOLD) INTEGRAL_ESCALATED_COOLDOWN_MS
+            else INTEGRAL_RETRY_COOLDOWN_MS
 
         /** Pure decision: is the DNS-degraded latch still active? Armed AND within
          *  [DNS_DEGRADED_TTL_MS] of its onset. Past the TTL the latch is stale and must
