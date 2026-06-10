@@ -121,7 +121,7 @@ data class RelaySet(
 )
 
 /**
- * A single notification item — MES equivalent of Room's NotificationRow.
+ * A single notification item — in-memory notification representation.
  *
  * Built at scan time from eventsById + profile lookups.
  * Carries enough resolved data for the UI to render without additional lookups.
@@ -171,11 +171,10 @@ data class FeedFilter(
     val relayUrls: Set<String>? = null,
 )
 
-// ── Types moved from Room entity/dao layer (A.8) ────────────────────────────
+// ── Core data types ────────────────────────────
 
 /**
- * Event data class. Formerly a Room @Entity; now a plain data class
- * used throughout the app as the canonical event representation.
+ * Plain data class used throughout the app as the canonical event representation.
  */
 @androidx.compose.runtime.Immutable
 data class EventEntity(
@@ -197,7 +196,7 @@ data class EventEntity(
 )
 
 /**
- * User profile data class. Formerly a Room @Entity; now a plain data class.
+ * Plain data class for user profile data.
  */
 @androidx.compose.runtime.Immutable
 data class UserEntity(
@@ -244,7 +243,7 @@ data class FeedRow(
 )
 
 /**
- * Relay trust score (kind 30385). Formerly a Room @Entity; now a plain data class.
+ * Relay trust score (kind 30385). Plain data class.
  * Populated by MES handleTrustScore() from kind-30385 events fetched via
  * RelayPool.fetchTrustScores(). UI renders colored dots in Relay Settings.
  */

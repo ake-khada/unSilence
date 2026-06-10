@@ -86,7 +86,7 @@ interface ActiveSubsSource {
 /**
  * Manages multiple relay WebSocket connections for the global feed.
  *
- * Architecture rule: events flow Relay → EventProcessor → Room.
+ * Architecture rule: events flow Relay → EventProcessor → MemoryEventStore.
  * The pool itself never touches the UI.
  */
 @Singleton
@@ -2404,7 +2404,7 @@ class RelayPool @Inject constructor(
 
     /**
      * NIP-50 search: connect to [searchRelayUrls] (if not already) and send a REQ with the
-     * "search" field. Results arrive via EventProcessor → Room as with any other subscription.
+     * "search" field. Results arrive via EventProcessor → MemoryEventStore as with any other subscription.
      *
      * Two filters are sent:
      *  - kind 0 (profiles) — drives the People tab
