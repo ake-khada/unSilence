@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -36,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.ReactionContent
 import com.unsilence.app.data.memory.ReactionInfo
@@ -50,6 +50,14 @@ import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.flow.StateFlow
 
 enum class EngagementSection { REPLIES, REPOSTS, REACTIONS, ZAPS }
+
+/** Dark gradient under sats labels in zap chips — hoisted so recompositions reuse one instance. */
+private val ZapChipGradientColors = listOf(
+    Color.Transparent,
+    Color.Black.copy(alpha = 0.85f),
+    Color.Black.copy(alpha = 0.9f),
+)
+private val ZapChipGradient = Brush.verticalGradient(colors = ZapChipGradientColors)
 
 private data class ReactionGroup(
     val displayContent: ReactionContent,
@@ -83,7 +91,7 @@ internal fun EngagementDrawer(
 ) {
     val stats = if (statsFlow != null) {
         key(eventId) {
-            statsFlow(eventId).collectAsState().value
+            statsFlow(eventId).collectAsStateWithLifecycle().value
         }
     } else null
 
@@ -385,15 +393,7 @@ private fun ZapChip(
                 .fillMaxWidth()
                 .fillMaxHeight(0.65f)
                 .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color.Black.copy(alpha = 0.85f),
-                            Color.Black.copy(alpha = 0.9f),
-                        ),
-                    ),
-                ),
+                .background(ZapChipGradient),
         )
         Text(
             text = zap.sats.toCompactSats(),
@@ -434,15 +434,7 @@ private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
                 .fillMaxWidth()
                 .fillMaxHeight(0.65f)
                 .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color.Black.copy(alpha = 0.85f),
-                            Color.Black.copy(alpha = 0.9f),
-                        ),
-                    ),
-                ),
+                .background(ZapChipGradient),
         )
         Text(
             text = sats.toCompactSats(),

@@ -97,8 +97,25 @@ fun ThreadScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+    // Resolved once per screen recomposition — getPinnedEmojis() allocates a
+    // fresh list per call, which defeats Compose skipping when called per card.
+    val pinnedEmojis = actionsViewModel.getPinnedEmojis()
     val listState = rememberLazyListState()
     var didScrollToFocus by remember { mutableStateOf(false) }
+
+    // Single engagement snapshot for ALL cards in the thread — same remember
+    // keys as the previous per-item snapshots, built once instead of N+1 times.
+    val engagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
+        EngagementSnapshot(
+            reactedIds      = reactedIds,
+            repostedIds     = repostedIds,
+            zappedIds       = zappedIds,
+            isNwcConfigured = isNwcConfigured,
+            zapLoadingIds   = zapLoadingIds,
+            optimisticZapSats = optimisticSats,
+            zapFlash        = zapFlash,
+        )
+    }
 
     // ── Video playback scope ────────────────────────────────────────────────
     val allThreadRows = remember(state.focusedNote, state.replies) {
@@ -181,17 +198,6 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
-                                val focusedEngagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
-                                    EngagementSnapshot(
-                                        reactedIds      = reactedIds,
-                                        repostedIds     = repostedIds,
-                                        zappedIds       = zappedIds,
-                                        isNwcConfigured = isNwcConfigured,
-                                        zapLoadingIds   = zapLoadingIds,
-                                        optimisticZapSats = optimisticSats,
-                                        zapFlash        = zapFlash,
-                                    )
-                                }
                                 val focusedModel = remember(note.id) {
                                     actionsViewModel.getEventModel(note.id) ?: note.toEventModel()
                                 }
@@ -199,7 +205,7 @@ fun ThreadScreen(
                                     model               = focusedModel,
                                     row                 = note,
                                     role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
-                                    engagement          = focusedEngagement,
+                                    engagement          = engagement,
                                     isFocused           = state.focusedReplyId == null,
                                     onNoteClick         = { /* already on thread */ },
                                     onComment           = { onComment(note.id) },
@@ -211,7 +217,7 @@ fun ThreadScreen(
                                         emojiReactTarget = note.id to note.pubkey
                                         showFullEmojiPicker = true
                                     },
-                                    pinnedEmojis        = actionsViewModel.getPinnedEmojis(),
+                                    pinnedEmojis        = pinnedEmojis,
                                     onReactWithEmoji    = { emoji ->
                                         actionsViewModel.react(note.id, note.pubkey, ":${emoji.shortcode}:", emoji.url)
                                     },
@@ -279,17 +285,6 @@ fun ThreadScreen(
                                         }
                                         .padding(start = indent),
                                 ) {
-                                    val replyEngagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
-                                        EngagementSnapshot(
-                                            reactedIds      = reactedIds,
-                                            repostedIds     = repostedIds,
-                                            zappedIds       = zappedIds,
-                                            isNwcConfigured = isNwcConfigured,
-                                            zapLoadingIds   = zapLoadingIds,
-                                            optimisticZapSats = optimisticSats,
-                                            zapFlash        = zapFlash,
-                                        )
-                                    }
                                     val replyModel = remember(reply.id) {
                                         actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
                                     }
@@ -297,7 +292,7 @@ fun ThreadScreen(
                                         model               = replyModel,
                                         row                 = reply,
                                         role                = CardRole.Reply,
-                                        engagement          = replyEngagement,
+                                        engagement          = engagement,
                                         isFocused           = reply.id == state.focusedReplyId,
                                         onNoteClick         = { /* already viewing thread */ },
                                         onComment           = { onComment(reply.id) },
@@ -309,7 +304,7 @@ fun ThreadScreen(
                                             emojiReactTarget = reply.id to reply.pubkey
                                             showFullEmojiPicker = true
                                         },
-                                        pinnedEmojis        = actionsViewModel.getPinnedEmojis(),
+                                        pinnedEmojis        = pinnedEmojis,
                                         onReactWithEmoji    = { emoji ->
                                             actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
                                         },
@@ -355,7 +350,7 @@ fun ThreadScreen(
                 emojiReactTarget = row.id to row.pubkey
                 showFullEmojiPicker = true
             },
-            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
                 actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
             },

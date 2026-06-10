@@ -118,6 +118,9 @@ fun LazyListScope.eventFeedItems(
     eventModelProvider: ((String) -> EventModel?)? = null,
     sensitiveBlur: Boolean = false,
 ) {
+    // Resolve once per items-builder pass — getPinnedEmojis() allocates a fresh
+    // list per call, which defeats Compose skipping when invoked per item.
+    val pinnedEmojis = callbacks.pinnedEmojis()
     items(
         items = events,
         key = { it.id },
@@ -132,6 +135,7 @@ fun LazyListScope.eventFeedItems(
                 replyRow = row,
                 engagement = engagement,
                 callbacks = callbacks,
+                pinnedEmojis = pinnedEmojis,
                 videoScope = videoScope,
                 role = role,
                 isNewPost = row.id in newEventIds,
@@ -146,6 +150,7 @@ fun LazyListScope.eventFeedItems(
                 row = row,
                 engagement = engagement,
                 callbacks = callbacks,
+                pinnedEmojis = pinnedEmojis,
                 videoScope = videoScope,
                 role = role,
                 isNewPost = row.id in newEventIds,
@@ -174,6 +179,7 @@ private fun ThreadedReplyItem(
     replyRow: FeedRow,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
     videoScope: VideoPlaybackScope?,
     role: CardRole,
     isNewPost: Boolean,
@@ -215,6 +221,7 @@ private fun ThreadedReplyItem(
         row = replyRow,
         engagement = engagement,
         callbacks = callbacks,
+        pinnedEmojis = pinnedEmojis,
         videoScope = videoScope,
         role = role,
         isNewPost = isNewPost,
@@ -323,6 +330,7 @@ private fun EventFeedItem(
     row: FeedRow,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
     videoScope: VideoPlaybackScope?,
     role: CardRole,
     isNewPost: Boolean,
@@ -383,7 +391,7 @@ private fun EventFeedItem(
         onArticleClick      = callbacks.onArticleClick,
         onReact             = onReact,
         onReactLongPress    = onReactLongPress,
-        pinnedEmojis        = callbacks.pinnedEmojis(),
+        pinnedEmojis        = pinnedEmojis,
         onReactWithEmoji    = onReactWithEmoji,
         onRepost            = onRepost,
         onZap               = onZap,

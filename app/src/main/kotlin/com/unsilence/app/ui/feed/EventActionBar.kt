@@ -80,7 +80,6 @@ internal fun EventActionBar(
     zapEnabled: Boolean = true,
     drawerOpen: Boolean = false,
     onChevronTap: () -> Unit = {},
-    onCountClick: (() -> Unit)? = null,
     onNoteClick: () -> Unit,
     onComment: () -> Unit = {},
     onReact: () -> Unit,
@@ -124,7 +123,6 @@ internal fun EventActionBar(
                 count              = replyCount,
                 contentDescription = "Replies",
                 onClick            = onComment,
-                onCountClick       = onCountClick,
             )
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -135,7 +133,6 @@ internal fun EventActionBar(
                     contentDescription = "Reposts",
                     highlighted        = hasReposted,
                     onClick            = { showRepostMenu = true },
-                    onCountClick       = onCountClick,
                 )
                 DropdownMenu(
                     expanded         = showRepostMenu,
@@ -157,7 +154,6 @@ internal fun EventActionBar(
             EventReactButton(
                 count            = reactionCount,
                 hasReacted       = hasReacted,
-                onCountClick     = onCountClick,
                 onTap            = onReact,
                 onOpenFullPicker = onReactLongPress,
                 pinnedEmojis     = pinnedEmojis,
@@ -171,7 +167,6 @@ internal fun EventActionBar(
                 isLoading    = isZapLoading,
                 flashTrigger = zapFlashTrigger,
                 enabled      = zapEnabled,
-                onSatsClick  = onCountClick,
                 onTap        = {
                     if (!zapEnabled) { showSnackbar("This author hasn't set up Lightning."); return@EventZapButton }
                     if (isNwcConfigured) onZap(
@@ -215,7 +210,6 @@ internal fun EventActionButton(
     highlighted: Boolean = false,
     highlightColor: Color = Brand,
     onClick: (() -> Unit)? = null,
-    onCountClick: (() -> Unit)? = null,
 ) {
     val tint = if (highlighted) highlightColor else ActionTint
     val rowModifier = if (onClick != null)
@@ -240,7 +234,6 @@ internal fun EventActionButton(
                 text     = formatCount(count),
                 color    = tint,
                 fontSize = AppType.footnote,
-                modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
             )
         }
     }
@@ -254,7 +247,6 @@ internal fun EventActionButton(
 internal fun EventReactButton(
     count: Int,
     hasReacted: Boolean,
-    onCountClick: (() -> Unit)? = null,
     onTap: () -> Unit,
     onOpenFullPicker: () -> Unit,
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
@@ -289,7 +281,6 @@ internal fun EventReactButton(
                     text     = formatCount(count),
                     color    = tint,
                     fontSize = AppType.footnote,
-                    modifier = if (onCountClick != null) Modifier.clickable(onClick = onCountClick) else Modifier,
                 )
             }
         }
@@ -325,7 +316,6 @@ internal fun EventZapButton(
     isLoading: Boolean = false,
     flashTrigger: Int = 0,
     enabled: Boolean = true,
-    onSatsClick: (() -> Unit)? = null,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -395,7 +385,6 @@ internal fun EventZapButton(
                     text     = sats.toCompactSats(),
                     color    = tint,
                     fontSize = AppType.footnote,
-                    modifier = if (onSatsClick != null) Modifier.clickable(onClick = onSatsClick) else Modifier,
                 )
             }
         }

@@ -136,6 +136,9 @@ fun FeedScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+    // Resolved once per screen recomposition — getPinnedEmojis() allocates a
+    // fresh list per call, which defeats Compose skipping when called per card.
+    val pinnedEmojis = actionsViewModel.getPinnedEmojis()
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -452,7 +455,7 @@ fun FeedScreen(
                 emojiReactTarget = row.id to row.pubkey
                 showFullEmojiPicker = true
             },
-            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
                 actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
             },

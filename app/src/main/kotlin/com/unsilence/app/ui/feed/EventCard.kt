@@ -20,7 +20,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,12 +34,14 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.data.memory.EventEntity
@@ -143,7 +144,7 @@ fun EventCard(
 
     // Resolve source profile for repost header (kind-6 wrapper author).
     val sourceProfile = if (model.repost != null && profileFlow != null) {
-        profileFlow(model.sourcePubkey).collectAsState().value
+        profileFlow(model.sourcePubkey).collectAsStateWithLifecycle().value
     } else null
 
     // Fallback profile fetch for reposts when the source's profile hasn't
@@ -167,7 +168,7 @@ fun EventCard(
     // mount doesn't flash empty avatars on rows whose profiles MES already
     // has cached.
     val authorProfile = if (profileFlow != null) {
-        profileFlow(model.pubkey).collectAsState().value
+        profileFlow(model.pubkey).collectAsStateWithLifecycle().value
     } else null
 
     // For repost cards, model.pubkey is the inner (effective) author and
@@ -186,7 +187,7 @@ fun EventCard(
     // after the slot diffs to a new ID.
     val liveStats = if (statsFlow != null) {
         key(model.engagementId) {
-            statsFlow(model.engagementId).collectAsState().value
+            statsFlow(model.engagementId).collectAsStateWithLifecycle().value
         }
     } else null
     val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
@@ -231,7 +232,10 @@ fun EventCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.White.copy(alpha = flashAlpha.value * 0.05f)),
+            // drawBehind defers the Animatable read to the draw phase — reading
+            // flashAlpha.value in composition recomposed the whole card subtree
+            // every animation frame.
+            .drawBehind { drawRect(Color.White.copy(alpha = flashAlpha.value * 0.05f)) },
     ) {
         // Content area — card-level long-press lives here so it doesn't
         // intercept action-bar gestures (heart long-press → emoji picker,
