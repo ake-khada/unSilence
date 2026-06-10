@@ -48,7 +48,10 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-private const val SNAPSHOT_BINARY_VERSION = 12
+/** V13: event records carry the pre-built tagsJson string — readers of V13+
+ *  skip the per-event tagsToJson reconstruction on cold start. Older files
+ *  (≤V12) still restore via the reconstruction path in readEventBinary. */
+private const val SNAPSHOT_BINARY_VERSION = 13
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -148,7 +151,7 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Per-recipient sorted notification index. Populated at insert time
-     * (insertCore + insertFromSnapshot + rebuildNotificationIndex on restore)
+     * (insertCore + insertFromSnapshot, both via indexNotificationRecipients)
      * for any kind-1/6/7/9735 event carrying p-tags. Iteration is in
      * createdAt-DESC order; sort tiebreak by eventId for stability.
      */
@@ -479,6 +482,10 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Eviction bookkeeping ─────────────────────────────────────────────
     private val insertsSinceLastEviction = java.util.concurrent.atomic.AtomicInteger(0)
+    // Gated maintenance counters (mirror evictionTickAfterInsert): run the
+    // size/sort trim check every Nth call instead of on every hot-path call.
+    private val actorIndexAddsSinceTrimCheck = java.util.concurrent.atomic.AtomicInteger(0)
+    private val feedRowPutsSinceTrimCheck = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ─── Signal-bump coalescing ───────────────────────────────────────────
     // Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
@@ -886,7 +893,13 @@ class MemoryEventStore @Inject constructor(
             targets.add(targetId)
         }
         actorAccessedAt[actorPubkey] = System.nanoTime()
-        trimActorIndexesIfNeeded()
+        // Gated: three CHM .size reads (plus a sort when trimming) on every
+        // add is wasteful — check every 64th add. Worst-case overshoot past
+        // ACTOR_INDEX_CAP between checks is 64 actors.
+        if (actorIndexAddsSinceTrimCheck.incrementAndGet() >= 64) {
+            actorIndexAddsSinceTrimCheck.set(0)
+            trimActorIndexesIfNeeded()
+        }
     }
 
     private fun trimActorIndexesIfNeeded() {
@@ -1069,6 +1082,16 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleMuteList(event: NostrEvent) {
+        // Newest-known kind-10000 createdAt per pubkey (replaceable dedup index,
+        // shared with the other replaceable handlers). Read the prior value for
+        // the guard below, then merge this event's createdAt in — unconditionally,
+        // mirroring the eventsById scan this replaces: every kind-10000 that lands
+        // in the store counts toward "newest", even when the guards below skip
+        // processing (the event is already in eventsById at this point).
+        val dedupKey = "${event.pubkey}:10000"
+        val newestKnown = relayKindCreatedAt[dedupKey]
+        relayKindCreatedAt.merge(dedupKey, event.createdAt) { a, b -> maxOf(a, b) }
+
         val isOwn = event.pubkey == ownPubkey
 
         // Skip our own published events — we already have canonical local state.
@@ -1097,10 +1120,10 @@ class MemoryEventStore @Inject constructor(
         // Replaceable event guard: skip if a newer kind-10000 for this pubkey
         // already exists in MES. Prevents older relay echoes from clobbering
         // the newest mute list (especially the async Amber decrypt callback).
-        val newerExists = eventsById.values.any {
-            it.pubkey == event.pubkey && it.kind == 10000 && it.id != event.id &&
-                it.createdAt > event.createdAt
-        }
+        // Strictly-older only: an event equal in createdAt to the newest known
+        // (including this event re-processing itself) passes, matching the
+        // old eventsById scan's `it.id != event.id && it.createdAt > ...`.
+        val newerExists = newestKnown != null && event.createdAt < newestKnown
         if (newerExists) return
 
         // Parse public tags from this event
@@ -1671,6 +1694,15 @@ class MemoryEventStore @Inject constructor(
         val ownPubkeyAnchor = ownPubkey
         val viewed = viewedPubkey
 
+        // Own-mention lookup built once from the notification recipient index —
+        // replaces a per-candidate tag scan for notification kinds (1/6/7/9735).
+        // Kinds outside NOTIFICATION_KINDS aren't indexed and keep the tag scan.
+        val ownMentionIds: Set<String> = if (ownPubkeyAnchor != null) {
+            notifIdsByRecipient[ownPubkeyAnchor]?.mapTo(HashSet()) { it.eventId } ?: emptySet()
+        } else {
+            emptySet()
+        }
+
         // Pass 1: bucket events by kind. Anchored events are excluded entirely —
         // they don't count against the cap and can't be evicted.
         val toEvict = mutableListOf<EventEntry>()
@@ -1691,10 +1723,17 @@ class MemoryEventStore @Inject constructor(
                 continue
             }
             // Band A: events mentioning own pubkey (notifications)
-            if (ownPubkeyAnchor != null && event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == ownPubkeyAnchor }) {
-                anchoredMentioned++
-                evictionAnchoredMentioned.incrementAndGet()
-                continue
+            if (ownPubkeyAnchor != null) {
+                val mentionsOwn = if (kind in NOTIFICATION_KINDS) {
+                    entry.id in ownMentionIds
+                } else {
+                    event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == ownPubkeyAnchor }
+                }
+                if (mentionsOwn) {
+                    anchoredMentioned++
+                    evictionAnchoredMentioned.incrementAndGet()
+                    continue
+                }
             }
             // Band A: events authored by currently viewed profile
             if (viewed != null && event.pubkey == viewed) {
@@ -2073,9 +2112,15 @@ class MemoryEventStore @Inject constructor(
      * Returns content from the NEWEST kind-10000 event for that pubkey.
      */
     fun getMuteListContent(pubkey: String): String? {
+        // Per-pubkey index scan (not full eventsById): the newest-createdAt
+        // index alone can't answer this — it has no event reference, and the
+        // newest kind-10000 may have EMPTY content while an older one carries
+        // the encrypted private tags.
+        val ids = idsByPubkey[pubkey] ?: return null
         var newest: NostrEvent? = null
-        for (event in eventsById.values) {
-            if (event.pubkey == pubkey && event.kind == 10000 && event.content.isNotEmpty()) {
+        for (id in ids) {
+            val event = eventsById[id] ?: continue
+            if (event.kind == 10000 && event.content.isNotEmpty()) {
                 if (newest == null || event.createdAt > newest.createdAt) newest = event
             }
         }
@@ -2085,10 +2130,12 @@ class MemoryEventStore @Inject constructor(
     /** True if [eventId] is the newest kind-10000 for [pubkey] in eventsById. */
     fun isNewestMuteEvent(eventId: String, pubkey: String): Boolean {
         val target = eventsById[eventId] ?: return false
-        return eventsById.values.none {
-            it.pubkey == pubkey && it.kind == 10000 && it.id != eventId &&
-                it.createdAt > target.createdAt
-        }
+        // Newest-known createdAt from the replaceable dedup index (maintained
+        // at the top of handleMuteList for every inserted kind-10000). Equal
+        // createdAt means no STRICTLY newer event exists — same semantics as
+        // the old `none { it.id != eventId && it.createdAt > target.createdAt }`.
+        val newestKnown = relayKindCreatedAt["$pubkey:10000"] ?: return true
+        return target.createdAt >= newestKnown
     }
 
     /** Optimistic local mute — feed refilters via _muteListSignal.
@@ -2384,18 +2431,21 @@ class MemoryEventStore @Inject constructor(
      */
     fun trendingHashtags(limit: Int = 8): List<Pair<String, Int>> {
         val freq = HashMap<String, Int>()
-        eventsById.values.asSequence()
-            .filter { it.kind == 1 }
-            .sortedByDescending { it.createdAt }
-            .take(500)
-            .forEach { event ->
-                event.tags.forEach { tag ->
-                    if (tag.size >= 2 && tag[0] == "t" && tag[1].isNotBlank()) {
-                        val value = tag[1].lowercase()
-                        freq[value] = (freq[value] ?: 0) + 1
-                    }
+        // recentByCreatedAt is already createdAt-DESC ordered — walk it and
+        // stop after 500 kind-1 events. No full materialization, no full sort.
+        var counted = 0
+        for (entry in recentByCreatedAt) {
+            if (counted >= 500) break
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind != 1) continue
+            counted++
+            event.tags.forEach { tag ->
+                if (tag.size >= 2 && tag[0] == "t" && tag[1].isNotBlank()) {
+                    val value = tag[1].lowercase()
+                    freq[value] = (freq[value] ?: 0) + 1
                 }
             }
+        }
         return freq.entries
             .sortedByDescending { it.value }
             .take(limit)
@@ -2602,7 +2652,11 @@ class MemoryEventStore @Inject constructor(
         kinds: Set<Int> = setOf(1, 6, 30023),
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
-        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+        // No _statsSignal: stats changes don't alter feed membership/order, and
+        // per-card statsFlow carries the counts. _profileSignal stays — the
+        // emitted rows embed author name/picture resolved at emission time
+        // with no per-card reactive profile path through this flow.
+        combine(_feedSignal, _profileSignal) { _, _ -> }
             .sample(200)
             .map { userFeedEvents(pubkey, contentFilter, kinds, limit).map { toFeedRow(it) } }
             .flowOn(Dispatchers.Default)
@@ -2622,39 +2676,48 @@ class MemoryEventStore @Inject constructor(
 
     /** Thread flow producing FeedRow for UI consumption (ThreadViewModel). */
     fun threadFeedRowFlow(rootId: String): Flow<List<FeedRow>> =
-        combine(_feedSignal, _statsSignal, _profileSignal) { _, _, _ -> }
+        // _feedSignal only: ThreadScreen wires per-card statsFlow/profileFlow
+        // through ThreadViewModel, so stats/profile bumps don't need to
+        // recompute the whole thread list.
+        _feedSignal
             .map { collectThread(rootId).map { toFeedRow(it) } }
             .flowOn(Dispatchers.Default)
 
     private fun collectThread(rootId: String): List<NostrEvent> {
         val results = mutableListOf<NostrEvent>()
         val included = mutableSetOf<String>()
+        // BFS frontier — every admitted id gets its repliers expanded.
+        val queue = ArrayDeque<String>()
 
-        eventsById[rootId]?.let {
-            results.add(it)
-            included.add(rootId)
+        fun admit(id: String, event: NostrEvent) {
+            if (!included.add(id)) return
+            results.add(event)
+            queue.add(id)
         }
 
-        // Add events that explicitly mark rootId as their thread root
-        for (event in eventsById.values) {
-            if (event.id in included) continue
-            if (event.rootId == rootId) {
-                results.add(event)
-                included.add(event.id)
+        eventsById[rootId]?.let { admit(rootId, it) }
+
+        // Events that explicitly mark rootId as their thread root.
+        // idsByReplyTarget[rootId] indexes BOTH rootId and replyToId references
+        // (insertCore/insertFromSnapshot); the rootId filter here keeps the
+        // direct-mark predicate exact — replyToId-only references are admitted
+        // by the BFS below, which requires their parent to be in the thread.
+        idsByReplyTarget[rootId]?.forEach { id ->
+            if (id !in included) {
+                val event = eventsById[id] ?: return@forEach
+                if (event.rootId == rootId) admit(id, event)
             }
         }
 
-        // Fixpoint loop: add events whose replyToId points to anything
-        // already in the thread, until no new additions
-        var changed = true
-        while (changed) {
-            changed = false
-            for (event in eventsById.values) {
-                if (event.id in included) continue
-                if (event.replyToId != null && event.replyToId in included) {
-                    results.add(event)
-                    included.add(event.id)
-                    changed = true
+        // BFS over the reply index: admit events whose replyToId points to
+        // anything already in the thread, expanding replies-of-replies until
+        // the frontier drains (replaces the O(N)-per-iteration fixpoint scan).
+        while (queue.isNotEmpty()) {
+            val parentId = queue.removeFirst()
+            idsByReplyTarget[parentId]?.forEach { id ->
+                if (id !in included) {
+                    val event = eventsById[id] ?: return@forEach
+                    if (event.replyToId == parentId) admit(id, event)
                 }
             }
         }
@@ -3042,11 +3105,17 @@ class MemoryEventStore @Inject constructor(
             if (items.size >= cap) break
             val event = eventsById[entry.eventId] ?: continue
 
+            // Resolve kind-9735 zap identity ONCE per event and reuse it for
+            // self-exclusion AND buildNotificationItem — parseZapDescription
+            // is a JSON parse, not a map lookup. zapDesc is only consulted
+            // when no decrypted private zap exists, so skip the parse otherwise.
+            val decryptedZap = if (event.kind == 9735) privateZapDecryptedById[event.id] else null
+            val zapDesc = if (event.kind == 9735 && decryptedZap == null) parseZapDescription(event) else null
+
             // Self-exclusion: kind-9735 must use parsed sender, not LNURL service.
             val effectivePubkey = if (event.kind == 9735) {
-                val decrypted = privateZapDecryptedById[event.id]
-                decrypted?.senderPubkey
-                    ?: parseZapDescription(event)?.senderPubkey
+                decryptedZap?.senderPubkey
+                    ?: zapDesc?.senderPubkey
                     ?: event.pubkey
             } else {
                 event.pubkey
@@ -3055,7 +3124,7 @@ class MemoryEventStore @Inject constructor(
 
             if (follows != null && effectivePubkey !in follows) continue
 
-            val item = buildNotificationItem(event, recipientPubkey) ?: continue
+            val item = buildNotificationItem(event, recipientPubkey, decryptedZap, zapDesc) ?: continue
             items.add(item)
         }
         return items
@@ -3101,8 +3170,18 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Build a NotificationItem from a notification-eligible event.
+     *
+     * [decryptedZap]/[zapDesc] are the caller's pre-resolved kind-9735 zap
+     * identity (see getNotifications) so the description JSON is parsed at
+     * most once per event per pass. Both are null for non-zap kinds, and
+     * [zapDesc] is null when [decryptedZap] is present (it would be unused).
      */
-    private fun buildNotificationItem(event: NostrEvent, recipientPubkey: String): NotificationItem? {
+    private fun buildNotificationItem(
+        event: NostrEvent,
+        recipientPubkey: String,
+        decryptedZap: DecryptedPrivateZap?,
+        zapDesc: ZapDescription?,
+    ): NotificationItem? {
         val notifType = deriveNotifType(event, recipientPubkey)
         val fields = cachedProfileFields(event.pubkey)
 
@@ -3146,18 +3225,16 @@ class MemoryEventStore @Inject constructor(
         val actorPubkey: String
         val actorFields: Map<String, String?>
         if (event.kind == 9735) {
-            val decryptedPrivate = privateZapDecryptedById[event.id]
-            val desc = parseZapDescription(event)
             when {
-                decryptedPrivate != null -> {
+                decryptedZap != null -> {
                     // NIP-57 private zap successfully decrypted.
-                    actorPubkey = decryptedPrivate.senderPubkey
-                    actorFields = cachedProfileFields(decryptedPrivate.senderPubkey)
+                    actorPubkey = decryptedZap.senderPubkey
+                    actorFields = cachedProfileFields(decryptedZap.senderPubkey)
                 }
-                desc != null -> {
+                zapDesc != null -> {
                     // Standard public zap — kind-9734 signed by real sender.
-                    actorPubkey = desc.senderPubkey
-                    actorFields = cachedProfileFields(desc.senderPubkey)
+                    actorPubkey = zapDesc.senderPubkey
+                    actorFields = cachedProfileFields(zapDesc.senderPubkey)
                 }
                 else -> {
                     // Truly anonymous OR private-but-undecrypted. Show as "Anonymous"
@@ -3254,7 +3331,13 @@ class MemoryEventStore @Inject constructor(
 
         feedRowCache[event.id] = CachedFeedRow(row, authorProfileTs, statsTs)
         feedRowAccessedAt[event.id] = System.nanoTime()
-        trimFeedRowCacheIfNeeded()
+        // Gated: CHM .size per row conversion adds up during feed scans —
+        // check every 64th put. Worst-case overshoot past FEED_ROW_CACHE_CAP
+        // between checks is 64 entries.
+        if (feedRowPutsSinceTrimCheck.incrementAndGet() >= 64) {
+            feedRowPutsSinceTrimCheck.set(0)
+            trimFeedRowCacheIfNeeded()
+        }
         return row
     }
 
@@ -3348,6 +3431,11 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
+    /** V2 TSV writer — TEST-ONLY. Production writes V3 binary exclusively
+     *  (saveSnapshotBinary); this remains so the V2→V3 migration round-trip
+     *  tests can exercise restoreSnapshotFrom. Delete together with the V2
+     *  reader once migration support is dropped. */
+    @androidx.annotation.VisibleForTesting
     suspend fun saveSnapshotTo(writer: BufferedWriter) {
         writer.write(SNAPSHOT_VERSION)
         writer.newLine()
@@ -3814,7 +3902,7 @@ class MemoryEventStore @Inject constructor(
         var lineCount = 0
         for (i in 0 until eventsCount) {
             if (++lineCount % 500 == 0) kotlinx.coroutines.yield()
-            val event = input.readEventBinary()
+            val event = input.readEventBinary(version)
             insertFromSnapshot(event)
         }
 
@@ -4024,10 +4112,8 @@ class MemoryEventStore @Inject constructor(
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
 
-        // Rebuild notification recipient index from restored events.
-        // insertFromSnapshot already indexed each event, but rebuildNotificationIndex
-        // is idempotent and ensures consistency after any future restore-path changes.
-        rebuildNotificationIndex()
+        // Notification recipient index: already populated per-event by
+        // insertFromSnapshot via indexNotificationRecipients — no rebuild pass.
 
         // End-of-restore signal bumps (matches V2 reader)
         val now = System.nanoTime()
@@ -4060,6 +4146,9 @@ class MemoryEventStore @Inject constructor(
             writeInt(tag.size)
             for (item in tag) writeStr(item)
         }
+        // V13: pre-built tagsJson — restore reads it directly instead of
+        // reconstructing via tagsToJson(tags) for every event on cold start.
+        writeStr(e.tagsJson)
         var flags = 0
         if (e.replyToId != null) flags = flags or 0x01
         if (e.rootId != null) flags = flags or 0x02
@@ -4077,7 +4166,7 @@ class MemoryEventStore @Inject constructor(
         for (r in seenSnapshot) writeStr(r)
     }
 
-    private fun DataInputStream.readEventBinary(): NostrEvent {
+    private fun DataInputStream.readEventBinary(version: Int): NostrEvent {
         val createdAt = readLong()
         val kind = readInt()
         val id = readStr()
@@ -4099,6 +4188,8 @@ class MemoryEventStore @Inject constructor(
             for (j in 0 until itemCount) tag.add(readStr())
             tags.add(tag)
         }
+        // V13+ stores the pre-built tagsJson; older files reconstruct it.
+        val tagsJson = if (version >= 13) readStr() else tagsToJson(tags)
         val flags = readByte().toInt() and 0xff
         val replyToId = if (flags and 0x01 != 0) readStr() else null
         val rootId = if (flags and 0x02 != 0) readStr() else null
@@ -4119,7 +4210,7 @@ class MemoryEventStore @Inject constructor(
             content = content,
             createdAt = createdAt,
             tags = tags,
-            tagsJson = tagsToJson(tags),
+            tagsJson = tagsJson,
             sig = sig,
             relayUrl = relayUrl,
             replyToId = replyToId,
