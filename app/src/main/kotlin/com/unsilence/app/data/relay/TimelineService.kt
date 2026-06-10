@@ -30,6 +30,11 @@ private const val SLOW_TIER_WATCHDOG_MS = 2_000L
  *  wake up promptly when allEosed flips. */
 private const val SLOW_TIER_POLL_MS = 50L
 
+/** Min interval between intermediate (pre-EOSE) k-way merges in
+ *  subscribeTimeline. EOSE-driven invocations always merge — never gated —
+ *  so the final emit can never lose tail events. */
+private const val INTERMEDIATE_MERGE_MIN_INTERVAL_MS = 250L
+
 /** Max refs persisted per timeline to bound snapshot disk usage. */
 private const val PERSISTED_REFS_CAP = 500
 
@@ -104,6 +109,15 @@ class TimelineService @Inject constructor(
         // Cross-sub dedup for onNew (Jumble's newEventIdSet)
         val newEventIdSet = ConcurrentHashMap.newKeySet<String>()
 
+        // Time gate for intermediate (pre-EOSE) merges. Every per-relay EOSE
+        // on every sub used to re-run the full k-way mergeTimelines — O(N×K)
+        // per batch with most intermediate results discarded. Initialized to
+        // 0 so the very first batch merges immediately (first paint).
+        // Skipped batches are never lost: events stay accumulated in
+        // perSubTimelines and ride the next merge; each sub's final EOSE
+        // (eosed=true) merges unconditionally.
+        val lastIntermediateMergeAtMs = AtomicLong(0L)
+
         // Fire-and-forget: launch all subscribeSingle calls concurrently and
         // return immediately. Jumble doesn't block on the subscribe loop —
         // the handle is returned right away, callbacks fire as EOSEs arrive.
@@ -137,14 +151,22 @@ class TimelineService @Inject constructor(
                             eosedCount.incrementAndGet()
                             if (sr.tier == SubTier.FAST) fastEosedCount.incrementAndGet()
                         }
-                        // Emit on every per-sub update so cached events render
-                        // immediately and pre-EOSE batches stream through. The
-                        // allEosed flag tells consumers when the load is final.
-                        val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
-                        if (merged.isNotEmpty()) {
-                            val allEosed = eosedCount.get() >= subRequests.size
-                            try { onEvents(merged, allEosed) } catch (t: Throwable) {
-                                Log.w(TAG, "onEvents threw", t)
+                        // Merge + emit so cached events render immediately and
+                        // pre-EOSE batches stream through. The allEosed flag
+                        // tells consumers when the load is final. Intermediate
+                        // (non-EOSE) batches are time-gated — see
+                        // lastIntermediateMergeAtMs above.
+                        val nowMs = System.currentTimeMillis()
+                        val shouldMerge = eosed ||
+                            nowMs - lastIntermediateMergeAtMs.get() >= INTERMEDIATE_MERGE_MIN_INTERVAL_MS
+                        if (shouldMerge) {
+                            lastIntermediateMergeAtMs.set(nowMs)
+                            val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
+                            if (merged.isNotEmpty()) {
+                                val allEosed = eosedCount.get() >= subRequests.size
+                                try { onEvents(merged, allEosed) } catch (t: Throwable) {
+                                    Log.w(TAG, "onEvents threw", t)
+                                }
                             }
                         }
                     },
@@ -387,12 +409,21 @@ class TimelineService @Inject constructor(
         val cached = loadMoreTimeline(timelineKey, until, limit)
         if (cached.size >= limit) return cached
 
-        // Cache exhausted — fetch from relays using stored filter + urls
+        // Cache exhausted — fetch from relays using stored filter + urls.
+        // Keys sharing the same filter are coalesced into ONE REQ across the
+        // union of their relay groups (first-seen order, deduped) — the old
+        // per-key loop sent duplicate until-paginated REQs to overlapping
+        // relay groups and blocked up to 10s per group sequentially. Keys
+        // with distinct filters (outbox per-relay author subsets) cannot
+        // share a REQ without leaking authors to the wrong relays, so they
+        // stay separate.
         val keys = multiKeys[timelineKey] ?: listOf(timelineKey)
         val allFetched = mutableListOf<NostrEvent>()
-        for (k in keys) {
-            val tl = timelines[k] ?: continue
-            val paginationFilter = tl.filter.copy(
+        val keyedTimelines = keys.mapNotNull { k -> timelines[k]?.let { k to it } }
+        for ((filter, members) in keyedTimelines.groupBy { it.second.filter }) {
+            val unionUrls = members.flatMap { it.second.urls }.distinct()
+            if (unionUrls.isEmpty()) continue
+            val paginationFilter = filter.copy(
                 until = until,
                 since = null,
                 limit = limit,
@@ -401,7 +432,7 @@ class TimelineService @Inject constructor(
             val eoseSignal = CompletableDeferred<Unit>()
 
             val handle = subscription.subscribe(
-                urls = tl.urls,
+                urls = unionUrls,
                 filter = paginationFilter,
                 onevent = { evt -> events.add(evt) },
                 oneose = { allEosed -> if (allEosed) eoseSignal.complete(Unit) },
@@ -415,9 +446,12 @@ class TimelineService @Inject constructor(
             val sorted = events.sortedWith(compareEventsDesc)
             allFetched.addAll(sorted)
 
-            // Merge into timeline cache (append older refs)
-            val existing = timelines[k]
-            if (existing != null) {
+            // Merge into timeline cache (append older refs). The union fetch
+            // is attributed to every key in the group — same filter, superset
+            // of each key's urls, so each key's cache gets at least what its
+            // own REQ would have returned.
+            for ((k, _) in members) {
+                val existing = timelines[k] ?: continue
                 val newRefs = sorted.map { TimelineRef(it.id, it.createdAt) }
                 val existingIds = existing.refs.map { it.id }.toSet()
                 val deduped = newRefs.filter { it.id !in existingIds }

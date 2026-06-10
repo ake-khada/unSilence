@@ -24,7 +24,7 @@ import javax.inject.Singleton
 private const val TAG = "Subscription"
 private const val EOSE_QUIESCENCE_MS = 2_500L   // silence after ≥1 event ⇒ backfill done ⇒ flip live
 private const val EOSE_CEILING_MS    = 30_000L  // relay accepted REQ but sent nothing at all
-private const val EOSE_POLL_MS       = 500L
+private const val EOSE_POLL_MS       = 1_250L  // coarse — quiescence needs 2.5s of silence; finer polling is wasted wakeups
 
 /**
  * Low-level Nostr REQ subscription primitive.

@@ -414,7 +414,16 @@ class FeedViewModel @Inject constructor(
                     val lookahead = if (_feedType.value is FeedType.Following) ENGAGEMENT_LOOKAHEAD else ENGAGEMENT_LOOKAHEAD_CHURNY
                     val engEnd = (vpEnd + lookahead).coerceAtMost(warmEvents.size)
                     val viewportIds = warmEvents.subList(vpStart, engEnd).map { it.id }.toSet()
-                    val rows = memoryEventStore.feedRowsByIds(warmEvents.map { it.id }.toSet())
+                    // Reuse rows the feedRows pipeline already derived (feedRowCache
+                    // backs feedRows) instead of a redundant MES feedRowsByIds scan.
+                    // Warm-zone events filtered out of the display list (mute /
+                    // contentFilter / sensitive) miss the cache — synthesize those so
+                    // hydration coverage is unchanged. The hydrator only reads
+                    // immutable event fields (id/kind/content/createdAt/rootId),
+                    // never author/stat columns, so row staleness is irrelevant.
+                    val rows = warmEvents.map { evt ->
+                        feedRowCache.get(evt.id) ?: memoryEventStore.synthesizeFeedRow(evt)
+                    }
                     if (rows.isNotEmpty()) {
                         val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
                         cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay, viewportIds = viewportIds)
