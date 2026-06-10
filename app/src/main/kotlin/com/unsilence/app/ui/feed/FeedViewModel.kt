@@ -480,11 +480,13 @@ class FeedViewModel @Inject constructor(
 
         _isLoading.value = resetView && cachedEvents.isEmpty()
 
-        // since from cached events head — relay data newer than this merges
-        // on top; null → bulk replace on first onEvents call.
+        // Admission gate for relay batches arriving after subscription starts.
+        // resetView=true (user-initiated switch): null → TimelineMerge.merge handles
+        //   dedup; no since filter rejects events the cache may have missed.
+        // resetView=false (metaVer resub): head-since from current _events — relay
+        //   data newer than this merges on top, older is skipped (already displayed).
         // Clamped to now — defense against poisoned future-dated events in snapshot.
-        val sinceSource = if (resetView) cachedEvents else _events.value
-        val since: Long? = sinceSource.firstOrNull()?.createdAt
+        val since: Long? = if (resetView) null else _events.value.firstOrNull()?.createdAt
             ?.coerceAtMost(System.currentTimeMillis() / 1000L)
 
         currentHandle = timelineService.subscribeTimeline(
