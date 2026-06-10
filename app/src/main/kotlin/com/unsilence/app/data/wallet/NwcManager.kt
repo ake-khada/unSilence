@@ -31,6 +31,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -39,6 +40,7 @@ private const val PREFS_FILE = "unsilence_nwc"
 private const val KEY_PUBKEY = "wallet_pubkey"
 private const val KEY_RELAY  = "wallet_relay"
 private const val KEY_SECRET = "wallet_secret"
+private const val BALANCE_TTL_MS = 60_000L
 
 /** Parsed fields from a nostr+walletconnect:// URI. */
 data class NwcConnection(
@@ -72,6 +74,18 @@ class NwcManager @Inject constructor(
         )
     }
 
+    /** Ping-free client for genuinely one-shot sockets (balance query, ≤10s) —
+     *  the base client's 25s pingInterval would schedule keepalives that never
+     *  fire usefully. The pre-warmed payment socket stays on [okHttpClient]:
+     *  it can sit open across invoice fetch + user confirmation and benefits
+     *  from keepalives. newBuilder() shares pools, so this is cheap. */
+    private val wsClient by lazy {
+        okHttpClient.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
+    }
+
+    /** Balance TTL cache: (timestampMs, msats) — settings screens query on every entry. */
+    @Volatile private var lastBalance: Pair<Long, Long>? = null
+
     val isConfigured: Boolean
         get() = prefs.contains(KEY_PUBKEY)
 
@@ -86,12 +100,14 @@ class NwcManager @Inject constructor(
             .putString(KEY_RELAY,  conn.relayUrl)
             .putString(KEY_SECRET, conn.secret)
             .apply()
+        lastBalance = null
         Log.d(TAG, "Saved NWC connection to ${conn.relayUrl}")
         return true
     }
 
     fun clear() {
         prefs.edit().clear().apply()
+        lastBalance = null
         Log.d(TAG, "NWC connection cleared")
     }
 
@@ -113,19 +129,40 @@ class NwcManager @Inject constructor(
         val walletPubkey: String,
     )
 
+    /** Crypto material derived from the stored connection — shared by [warmUp] and [getBalance]. */
+    private class NwcCredentials(
+        val conn: NwcConnection,
+        val nwcPrivKeyBytes: ByteArray,
+        val nwcSigner: NostrSignerInternal,
+        val nwcPubkeyHex: String,
+        val walletPubBytes: ByteArray,
+    )
+
+    /** Derive per-request crypto material from stored credentials, or null if not configured. */
+    private fun credentials(): NwcCredentials? {
+        val conn = connection() ?: return null
+        val nwcPrivKeyBytes = conn.secret.hexToByteArray()
+        val nwcKeyPair      = KeyPair(privKey = nwcPrivKeyBytes)
+        return NwcCredentials(
+            conn            = conn,
+            nwcPrivKeyBytes = nwcPrivKeyBytes,
+            nwcSigner       = NostrSignerInternal(nwcKeyPair),
+            nwcPubkeyHex    = nwcKeyPair.pubKey.toHexKey(),
+            walletPubBytes  = conn.walletPubkey.hexToByteArray(),
+        )
+    }
+
     /**
      * Start connecting the NWC WebSocket BEFORE the bolt11 is ready.
      * Returns a [WarmSocket] handle. Call [sendPayment] once the invoice is available.
      * Returns null if NWC is not configured.
      */
     fun warmUp(): WarmSocket? {
-        val conn = connection() ?: return null
+        val creds = credentials() ?: return null
 
-        val nwcPrivKeyBytes = conn.secret.hexToByteArray()
-        val nwcKeyPair      = KeyPair(privKey = nwcPrivKeyBytes)
-        val nwcSigner       = NostrSignerInternal(nwcKeyPair)
-        val nwcPubkeyHex    = nwcKeyPair.pubKey.toHexKey()
-        val walletPubBytes  = conn.walletPubkey.hexToByteArray()
+        val nwcPrivKeyBytes = creds.nwcPrivKeyBytes
+        val nwcPubkeyHex    = creds.nwcPubkeyHex
+        val walletPubBytes  = creds.walletPubBytes
 
         val deferred = CompletableDeferred<Result<Unit>>()
 
@@ -134,7 +171,7 @@ class NwcManager @Inject constructor(
             add(JsonPrimitive("nwc-resp-${System.currentTimeMillis()}"))
             add(buildJsonObject {
                 put("kinds",   buildJsonArray { add(JsonPrimitive(23195)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(conn.walletPubkey)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(creds.conn.walletPubkey)) })
                 put("#p",      buildJsonArray { add(JsonPrimitive(nwcPubkeyHex)) })
             })
         }.toString()
@@ -203,10 +240,10 @@ class NwcManager @Inject constructor(
             }
         }
 
-        val request = Request.Builder().url(conn.relayUrl).build()
+        val request = Request.Builder().url(creds.conn.relayUrl).build()
         val ws = okHttpClient.newWebSocket(request, listener)
 
-        return WarmSocket(ws, deferred, nwcPrivKeyBytes, walletPubBytes, nwcPubkeyHex, nwcSigner, conn.walletPubkey)
+        return WarmSocket(ws, deferred, nwcPrivKeyBytes, walletPubBytes, nwcPubkeyHex, creds.nwcSigner, creds.conn.walletPubkey)
     }
 
     /**
@@ -265,16 +302,24 @@ class NwcManager @Inject constructor(
      * Query the connected NWC wallet for the current balance via NIP-47
      * `get_balance`. Returns balance in millisats, or null on any failure
      * (not configured, timeout, wallet doesn't support the method).
+     * Successful results are cached for 60s — settings screens call this on
+     * every entry. Pass [forceRefresh] to bypass the cache (e.g. explicit
+     * user-initiated refresh).
      */
-    suspend fun getBalance(): Long? = withContext(Dispatchers.IO) {
-        val conn = connection() ?: return@withContext null
+    suspend fun getBalance(forceRefresh: Boolean = false): Long? = withContext(Dispatchers.IO) {
+        val nowMs = System.currentTimeMillis()
+        if (!forceRefresh) {
+            lastBalance?.let { (ts, msats) ->
+                if (nowMs - ts < BALANCE_TTL_MS) return@withContext msats
+            }
+        }
 
-        val nwcPrivKeyBytes = conn.secret.hexToByteArray()
-        val nwcKeyPair      = KeyPair(privKey = nwcPrivKeyBytes)
-        val nwcSigner       = NostrSignerInternal(nwcKeyPair)
-        val nwcPubkeyHex    = nwcKeyPair.pubKey.toHexKey()
-        val walletPubBytes  = conn.walletPubkey.hexToByteArray()
-        val nowSeconds      = System.currentTimeMillis() / 1000L
+        val creds = credentials() ?: return@withContext null
+
+        val nwcPrivKeyBytes = creds.nwcPrivKeyBytes
+        val nwcPubkeyHex    = creds.nwcPubkeyHex
+        val walletPubBytes  = creds.walletPubBytes
+        val nowSeconds      = nowMs / 1000L
 
         val plaintext = buildJsonObject {
             put("method", "get_balance")
@@ -289,10 +334,10 @@ class NwcManager @Inject constructor(
         val template = EventTemplate<Event>(
             createdAt = nowSeconds,
             kind      = 23194,
-            tags      = arrayOf(arrayOf("p", conn.walletPubkey)),
+            tags      = arrayOf(arrayOf("p", creds.conn.walletPubkey)),
             content   = encryptedContent,
         )
-        val signed = runCatching { nwcSigner.sign(template) }
+        val signed = runCatching { creds.nwcSigner.sign(template) }
             .getOrElse { return@withContext null }
 
         val deferred = CompletableDeferred<Long?>()
@@ -302,7 +347,7 @@ class NwcManager @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds",   buildJsonArray { add(JsonPrimitive(23195)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(conn.walletPubkey)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(creds.conn.walletPubkey)) })
                 put("#p",      buildJsonArray { add(JsonPrimitive(nwcPubkeyHex)) })
             })
         }.toString()
@@ -351,11 +396,12 @@ class NwcManager @Inject constructor(
             }
         }
 
-        val ws = okHttpClient.newWebSocket(Request.Builder().url(conn.relayUrl).build(), listener)
+        val ws = wsClient.newWebSocket(Request.Builder().url(creds.conn.relayUrl).build(), listener)
         val result = runCatching {
             withTimeout(10_000) { deferred.await() }
         }.getOrElse { null }
         ws.close(1000, "done")
+        if (result != null) lastBalance = nowMs to result
         result
     }
 

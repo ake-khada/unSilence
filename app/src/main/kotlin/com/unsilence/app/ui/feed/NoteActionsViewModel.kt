@@ -33,6 +33,7 @@ import com.vitorpamplona.quartz.nip18Reposts.RepostEvent
 import com.vitorpamplona.quartz.nip25Reactions.ReactionEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -310,6 +311,10 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
+    /** In-flight receipt waiters keyed by eventId — re-zapping the same note
+     *  cancels the previous waiter instead of leaking a suspended coroutine. */
+    private val optimisticClearJobs = ConcurrentHashMap<String, Job>()
+
     /**
      * Auto-clear the optimistic sats overlay for [eventId] once OUR own
      * kind-9735 receipt arrives. Identity-based: fires only when the
@@ -317,11 +322,14 @@ class NoteActionsViewModel @Inject constructor(
      * else's zap on the same post doesn't clear our overlay prematurely.
      */
     private fun clearOptimisticOnReceipt(eventId: String) {
-        viewModelScope.launch {
+        optimisticClearJobs[eventId]?.cancel()
+        val job = viewModelScope.launch {
             memoryEventStore.ownZapReceivedFlow
                 .first { it == eventId }
             _optimisticZapSats.value = _optimisticZapSats.value - eventId
         }
+        optimisticClearJobs[eventId] = job
+        job.invokeOnCompletion { optimisticClearJobs.remove(eventId, job) }
     }
 
     /** Re-read NWC configured state from storage. Call after external changes (e.g. ZapSettingsScreen). */

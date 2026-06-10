@@ -151,18 +151,17 @@ class ComposeViewModel @Inject constructor(
     /** Pubkey for the avatar in the compose UI. */
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
-    /** Signed-in user's avatar URL, for the compose avatar. */
-    val userAvatarUrl: StateFlow<String?> = pubkeyHex?.let { pk ->
-        userRepository.userFlow(pk)
-            .map { it?.picture }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-    } ?: MutableStateFlow(null)
-
     /** Signed-in user's profile for the compose header. */
     val userEntity: StateFlow<com.unsilence.app.data.memory.UserEntity?> = pubkeyHex?.let { pk ->
         userRepository.userFlow(pk)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
+
+    /** Signed-in user's avatar URL, for the compose avatar — derived from [userEntity]
+     *  so there's a single upstream userFlow subscription. */
+    val userAvatarUrl: StateFlow<String?> = userEntity
+        .map { it?.picture }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** True once the note has been signed, published, and inserted into MES. */
     var published by mutableStateOf(false)

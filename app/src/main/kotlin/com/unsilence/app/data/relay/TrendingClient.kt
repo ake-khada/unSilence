@@ -23,6 +23,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -56,6 +57,13 @@ class TrendingClient @Inject constructor(
     /** Staleness guard: don't fetch more than once per 30 minutes. */
     private val lastFetchMs = AtomicLong(0L)
     @Volatile private var cachedData: TrendingData? = null
+
+    /** Ping-free client for the short-lived trending WS — the base client's
+     *  25s pingInterval would schedule keepalives on a ≤5s one-shot socket.
+     *  newBuilder() shares the base client's pools, so this is cheap. */
+    private val wsClient by lazy {
+        okHttpClient.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
+    }
 
     suspend fun fetch(forceRefresh: Boolean = false): TrendingData? {
         val now = System.currentTimeMillis()
@@ -138,7 +146,7 @@ class TrendingClient @Inject constructor(
 
                 val events = mutableListOf<JsonObject>()
                 val request = Request.Builder().url(TRENDING_RELAY_URL).build()
-                val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+                val ws = wsClient.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         Log.d(TAG, "Connected to $TRENDING_RELAY_URL")
                         webSocket.send(req)
