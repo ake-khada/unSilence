@@ -51,6 +51,14 @@ private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min flat —
 internal const val NETWORK_DOWN_DNS_THRESHOLD = 4
 internal const val NETWORK_DOWN_WINDOW_MS = 3_000L
 
+/** DNS-degraded latch TTL. The degraded flag defers EVERY reconnect, so clearing it
+ *  requires a successful connect — but if the gate blocks all connects, the latch
+ *  could never produce its own exit evidence and would hang forever (observed: armed
+ *  5+ min on a censored network). After this TTL the latch auto-expires; a fresh burst
+ *  of distinct DNS failures re-arms it with a new onset. The heuristic stays useful;
+ *  it just can't latch. (H20a) */
+internal const val DNS_DEGRADED_TTL_MS = 90_000L  // 90s
+
 /** Cross-session dead-relay denylist. Distinct from transient strikes (in-memory,
  *  24h TTL, half-open) — this is long-term, persisted, DataStore-backed.
  *  A relay is dead when it fails [DEAD_RELAY_THRESHOLD] consecutive DNS resolutions
@@ -117,7 +125,8 @@ class RelayCapabilitiesStore @Inject constructor(
     @Volatile var dnsDegraded: Boolean = false
         private set
 
-    /** Epoch ms when dnsDegraded was set. Used to scope the heal on recovery. */
+    /** Epoch ms when dnsDegraded was set. Load-bearing for the [DNS_DEGRADED_TTL_MS]
+     *  latch expiry (H20a) — was previously set-but-never-read. */
     private val dnsDegradedOnsetAt = AtomicLong(0L)
 
     /** Relay URLs that received a DNS failure while degraded — cleared on heal. */
@@ -128,18 +137,37 @@ class RelayCapabilitiesStore @Inject constructor(
      *  degraded (multiple distinct relays failing). Used by RelayPool to gate
      *  reconnect attempts and by this class to gate strikes. */
     val isNetworkDown: Boolean
-        get() = networkMonitor.state.value == NetworkState.OFFLINE || dnsDegraded
+        get() = networkMonitor.state.value == NetworkState.OFFLINE || dnsDegradedActive()
+
+    /** True while the DNS-degraded latch is armed AND within its TTL. Lazily clears an
+     *  expired latch: that's a TIMEOUT-driven expiry, not a recovery — no successful
+     *  connect happened — so strikes are NOT healed here (cf. [healDnsDegraded]). A
+     *  fresh burst of distinct DNS failures must re-arm it. (H20a) */
+    private fun dnsDegradedActive(): Boolean {
+        if (!dnsDegraded) return false
+        if (isDegradedActive(true, dnsDegradedOnsetAt.get(), System.currentTimeMillis())) return true
+        dnsDegraded = false
+        recentDnsFailures.clear()
+        dnsFailedDuringDegradation.clear()
+        Log.w(TAG, "DNS-degraded latch expired after ${DNS_DEGRADED_TTL_MS}ms with no successful connect — clearing (gate must not block its own exit, H20a)")
+        return false
+    }
 
     /** Record a DNS failure for degraded-detection. Called before the strike gate. */
     private fun recordDnsFailure(url: String) {
         val now = System.currentTimeMillis()
+        // Evaluate the latch's TTL first: an expired latch clears here so THIS fresh
+        // failure re-arms with a new onset rather than riding a stale (possibly
+        // minutes-old) arm. dnsDegradedActive() also clears recentDnsFailures on expiry. (H20a)
+        val active = dnsDegradedActive()
+
         recentDnsFailures[url] = now
 
         // Prune stale entries
         val cutoff = now - NETWORK_DOWN_WINDOW_MS
         recentDnsFailures.entries.removeIf { it.value < cutoff }
 
-        if (!dnsDegraded && recentDnsFailures.size >= NETWORK_DOWN_DNS_THRESHOLD) {
+        if (!active && recentDnsFailures.size >= NETWORK_DOWN_DNS_THRESHOLD) {
             dnsDegraded = true
             dnsDegradedOnsetAt.set(now)
             Log.w(TAG, "DNS-degraded: ${recentDnsFailures.size} distinct relays failed DNS within ${NETWORK_DOWN_WINDOW_MS}ms")
@@ -483,5 +511,12 @@ class RelayCapabilitiesStore @Inject constructor(
                        else TRANSPORT_RETRY_BASE_MS
             return (base shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
         }
+
+        /** Pure decision: is the DNS-degraded latch still active? Armed AND within
+         *  [DNS_DEGRADED_TTL_MS] of its onset. Past the TTL the latch is stale and must
+         *  not keep gating reconnects — the gate that armed it also defers the connects
+         *  that would clear it, so a stale latch hangs forever (H20a). Testable directly. */
+        internal fun isDegradedActive(armed: Boolean, onsetAtMs: Long, nowMs: Long): Boolean =
+            armed && (nowMs - onsetAtMs) < DNS_DEGRADED_TTL_MS
     }
 }

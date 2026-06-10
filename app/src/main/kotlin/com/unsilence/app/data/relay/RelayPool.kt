@@ -660,18 +660,43 @@ class RelayPool @Inject constructor(
                             "(closed $toCloseActual of $toCloseTarget; all remaining are exempt)")
                     }
                 }
-                // Drain deferred reconnects after network recovery.
-                // Spread with jitter to avoid spiking the DNS resolver.
-                if (!relayCapabilitiesStore.isNetworkDown && pendingReconnect.isNotEmpty()) {
-                    // DNS-dead state is cleared by the networkChanged collector (H18.4b);
-                    // doing it here too caused a duplicate DataStore persist.
-                    val deferred = pendingReconnect.toList()
-                    pendingReconnect.clear()
-                    Log.w(TAG, "Network recovered — draining ${deferred.size} deferred reconnects with jitter")
-                    for (url in deferred) {
-                        scope.launch {
-                            delay(kotlin.random.Random.nextLong(RECONNECT_JITTER_WINDOW_MS))
-                            reconnectWithBackoff(url)
+                // Drain deferred reconnects. Spread with jitter to avoid spiking the resolver.
+                if (pendingReconnect.isNotEmpty()) {
+                    if (!relayCapabilitiesStore.isNetworkDown) {
+                        // Recovered — drain everything.
+                        // DNS-dead state is cleared by the networkChanged collector (H18.4b);
+                        // doing it here too caused a duplicate DataStore persist.
+                        val deferred = pendingReconnect.toList()
+                        pendingReconnect.clear()
+                        Log.w(TAG, "Network recovered — draining ${deferred.size} deferred reconnects with jitter")
+                        for (url in deferred) {
+                            scope.launch {
+                                delay(kotlin.random.Random.nextLong(RECONNECT_JITTER_WINDOW_MS))
+                                reconnectWithBackoff(url)
+                            }
+                        }
+                    } else {
+                        // Still degraded/down — the gate defers every reconnectWithBackoff,
+                        // so nothing produces the successful connect that clears the latch.
+                        // Drain 1-2 entries as DIRECT probes (connectAndAwait bypasses the
+                        // defer). Prefer relays whose last failure was DNS — their success is
+                        // the strongest proof the resolver recovered, and onOpen →
+                        // clearTransportStrikes → healDnsDegraded clears the latch at once. (H20a)
+                        val probes = pendingReconnect.toList()
+                            .sortedByDescending { relayCapabilitiesStore.get(it)?.lastReason == SkipReason.DNS_RESOLUTION.name }
+                            .take(2)
+                        Log.w(TAG, "DNS-degraded — probing ${probes.size} deferred relay(s) to test recovery (${pendingReconnect.size} pending)")
+                        for (url in probes) {
+                            pendingReconnect.remove(url)
+                            scope.launch {
+                                delay(kotlin.random.Random.nextLong(RECONNECT_JITTER_WINDOW_MS))
+                                val ready = connectAndAwait(listOf(url), timeoutMs = 3_000)
+                                if (ready > 0) {
+                                    Log.w(TAG, "DNS-degraded probe connected: $url — latch cleared via heal path")
+                                } else {
+                                    pendingReconnect.add(url)  // still unreachable — requeue for next sweep
+                                }
+                            }
                         }
                     }
                 }
