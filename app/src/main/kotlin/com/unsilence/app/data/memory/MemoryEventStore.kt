@@ -66,6 +66,12 @@ private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
 private const val PROFILE_CAP = 2_000
 private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
+/** Backoff after a profile trim pass evicts nothing. When everything over
+ *  [PROFILE_CAP] is anchored (typical mid-restore: every restored profile's
+ *  author has events in idsByPubkey), candidates stay empty until anchors or
+ *  access patterns change — re-scanning per kind-0 insert is a quadratic
+ *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
+private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
@@ -730,8 +736,11 @@ class MemoryEventStore @Inject constructor(
      * Anchors (never evicted): own pubkey, followed pubkeys, authors of recent events.
      * Cascades to profileUpdatedAt, profileFieldsCache, relayListsByPubkey.
      */
+    @Volatile private var profileTrimBackoffUntilMs = 0L
+
     private fun trimProfilesIfNeeded() {
         if (profilesByPubkey.size <= PROFILE_CAP) return
+        if (System.currentTimeMillis() < profileTrimBackoffUntilMs) return
 
         // Build anchor set: own + followed + recent event authors
         val anchor = ownPubkey
@@ -770,6 +779,11 @@ class MemoryEventStore @Inject constructor(
         }
         if (removed > 0) {
             Log.d("MES", "Profiles trimmed $removed entries, remaining=${profilesByPubkey.size}")
+        } else {
+            // Everything over cap is anchored — nothing can change until
+            // anchors/access patterns do. Back off instead of re-scanning
+            // on every subsequent kind-0 insert.
+            profileTrimBackoffUntilMs = System.currentTimeMillis() + PROFILE_TRIM_NOOP_BACKOFF_MS
         }
     }
 
