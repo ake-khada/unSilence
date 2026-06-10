@@ -957,9 +957,11 @@ class ComposeViewModel @Inject constructor(
         }
 
         try {
-            // Broadcast to relays
+            // Publish to the user's own write relays only — connectAndAwait handles any
+            // that aren't open (bypassing the degraded defer, explicit user intent). No
+            // more spraying note content to every open socket. (H20c)
             withContext(Dispatchers.IO) {
-                relayPool.publish(eventJson)
+                relayPool.publish(eventJson, writeRelays)
             }
 
             // Wait up to 6s for all relays to respond

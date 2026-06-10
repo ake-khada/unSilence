@@ -2837,6 +2837,52 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Targeted publish (H20c): send an event to a SPECIFIC relay set — the author's
+     * own write relays — rather than broadcasting to every open socket. Two reasons:
+     * the broadcast form spammed ~30 bystander relays per note (bandwidth) and leaked
+     * note content to relays the user never configured (outbox-model violation + privacy).
+     *
+     * Pressing Post is explicit user intent, so any target that isn't already open is
+     * connected here. [connectAndAwait] does NOT gate on isNetworkDown — a DNS-degraded
+     * latch must never refuse a user-initiated publish (H20c: honest attempt beats
+     * refused attempt; cf. H18.4b). Only the target relays receive the event; partial
+     * success (≥1 relay accepts) is handled by the caller's per-relay OK tracking.
+     */
+    suspend fun publish(eventJson: String, targetRelays: List<String>) {
+        val targets = targetRelays.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        if (targets.isEmpty()) {
+            Log.w(TAG, "PUBLISH dispatch: no target relays — nothing sent")
+            return
+        }
+        val parsed = NostrJson.parseToJsonElement(eventJson)
+        val cmd = buildJsonArray {
+            add(JsonPrimitive("EVENT"))
+            add(parsed)
+        }.toString()
+        val kind = runCatching { parsed.jsonObject["kind"]?.jsonPrimitive?.content }.getOrNull()
+
+        // Connect any target that isn't already open — bypassing the degraded/offline
+        // reconnect defer, because this is explicit user intent (H20c).
+        val unopened = targets.filter { connections[it]?.isConnected != true }
+        if (unopened.isNotEmpty()) {
+            Log.w(TAG, "PUBLISH: connecting ${unopened.size} unopened write relay(s): $unopened")
+            connectAndAwait(unopened, timeoutMs = 5_000)
+        }
+
+        // send() enqueues on OkHttp even while a socket is still handshaking (flushes on
+        // open), so a slow-connecting target still receives the event within the caller's
+        // OK deadline. false = no live socket → unreachable this attempt.
+        var sent = 0
+        val unreachable = mutableListOf<String>()
+        for (url in targets) {
+            val conn = connections[url]
+            if (conn != null && conn.send(cmd)) sent++ else unreachable.add(url)
+        }
+        Log.w(TAG, "PUBLISH dispatch: kind=$kind targets=$targets sent=$sent" +
+            if (unreachable.isNotEmpty()) " unreachable=$unreachable" else "")
+    }
+
+    /**
      * Register a callback for OK messages for a specific event ID.
      * Callback receives (relayUrl, success, message).
      */
