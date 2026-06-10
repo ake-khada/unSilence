@@ -128,7 +128,6 @@ class MemoryEventStore @Inject constructor(
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
     private val replyCounts = ConcurrentHashMap<String, Int>()
     private val repostCounts = ConcurrentHashMap<String, Int>()
-    private val reactionCounts = ConcurrentHashMap<String, Int>() // legacy persisted aggregate; display reads reactionsByTarget — remove in cleanup pass
     private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
 
@@ -824,7 +823,6 @@ class MemoryEventStore @Inject constructor(
         val targetId = event.tags
             .lastOrNull { it.size >= 2 && it[0] == "e" }
             ?.get(1) ?: return
-        reactionCounts.compute(targetId) { _, v -> (v ?: 0) + 1 } // legacy aggregate; not read for display
         val contentStr = event.content.ifBlank { "+" }
         val reactionContent = parseReactionContent(contentStr, event.tags)
         // NIP-25 "-" is a downvote — don't index as a displayable reaction
@@ -1781,7 +1779,6 @@ class MemoryEventStore @Inject constructor(
         val removeIds = toEvict.map { it.id }.toSet()
         replyCounts.keys.removeAll(removeIds)
         repostCounts.keys.removeAll(removeIds)
-        reactionCounts.keys.removeAll(removeIds)
         zapStatsByEventId.keys.removeAll(removeIds)
         statsUpdatedAt.keys.removeAll(removeIds)
         repostPubkeysByTarget.keys.removeAll(removeIds)
@@ -3322,7 +3319,7 @@ class MemoryEventStore @Inject constructor(
             followerCountEntries = followerCountCache.size,
             replyCountEntries = replyCounts.size,
             repostCountEntries = repostCounts.size,
-            reactionCountEntries = reactionCounts.size,
+            reactionCountEntries = reactionsByTarget.size,
             zapStatsEntries = zapStatsByEventId.size,
             statsUpdatedAtEntries = statsUpdatedAt.size,
             reactedActors = reactedTargetsByActor.size,
@@ -3396,10 +3393,7 @@ class MemoryEventStore @Inject constructor(
             writer.write("repost|$id|$count")
             writer.newLine()
         }
-        for ((id, count) in reactionCounts) {
-            writer.write("reaction|$id|$count")
-            writer.newLine()
-        }
+        // reactionCounts no longer written — reactionsByTarget is the source of truth (H10)
         for ((id, zap) in zapStatsByEventId) {
             writer.write("zap|$id|${zap.count}|${zap.totalSats}")
             writer.newLine()
@@ -3574,9 +3568,8 @@ class MemoryEventStore @Inject constructor(
             val reposts = repostCounts.toMap()
             d.writeInt(reposts.size)
             for ((id, count) in reposts) { d.writeStr(id); d.writeInt(count) }
-            val reactions = reactionCounts.toMap()
-            d.writeInt(reactions.size)
-            for ((id, count) in reactions) { d.writeStr(id); d.writeInt(count) }
+            // reactionCounts: write 0 entries (legacy field, reactionsByTarget is source of truth)
+            d.writeInt(0)
             val zaps = zapStatsByEventId.toMap()
             d.writeInt(zaps.size)
             for ((id, zap) in zaps) {
@@ -3837,12 +3830,10 @@ class MemoryEventStore @Inject constructor(
             val id = input.readStr(); val c = input.readInt()
             repostCounts[id] = c
         }
+        // reactionCounts: skip legacy entries to advance stream (no longer stored)
         val reactionN = input.readInt()
         if (reactionN < 0 || reactionN > 5_000_000) throw IOException("Invalid reaction count: $reactionN")
-        for (i in 0 until reactionN) {
-            val id = input.readStr(); val c = input.readInt()
-            reactionCounts[id] = c
-        }
+        for (i in 0 until reactionN) { input.readStr(); input.readInt() }
         val zapN = input.readInt()
         if (zapN < 0 || zapN > 5_000_000) throw IOException("Invalid zap count: $zapN")
         for (i in 0 until zapN) {
@@ -4311,7 +4302,7 @@ class MemoryEventStore @Inject constructor(
         when (parts[0]) {
             "reply" -> replyCounts[parts[1]] = parts[2].toIntOrNull() ?: return
             "repost" -> repostCounts[parts[1]] = parts[2].toIntOrNull() ?: return
-            "reaction" -> reactionCounts[parts[1]] = parts[2].toIntOrNull() ?: return
+            "reaction" -> { /* legacy: skip, reactionsByTarget is source of truth */ }
             "zap" -> {
                 if (parts.size >= 4) {
                     val count = parts[2].toIntOrNull() ?: return
@@ -4532,7 +4523,6 @@ class MemoryEventStore @Inject constructor(
         lastTouchedAt.clear()
         replyCounts.clear()
         repostCounts.clear()
-        reactionCounts.clear()
         zapStatsByEventId.clear()
         statsUpdatedAt.clear()
         repostPubkeysByTarget.clear()
