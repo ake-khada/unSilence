@@ -35,4 +35,11 @@ data class RelayCapabilities(
     /** Epoch ms of last successful reprobe attempt for a dead relay.
      *  Dead relays are re-probed once per [DEAD_RELAY_REPROBE_MS]. */
     val lastProbeAt: Long = 0L,
+
+    /** Consecutive transport failures (ANY reason, NOT during network-down), reset on any
+     *  successful connection. Drives integral-relay cooldown escalation (H20b). Distinct
+     *  from [deadFailCount], which counts DNS-only toward the permanent denylist
+     *  (CONNECT_TIMEOUT excluded, H18.4): a TCP-blackholed integral relay times out forever
+     *  without ever incrementing deadFailCount, so escalation needs its own counter. */
+    val consecutiveFailures: Int = 0,
 )
