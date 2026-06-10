@@ -932,15 +932,24 @@ class ComposeViewModel @Inject constructor(
             .mapNotNull { com.unsilence.app.data.relay.normalizeRelayUrl(it) }
             .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS }
 
+        // H20 Commit 1 instrumentation: record the INTENDED outbox target set (own
+        // write relays). Contrast with RelayPool.publish()'s "actually-sent-to" line —
+        // publish broadcasts to every open socket, so a gap here exposes the
+        // outbox-model violation + bandwidth over-broadcast on record.
+        Log.w(TAG, "PUBLISH: event=$eventId targets=write$writeRelays (count=${writeRelays.size})")
+
         // Enter Publishing state with all relays Pending
         val statusMap = ConcurrentHashMap<String, RelayPublishStatus>()
         writeRelays.forEach { statusMap[it] = RelayPublishStatus.Pending }
         _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
 
         // Register OK callback before sending
-        relayPool.registerPublishCallback(eventId) { relayUrl, success, _ ->
+        relayPool.registerPublishCallback(eventId) { relayUrl, success, message ->
             val normalized = com.unsilence.app.data.relay.normalizeRelayUrl(relayUrl)
             val key = normalized ?: relayUrl
+            Log.w(TAG, "PUBLISH ${if (success) "OK" else "FAIL"} $relayUrl" +
+                (if (message.isNotBlank()) " — $message" else "") +
+                (if (!statusMap.containsKey(key)) " (non-target relay)" else ""))
             if (statusMap.containsKey(key)) {
                 statusMap[key] = if (success) RelayPublishStatus.Accepted else RelayPublishStatus.Rejected
                 _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
@@ -969,6 +978,8 @@ class ComposeViewModel @Inject constructor(
             _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
 
             val acceptedCount = statusMap.values.count { it == RelayPublishStatus.Accepted }
+            Log.w(TAG, "PUBLISH verdict: $acceptedCount/${writeRelays.size} accepted " +
+                "(event=$eventId, statuses=${statusMap.values.groupingBy { it }.eachCount()})")
             if (acceptedCount > 0) {
                 // Insert into MES for local state
                 withContext(Dispatchers.IO) { insertIntoMes() }

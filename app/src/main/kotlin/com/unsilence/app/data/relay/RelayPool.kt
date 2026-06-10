@@ -2797,12 +2797,18 @@ class RelayPool @Inject constructor(
     }
 
     fun publish(eventJson: String) {
+        val parsed = NostrJson.parseToJsonElement(eventJson)
         val cmd = buildJsonArray {
             add(JsonPrimitive("EVENT"))
-            add(NostrJson.parseToJsonElement(eventJson))
+            add(parsed)
         }.toString()
+        // H20 Commit 1 instrumentation: publish() broadcasts to EVERY open socket
+        // (connections.values), not just configured write relays — capture the
+        // actual fan-out target set so the over-broadcast is on record in release logs.
+        val kind = runCatching { parsed.jsonObject["kind"]?.jsonPrimitive?.content }.getOrNull()
+        val sentTo = connections.keys.toList()
         connections.values.forEach { it.send(cmd) }
-        Log.d(TAG, "Published event to ${connections.size} relay(s)")
+        Log.w(TAG, "PUBLISH dispatch: kind=$kind actually-sent-to=$sentTo (count=${sentTo.size})")
     }
 
     /**
