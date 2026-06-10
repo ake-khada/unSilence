@@ -4,7 +4,6 @@ import android.util.Log
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.model.buildVideoRenderModels
-import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
@@ -12,7 +11,6 @@ import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
-import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -78,10 +76,8 @@ object Nip19FailureCache {
 class CardHydrator @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
-    private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
-    private val profileResolver: ProfileResolver,
     private val outboxResolver: OutboxRelayResolver,
 ) {
     // ── Per-phase hydrated-id memo ───────────────────────────────────────
@@ -93,8 +89,6 @@ class CardHydrator @Inject constructor(
     // Downstream caches (UserRepository, RelayPool eventFetchInFlight,
     // ImageDimensionCache) already dedup the actual fetches — these sets
     // skip the upstream orchestration cost only.
-    private val profilesHydrated = LinkedHashSet<String>()
-    private val refsHydrated = LinkedHashSet<String>()
     private val mediaHydrated = LinkedHashSet<String>()
     private val hydratedLock = Any()
 
@@ -120,8 +114,6 @@ class CardHydrator @Inject constructor(
      *  hydrate* — the lock guards both reads and writes. */
     fun resetHydratedMemo() {
         synchronized(hydratedLock) {
-            profilesHydrated.clear()
-            refsHydrated.clear()
             mediaHydrated.clear()
         }
         backfillScope.coroutineContext.cancelChildren()
@@ -184,295 +176,6 @@ class CardHydrator @Inject constructor(
 
     /** The debounce job — cancelled and relaunched on each new accumulation. */
     private var backfillDebounceJob: Job? = null
-
-    /**
-     * Profile resolution — avatar, name, identity.
-     *
-     * @param fanOut When false, only fetches from indexer relays (fastest path).
-     *   Source relay and hint relay fetches are skipped.
-     */
-    suspend fun hydrateProfiles(events: List<FeedRow>, fanOut: Boolean = true, excludeSourceRelay: String? = null) {
-        if (events.isEmpty()) return
-        val novelEvents = filterAndMarkNovel(events, profilesHydrated)
-        if (novelEvents.isEmpty()) return
-
-        val pubkeys = mutableSetOf<String>()
-        val profileHints = mutableMapOf<String, MutableList<String>>()
-
-        for (event in novelEvents) {
-            pubkeys.add(event.pubkey)
-            if (event.kind == 6) {
-                extractRepostAuthorPubkey(event.content, event.tags)?.let { pubkeys.add(it) }
-            }
-            if (fanOut) {
-                extractProfileHints(event.content).forEach { (pk, relays) ->
-                    pubkeys.add(pk)
-                    profileHints.getOrPut(pk) { mutableListOf() }.addAll(relays)
-                }
-            }
-        }
-
-        if (pubkeys.isEmpty()) return
-
-        // Pre-filter: drop pubkeys already cached in Room — avoids launching
-        // orchestration (relay REQs, ProfileResolver batching, logging) for pubkeys
-        // that will immediately resolve to "all fresh, skipping."
-        val unresolved = profileResolver.filterUnresolved(pubkeys)
-        if (unresolved.isEmpty()) return
-
-        userRepository.fetchMissingProfiles(unresolved.toList())
-
-        if (fanOut) {
-            val sourceRelays = novelEvents.map { it.relayUrl }.distinct()
-                .filter { it != excludeSourceRelay }
-            if (sourceRelays.isNotEmpty()) {
-                relayPool.fetchProfilesFromSourceRelays(unresolved.toList(), sourceRelays)
-            }
-            if (profileHints.isNotEmpty()) {
-                // Only fan out hints for unresolved pubkeys
-                val unresolvedHints = profileHints.filterKeys { it in unresolved }
-                if (unresolvedHints.isNotEmpty()) {
-                    relayPool.fetchProfilesFromHints(unresolvedHints.mapValues { it.value.distinct() })
-                }
-            }
-        }
-
-        val skipped = events.size - novelEvents.size
-        Log.d(TAG, "Phase1 profiles: ${novelEvents.size} novel cards (${skipped} skipped) → ${unresolved.size} pubkeys${if (!fanOut) " (indexer-only)" else ", ${novelEvents.map { it.relayUrl }.distinct().size} source relays"}")
-    }
-
-    /**
-     * Phase 2: Referenced events + thumbnails. The slow path — ref fetches have a
-     * 1500ms wait for relay responses. Also resolves ref-event author profiles.
-     * Called from SLOW_SCROLL (after profiles) and IDLE.
-     */
-    suspend fun hydrateRefs(events: List<FeedRow>, feedRelay: String? = null) {
-        if (events.isEmpty()) return
-        val novelEvents = filterAndMarkNovel(events, refsHydrated)
-        if (novelEvents.isEmpty()) return
-
-        val referencedIds = mutableSetOf<String>()
-        val relayHints = mutableMapOf<String, String>()
-        for (event in novelEvents) {
-            if (event.kind == 6) {
-                extractRepostTargetId(event.tags)?.let { id ->
-                    referencedIds.add(id)
-                    // Use e-tag relay hint if present; fall back to the wrapper's own relay.
-                    // Bridged reposts (mostr.pub) often omit the relay hint in e-tags,
-                    // but the target event usually lives on the same relay as the wrapper.
-                    val eTagRelay = extractRepostTargetRelay(event.tags)
-                    relayHints[id] = eTagRelay ?: event.relayUrl
-                }
-            }
-            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
-            // Thread parents: replies reference their parent (replyToId) and root (rootId).
-            // Fetching these ensures Conversations tab parent notes resolve via hydrateRefs
-            // even if the initial lookupEvent times out.
-            event.replyToId?.let { id ->
-                referencedIds.add(id)
-                relayHints.putIfAbsent(id, event.relayUrl)
-            }
-            event.rootId?.let { id ->
-                referencedIds.add(id)
-                relayHints.putIfAbsent(id, event.relayUrl)
-            }
-        }
-
-        // Short-circuit: if no refs to resolve, skip the entire pipeline
-        // (Room lookups, relay fetches, 1500ms delay, author resolution, thumbnails).
-        if (referencedIds.isEmpty()) return
-
-        // Skip refs in the negative cache (now in RelayPool, shared across all entry points)
-        referencedIds.removeAll { relayPool.isEventUnresolved(it) }
-        if (referencedIds.isEmpty()) return
-
-        // Fetch missing referenced events (check MemoryEventStore, not Room)
-        val missingRefs = referencedIds.filter { memoryEventStore.getEventEntity(it) == null }
-        if (missingRefs.isNotEmpty()) {
-            // Broadcast fetch for all missing refs
-            relayPool.fetchEventsByIds(missingRefs.toList())
-
-            // Hint-relay coverage. The broadcast targets only 6 connected relays —
-            // events that live exclusively on the wrapper's source relay (or an
-            // explicit e-tag hint relay) won't be covered. Group missing refs by
-            // hint URL and send ONE batched REQ per hint relay instead of one per
-            // ref id; in field logs the per-id loop fires 30+ separate one-shot
-            // REQs at the same hint relay, queue-saturating it. bypassDedup:
-            // the broadcast already registered these ids in eventFetchInFlight,
-            // and we want the hint REQ to fire anyway.
-            val hintBatches = HashMap<String, MutableList<String>>()
-            for (id in missingRefs) {
-                val hint = relayHints[id] ?: continue
-                hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
-            }
-            // Cap fan-out: take the highest-value hint relays (most missing refs).
-            // The broadcast already hit the 6 connected relays; the long tail of
-            // single-ref obscure relays retries on the next hydration pass.
-            val cappedHints = hintBatches.entries
-                .filter { it.key != feedRelay }
-                .sortedByDescending { it.value.size }
-                .take(MAX_HINT_RELAYS_PER_PASS)
-            if (hintBatches.size > cappedHints.size) {
-                Log.d(TAG, "hint fan-out capped: ${hintBatches.size} → ${cappedHints.size} relays")
-            }
-            for (entry in cappedHints) {
-                relayPool.fetchEventsByIdsFromRelay(entry.key, entry.value, bypassDedup = true)
-            }
-        }
-
-        // Wait for missing refs to arrive from relays
-        if (missingRefs.isNotEmpty()) {
-            delay(1500)
-        }
-
-        // ── A.6 outbox fallback: try author's NIP-65 write relays for stragglers ─
-        // Phase tracking: which fetch path resolved each originally-missing ref
-        val phaseResolved = mutableMapOf<String, String>() // refId → "source"|"outbox1"|"outbox2"
-
-        val afterSourceRelay = if (missingRefs.isNotEmpty()) {
-            val resolved = missingRefs.filter { memoryEventStore.getEventEntity(it) != null }
-            resolved.forEach { phaseResolved[it] = "source" }
-            missingRefs.filter { memoryEventStore.getEventEntity(it) == null }
-        } else emptyList()
-
-        if (afterSourceRelay.isNotEmpty()) {
-            try {
-                // Extract p-tag pubkeys from referencing events to find ref authors.
-                // A.6.2: for kind-6 reposts without p-tags (bridged content from mostr.pub
-                // etc.), use the wrapper's own pubkey as fallback author for outbox routing.
-                val refAuthorPubkeys = mutableSetOf<String>()
-                for (event in novelEvents) {
-                    val pTags = extractPTagPubkeys(event.tags)
-                    if (pTags.isNotEmpty()) {
-                        pTags.forEach { refAuthorPubkeys.add(it) }
-                    } else if (event.kind == 6) {
-                        refAuthorPubkeys.add(event.pubkey)
-                    }
-                }
-                Log.d(TAG, "Outbox: ${afterSourceRelay.size} still-missing refs, ${refAuthorPubkeys.size} p-tag authors")
-
-                // Phase 1: try write relays already cached in MemoryEventStore.
-                // The per-author relay-list dump was useful during early outbox
-                // debugging but produces multi-KB log lines — printing 60-relay
-                // arrays once per author per hydration pass added measurable
-                // Main-thread cost when this runs frequently.
-                val cachedWriteRelays = refAuthorPubkeys
-                    .flatMap { pk -> memoryEventStore.writeRelaysForRanked(pk) }
-                    .distinct()
-                    .filter { it != feedRelay }
-                    .take(5)
-
-                if (cachedWriteRelays.isNotEmpty()) {
-                    // Batch: ONE REQ per write relay with all afterSourceRelay
-                    // ids in `{"ids":[...]}`, instead of per-id REQs (which sent
-                    // up to 5 single-id REQs per missing ref). Same shape as
-                    // the hint-batch fix in ecf931e for hydrateRefs's primary
-                    // hint loop. With 4 missing refs × 5 cached write relays
-                    // that's 20 REQs collapsed to 5.
-                    for (relay in cachedWriteRelays) {
-                        relayPool.fetchEventsByIdsFromRelay(relay, afterSourceRelay, bypassDedup = true)
-                    }
-                    Log.d(TAG, "Outbox fallback: ${afterSourceRelay.size} refs → ${cachedWriteRelays.size} cached write relays (batched)")
-                }
-
-                // Phase 2: for authors without cached relay lists, fetch kind-10002
-                val authorsWithoutRelayList = refAuthorPubkeys
-                    .filter { memoryEventStore.writeRelaysFor(it).isEmpty() }
-                    .take(5)
-                if (authorsWithoutRelayList.isNotEmpty()) {
-                    relayPool.fetchRelayLists(authorsWithoutRelayList.toList())
-                    delay(2000) // Wait for kind-10002 to arrive via EventProcessor
-
-                    // Check phase 1 resolution before phase 2 dispatch
-                    afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
-                        .forEach { phaseResolved[it] = "outbox1" }
-
-                    // Now resolve newly-cached write relays
-                    val newWriteRelays = authorsWithoutRelayList
-                        .flatMap { memoryEventStore.writeRelaysForRanked(it) }
-                        .distinct()
-                        .filter { it != feedRelay }
-                        .take(5)
-                    if (newWriteRelays.isNotEmpty()) {
-                        // Re-check which refs are still missing
-                        val stillMissingAfterPhase1 = afterSourceRelay
-                            .filter { memoryEventStore.getEventEntity(it) == null }
-                        if (stillMissingAfterPhase1.isNotEmpty()) {
-                            // Same batch-by-relay pattern as phase 1.
-                            for (relay in newWriteRelays) {
-                                relayPool.fetchEventsByIdsFromRelay(
-                                    relay, stillMissingAfterPhase1, bypassDedup = true,
-                                )
-                            }
-                            Log.d(TAG, "Outbox fallback phase 2: ${stillMissingAfterPhase1.size} refs → ${newWriteRelays.size} newly-resolved write relays (batched)")
-                        }
-                    }
-                }
-
-                // Final wait for outbox relay responses
-                if (cachedWriteRelays.isNotEmpty() || authorsWithoutRelayList.isNotEmpty()) {
-                    delay(2000)
-                }
-
-                // Check outbox1/outbox2 resolution
-                afterSourceRelay.filter { memoryEventStore.getEventEntity(it) != null && it !in phaseResolved }
-                    .forEach { phaseResolved[it] = "outbox2" }
-            } finally {
-                // Write negative cache even if coroutine was canceled during a delay.
-                // Both getEventEntity and markEventUnresolved are non-suspending
-                // ConcurrentHashMap ops — safe in a finally block without NonCancellable.
-                val finallyMissing = afterSourceRelay.filter { memoryEventStore.getEventEntity(it) == null }
-                for (id in finallyMissing) { relayPool.markEventUnresolved(id) }
-                val resolvedViaOutbox = afterSourceRelay.size - finallyMissing.size
-                if (resolvedViaOutbox > 0) {
-                    Log.d(TAG, "Outbox resolved: $resolvedViaOutbox/${afterSourceRelay.size} refs via author write relays")
-                }
-            }
-        } else if (missingRefs.isNotEmpty()) {
-            // Source relay resolved everything
-            missingRefs.filter { memoryEventStore.getEventEntity(it) != null }
-                .forEach { phaseResolved[it] = "source" }
-        }
-
-        // ── DIAGNOSTIC: structured log per originally-missing ref ─────────────
-        if (missingRefs.isNotEmpty()) {
-            // Build refId → (referencedBy, referencedByKind) mapping
-            val refToReferencer = mutableMapOf<String, Pair<String, Int>>()
-            for (event in novelEvents) {
-                if (event.kind == 6) {
-                    extractRepostTargetId(event.tags)?.let { refToReferencer[it] = event.id to event.kind }
-                }
-                event.replyToId?.let { refToReferencer.putIfAbsent(it, event.id to event.kind) }
-                event.rootId?.let { refToReferencer.putIfAbsent(it, event.id to event.kind) }
-                extractQuotedEventIds(event.content).forEach { refToReferencer.putIfAbsent(it, event.id to event.kind) }
-            }
-            for (refId in missingRefs) {
-                val entity = memoryEventStore.getEventEntity(refId)
-                val (referencedBy, refByKind) = refToReferencer[refId] ?: ("unknown" to -1)
-                val phase = phaseResolved[refId] ?: "unresolved"
-                Log.d(TAG, "Outbox final: refId=${refId.take(12)} exists=${entity != null} " +
-                    "kind=${entity?.kind} author=${entity?.pubkey?.take(12)} " +
-                    "relayUrl=${entity?.relayUrl} " +
-                    "contentLen=${entity?.content?.length ?: 0} " +
-                    "referencedBy=${referencedBy.take(12)} referencedByKind=$refByKind " +
-                    "phase=$phase")
-            }
-        }
-
-        // Resolve authors for ALL referenced events (existing + newly fetched).
-        // Previously only missing refs got author resolution — refs already in
-        // MemoryEventStore were skipped, leaving embedded quote author profiles
-        // unresolved (no name, avatar, or NIP-05).
-        val allRefAuthors = referencedIds
-            .mapNotNull { memoryEventStore.getEventEntity(it)?.pubkey }
-        if (allRefAuthors.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(allRefAuthors)
-        }
-
-        val outboxResolved = afterSourceRelay.size - afterSourceRelay.count { memoryEventStore.getEventEntity(it) == null }
-        val skipped = events.size - novelEvents.size
-        Log.d(TAG, "Phase2 refs: ${novelEvents.size} novel cards (${skipped} skipped) → ${referencedIds.size} refs (${missingRefs.size} missing, ${afterSourceRelay.size} post-source, $outboxResolved outbox-resolved)")
-    }
 
     /**
      * Independent media pipeline — no relay queries, no dependencies on ref resolution.
@@ -987,18 +690,3 @@ fun extractPTagPubkeys(tagsJson: String): List<String> {
     } catch (_: Exception) { emptyList() }
 }
 
-/** Extract pubkey → relay hints from nostr:nprofile1... URIs in content. */
-fun extractProfileHints(content: String): Map<String, List<String>> {
-    if (!content.contains("nostr:")) return emptyMap()
-    val hints = mutableMapOf<String, List<String>>()
-    NOSTR_URI_REGEX.findAll(content).forEach { match ->
-        if (Nip19FailureCache.isKnownBad(match.value)) return@forEach
-        runCatching {
-            val entity = Nip19Parser.uriToRoute(match.value)?.entity
-            if (entity is NProfile && entity.relay.isNotEmpty()) {
-                hints[entity.hex] = entity.relay.map { it.url }
-            }
-        }.onFailure { Nip19FailureCache.markBad(match.value) }
-    }
-    return hints
-}
