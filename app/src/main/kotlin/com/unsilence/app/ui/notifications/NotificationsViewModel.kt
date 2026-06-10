@@ -41,6 +41,16 @@ class NotificationsViewModel @Inject constructor(
     private val _hasNew = MutableStateFlow(false)
     val hasNewNotifications: StateFlow<Boolean> = _hasNew.asStateFlow()
 
+    /**
+     * In-memory mirror of the DataStore lastSeen timestamp. Seeded once per
+     * pubkey in [startCollecting]; [markSeen] updates BOTH this and DataStore,
+     * so each notification emission reads a fresh value without re-opening a
+     * DataStore flow (disk I/O per emission). Preserves the stale-capture fix:
+     * markSeen() writes are reflected immediately, the dot doesn't reappear.
+     */
+    private val lastSeenCache = MutableStateFlow(0L)
+    private var lastSeenPubkey: String? = null
+
     /** Mark current notifications as seen — clears the blue dot. */
     fun markSeen() {
         val items = _uiState.value.items
@@ -49,9 +59,10 @@ class NotificationsViewModel @Inject constructor(
             return
         }
         val pubkey = keyManager.getPublicKeyHex() ?: return
+        lastSeenCache.value = items.first().createdAt
+        _hasNew.value = false
         viewModelScope.launch {
             relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().createdAt)
-            _hasNew.value = false
         }
     }
 
@@ -75,14 +86,20 @@ class NotificationsViewModel @Inject constructor(
         collectJob = viewModelScope.launch {
             val followedOnly = _filter.value == NotifFilter.Following
 
+            // Seed lastSeenCache from DataStore once per pubkey — markSeen()
+            // keeps it in sync afterwards, so per-emission reads stay in memory.
+            if (lastSeenPubkey != pubkey) {
+                lastSeenCache.value = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
+                lastSeenPubkey = pubkey
+            }
+
             memoryEventStore.notificationsFlow(pubkey, followedOnly = followedOnly)
                 .collect { items ->
                     _uiState.update { it.copy(items = items, loading = false) }
                     if (items.isNotEmpty()) {
-                        // Re-read lastSeen on each emission so markSeen() writes
-                        // are reflected immediately (stale capture caused dot reappearing).
-                        val lastSeen = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
-                        _hasNew.value = items.first().createdAt > lastSeen
+                        // Read the in-memory mirror — markSeen() updates it
+                        // immediately (stale capture caused dot reappearing).
+                        _hasNew.value = items.first().createdAt > lastSeenCache.value
                     }
 
                     val missingPubkeys = items
