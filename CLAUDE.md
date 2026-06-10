@@ -22,6 +22,7 @@
 - **Deploy:** `adb install -r app/build/outputs/apk/debug/app-debug.apk`
 - **Editor:** Neovim — never `nano`
 - **NEVER** run `./gradlew` while Android Studio is open (Gradle lock conflict)
+- **Release-build validation log lines must be `Log.w` or higher** — R8 strips `Log.d`/`Log.v` in release. A validation that depends on a `Log.d` line will read as a silent failure on the release builds we actually test on
 
 ---
 
@@ -110,6 +111,8 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - **Map-before-close contract:** all close paths remove/replace map entry BEFORE `conn.close()`
 - **`listenForEvents` cancellation:** rethrows `CancellationException`; finally block gates on `isActive`, no `return`
 - **`listenForEvents` reconnect gate:** `stillNeeded = !purposes.isNullOrEmpty() || url in activeSubUrls` — no recency check (H8). Never gate on `recentlyActive` — it creates self-perpetuating resurrection loops
+- **Ids-only filters must include `kinds`** — some relays (purplepag.es) reject filters without kinds. Always add kinds to `{"ids":[...]}` fetch paths (H19a)
+- **`"blocked"` CLOSED is TRANSIENT** — per-REQ policy rejection must not strike relay-level health. Sub-level rejection ≠ relay unhealthy (H19a)
 - **`flushRelayQueue`:** uses `isRelayOutOfCooldown` (check only), NOT `canSendToRelay` (consumes token)
 - **`normalizeRelayUrl` rejects whitespace/control chars** — chokepoint for all relay URL validation
 - `sendOneShotBatch` excludes `activeSingleRelayFeedUrl`; targeted id-fetches do NOT exclude
@@ -158,6 +161,7 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 ## Critical Rules — Memory Bounds
 
 - **`DERIVED_ONLY_KINDS` (H9):** kind-30166 relay monitors skip `eventsById`/`idsByKind`, populate only compact `relayMonitorsByUrl`. Saved 80MB heap. Pattern: raw event → compact derived state → discard raw
+- **Profile eviction anchors `idsByPubkey` (H19c):** `trimProfilesIfNeeded` skips pubkeys that have events in MES — don't evict profiles whose content is stored (evict-then-refetch is wasted work)
 - VideoThumbnailCache: ½ source dims, no JPEG round-trip, 48MB/30 entries
 - **feedRowCache:** `LruCache(1000)` — retains across slice swaps, bounds memory (H7)
 - FeedVM `profileCache`/`statsCache`: `LruCache(500)`, synchronized. Never unbounded CHM

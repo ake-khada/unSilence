@@ -6,13 +6,22 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "NetworkMonitor"
+
+/** Collapse rapid callbacks (VPN toggle can fire multiple times in seconds). */
+private const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
 
 enum class NetworkState { ONLINE, OFFLINE, UNKNOWN }
 
@@ -32,6 +41,18 @@ class NetworkMonitor @Inject constructor(
     private val _state = MutableStateFlow(NetworkState.UNKNOWN)
     val state: StateFlow<NetworkState> = _state.asStateFlow()
 
+    /** Emits when the default network identity changes (VPN toggle, WiFi↔cellular).
+     *  DNS resolvability is a property of the current network — relay DNS-dead state
+     *  should be re-evaluated on every identity change. */
+    private val _networkChanged = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val networkChanged: SharedFlow<Unit> = _networkChanged.asSharedFlow()
+
+    private val lastDefaultNetwork = AtomicReference<Network?>(null)
+    private val lastNetworkChangedAt = AtomicLong(0L)
+
     init {
         val cm = context.getSystemService(ConnectivityManager::class.java)
         if (cm != null) {
@@ -47,6 +68,15 @@ class NetworkMonitor @Inject constructor(
             cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     _state.value = NetworkState.ONLINE
+                    val prev = lastDefaultNetwork.getAndSet(network)
+                    if (prev != null && prev != network) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastNetworkChangedAt.get() >= NETWORK_CHANGE_DEBOUNCE_MS) {
+                            lastNetworkChangedAt.set(now)
+                            _networkChanged.tryEmit(Unit)
+                            Log.w(TAG, "Default network changed — DNS resolvability may differ")
+                        }
+                    }
                     Log.d(TAG, "Network available")
                 }
 

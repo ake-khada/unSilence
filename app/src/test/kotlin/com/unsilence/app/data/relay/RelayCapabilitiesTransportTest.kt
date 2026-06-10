@@ -135,14 +135,57 @@ class RelayCapabilitiesTransportTest {
         assertTrue("10 DNS failures must reach dead threshold", deadCount >= DEAD_RELAY_THRESHOLD)
     }
 
-    // ── Cooldown base by failure type (H18.4) ─────────────────────────
-    // retryCooldownMs needs the store instance (Android Context) — tested
-    // via documented contract: DNS_RETRY_BASE_MS > TRANSPORT_RETRY_BASE_MS
+    // ── Cooldown base by failure type (H18.4) ────────────────────────
+    // Tests call the extracted companion function directly — no Android context needed.
 
     @Test
-    fun `DNS retry base is longer than timeout retry base`() {
-        // These are compile-time constants — lock the ratio so it can't drift
-        assertTrue("DNS base (5min) must be > timeout base (1min)",
-            5 * 60_000L > 60_000L)
+    fun `DNS lastReason uses 5min base`() {
+        val cooldown = RelayCapabilitiesStore.computeRetryCooldownMs(
+            isIntegral = false,
+            lastReason = SkipReason.DNS_RESOLUTION.name,
+            strikes = MAX_CAPABILITY_STRIKES,
+        )
+        assertEquals(5 * 60_000L, cooldown)
+    }
+
+    @Test
+    fun `CONNECT_TIMEOUT lastReason uses 1min base`() {
+        val cooldown = RelayCapabilitiesStore.computeRetryCooldownMs(
+            isIntegral = false,
+            lastReason = SkipReason.CONNECT_TIMEOUT.name,
+            strikes = MAX_CAPABILITY_STRIKES,
+        )
+        assertEquals(60_000L, cooldown)
+    }
+
+    @Test
+    fun `integral uses flat 60s regardless of DNS reason`() {
+        val cooldown = RelayCapabilitiesStore.computeRetryCooldownMs(
+            isIntegral = true,
+            lastReason = SkipReason.DNS_RESOLUTION.name,
+            strikes = 10,
+        )
+        assertEquals(60_000L, cooldown)
+    }
+
+    @Test
+    fun `integral uses flat 60s regardless of timeout reason`() {
+        val cooldown = RelayCapabilitiesStore.computeRetryCooldownMs(
+            isIntegral = true,
+            lastReason = SkipReason.CONNECT_TIMEOUT.name,
+            strikes = 10,
+        )
+        assertEquals(60_000L, cooldown)
+    }
+
+    @Test
+    fun `DNS cooldown schedule with exponential backoff`() {
+        val dns = SkipReason.DNS_RESOLUTION.name
+        // overage 0 → 5min, 1 → 10min, 2 → 20min, 3 → 30min(cap)
+        assertEquals(5 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 3))
+        assertEquals(10 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 4))
+        assertEquals(20 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 5))
+        assertEquals(30 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 6))  // cap
+        assertEquals(30 * 60_000L, RelayCapabilitiesStore.computeRetryCooldownMs(false, dns, 100))
     }
 }

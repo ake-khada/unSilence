@@ -190,7 +190,15 @@ class RelayCapabilitiesStore @Inject constructor(
                 val evicted = map.size - fresh.size
                 // Clear legacy authRequired flags — auth is handled by the auth pipeline
                 val cleaned = fresh.mapValues { (_, c) ->
-                    if (c.authRequired) c.copy(authRequired = false) else c
+                    var fixed = c
+                    if (fixed.authRequired) fixed = fixed.copy(authRequired = false)
+                    // Dead-count policy invariant (H18.4): only DNS_RESOLUTION produces
+                    // deadFailCount. Historical data may contain dead entries from
+                    // CONNECT_TIMEOUT before this policy. Reset on every load — idempotent.
+                    if (fixed.deadFailCount > 0 && fixed.lastReason != SkipReason.DNS_RESOLUTION.name) {
+                        fixed = fixed.copy(deadFailCount = 0)
+                    }
+                    fixed
                 }
                 caps.putAll(cleaned)
                 Log.w(TAG, "Loaded ${cleaned.size} relay capabilities (evicted $evicted stale)")
@@ -201,8 +209,11 @@ class RelayCapabilitiesStore @Inject constructor(
                         Log.w(TAG, "  WILL-SKIP: $url restricted=${c.restricted} strikes=${c.strikes} dead=${c.deadFailCount} reason='${c.lastReason}'")
                     }
                 }
-                // Persist cleaned data so stale entries don't re-load
-                if (evicted > 0 || fresh.any { (k, _) -> map[k]?.authRequired == true }) {
+                // Persist cleaned data so stale/fixed entries don't re-load
+                val needsPersist = evicted > 0 ||
+                    fresh.any { (k, v) -> map[k]?.authRequired == true ||
+                        (v.deadFailCount > 0 && v.lastReason != SkipReason.DNS_RESOLUTION.name) }
+                if (needsPersist) {
                     GlobalScope.launch(Dispatchers.IO) { persist() }
                 }
             }
@@ -252,16 +263,10 @@ class RelayCapabilitiesStore @Inject constructor(
     }
 
     /** Cooldown before a struck relay becomes retry-eligible.
-     *  Integral relays: short flat window. Others: exponential backoff, capped.
-     *  DNS failures use a longer base — the VPN/system resolver won't resolve
-     *  a missing host in 1 minute. */
+     *  Delegates to [computeRetryCooldownMs] — see companion for testable pure logic. */
     internal fun retryCooldownMs(url: String, strikes: Int): Long {
-        if (isIntegral(url)) return INTEGRAL_RETRY_COOLDOWN_MS
-        val overage = (strikes - MAX_CAPABILITY_STRIKES).coerceIn(0, 6)
-        val lastReason = caps[normalizeRelayUrl(url) ?: url]?.lastReason
-        val base = if (lastReason == SkipReason.DNS_RESOLUTION.name) DNS_RETRY_BASE_MS
-                   else TRANSPORT_RETRY_BASE_MS
-        return (base shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
+        val key = normalizeRelayUrl(url) ?: url
+        return computeRetryCooldownMs(isIntegral(url), caps[key]?.lastReason, strikes)
     }
 
     /**
@@ -430,6 +435,7 @@ class RelayCapabilitiesStore @Inject constructor(
         }
         if (cleared > 0) {
             Log.w(TAG, "Network change: cleared DNS-dead state for $cleared relay(s)")
+            GlobalScope.launch(Dispatchers.IO) { persist() }
         }
     }
 
@@ -464,6 +470,18 @@ class RelayCapabilitiesStore @Inject constructor(
         internal fun strikesForReason(reason: SkipReason): Int = when (reason) {
             SkipReason.CLEARTEXT_BLOCKED -> MAX_CAPABILITY_STRIKES
             else -> 1
+        }
+
+        /** Pure cooldown calculation — no store state needed. Testable directly.
+         *  Integral relays: short flat window. Others: exponential backoff, capped.
+         *  DNS failures use a longer base — the VPN/system resolver won't resolve
+         *  a missing host in 1 minute. */
+        internal fun computeRetryCooldownMs(isIntegral: Boolean, lastReason: String?, strikes: Int): Long {
+            if (isIntegral) return INTEGRAL_RETRY_COOLDOWN_MS
+            val overage = (strikes - MAX_CAPABILITY_STRIKES).coerceIn(0, 6)
+            val base = if (lastReason == SkipReason.DNS_RESOLUTION.name) DNS_RETRY_BASE_MS
+                       else TRANSPORT_RETRY_BASE_MS
+            return (base shl overage).coerceAtMost(TRANSPORT_RETRY_MAX_MS)
         }
     }
 }
