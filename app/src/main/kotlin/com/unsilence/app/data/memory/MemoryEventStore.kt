@@ -2745,6 +2745,20 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
+    /** Relay URLs that have delivered events by [pubkey]. For profile fallback
+     *  routing — a relay serving an author's kind-1s likely has their kind-0.
+     *  Snapshots the concurrent [idsByPubkey] set before iteration (Rule #23). */
+    fun relaysSeenForPubkey(pubkey: String): Set<String> {
+        val eventIds = idsByPubkey[pubkey]?.toList() ?: return emptySet()
+        val relays = mutableSetOf<String>()
+        for (id in eventIds.take(20)) {
+            val event = eventsById[id] ?: continue
+            relays.addAll(event.relaysSeen)
+            if (relays.size >= 8) break
+        }
+        return relays
+    }
+
     override fun writeRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.write ?: emptyList()
 
