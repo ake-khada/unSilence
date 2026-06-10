@@ -2,15 +2,10 @@ package com.unsilence.app.data
 
 import android.content.Context
 import android.util.Log
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.work.BackgroundSyncWorker
-import java.util.concurrent.TimeUnit
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
@@ -509,26 +504,18 @@ class AppBootstrapper @Inject constructor(
         // reactive flow recomputes when pinned relays change.
         feedRelayWarmer.start()
 
-        scheduleBackgroundSync()
+        cancelLegacyBackgroundSync()
 
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
     }
 
-    private fun scheduleBackgroundSync() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .setRequiresBatteryNotLow(true)
-            .build()
-        val request = PeriodicWorkRequestBuilder<BackgroundSyncWorker>(30, TimeUnit.MINUTES)
-            .setConstraints(constraints)
-            .build()
-        WorkManager.getInstance(context)
-            .enqueueUniquePeriodicWork(
-                BackgroundSyncWorker.WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
-                request,
-            )
-        Log.d(TAG, "Background sync worker scheduled (30min interval, stub implementation)")
+    /**
+     * BackgroundSyncWorker.doWork() is an empty stub — the 30min periodic
+     * work it used to run only produced pointless device wakeups. Cancel the
+     * unique work so existing installs stop the legacy schedule too.
+     */
+    private fun cancelLegacyBackgroundSync() {
+        WorkManager.getInstance(context).cancelUniqueWork(BackgroundSyncWorker.WORK_NAME)
     }
 
     /**
