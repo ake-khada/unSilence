@@ -833,9 +833,10 @@ class MemoryEventStore @Inject constructor(
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
-        // Actor-side index: track what this pubkey has reacted to
-        // TODO(cleanup): "-" still hits reactedTargetsByActor; harmless (no dislike UI) but inconsistent
-        addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+        // Actor-side index: track what this pubkey has reacted to (skip dislikes)
+        if (reactionContent != ReactionContent.Standard("-")) {
+            addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+        }
     }
 
     /**
