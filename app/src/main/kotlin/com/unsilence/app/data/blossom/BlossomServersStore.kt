@@ -74,16 +74,24 @@ class BlossomServersStore @Inject constructor(
     val videoQuality: StateFlow<VideoTranscoder.Quality> = _videoQuality.asStateFlow()
 
     private var publishJob: Job? = null
-    private var initialized = false
+    private val initMutex = Mutex()
+    @Volatile private var initialized = false
 
     /**
      * Hydrate from MES (kind-10063 from relay) or DataStore, or seed with defaults.
-     * Called once by ViewModel on first access.
+     * Called once by ViewModel on first access. Mutex-guarded — multiple ViewModels
+     * race this on startup; later callers wait, then return without re-running.
      */
     suspend fun initialize() {
         if (initialized) return
-        initialized = true
+        initMutex.withLock {
+            if (initialized) return
+            initialized = true
+            doInitialize()
+        }
+    }
 
+    private suspend fun doInitialize() {
         // 1. Try MES (published kind-10063)
         val pubkey = keyManager.getPublicKeyHex()
         val mesServers = if (pubkey != null) memoryEventStore.blossomServersFor(pubkey) else emptyList()

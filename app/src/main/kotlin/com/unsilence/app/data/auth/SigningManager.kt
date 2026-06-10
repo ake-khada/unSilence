@@ -29,6 +29,10 @@ class SigningManager @Inject constructor(
     @Volatile
     private var signer: NostrSigner? = null
 
+    /** Cached sync signer — KeyPair derivation (secp256k1) is expensive, don't rebuild per call. */
+    @Volatile
+    private var signerSync: NostrSignerSync? = null
+
     /** Launcher registrations that survive signer rebuilds (logout/relogin). */
     private val registeredLaunchers = CopyOnWriteArraySet<(Intent) -> Unit>()
 
@@ -66,8 +70,11 @@ class SigningManager @Inject constructor(
      * mode; returns null in Amber mode (no private key access).
      */
     fun getSignerSync(): NostrSignerSync? {
+        val pubkey = keyManager.getPublicKeyHex() ?: return null
+        signerSync?.let { if (it.pubKey == pubkey) return it }
         val privKeyHex = keyManager.getPrivateKeyHex() ?: return null
         return NostrSignerSync(KeyPair(privKey = privKeyHex.hexToByteArray()))
+            .also { signerSync = it }
     }
 
     suspend fun <T : Event> sign(template: EventTemplate<T>): T? {
@@ -221,6 +228,7 @@ class SigningManager @Inject constructor(
         // stays alive across logout/relogin, so DisposableEffect won't re-fire.
         // getOrCreateSigner() re-applies them to the next external signer.
         signer = null
+        signerSync = null
     }
 
     companion object {
