@@ -47,8 +47,9 @@ class MuteListRepository @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var publishJob: Job? = null
 
-    /** Set of event IDs we've published ourselves — to skip re-decrypt of our own echo. */
-    private val selfPublishedEventIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** Event ID of the most recent self-published kind-10000 — skip re-decrypt of our
+     *  own echo. Single var: kind-10000 is replaceable, only one in-flight ID is valid. */
+    @Volatile private var selfPublishedEventId: String? = null
 
     /**
      * Tracks whether we've confirmed the user's network mute-list state.
@@ -69,7 +70,7 @@ class MuteListRepository @Inject constructor(
     fun markPublishUnsafe(reason: String) { _publishSafe.value = false }
 
     /** Called from MES handleMuteList to check if an arriving event is our own echo. */
-    fun isSelfPublished(eventId: String): Boolean = eventId in selfPublishedEventIds
+    fun isSelfPublished(eventId: String): Boolean = eventId == selfPublishedEventId
 
     /**
      * Mute a user. Local mute is ALWAYS applied (feed filtering works immediately).
@@ -179,7 +180,7 @@ class MuteListRepository @Inject constructor(
 
         // Register self-publish BEFORE sending — handleMuteList must already know
         // by the time the echo arrives.
-        selfPublishedEventIds.add(signed.id)
+        selfPublishedEventId = signed.id
 
         // Store the signed event in MES immediately so the next snapshot save
         // captures the latest mute list. Without this, backgrounding before the
@@ -208,7 +209,7 @@ class MuteListRepository @Inject constructor(
 
         val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
         if (writeRelays.isEmpty()) {
-            selfPublishedEventIds.remove(signed.id)
+            selfPublishedEventId = null
             memoryEventStore.clearMuteListOptimisticFloor()
             return
         }
