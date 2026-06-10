@@ -131,7 +131,8 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - VideoThumbnailCache: ½ dims, no JPEG round-trip, 48MB/30 entries
 - **feedRowCache `LruCache(1000)`** retains across slice swaps (H7). FeedVM `profileCache`/`statsCache` `LruCache(500)` synchronized. Never unbounded CHM
 - Actor indexes: 1000 actors LRU, 500 targets/actor, ownPubkey anchored
-- **TimelineService cache persisted** — snapshot V12, `INITIAL_CACHE_EMIT_CAP`=60, `PERSISTED_REFS_CAP`=500
+- **TimelineService cache persisted** — snapshot V13 (events carry tagsJson; ≤V12 reader reconstructs), `INITIAL_CACHE_EMIT_CAP`=60, `PERSISTED_REFS_CAP`=500
+- **Maintenance trims are gated** — actor/feedRow trims every 64th call; profile trim backs off 60s when a pass evicts 0 (anchored-over-cap livelock: 7.5min restore). Never call a scan-trim per insert
 - Kind-9735 `event.pubkey` is LNURL signer — use `parseZapDescription`. Notif index: `notifIdsByRecipient` per-recipient signals
 
 ---
