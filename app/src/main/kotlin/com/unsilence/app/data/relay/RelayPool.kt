@@ -50,6 +50,14 @@ import javax.inject.Singleton
 
 private const val TAG = "RelayPool"
 
+/** Profile fallback negative-cache TTL — prevents re-firing the full chain. */
+private const val PROFILE_FALLBACK_NEG_TTL = 5 * 60_000L
+/** Max fallback relay targets across all missing pks in one batch. */
+private const val MAX_PROFILE_FALLBACK_RELAYS = 8
+/** Wait for EventProcessor cold-lane flush (2s batch cycle) + margin.
+ *  Must track EventProcessor.drainCold's 2s timeout — if that changes, update here. */
+private const val COLD_LANE_FLUSH_MS = 2_500L
+
 /** A search result correlated with the token of the search session that produced it. */
 data class SearchResult(val token: Long, val eventId: String)
 
@@ -193,6 +201,9 @@ class RelayPool @Inject constructor(
      *  don't wait for all 4-6 outbox relays to respond. */
     internal val oneShotFirstEose = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
+    /** Pubkeys that went through the full indexer+fallback chain and still missed.
+     *  5-min TTL prevents scroll-back from re-firing the chain. */
+    private val profileFallbackNegCache = ConcurrentHashMap<String, Long>()
 
     /** In-flight event fetch dedup — maps event ID to completion signal.
      *  Callers that arrive while a fetch is in-flight skip the REQ;
@@ -609,6 +620,7 @@ class RelayPool @Inject constructor(
                 // eventFetchInFlight: self-cleaning via launchFetchMonitor finally blocks
                 missingRefCache.entries.removeIf { it.value < cutoff } // same 5-min TTL
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
+                profileFallbackNegCache.entries.removeIf { it.value < cutoff }
             }
         }
         // Periodic pool state logging + connection sweep — every 60s.
@@ -757,6 +769,7 @@ class RelayPool @Inject constructor(
     /** Clear transient caches. Called on logout. */
     fun clearCaches() {
         profileFetchAttempted.clear()
+        profileFallbackNegCache.clear()
     }
 
     /**
@@ -2216,6 +2229,9 @@ class RelayPool @Inject constructor(
         if (pubkeys.isEmpty()) return
         val now = System.currentTimeMillis()
         val novel = pubkeys.filter { pk ->
+            // Negative-cache: full chain (indexer+fallback) failed for this pk recently
+            val negCached = profileFallbackNegCache[pk]
+            if (negCached != null && (now - negCached) < PROFILE_FALLBACK_NEG_TTL) return@filter false
             val lastAttempt = profileFetchAttempted[pk]
             lastAttempt == null || (now - lastAttempt) > 120_000 // 2 min TTL
         }
@@ -2242,7 +2258,85 @@ class RelayPool @Inject constructor(
                 indexers + extras
             }
         }.ifEmpty { connections.keys.take(minTargets).toList() }
-        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+
+        scope.launch {
+            // Register EOSE callback so sendOneShotBatch tracks per-relay coverage
+            val eoseDeferred = CompletableDeferred<Unit>()
+            oneShotEoseCallbacks[subId] = eoseDeferred
+
+            sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
+
+            // Wait for all indexer relays to EOSE (ceiling 5s past sendOneShotBatch)
+            withTimeoutOrNull(5_000) { eoseDeferred.await() }
+            oneShotEoseCallbacks.remove(subId)
+            oneShotSubTargets.remove(subId)
+            oneShotSubEosed.remove(subId)
+
+            // Cold-lane flush for kind-0 events
+            delay(COLD_LANE_FLUSH_MS)
+
+            // ── Fallback: indexers-empty → author's own relays (H19b) ─────
+            val mes = memoryEventStore.get()
+            val stillMissing = novel.filter { !mes.hasProfile(it) }
+            if (stillMissing.isEmpty()) return@launch
+
+            val triedRelays = targetUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+            val relayToPks = mutableMapOf<String, MutableList<String>>()
+            for (pk in stillMissing) {
+                val candidates = mutableSetOf<String>()
+                candidates.addAll(mes.writeRelaysFor(pk))
+                candidates.addAll(mes.relaysSeenForPubkey(pk))
+                candidates.removeAll(triedRelays)
+                // sendOneShotBatch filters blocked+shouldSkip; pre-filter for accurate grouping
+                candidates.removeAll(blockedUrls)
+                for (url in candidates.take(4)) {
+                    relayToPks.getOrPut(url) { mutableListOf() }.add(pk)
+                }
+            }
+            if (relayToPks.isEmpty()) {
+                val fbNow = System.currentTimeMillis()
+                stillMissing.forEach { profileFallbackNegCache[it] = fbNow }
+                Log.w(TAG, "PROFFB: ${stillMissing.size} pk(s) unresolvable — no relay signal")
+                return@launch
+            }
+
+            // Pick relays that cover the most pks, capped
+            val fbRelayEntries = relayToPks.entries
+                .sortedByDescending { it.value.size }
+                .take(MAX_PROFILE_FALLBACK_RELAYS)
+            val fbRelayUrls = fbRelayEntries.map { it.key }
+            val fbPks = fbRelayEntries.flatMap { it.value }.distinct()
+
+            Log.w(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
+                fbPks.joinToString(",") { it.take(8) } + " → " +
+                fbRelayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") })
+
+            val fbSubId = "prof-fb-${System.nanoTime()}"
+            val fbReq = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(fbSubId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray {
+                        add(JsonPrimitive(0))
+                        add(JsonPrimitive(10002))
+                    })
+                    put("authors", buildJsonArray { fbPks.forEach { add(JsonPrimitive(it)) } })
+                })
+            }.toString()
+
+            sendOneShotBatch(fbRelayUrls, listOf(fbReq), listOf(fbSubId))
+            delay(COLD_LANE_FLUSH_MS)
+
+            // Negative-cache remaining misses; log successes for field validation
+            val fbNow = System.currentTimeMillis()
+            val finalMissing = fbPks.filter { !mes.hasProfile(it) }
+            val resolved = fbPks.size - finalMissing.size
+            if (resolved > 0) Log.w(TAG, "PROFFB: $resolved pk(s) resolved via fallback")
+            finalMissing.forEach { profileFallbackNegCache[it] = fbNow }
+            if (finalMissing.isNotEmpty()) {
+                Log.w(TAG, "PROFFB: ${finalMissing.size} pk(s) still unresolved after fallback")
+            }
+        }
         Log.d(TAG, "Fetching ${novel.size} profiles+relaylists → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")
     }
 
