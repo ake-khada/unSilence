@@ -149,7 +149,7 @@ class NoteActionsViewModel @Inject constructor(
     private val _actionError = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val actionError: SharedFlow<String> = _actionError.asSharedFlow()
 
-    /** Optimistic sats: per-event amount to add on top of Room's zapTotalSats. */
+    /** Optimistic sats: per-event amount to add on top of MES zapTotalSats. */
     private val _optimisticZapSats = MutableStateFlow<Map<String, Long>>(emptyMap())
     val optimisticZapSats: StateFlow<Map<String, Long>> = _optimisticZapSats.asStateFlow()
 
@@ -358,11 +358,11 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     /**
-     * Look up an event by ID. Checks Room first; if missing, triggers a one-shot relay
-     * fetch and waits up to 5 seconds for the event to arrive via EventProcessor → Room.
+     * Look up an event by ID. Checks MemoryEventStore first; if missing, triggers a one-shot relay
+     * fetch and waits up to 5 seconds for the event to arrive via EventProcessor → MemoryEventStore.
      * [relayHints] from nevent1 URIs are used for targeted fetching.
      *
-     * Fetch is triggered once per event ID (fetchedQuoteIds guard), but Room observation
+     * Fetch is triggered once per event ID (fetchedQuoteIds guard), but MES observation
      * happens every call — so recomposition after a late relay arrival can still resolve.
      */
     suspend fun lookupEvent(

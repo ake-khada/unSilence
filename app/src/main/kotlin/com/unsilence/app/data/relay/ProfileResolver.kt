@@ -22,7 +22,7 @@ private const val TAG = "ProfileResolver"
  * directly to RelayPool. This class provides:
  *
  *  1. **In-flight guard** (30 s TTL) — prevents duplicate REQs for the same pubkey.
- *  2. **Room staleness check** (6 h) — skips fetch for recently-updated profiles.
+ *  2. **MES staleness check** (6 h) — skips fetch for recently-updated profiles.
  *  3. **300 ms deadline-anchored batching** — first arrival starts a 300ms window;
  *     all pubkeys arriving within the window merge into one REQ.
  *

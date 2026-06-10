@@ -2345,7 +2345,7 @@ class MemoryEventStore @Inject constructor(
         val events = ids.mapNotNull { eventsById[it] }.filter { it.kind in kinds }
 
         val filtered = when (contentFilter) {
-            // Notes tab: kind-1 roots (no replies) + kind-6 reposts — matches Room userNotesFlow
+            // Notes tab: kind-1 roots (no replies) + kind-6 reposts — matches userNotesFlow
             1 -> events.filter {
                 (it.kind == 1 && it.replyToId == null && it.rootId == null) || it.kind == 6
             }
@@ -2365,7 +2365,7 @@ class MemoryEventStore @Inject constructor(
 
     // ─── A.5.1 T2: Follower count cache ───────────────────────────────────
 
-    /** Cache a NIP-45 COUNT result. Timestamp stored in seconds (parity with Room path). */
+    /** Cache a NIP-45 COUNT result. Timestamp stored in seconds (parity with legacy storage). */
     fun cacheFollowerCount(pubkey: String, count: Long) {
         followerCountCache[pubkey] = Pair(count, System.currentTimeMillis() / 1000)
     }
@@ -2661,7 +2661,7 @@ class MemoryEventStore @Inject constructor(
         return results.sortedBy { it.createdAt }
     }
 
-    // ─── Entity adapters (bridge for consumers still expecting Room types) ──
+    // ─── Event/User entity getters ──
 
     /** Convert NostrEvent to EventEntity. Returns null if event not found. */
     fun getEventEntity(eventId: String): EventEntity? {
@@ -4584,7 +4584,7 @@ class MemoryEventStore @Inject constructor(
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
-/** Serialize tags to JSON format matching Room's storage: [["tag","val"],["tag","val"]] */
+/** Serialize tags to JSON format matching snapshot storage: [["tag","val"],["tag","val"]] */
 internal fun tagsToJson(tags: List<List<String>>): String {
     return tags.joinToString(",", "[", "]") { tag ->
         tag.joinToString(",", "[", "]") { value ->

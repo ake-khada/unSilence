@@ -124,8 +124,8 @@ class AppBootstrapper @Inject constructor(
      *
      * Each step completes (or times out) before the next starts:
      * 1. Connect to indexer relays → wait for at least one connection
-     * 2. Fetch kind-3 (contact list) → wait for follows to appear in Room
-     * 3. Fetch kind-0 (own profile) → wait for profile to appear in Room
+     * 2. Fetch kind-3 (contact list) → wait for follows to appear in MemoryEventStore
+     * 3. Fetch kind-0 (own profile) → wait for profile to appear in MemoryEventStore
      * 4. Fetch kind-10002 (relay list) → wait for response (5s timeout)
      * 4b. Fetch NIP-51 relay kinds (10006, 10007, 10012, 30002)
      * 5. Connect to global relays → opens persistent feed subscriptions

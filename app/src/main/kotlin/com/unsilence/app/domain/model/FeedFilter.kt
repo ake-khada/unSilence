@@ -15,7 +15,7 @@ data class FeedFilter(
     val minZapSats: Long = 0,
 ) {
     /**
-     * Kinds to pass to the Room query. When specific types are selected,
+     * Kinds to pass to the feed query. When specific types are selected,
      * we include all kinds that COULD match — post-query filtering in the
      * ViewModel handles Text vs Images vs Video within kind 1.
      */
