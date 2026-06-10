@@ -130,6 +130,7 @@ class RelayManagementViewModel @Inject constructor(
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addSearchRelay(pk, normalized)
             publishChanges(10007)
         }
@@ -149,6 +150,7 @@ class RelayManagementViewModel @Inject constructor(
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addFavoriteRelay(pk, FavoriteEntry(normalized, null))
             publishChanges(10012)
         }

@@ -91,6 +91,7 @@ class RelayPool @Inject constructor(
     private val memoryEventStore: dagger.Lazy<com.unsilence.app.data.memory.MemoryEventStore>,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
     private val activeSubsSource: dagger.Lazy<ActiveSubsSource>,
+    private val networkMonitor: NetworkMonitor,
 ) : RelayTransport, ReconnectSource {
     // WebSocket consume loops MUST not be starved by snapshot restore or
     // other heavy IO. limitedParallelism(8) reserves dedicated threads for
@@ -584,6 +585,18 @@ class RelayPool @Inject constructor(
     init {
         processor.relaySetRefFetcher = RelaySetRefFetcher { author, dTags, hintRelayUrls ->
             scope.launch { fetchRelaySetsByCoordinate(author, dTags, hintRelayUrls) }
+        }
+    }
+
+    // Hook 2 (H18.4b): network identity change → clear DNS-dead state.
+    // VPN toggle / WiFi↔cellular changes the DNS resolver. Relays dead on
+    // the old network may resolve on the new one. Don't eagerly reconnect —
+    // just clear the skip-gate; demand paths + 60s sweep pick them up.
+    init {
+        scope.launch {
+            networkMonitor.networkChanged.collect {
+                relayCapabilitiesStore.clearDnsDeadOnNetworkChange()
+            }
         }
     }
 
