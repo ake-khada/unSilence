@@ -137,6 +137,7 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - **TimelineService cache persisted** — snapshot V13 (events carry tagsJson; ≤V12 reader reconstructs), `INITIAL_CACHE_EMIT_CAP`=60, `PERSISTED_REFS_CAP`=500
 - **Maintenance trims are gated** — actor/feedRow trims every 64th call; profile trim backs off 60s when a pass evicts 0 (anchored-over-cap livelock: 7.5min restore). Never call a scan-trim per insert
 - Kind-9735 `event.pubkey` is LNURL signer — use `parseZapDescription`. Notif index: `notifIdsByRecipient` per-recipient signals
+- **ContentParser DoS bound (H-spam):** INPUT `take(20k`, kind-30023 `200k)` BEFORE tokenize (regex pass is O(content)); SEGMENT `take(150)`, tail→one `"… [content truncated]"` text node; `EventModel.truncated`→chip, NO tap-to-expand (re-creates the freeze). `PARSE-HEAVY` probe permanent. Rotating-npub sybil defeats per-pubkey mute — the bound is the durable defense
 
 ---
 
