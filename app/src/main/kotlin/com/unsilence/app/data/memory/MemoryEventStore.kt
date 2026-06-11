@@ -1545,6 +1545,10 @@ class MemoryEventStore @Inject constructor(
     // ─── Kind 30166: NIP-66 Relay Monitor (liveness / RTT) ───────────────
 
     /** @return true iff the monitor was novel or newer than the existing entry. */
+    // LEGACY-NIP66: partial 30166 parser feeding the health UI (dots/ping/getRelayHealth
+    // read relayMonitorsByUrl). Phase 1 of the Relay Directory adds a fuller, verified
+    // firehose parser (RelayDirectory.parseMonitorEvent). Convergence plan: Phase 2 makes
+    // the directory the SINGLE 30166 parse path and health reads from it — then delete this.
     private fun handleRelayMonitor(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
@@ -1561,7 +1565,9 @@ class MemoryEventStore @Inject constructor(
             .filter { it.size >= 2 && it[0] == "N" }
             .mapNotNull { it[1].toIntOrNull() }
 
-        val network = tag("network")
+        // Network tag is `n` ("clearnet"/"tor"), NOT "network" — the latter has been silently
+        // null since shipping (real monitors publish `n`). Fixed here per directory audit (A4).
+        val network = tag("n")
         val geohash = tag("g")
 
         // Extract relay icon from NIP-11 JSON in event content

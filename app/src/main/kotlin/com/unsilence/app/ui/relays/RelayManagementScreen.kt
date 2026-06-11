@@ -104,6 +104,10 @@ fun RelayManagementScreen(
     val relaySets       by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
     val relayHealth     by viewModel.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
 
+    // PHASE-2: replace with the dedicated relay-discovery screen. Temporary Phase-1 trigger
+    // to build/refresh the relay directory firehose on open (single-flight + 6h TTL inside).
+    LaunchedEffect(Unit) { viewModel.phase1TriggerDirectoryBuild() }
+
     var showCreateRelaySet by remember { mutableStateOf(false) }
     var healthDetailRelay by remember { mutableStateOf<RelayHealthInfo?>(null) }
 

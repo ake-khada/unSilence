@@ -37,6 +37,13 @@ class RelayManagementViewModel @Inject constructor(
     private val signingManager: SigningManager,
 ) : ViewModel() {
 
+    // PHASE-2: replace with the dedicated discovery screen's load. Temporary trigger to
+    // validate the Phase-1 relay-directory firehose (ensureDirectoryFresh is on-demand only,
+    // never cold-start/background). Single-flight + 6h TTL are enforced inside the call.
+    fun phase1TriggerDirectoryBuild() {
+        viewModelScope.launch(Dispatchers.IO) { relayPool.ensureDirectoryFresh() }
+    }
+
     val ownerPubkey: String? get() = keyManager.getPublicKeyHex()
 
     /** Kind 10002 read/write relays. */
