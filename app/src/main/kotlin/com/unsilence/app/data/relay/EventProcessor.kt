@@ -325,6 +325,46 @@ class EventProcessor @Inject constructor(
         handleEvent(dto, relayUrl)
     }
 
+    /**
+     * Parse + signature-verify a raw EVENT message and RETURN the verified event without
+     * inserting into MES. For the relay-directory firehose (A1): the ephemeral collector
+     * bypasses [process]/[handleEvent], so the SAME id-hash + Schnorr verification must be
+     * re-applied before any directory parse — a forgeable directory is an attack surface.
+     * Returns null on malformed JSON, id-mismatch, or invalid signature. Author allow-listing
+     * (event.pubkey ∈ trusted monitors) is the caller's responsibility — verification proves
+     * authenticity of event.pubkey, not that it is a monitor we trust.
+     */
+    fun parseAndVerify(raw: String, relayUrl: String): NostrEvent? {
+        val eventId = extractEventIdFromRaw(raw) ?: return null
+        val start = findEventObjectStart(raw)
+        val end = if (start >= 0) findMatchingBraceEnd(raw, start) else -1
+        if (start < 0 || end < 0) return null
+        val dto = try {
+            NostrJson.decodeFromString<EventDto>(raw.substring(start, end + 1))
+        } catch (_: Exception) {
+            return null
+        }
+        if (dto.id != eventId) return null
+        val event = NostrEvent(
+            id = dto.id,
+            pubkey = dto.pubkey,
+            kind = dto.kind,
+            content = dto.content,
+            createdAt = dto.createdAt,
+            tags = dto.tags,
+            tagsJson = tagsToJson(dto.tags),
+            sig = dto.sig,
+            relayUrl = relayUrl,
+            replyToId = null,
+            rootId = null,
+            hasContentWarning = false,
+            contentWarningReason = null,
+            firstSeenAt = System.currentTimeMillis(),
+            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
+        )
+        return if (verifySig(event)) event else null
+    }
+
     // ── Dedup helpers ─────────────────────────────────────────────────────────
     // extractEventIdFromRaw / findEventObjectStart / findMatchingBraceEnd
     // live as top-level helpers in RawEventJson.kt — shared with Subscription.

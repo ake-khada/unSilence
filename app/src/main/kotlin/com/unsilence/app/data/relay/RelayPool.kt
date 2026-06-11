@@ -2241,6 +2241,206 @@ class RelayPool @Inject constructor(
         }
     }
 
+    // ── Relay Directory firehose (Phase 1) ────────────────────────────────────
+    // Two vetted monitors (dynamic registry discovery = Phase 1.5 backlog), author-pinned
+    // across four redundant transports — author and transport are independent dimensions,
+    // censorship-resilient by construction. 30166 events are signature-verified (A1) then
+    // parsed into a bounded map; they NEVER enter MES (raw→directory→discard), so MES/size
+    // stays flat by construction.
+    private val DIRECTORY_MONITOR_PUBKEYS = setOf(
+        RELAY_MONITOR_PUBKEY,  // 9bbbb845 — rich schema (RTT, NIPs, embedded NIP-11)
+        "6d9717bc8758ddf99bc1b0e325d60bf5c41418dc122d81de6cd1a35138e51fe3",  // light/bot — liveness corroboration
+    )
+    private val DIRECTORY_TRANSPORT_RELAYS = listOf(
+        RELAY_MONITOR_URL, "wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net",
+    )
+    private val DIRECTORY_TTL_MS = 6L * 60 * 60 * 1000   // 6h, success-only
+    private val DIRECTORY_MAX_PAGES = 8
+    private val relayDirectory = ConcurrentHashMap<String, RelayDirectoryEntry>()
+    private val directoryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var lastDirectoryBuildAt = 0L
+
+    /** Snapshot of the built directory (UI/validation). */
+    fun directorySnapshot(): Map<String, RelayDirectoryEntry> = relayDirectory.toMap()
+
+    /**
+     * Build/refresh the relay directory (Phase 1). Public, ON-DEMAND only — never cold-start
+     * or background (Phase 2 wires it to the discovery screen). Single-flight; 6h success-only
+     * TTL (mirrors c9dbb4e4 — a failed build never advances the TTL, so a bad network doesn't
+     * buy 6h of staleness).
+     */
+    suspend fun ensureDirectoryFresh() {
+        val sinceLast = System.currentTimeMillis() - lastDirectoryBuildAt
+        if (lastDirectoryBuildAt > 0L && sinceLast < DIRECTORY_TTL_MS) {
+            Log.w(TAG, "DIRECTORY: fresh (age=${sinceLast / 60_000}min) — skipping fetch")
+            return
+        }
+        if (!directoryInFlight.compareAndSet(false, true)) {
+            Log.w(TAG, "DIRECTORY: build already in flight — skipping")
+            return
+        }
+        val started = System.currentTimeMillis()
+        try {
+            val perUrl = HashMap<String, MutableList<RelayDirectoryEntry>>()
+            var totalEvents = 0
+            var verifyFailed = 0
+            outer@ for (transport in DIRECTORY_TRANSPORT_RELAYS) {
+                val (events, failed) = collectDirectory30166(transport)
+                verifyFailed += failed
+                // Per-transport breakdown — proves the redundancy is actually multi-sourced
+                // (vs. one transport carrying everything). Permanent: it's the only field signal
+                // that a transport is silently rate-limited/empty.
+                Log.w(TAG, "DIRECTORY: transport $transport → ${events.size} events ($failed verify-failed)")
+                for (ev in events) {
+                    totalEvents++
+                    val entry = RelayDirectory.parseMonitorEvent(ev.tags, ev.content, ev.pubkey, ev.createdAt)
+                        ?: continue
+                    perUrl.getOrPut(entry.url) { mutableListOf() }.add(entry)
+                    if (perUrl.size >= RelayDirectory.MAX_DIRECTORY_ENTRIES) break@outer
+                }
+            }
+            val mes = memoryEventStore.get()
+            val trust = mes.getTrustScores()
+            val popularity = computeDirectoryPopularity(mes)
+            val built = perUrl.mapValues { (_, entries) ->
+                // Dedup per monitor (newest createdAt), then merge across monitors (median RTT).
+                val perMonitorNewest = entries.groupBy { it.monitorPubkeys.firstOrNull() }
+                    .values.map { grp -> grp.maxBy { it.monitorLastSeenAt } }
+                val merged = RelayDirectory.mergeMonitorEntries(perMonitorNewest)
+                enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0)
+            }
+            // Bound: never evict the user's own-list relays.
+            val ownPk = keyManager.getPublicKeyHex()
+            val ownRelays = if (ownPk != null) {
+                (mes.writeRelaysFor(ownPk) + mes.readRelaysFor(ownPk)).mapNotNull { normalizeRelayUrl(it) }.toSet()
+            } else emptySet()
+            val bounded = RelayDirectory.enforceBound(built, ownRelays)
+            relayDirectory.clear()
+            relayDirectory.putAll(bounded)
+            lastDirectoryBuildAt = System.currentTimeMillis()
+            val reachable = relayDirectory.values.count { it.reachability == Reachability.REACHABLE }
+            val dnsBlocked = relayDirectory.values.count { it.reachability == Reachability.DNS_BLOCKED }
+            Log.w(TAG, "DIRECTORY: built ${relayDirectory.size} relays from $totalEvents events " +
+                "($verifyFailed verified-failed), ${System.currentTimeMillis() - started}ms, " +
+                "reachable=$reachable dnsBlocked=$dnsBlocked")
+            val land = relayDirectory.keys.filter { it.contains("relays.land") }
+            Log.w(TAG, "DIRECTORY: relays.land entries = $land")   // acceptance signal
+        } catch (e: Exception) {
+            Log.w(TAG, "DIRECTORY: build failed — ${e.message} (TTL not advanced, will retry)")
+        } finally {
+            directoryInFlight.set(false)
+        }
+    }
+
+    private fun computeDirectoryPopularity(mes: com.unsilence.app.data.memory.MemoryEventStore): Map<String, Int> {
+        val counts = HashMap<String, Int>()
+        for ((_, list) in mes.allRelayListsSnapshot()) {
+            (list.read + list.write).mapNotNull { normalizeRelayUrl(it) }.toSet().forEach { url ->
+                counts[url] = (counts[url] ?: 0) + 1
+            }
+        }
+        return counts
+    }
+
+    private fun enrichDirectoryEntry(merged: RelayDirectoryEntry, trustScore: Int?, popularity: Int): RelayDirectoryEntry {
+        val caps = relayCapabilitiesStore.get(merged.url)
+        // Device-empirical evidence is the trump card (A5); monitor data only adds positive signal.
+        val reach = RelayDirectory.computeReachability(
+            hasCapsEntry = caps != null,
+            deadFailCount = caps?.deadFailCount ?: 0,
+            authRequired = (caps?.authRequired == true) || merged.auth,
+            restricted = caps?.restricted == true,
+            strikes = caps?.strikes ?: 0,
+            consecutiveFailures = caps?.consecutiveFailures ?: 0,
+            lastReason = caps?.lastReason,
+            monitorRttMs = merged.monitorRttMs,
+        )
+        return merged.copy(
+            trustScore = trustScore,
+            popularity = popularity,
+            ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
+            reachability = reach,
+        )
+    }
+
+    /** Ephemeral, paginated (A6), VERIFIED (A1) collect of kind-30166 from one transport.
+     *  Author-pinned to our trusted monitors; every event is id-hash + Schnorr verified and
+     *  author-allowlisted (relays can return anything) before it's returned. Returns
+     *  (verified events, verification-failure count). Never touches the connections map. */
+    private suspend fun collectDirectory30166(transport: String): Pair<List<NostrEvent>, Int> {
+        val url = normalizeRelayUrl(transport) ?: return emptyList<NostrEvent>() to 0
+        val collected = mutableListOf<NostrEvent>()
+        var verifyFailed = 0
+        val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+
+        fun reqFor(subId: String, until: Long): String = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30166)) })
+                put("authors", buildJsonArray { DIRECTORY_MONITOR_PUBKEYS.forEach { add(JsonPrimitive(it)) } })
+                if (until < Long.MAX_VALUE) put("until", JsonPrimitive(until - 1))
+            })
+        }.toString()
+
+        try {
+            conn.connect()
+            val state = withTimeoutOrNull(2_000) {
+                conn.state.first { it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED }
+            }
+            if (state != RelayState.CONNECTED) return collected to verifyFailed
+
+            // ONE consumeEach for the whole transport — pagination is driven INSIDE the loop by
+            // sending the next page's REQ on EOSE. consumeEach cancels the channel when it exits,
+            // so a per-page consume (the old bug) killed the socket after page 1 ("Channel was
+            // cancelled" on every clean-EOSE relay). Until-cursor windowing; 8-page / 3000-relay cap.
+            var page = 0
+            var until = Long.MAX_VALUE
+            var subId = "dir-${System.nanoTime()}-p0"
+            var pageCount = 0
+            var pageOldest = Long.MAX_VALUE
+            if (!conn.send(reqFor(subId, until))) return collected to verifyFailed
+
+            withTimeoutOrNull(15_000) {
+                conn.messages.consumeEach { raw ->
+                    when {
+                        raw.startsWith("[\"EVENT\"") -> {
+                            val ev = processor.parseAndVerify(raw, url)
+                            when {
+                                ev == null -> verifyFailed++   // forged/malformed — dropped + counted (A1)
+                                ev.kind == 30166 && ev.pubkey in DIRECTORY_MONITOR_PUBKEYS -> {
+                                    collected.add(ev)
+                                    pageCount++
+                                    if (ev.createdAt < pageOldest) pageOldest = ev.createdAt
+                                }
+                                // else: authentic but not a trusted monitor — silently ignore (A1)
+                            }
+                        }
+                        raw.startsWith("[\"EOSE\"") && extractEoseSubId(raw) == subId -> {
+                            conn.send("""["CLOSE","$subId"]""")
+                            page++
+                            val done = pageCount == 0 ||
+                                pageOldest == Long.MAX_VALUE || pageOldest >= until ||
+                                page >= DIRECTORY_MAX_PAGES ||
+                                collected.size >= RelayDirectory.MAX_DIRECTORY_ENTRIES
+                            if (done) return@withTimeoutOrNull
+                            until = pageOldest
+                            pageCount = 0
+                            pageOldest = Long.MAX_VALUE
+                            subId = "dir-${System.nanoTime()}-p$page"
+                            conn.send(reqFor(subId, until))   // next page on the SAME channel
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "DIRECTORY: collect failed on $url — ${e.message}")
+        } finally {
+            conn.close()
+        }
+        return collected to verifyFailed
+    }
+
     /**
      * Get a live connection to [url], creating one if needed.
      * Bypasses connection cap for control-plane fetches.
