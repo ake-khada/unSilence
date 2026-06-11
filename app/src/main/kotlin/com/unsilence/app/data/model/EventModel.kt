@@ -34,6 +34,7 @@ data class EventModel(
     val article: ArticleInfo?,           // null unless kind == 30023
     val warnings: ContentWarnings,
     val customEmojis: Map<String, String> = emptyMap(), // NIP-30: shortcode → url
+    val truncated: Boolean = false,      // content/segments capped (spam-post DoS bound) → show chip
 )
 
 /**
