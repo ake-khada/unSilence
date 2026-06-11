@@ -488,8 +488,15 @@ class AppBootstrapper @Inject constructor(
         } else {
             Log.d(TAG, "Phase3: fetching relay monitors (age=${monitorAge / 60_000}min, hasMonitors=$hasMonitors)")
             scope.launch {
-                relayPool.fetchRelayMonitors()
-                relayPreferencesStore.setLastMonitorFetchAt(System.currentTimeMillis())
+                // Advance the 12h staleness gate ONLY on a successful fetch — a failed
+                // fetch that timestamps "fetched" would suppress retries for 12h on stale
+                // data (H20 lesson: a gate poisoned by unverified success).
+                val ok = relayPool.fetchRelayMonitors()
+                if (ok) {
+                    relayPreferencesStore.setLastMonitorFetchAt(System.currentTimeMillis())
+                } else {
+                    Log.w(TAG, "Phase3: monitor fetch failed — not advancing 12h gate, will retry next launch")
+                }
             }
         }
         trustJob.join()
