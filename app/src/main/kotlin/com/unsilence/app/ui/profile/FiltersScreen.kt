@@ -205,8 +205,11 @@ fun FiltersScreen(
                 // ── Tab content ──────────────────────────────────────
                 when (activeTab) {
                     MuteTab.USERS -> {
+                        // Newest first: mute entries are appended in chronological order
+                        // (LinkedHashSet — see MuteList contract), so reverse = most-recent
+                        // mute on top. NEVER sort by name/alpha — insertion order is the feature.
                         val allPubkeys = muteList?.let {
-                            (it.pubkeys + it.privatePubkeys).toList().sorted()
+                            (it.pubkeys + it.privatePubkeys).toList().reversed()
                         } ?: emptyList()
                         val filtered = if (searchQuery.isBlank()) allPubkeys
                         else allPubkeys.filter { pk ->
@@ -231,7 +234,7 @@ fun FiltersScreen(
                     }
                     MuteTab.WORDS -> {
                         val allWords = muteList?.let {
-                            (it.words + it.privateWords).toList().sorted()
+                            (it.words + it.privateWords).toList().reversed()  // newest first, never alpha
                         } ?: emptyList()
 
                         if (allWords.isEmpty()) {
@@ -247,7 +250,7 @@ fun FiltersScreen(
                     }
                     MuteTab.HASHTAGS -> {
                         val allHashtags = muteList?.let {
-                            (it.hashtags + it.privateHashtags).toList().sorted()
+                            (it.hashtags + it.privateHashtags).toList().reversed()  // newest first, never alpha
                         } ?: emptyList()
 
                         if (allHashtags.isEmpty()) {

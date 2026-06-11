@@ -89,6 +89,13 @@ enum class SensitiveContentMode {
     SHOW,
 }
 
+/**
+ * CONTRACT: every Set here MUST be insertion-ordered (LinkedHashSet). Mute entries are
+ * appended chronologically (`mutableSetOf` in tag order; `existing.privatePubkeys + new`),
+ * so iteration order == chronology, and FiltersScreen displays `reversed()` for newest-first.
+ * Insertion order IS the feature — do NOT swap any builder to HashSet/CHM keyset, and do NOT
+ * sort by name/alpha. We have no per-entry timestamps; tag order is the only chronology we have.
+ */
 data class MuteList(
     val pubkeys: Set<String>,
     val hashtags: Set<String>,
