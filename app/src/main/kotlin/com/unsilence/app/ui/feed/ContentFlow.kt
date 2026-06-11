@@ -3,7 +3,10 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -22,6 +25,7 @@ import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 
 /** Maximum number of OG preview cards rendered per note. */
@@ -266,6 +270,22 @@ internal fun ContentFlow(
                     .padding(horizontal = Spacing.medium)
                     .padding(bottom = Spacing.micro)
                     .clickable { expanded = !expanded },
+            )
+        }
+
+        // Truncation chip — the post's content was capped by the spam-post DoS bound.
+        // No tap-to-expand by design: expanding would re-create the freeze we prevent.
+        if (model.truncated) {
+            Text(
+                text     = "Long post — truncated",
+                color    = TextSecondary,
+                fontSize = AppType.caption,
+                modifier = Modifier
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.small)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Surface2)
+                    .padding(horizontal = Spacing.small, vertical = Spacing.micro),
             )
         }
     }

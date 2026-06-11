@@ -1,5 +1,6 @@
 package com.unsilence.app.data.model
 
+import android.util.Log
 import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.Nip19FailureCache
@@ -17,6 +18,24 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 private const val TAG = "ContentParser"
+
+// ── Spam-post DoS bounds (H-spam) ───────────────────────────────────────────
+// Two caps, both required, covering both stall mechanisms:
+//  1. INPUT: the regex tokenization pass is O(content) — a 500KB string makes
+//     findAll itself the freeze before any segment exists. Truncate BEFORE tokenize.
+//  2. SEGMENTS: thousands of clickable segments explode composable count +
+//     pointerInput modifiers. Cap AFTER tokenize, collapse the tail to one text node.
+// Values: observed legit p100 < 60 segments / 4k chars → 150 / 20k is 2.5–5× headroom
+// over legit, orders of magnitude below pathology. The bound IS the feature — no
+// tap-to-expand (that would re-create the freeze we prevent).
+private const val MAX_PARSE_CHARS = 20_000
+// Long-form (kind-30023) is legitimately long prose — far larger input cap. The
+// SEGMENT cap still applies to every kind, so a hostile article stuffed with links/
+// hashtags is still bounded; only genuine prose (which tokenizes to few segments)
+// benefits. 200k chars ≈ 30k words; the regex pass over it is still linear/fast.
+private const val MAX_ARTICLE_PARSE_CHARS = 200_000
+private const val MAX_SEGMENTS = 150
+private const val TRUNCATION_MARKER = "… [content truncated]"
 
 /**
  * Single-pass content parser. Produces an [EventModel] from raw event fields.
@@ -91,8 +110,31 @@ object ContentParser {
         }
         val qHints = extractQTagHints(effectiveTagsJson)
 
-        // ── Step 3: Single-pass tokenization ──────────────────────────────
-        val segments = tokenize(effectiveContent, imeta, qHints, kind)
+        // ── Step 3: Bounded single-pass tokenization (spam-post DoS bound) ─
+        // Cap 1: truncate INPUT before the O(content) regex pass. Long-form gets a
+        // far larger cap (legit long prose); the segment cap below still bounds all kinds.
+        val maxChars = if (kind == 30023) MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
+        val rawLen = effectiveContent.length
+        val inputTruncated = rawLen > maxChars
+        val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
+        val tokenized = tokenize(parseInput, imeta, qHints, kind)
+        // Cap 2: bound SEGMENT count; collapse the tail into one plain-text marker.
+        val segmentTruncated = tokenized.size > MAX_SEGMENTS
+        val truncated = inputTruncated || segmentTruncated
+        val segments = if (truncated) {
+            tokenized.take(MAX_SEGMENTS) + Segment.Text(TRUNCATION_MARKER)
+        } else {
+            tokenized
+        }
+
+        // Permanent field probe — fires JUST UNDER the caps (and whenever truncation
+        // actually triggers) so we keep seeing near-pathological content and can tune
+        // thresholds from release logs. Log.w survives R8. Once per event (memoized).
+        if (truncated || tokenized.size > MAX_SEGMENTS * 3 / 4 || rawLen > maxChars * 3 / 4) {
+            Log.w(TAG, "PARSE-HEAVY: id=$id pubkey=$effectivePubkey kind=$kind " +
+                "rawLen=$rawLen tokenized=${tokenized.size} truncated=$truncated " +
+                "preview='${effectiveContent.take(140).replace("\n", " ")}'")
+        }
 
         // ── Step 4: Group media for grid rendering ────────────────────────
         val manifest = buildManifest(segments)
@@ -120,6 +162,7 @@ object ContentParser {
             article = article,
             warnings = ContentWarnings(hasContentWarning, contentWarningReason),
             customEmojis = customEmojis,
+            truncated = truncated,
         )
     }
 

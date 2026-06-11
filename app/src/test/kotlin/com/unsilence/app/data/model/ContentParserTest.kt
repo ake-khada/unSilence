@@ -1,6 +1,7 @@
 package com.unsilence.app.data.model
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -393,5 +394,57 @@ class ContentParserTest {
     fun `navigateId is id for non-repost`() {
         val model = parse("hello", kind = 1, id = "my-note")
         assertEquals("my-note", model.navigateId)
+    }
+
+    // ── Spam-post DoS bound (H-spam) — synthetic hostile fixtures ─────────────
+    // MAX_SEGMENTS=150, MAX_PARSE_CHARS=20_000 (private). Capped output is ≤ 150 + 1
+    // truncation marker = 151. Both shapes must parse fast and flag truncated.
+
+    @Test
+    fun `wall of thousands of URLs is capped to MAX_SEGMENTS plus marker`() {
+        // Mechanism A: segment-count explosion (clickable composables).
+        val hostile = (1..5_000).joinToString(" ") { "https://x.co/$it" }
+        val start = System.nanoTime()
+        val model = parse(content = hostile)
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000
+        assertTrue("segments bounded, was ${model.segments.size}", model.segments.size <= 151)
+        assertTrue("flagged truncated", model.truncated)
+        assertTrue("fast, was ${elapsedMs}ms", elapsedMs < 3_000)
+    }
+
+    @Test
+    fun `single 200KB URL string is input-truncated, not a regex stall`() {
+        // Mechanism B: O(content) regex pass on one giant token.
+        val hostile = "https://x.com/" + "a".repeat(200_000)
+        val start = System.nanoTime()
+        val model = parse(content = hostile)
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000
+        assertTrue("segments bounded, was ${model.segments.size}", model.segments.size <= 151)
+        assertTrue("flagged truncated", model.truncated)
+        assertTrue("fast, was ${elapsedMs}ms", elapsedMs < 3_000)
+    }
+
+    @Test
+    fun `normal post is not truncated`() {
+        val model = parse(content = "A normal note with a link https://example.com and a #hashtag.")
+        assertFalse("legit content must never be flagged truncated", model.truncated)
+        assertTrue(model.segments.size <= 151)
+    }
+
+    @Test
+    fun `long-form article over the kind-1 cap is NOT truncated`() {
+        // ~84k chars of prose — over the 20k default cap, under the 200k article cap.
+        // Prose tokenizes to few segments, so the segment cap doesn't trip either.
+        val article = "Lorem ipsum dolor sit amet, consectetur. ".repeat(2_000)
+        val model = parse(content = article, kind = 30023)
+        assertFalse("kind-30023 gets the larger input cap", model.truncated)
+    }
+
+    @Test
+    fun `same long content as a kind-1 note IS truncated`() {
+        // Identical payload, kind-1 → the 20k default cap applies.
+        val text = "Lorem ipsum dolor sit amet, consectetur. ".repeat(2_000)
+        val model = parse(content = text, kind = 1)
+        assertTrue("non-article over 20k chars is truncated", model.truncated)
     }
 }
