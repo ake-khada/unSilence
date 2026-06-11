@@ -2200,7 +2200,11 @@ class RelayPool @Inject constructor(
      * With snapshot persistence this only downloads once; subsequent launches
      * restore from disk and refresh in the background.
      */
-    suspend fun fetchRelayMonitors() {
+    /** @return true only if the monitor relay was reached and pagination completed
+     *  without error. The caller MUST advance the 12h staleness gate only on true —
+     *  a failed fetch that marked "fetched" buys 12h of silent staleness (H20 lesson:
+     *  a gate poisoned by unverified success). */
+    suspend fun fetchRelayMonitors(): Boolean {
         var conn = getOrCreateConnection(RELAY_MONITOR_URL)
         if (conn == null) {
             Log.w(TAG, "relay.nostr.watch unreachable — retrying in 3s")
@@ -2209,7 +2213,7 @@ class RelayPool @Inject constructor(
         }
         if (conn == null) {
             Log.w(TAG, "relay.nostr.watch unreachable after retry — skipping relay monitors")
-            return
+            return false
         }
 
         val baseFilter = buildJsonObject {
@@ -2217,7 +2221,7 @@ class RelayPool @Inject constructor(
             put("authors", buildJsonArray { add(JsonPrimitive(RELAY_MONITOR_PUBKEY)) })
         }
 
-        try {
+        return try {
             val result = paginatedFetch(
                 conn = conn,
                 baseFilter = baseFilter,
@@ -2230,8 +2234,10 @@ class RelayPool @Inject constructor(
             val monitorCount = memoryEventStore.get().getRelayMonitors().size
             Log.d(TAG, "Relay monitors: $monitorCount in MES " +
                 "(${result.totalPages} pages, ${result.totalEvents} events)")
+            true
         } catch (e: Exception) {
             Log.w(TAG, "Monitor fetch failed: ${e.message}")
+            false
         }
     }
 
