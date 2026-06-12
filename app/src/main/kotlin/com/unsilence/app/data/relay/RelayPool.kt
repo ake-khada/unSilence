@@ -2410,6 +2410,16 @@ class RelayPool @Inject constructor(
         val base = relayDirectory[u]
             ?: RelayDirectoryEntry(url = u, popularity = computeDirectoryPopularity(mes)[u] ?: 0)
 
+        // "You follow" — of the people YOU follow (kind-3), how many list this relay in their
+        // kind-10002. The honest reading of the §05 "do people I trust use it?" question;
+        // distinct from `popularity` (the broad all-known-lists ranking signal).
+        val ownPk = keyManager.getPublicKeyHex()
+        val follows = ownPk?.let { mes.getFollows(it) } ?: emptySet()
+        val allLists = mes.allRelayListsSnapshot()
+        val followsUsing = follows.count { fp ->
+            allLists[fp]?.let { rl -> (rl.read + rl.write).any { normalizeRelayUrl(it) == u } } == true
+        }
+
         // Device NIP-11 — the authority. Null (unreachable/blocked) keeps the monitor seed.
         val doc = nip11Fetcher.fetch(u)
         val overlaid = if (doc != null) RelayDirectory.overlayDeviceNip11(base, doc) else base
@@ -2432,10 +2442,11 @@ class RelayPool @Inject constructor(
             ourRttMs = rtt,
             ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
             reachability = reach,
+            followsUsing = followsUsing,
         )
         relayDirectory[u] = detail
         Log.w(TAG, "DETAIL: $u src=${detail.nip11Source} rtt=${rtt}ms reach=${detail.reachability} " +
-            "nips=${detail.supportedNips.size} pop=${detail.popularity}")
+            "nips=${detail.supportedNips.size} pop=${detail.popularity} follow=${detail.followsUsing}")
         return detail
     }
 

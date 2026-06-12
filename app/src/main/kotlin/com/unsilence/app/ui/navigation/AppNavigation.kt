@@ -117,6 +117,7 @@ import com.unsilence.app.ui.notifications.NotificationsViewModel
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
+import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
@@ -176,6 +177,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var showFilter           by remember { mutableStateOf(false) }
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var showRelaySettings    by remember { mutableStateOf(false) }
+    var relayDetailUrl       by remember { mutableStateOf<String?>(null) }
     var threadEventId        by remember { mutableStateOf<String?>(null) }
     var replyToEventId       by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
@@ -548,6 +550,16 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onStartFeed  = { url, label ->
                         feedViewModel.addPinnedRelay(url, label)
                     },
+                    onOpenDetail = { url -> relayDetailUrl = url },
+                )
+            }
+
+            // ── Relay detail overlay (§05) — over the relay list ────────────
+            relayDetailUrl?.let { url ->
+                RelayDetailScreen(
+                    relayUrl  = url,
+                    onDismiss = { relayDetailUrl = null },
+                    onOpenProfile = onAuthorClick,
                 )
             }
 

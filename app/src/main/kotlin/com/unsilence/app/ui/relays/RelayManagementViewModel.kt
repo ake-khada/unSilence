@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.RelayCapabilitiesStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -21,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -42,6 +44,22 @@ class RelayManagementViewModel @Inject constructor(
     // never cold-start/background). Single-flight + 6h TTL are enforced inside the call.
     /** User-initiated one-shot RTT probe for the "Test" action (no background/persistence). */
     suspend fun measureRtt(url: String): Int? = relayPool.measureRtt(url)
+
+    /** §05 detail page: device NIP-11 overlay + live RTT + reachability for one relay. */
+    suspend fun loadRelayDetail(url: String): com.unsilence.app.data.relay.RelayDirectoryEntry? =
+        relayPool.buildRelayDetail(url)
+
+    /** Reactive profile for the relay's operator (NIP-11 pubkey) — resolves the npub to a
+     *  NIP-05 / display name once the kind-0 is in MES. */
+    fun operatorProfileFlow(pubkeyHex: String): Flow<UserEntity?> =
+        memoryEventStore.profileFlow(pubkeyHex)
+            .map { memoryEventStore.getUserEntity(pubkeyHex) }
+            .flowOn(Dispatchers.Default)
+
+    /** On detail-open: fetch the operator's kind-0 so the npub resolves to a name/NIP-05. */
+    fun fetchOperatorProfile(pubkeyHex: String) {
+        viewModelScope.launch(Dispatchers.IO) { relayPool.fetchProfiles(listOf(pubkeyHex)) }
+    }
 
     fun phase1TriggerDirectoryBuild() {
         viewModelScope.launch(Dispatchers.IO) { relayPool.ensureDirectoryFresh() }
