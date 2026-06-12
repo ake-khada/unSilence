@@ -12,32 +12,40 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +64,7 @@ import com.unsilence.app.data.relay.EyesAlliance
 import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandSoft
 import com.unsilence.app.ui.theme.Like
@@ -96,65 +105,86 @@ fun RelayDiscoveryScreen(
     var sawBuild by remember { mutableStateOf(false) }
     LaunchedEffect(building) { if (building) sawBuild = true }
     var query by remember { mutableStateOf("") }
-    var facet by remember { mutableStateOf(DiscoveryFacet.ALL) }
+    val facets = DiscoveryFacet.entries
+    val pagerState = rememberPagerState(pageCount = { facets.size })
+    val scope = rememberCoroutineScope()
 
-    val ranked = remember(directory, query, facet) {
-        directory.values.asSequence()
-            .filter { matchesQuery(it, query) }
-            .filter { matchesFacet(it, facet) }
-            .sortedByDescending { score(it) }     // reachability-weighted: works-from-here wins
-            .toList()
+    // Membership — drives the per-card Add → Added flip. A relay counts as "added" if it's in
+    // any of the user's configured lists.
+    val readWriteRelays by viewModel.readWriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val searchRelays by viewModel.searchRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoriteRelays by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val indexerRelays by viewModel.indexerRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val addedUrls = remember(readWriteRelays, searchRelays, favoriteRelays, indexerRelays) {
+        buildSet {
+            readWriteRelays.forEach { normalizeRelayUrl(it.url)?.let(::add) }
+            searchRelays.forEach { normalizeRelayUrl(it)?.let(::add) }
+            favoriteRelays.forEach { fav -> fav.url?.let { normalizeRelayUrl(it)?.let(::add) } }
+            indexerRelays.forEach { normalizeRelayUrl(it)?.let(::add) }
+        }
     }
+    var addSheetUrl by remember { mutableStateOf<String?>(null) }
+
     val searching = query.isNotBlank()
-    val faceted = facet != DiscoveryFacet.ALL
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         Column(modifier = Modifier.fillMaxSize()) {
             // ── Top bar ──────────────────────────────────────────────────────
             Box(modifier = Modifier.fillMaxWidth().statusBarsPadding()) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().height(Sizing.topBarHeight).padding(horizontal = Spacing.small),
+                    modifier = Modifier.fillMaxWidth().height(Sizing.topBarHeight).padding(horizontal = Spacing.medium),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
-                    }
+                    // No back arrow — gesture-based dismiss (BackHandler), consistent with Settings.
                     Text("Discover relays", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
 
             DiscoverySearchField(query = query, onQuery = { query = it })
-            FacetChips(active = facet, onSelect = { facet = it })
+            // Facet chips are the tab indicator for the pager below — swipe the content left/right
+            // (like the relay-settings tabs) to move between facets.
+            FacetChips(activeIndex = pagerState.currentPage, onSelect = { scope.launch { pagerState.animateScrollToPage(it) } })
 
             when {
                 // Empty only until the firehose (triggered on open) populates it; a prior build
                 // this session already filled directoryFlow, so re-opens skip straight to content.
-                directory.isEmpty() -> DiscoveryLoading(loading = building || !sawBuild)
-                else -> {
-                    val listState = rememberLazyListState()
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                        if (searching || faceted) {
-                            if (ranked.isEmpty()) {
-                                item { NoMatches(query) }
-                            } else {
-                                items(ranked, key = { it.url }) { DiscoveryCard(it) { onOpenDetail(it.url) } }
-                            }
-                        } else {
-                            // Sections (no query/facet). "Works on your network" leads — the
-                            // identity statement; then the social killer module; then specialty.
-                            relaySection("Works on your network", ranked.filter { it.reachability == Reachability.REACHABLE }.take(SECTION_CAP), onOpenDetail)
-                            relaySection("Used by people you follow", ranked.filter { it.followsUsing > 0 }.sortedByDescending { it.followsUsing }.take(SECTION_CAP), onOpenDetail)
-                            relaySection("Specialty & community", ranked.filter { it.restrictedWrites || it.auth }.take(SECTION_CAP), onOpenDetail)
-                            item { Spacer(Modifier.height(32.dp)) }
-                        }
+                directory.isEmpty() -> Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    DiscoveryLoading(loading = building || !sawBuild)
+                }
+                else -> HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
+                    val pageFacet = facets[page]
+                    val pageRanked = remember(directory, query, pageFacet) {
+                        directory.values.asSequence()
+                            .filter { matchesQuery(it, query) }
+                            .filter { matchesFacet(it, pageFacet) }
+                            .sortedByDescending { score(it) }   // reachability-weighted: works-from-here wins
+                            .toList()
                     }
+                    DiscoveryList(pageRanked, pageFacet, searching, addedUrls, onAdd = { addSheetUrl = it }, onOpenDetail = onOpenDetail)
                 }
             }
         }
     }
+
+    addSheetUrl?.let { url ->
+        AddTargetSheet(
+            host = discoveryHost(url),
+            onDismiss = { addSheetUrl = null },
+            onMyRelays = { viewModel.addReadWriteRelay(url); addSheetUrl = null },
+            onIndex = { viewModel.addIndexerRelay(url); addSheetUrl = null },
+            onSearch = { viewModel.addSearchRelay(url); addSheetUrl = null },
+            onFavorites = { viewModel.addFavoriteRelay(url); addSheetUrl = null },
+        )
+    }
 }
 
-private fun LazyListScope.relaySection(label: String, list: List<RelayDirectoryEntry>, onOpenDetail: (String) -> Unit) {
+private fun LazyListScope.relaySection(
+    label: String,
+    list: List<RelayDirectoryEntry>,
+    addedUrls: Set<String>,
+    onAdd: (String) -> Unit,
+    onOpenDetail: (String) -> Unit,
+) {
     if (list.isEmpty()) return
     item(key = "sec-$label") {
         Text(
@@ -166,15 +196,17 @@ private fun LazyListScope.relaySection(label: String, list: List<RelayDirectoryE
             modifier = Modifier.fillMaxWidth().padding(start = Spacing.medium, end = Spacing.medium, top = Spacing.medium, bottom = Spacing.small),
         )
     }
-    items(list, key = { "${label}:${it.url}" }) { DiscoveryCard(it) { onOpenDetail(it.url) } }
+    items(list, key = { "${label}:${it.url}" }) {
+        DiscoveryCard(it, isAdded = normalizeRelayUrl(it.url) in addedUrls, onAdd = { onAdd(it.url) }) { onOpenDetail(it.url) }
+    }
 }
 
 // ── Card ──────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun DiscoveryCard(e: RelayDirectoryEntry, onClick: () -> Unit) {
+private fun DiscoveryCard(e: RelayDirectoryEntry, isAdded: Boolean, onAdd: () -> Unit, onClick: () -> Unit) {
     val unreachable = e.reachability == Reachability.DNS_BLOCKED || e.reachability == Reachability.DEAD
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.medium, vertical = 5.dp)
@@ -182,32 +214,39 @@ private fun DiscoveryCard(e: RelayDirectoryEntry, onClick: () -> Unit) {
             .background(Surface1)
             .clickable(onClick = onClick)
             .padding(Spacing.medium),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            RelayIcon(e.icon, Modifier.size(34.dp))
-            Spacer(Modifier.width(Spacing.small))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(e.name ?: discoveryHost(e.url), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(discoveryHost(e.url), color = Text3, fontSize = 11.5f.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RelayIcon(e.icon, Modifier.size(34.dp))
+                Spacer(Modifier.width(Spacing.small))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(e.name ?: discoveryHost(e.url), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(discoveryHost(e.url), color = Text3, fontSize = 11.5f.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (!e.description.isNullOrBlank()) {
+                Spacer(Modifier.height(7.dp))
+                Text(e.description!!, color = TextSecondary, fontSize = 12.5f.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (unreachable) {
+                    FootStat(dot = Like, text = "unreachable on your network", color = Like)
+                } else {
+                    val latency = e.ourRttMs ?: e.monitorRttMs
+                    latencyLabel(latency)?.let { FootStat(dot = latencyTier(latency), text = it, color = TextSecondary) }
+                }
+                if (e.followsUsing > 0) FootStat(dot = null, text = "${e.followsUsing} you follow", color = TextSecondary)
+                if (e.supportedNips.contains(50) && !unreachable) Text("Search", color = Brand.copy(alpha = 0.7f), fontSize = 11.5f.sp, fontWeight = FontWeight.Medium)
+                if (e.payment) {
+                    Spacer(Modifier.weight(1f))
+                    PaidBadge(e.feeMsats)
+                }
             }
         }
-        if (!e.description.isNullOrBlank()) {
-            Spacer(Modifier.height(7.dp))
-            Text(e.description!!, color = TextSecondary, fontSize = 12.5f.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (unreachable) {
-                FootStat(dot = Like, text = "unreachable on your network", color = Like)
-            } else {
-                val latency = e.ourRttMs ?: e.monitorRttMs
-                latencyLabel(latency)?.let { FootStat(dot = latencyTier(latency), text = it, color = TextSecondary) }
-            }
-            if (e.followsUsing > 0) FootStat(dot = null, text = "${e.followsUsing} you follow", color = TextSecondary)
-            if (e.supportedNips.contains(50) && !unreachable) Text("Search", color = Brand.copy(alpha = 0.7f), fontSize = 11.5f.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.weight(1f))
-            if (e.payment) PaidBadge(e.feeMsats)
-        }
+        Spacer(Modifier.width(Spacing.medium))
+        AddIconButton(isAdded = isAdded, onAdd = onAdd)
     }
 }
 
@@ -227,6 +266,56 @@ private fun PaidBadge(feeMsats: Long?) {
     val label = feeMsats?.let { "PAID · ${it / 1000} sats" } ?: "PAID"
     Box(modifier = Modifier.clip(RoundedCornerShape(5.dp)).background(Zap.copy(alpha = 0.16f)).padding(horizontal = 6.dp, vertical = 2.dp)) {
         Text(label, color = Zap, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Icon-only, circular, vertically centered against the card: + to add, ✓ once added. */
+@Composable
+private fun AddIconButton(isAdded: Boolean, onAdd: () -> Unit) {
+    if (isAdded) {
+        Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(Surface2), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Check, contentDescription = "Added", tint = Mint, modifier = Modifier.size(18.dp))
+        }
+    } else {
+        Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(BrandSoft).clickable(onClick = onAdd), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddTargetSheet(
+    host: String,
+    onDismiss: () -> Unit,
+    onMyRelays: () -> Unit,
+    onIndex: () -> Unit,
+    onSearch: () -> Unit,
+    onFavorites: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Surface1) {
+        Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = Spacing.medium)) {
+            Text(
+                "Add $host to…",
+                color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.small),
+            )
+            // Default is My relays (read+write) — listed first.
+            SheetRow("My relays", "Read + write — your main relays", onMyRelays)
+            SheetRow("Index", "Profile + follow-list resolution", onIndex)
+            SheetRow("Search", "NIP-50 search queries", onSearch)
+            SheetRow("Favorites", "Quick-access in the feed selector", onFavorites)
+        }
+    }
+}
+
+@Composable
+private fun SheetRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Spacing.large, vertical = 12.dp),
+    ) {
+        Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        Text(subtitle, color = TextSecondary, fontSize = 12.5f.sp)
     }
 }
 
@@ -263,24 +352,58 @@ private fun DiscoverySearchField(query: String, onQuery: (String) -> Unit) {
 }
 
 @Composable
-private fun FacetChips(active: DiscoveryFacet, onSelect: (DiscoveryFacet) -> Unit) {
+private fun FacetChips(activeIndex: Int, onSelect: (Int) -> Unit) {
+    val listState = rememberLazyListState()
+    // Follow the pager: keep the active chip in view (relay-settings rail did NOT do this, so the
+    // last chip stayed out of bounds — fixed here and there).
+    LaunchedEffect(activeIndex) { listState.animateScrollToItem(activeIndex) }
     LazyRow(
+        state = listState,
         modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.small),
         contentPadding = PaddingValues(horizontal = Spacing.medium),
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        items(DiscoveryFacet.entries, key = { it.name }) { f ->
-            val on = f == active
+        itemsIndexed(DiscoveryFacet.entries) { i, f ->
+            val on = i == activeIndex
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
                     .background(if (on) BrandSoft else Surface2)
                     .border(1.dp, if (on) Brand.copy(alpha = 0.4f) else Color.Transparent, RoundedCornerShape(16.dp))
-                    .clickable { onSelect(f) }
+                    .clickable { onSelect(i) }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
             ) {
                 Text(f.label, color = if (on) Brand else TextSecondary, fontSize = 12.sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
             }
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryList(
+    ranked: List<RelayDirectoryEntry>,
+    facet: DiscoveryFacet,
+    searching: Boolean,
+    addedUrls: Set<String>,
+    onAdd: (String) -> Unit,
+    onOpenDetail: (String) -> Unit,
+) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        if (searching || facet != DiscoveryFacet.ALL) {
+            if (ranked.isEmpty()) {
+                item { NoMatches(if (searching) "No relays match your search." else "No ${facet.label} relays found.") }
+            } else {
+                items(ranked, key = { it.url }) {
+                    DiscoveryCard(it, isAdded = normalizeRelayUrl(it.url) in addedUrls, onAdd = { onAdd(it.url) }) { onOpenDetail(it.url) }
+                }
+            }
+        } else {
+            // "All" page — sections. "Works on your network" leads (the identity statement),
+            // then the social killer module, then specialty.
+            relaySection("Works on your network", ranked.filter { it.reachability == Reachability.REACHABLE }.take(SECTION_CAP), addedUrls, onAdd, onOpenDetail)
+            relaySection("Used by people you follow", ranked.filter { it.followsUsing > 0 }.sortedByDescending { it.followsUsing }.take(SECTION_CAP), addedUrls, onAdd, onOpenDetail)
+            relaySection("Specialty & community", ranked.filter { it.restrictedWrites || it.auth }.take(SECTION_CAP), addedUrls, onAdd, onOpenDetail)
+            item { Spacer(Modifier.height(32.dp)) }
         }
     }
 }
@@ -301,9 +424,9 @@ private fun DiscoveryLoading(loading: Boolean) {
 }
 
 @Composable
-private fun NoMatches(query: String) {
+private fun NoMatches(message: String) {
     Box(modifier = Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
-        Text(if (query.isNotBlank()) "No relays match \"$query\"." else "No relays match this filter.", color = TextSecondary, fontSize = 13.sp)
+        Text(message, color = TextSecondary, fontSize = 13.sp)
     }
 }
 

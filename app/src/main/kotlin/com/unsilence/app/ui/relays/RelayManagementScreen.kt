@@ -131,6 +131,9 @@ private fun RelayCategoryRail(
 ) {
     Column {
         val listState = rememberLazyListState()
+        // Follow the pager — bring the active pill into view (so the last one, Blocked, doesn't
+        // stay out of bounds when you swipe to it).
+        LaunchedEffect(selectedIndex) { listState.animateScrollToItem(selectedIndex) }
         Box {
             LazyRow(
                 state = listState,
@@ -309,6 +312,7 @@ fun RelayManagementScreen(
                                 viewModel.addReadWriteRelay(url)
                             }
                         }
+                        if (readWriteRelays.isEmpty()) item { DiscoverEmptyCta(onOpenDiscovery) }
                         items(readWriteRelays, key = { it.url }) { relay ->
                             ReadWriteRelayRow(
                                 relay          = relay,
@@ -358,6 +362,7 @@ fun RelayManagementScreen(
                                 viewModel.addSearchRelay(url)
                             }
                         }
+                        if (searchRelays.isEmpty()) item { DiscoverEmptyCta(onOpenDiscovery) }
                         items(searchRelays, key = { it }) { url ->
                             SimpleRelayRow(
                                 url        = url,
@@ -400,6 +405,7 @@ fun RelayManagementScreen(
                             }
                         }
                         val relayFavorites = favoriteRelays.filter { it.setRef == null && it.url != null }
+                        if (relayFavorites.isEmpty()) item { DiscoverEmptyCta(onOpenDiscovery) }
                         items(relayFavorites, key = { it.url!! }) { fav ->
                             FavoriteRelayRow(
                                 url        = fav.url!!,
@@ -568,6 +574,28 @@ internal fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = if (on) Brand else Text3, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    }
+}
+
+/** §04 empty-state CTA — shown when a relay category is empty, routes to Discovery. */
+@Composable
+private fun DiscoverEmptyCta(onOpenDiscovery: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BrandSoft)
+            .clickable(onClick = onOpenDiscovery)
+            .padding(Spacing.medium),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Search, contentDescription = null, tint = Brand, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(Spacing.small))
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Discover relays", color = Brand, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Find relays by name, topic, or who you follow", color = TextSecondary, fontSize = 12.sp)
+        }
     }
 }
 
