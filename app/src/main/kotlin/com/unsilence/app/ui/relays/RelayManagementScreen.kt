@@ -50,10 +50,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
@@ -94,6 +98,7 @@ import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.BorderDefault
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BorderSubtle
 import com.unsilence.app.ui.theme.BrandSoft
@@ -306,7 +311,7 @@ fun RelayManagementScreen(
                                 relay          = relay,
                                 health         = relayHealth.lookup(relay.url),
                                 testedMs       = testedRtt[relay.url],
-                                onToggleMarker = { viewModel.toggleMarker(relay) },
+                                onSetMarker    = { m -> viewModel.setRelayMarker(relay, m) },
                                 onRemove       = { viewModel.removeReadWriteRelay(relay.url) },
                                 onHealthTap    = { relayHealth.lookup(relay.url)?.let { healthDetailRelay = it } },
                             )
@@ -495,6 +500,80 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
 private fun displayUrl(url: String): String =
     url.removePrefix("wss://").removePrefix("ws://")
 
+/** §03 safe removal — swipe left reveals a deliberate red "Remove", then a confirm dialog.
+ *  Replaces the one-tap trash (no more accidental deletes). Removal publishes kind-10002/6
+ *  through the caller's existing repository path (onRemove). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeToRemove(
+    onRemove: () -> Unit,
+    label: String,
+    title: String = "Remove relay?",
+    content: @Composable () -> Unit,
+) {
+    var confirm by remember { mutableStateOf(false) }
+    val state = rememberSwipeToDismissBoxState(
+        confirmValueChange = { v ->
+            // Don't auto-dismiss — reveal + confirm. Returning false snaps the row back.
+            if (v == SwipeToDismissBoxValue.EndToStart) confirm = true
+            false
+        },
+    )
+    SwipeToDismissBox(
+        state = state,
+        enableDismissFromStartToEnd = false,
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 4.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Like),
+            ) {
+                // Icon + label side by side at the right edge, vertically centered.
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(Icons.Filled.Delete, null, tint = Black, modifier = Modifier.size(15.dp))
+                    Text("Remove", color = Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        content = { Box(modifier = Modifier.background(Black)) { content() } },
+    )
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            confirmButton = { TextButton(onClick = { confirm = false; onRemove() }) { Text("Remove", color = Like) } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel", color = TextSecondary) } },
+            title = { Text(title, color = Color.White) },
+            text = { Text(label, color = TextSecondary) },
+            containerColor = Surface1,
+        )
+    }
+}
+
+/** §03 R / W toggle pill — filled cyan = enabled, ghost = disabled. */
+@Composable
+private fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (on) BrandSoft else Color.Transparent)
+            .border(1.dp, if (on) Brand.copy(alpha = 0.4f) else BorderDefault, RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = if (on) Brand else Text3, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    }
+}
+
 /** Look up health info, trying both raw and normalized URL forms. */
 private fun Map<String, RelayHealthInfo>.lookup(url: String): RelayHealthInfo? =
     this[url] ?: normalizeRelayUrl(url)?.let { this[it] }
@@ -507,28 +586,27 @@ private fun SimpleRelayRow(
     testedMs: Int? = null,
     onHealthTap: () -> Unit = {},
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.medium, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        HealthDot(testedMs ?: health?.ping)
-        Spacer(Modifier.width(8.dp))
-        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text     = displayUrl(url),
-                color    = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f, fill = false),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            HealthInfoButton(health, onClick = onHealthTap)
-        }
-        PingLabel(testedMs ?: health?.ping)
-        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
+    SwipeToRemove(onRemove = onRemove, label = displayUrl(url)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.medium, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            HealthDot(testedMs ?: health?.ping)
+            Spacer(Modifier.width(8.dp))
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text     = displayUrl(url),
+                    color    = Color.White,
+                    fontSize = 13.sp,
+                    modifier = Modifier.weight(1f, fill = false),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                HealthInfoButton(health, onClick = onHealthTap)
+            }
+            PingLabel(testedMs ?: health?.ping)
         }
     }
 }
@@ -538,52 +616,49 @@ private fun ReadWriteRelayRow(
     relay: RelayConfig,
     health: RelayHealthInfo?,
     testedMs: Int? = null,
-    onToggleMarker: () -> Unit,
+    onSetMarker: (String?) -> Unit,
     onRemove: () -> Unit,
     onHealthTap: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.medium, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        HealthDot(testedMs ?: health?.ping)
-        Spacer(Modifier.width(8.dp))
-        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text     = displayUrl(relay.url),
-                color    = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f, fill = false),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            HealthInfoButton(health, onClick = onHealthTap)
-        }
-        PingLabel(testedMs ?: health?.ping)
-        // R/W marker chip
-        val markerLabel = when (relay.marker) {
-            "read"  -> "R"
-            "write" -> "W"
-            else    -> "R/W"
-        }
-        Text(
-            text     = markerLabel,
-            color    = Brand,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
+    // marker: null = read+write · "read" = read-only · "write" = write-only.
+    val readOn = relay.marker != "write"
+    val writeOn = relay.marker != "read"
+    SwipeToRemove(onRemove = onRemove, label = displayUrl(relay.url)) {
+        Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(4.dp))
-                .background(Brand.copy(alpha = 0.15f))
-                .clickable { onToggleMarker() }
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-        )
-        Spacer(Modifier.width(8.dp))
-        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.medium, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            HealthDot(testedMs ?: health?.ping)
+            Spacer(Modifier.width(8.dp))
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text     = displayUrl(relay.url),
+                    color    = Color.White,
+                    fontSize = 13.sp,
+                    modifier = Modifier.weight(1f, fill = false),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                HealthInfoButton(health, onClick = onHealthTap)
+            }
+            PingLabel(testedMs ?: health?.ping)
+            Spacer(Modifier.width(8.dp))
+            // Two INDEPENDENT toggles. Can't disable both (a relay must read or write) —
+            // such a tap is a no-op; removal is via swipe.
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                RwPill("R", readOn) { val n = !readOn; if (n || writeOn) onSetMarker(rwMarker(n, writeOn)) }
+                RwPill("W", writeOn) { val n = !writeOn; if (readOn || n) onSetMarker(rwMarker(readOn, n)) }
+            }
         }
     }
+}
+
+private fun rwMarker(read: Boolean, write: Boolean): String? = when {
+    read && write -> null
+    read -> "read"
+    else -> "write"
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -599,7 +674,8 @@ private fun FavoriteRelayRow(
     onStartFeed: (() -> Unit)?,
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    Row(
+    SwipeToRemove(onRemove = onRemove, label = displayUrl(url)) {
+      Row(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = {}, onLongClick = { showMenu = true })
@@ -643,9 +719,6 @@ private fun FavoriteRelayRow(
                 )
             }
         }
-        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
-        }
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             if (relaySets.isNotEmpty()) {
                 DropdownMenuItem(
@@ -661,6 +734,7 @@ private fun FavoriteRelayRow(
                 }
             }
         }
+      }
     }
 }
 
@@ -673,31 +747,32 @@ private fun RelaySetRow(
     var expanded by remember { mutableStateOf(false) }
     val members by viewModel.getSetMembers(set.dTag).collectAsStateWithLifecycle(initialValue = emptyList())
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { expanded = !expanded }
-            .padding(horizontal = Spacing.medium, vertical = 6.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text     = set.title ?: set.dTag,
-                color    = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text  = "${members.size} relays",
-                color = TextSecondary,
-                fontSize = 11.sp,
-            )
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete set", tint = TextSecondary, modifier = Modifier.size(16.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Swipe applies to the HEADER only — so the expanded members/add-field below stay
+        // interactive without triggering a whole-set delete.
+        SwipeToRemove(onRemove = onDelete, label = set.title ?: set.dTag, title = "Delete set?") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = Spacing.medium, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text     = set.title ?: set.dTag,
+                    color    = Color.White,
+                    fontSize = 13.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text  = "${members.size} relays",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                )
             }
         }
         AnimatedVisibility(visible = expanded) {
-            Column(modifier = Modifier.padding(start = Spacing.medium)) {
+            Column(modifier = Modifier.padding(start = Spacing.medium, end = Spacing.medium, bottom = Spacing.small)) {
                 members.forEach { member ->
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -836,15 +911,26 @@ private fun HealthInfoButton(health: RelayHealthInfo?, onClick: () -> Unit) {
     }
 }
 
+/** Fixed-column latency: [qualifier 28dp] [· ] [ms 42dp] so they line up straight down the
+ *  list (no jitter from ping length) and a 4-digit ms fits before the R/W pills. */
 @Composable
 private fun PingLabel(latencyMs: Int?) {
-    Text(
-        text = latencyLabel(latencyMs),
-        color = latencyTier(latencyMs),
-        fontSize = 10.sp,
-        fontFamily = FontFamily.Monospace,
-        modifier = Modifier.padding(end = 4.dp),
-    )
+    val color = latencyTier(latencyMs)
+    val qualifier = when {
+        latencyMs == null -> "—"
+        latencyMs < 0     -> "off"
+        latencyMs < 150   -> "fast"
+        else              -> "slow"
+    }
+    val pingStr = if (latencyMs != null && latencyMs >= 0) "${latencyMs}ms" else ""
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(end = 8.dp),
+    ) {
+        Text(qualifier, color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, modifier = Modifier.width(28.dp))
+        Text(if (pingStr.isEmpty()) "   " else " · ", color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(pingStr, color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, modifier = Modifier.width(42.dp))
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

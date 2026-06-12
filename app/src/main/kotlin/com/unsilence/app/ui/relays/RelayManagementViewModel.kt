@@ -113,6 +113,16 @@ class RelayManagementViewModel @Inject constructor(
         }
     }
 
+    /** Set a specific R/W marker (null = read+write, "read" = read-only, "write" = write-only)
+     *  via the SAME kind-10002 path as toggleMarker — for the independent R / W toggle pills. */
+    fun setRelayMarker(relay: RelayConfig, marker: String?) {
+        val pk = ownerPubkey ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            memoryEventStore.updateRelayMarker(pk, relay.url, marker)
+            publishChanges(10002)
+        }
+    }
+
     // ── Kind 10006: Blocked relays ────────────────────────────────────────────
 
     fun addBlockedRelay(url: String) {
@@ -324,7 +334,10 @@ class RelayManagementViewModel @Inject constructor(
                 .filter { it.marker == null || it.marker == "write" }
                 .map { it.url }
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
-            relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
+            val targets = (writeUrls + indexerUrls).distinct()
+            relayPool.publishToRelays(eventJson, targets)
+            android.util.Log.w("RelayMgmt", "RELAY-LIST published kind=$publishKind id=${signed.id.take(8)}… → ${targets.size} relays: " +
+                tags.joinToString(", ") { it.joinToString(":") })
         } finally {
             publishing.value = false
         }
@@ -356,6 +369,8 @@ class RelayManagementViewModel @Inject constructor(
                 .map { it.url }
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
+            android.util.Log.w("RelayMgmt", "RELAY-LIST published kind=30002 set=$dTag id=${signed.id.take(8)}… tags: " +
+                tagsList.joinToString(", ") { it.joinToString(":") })
         } finally {
             publishing.value = false
         }
