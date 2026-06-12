@@ -2263,6 +2263,15 @@ class RelayPool @Inject constructor(
     /** Snapshot of the built directory (UI/validation). */
     fun directorySnapshot(): Map<String, RelayDirectoryEntry> = relayDirectory.toMap()
 
+    /** How many of [urls] (the caller's own kind-10002 relays) are CONNECTED right now.
+     *  One-shot snapshot — no ticker. INTERSECTION, never connections.size: the pool idles
+     *  ~30 sockets (indexers/search/monitor/warmed globals), so a "N online" badge must mean
+     *  the user's own relays, not the whole pool. Reused by Settings + the relay health bar. */
+    fun connectedCountOf(urls: Collection<String>): Int {
+        val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+        return normalized.count { connections[it]?.isConnected == true }
+    }
+
     /**
      * Build/refresh the relay directory (Phase 1). Public, ON-DEMAND only — never cold-start
      * or background (Phase 2 wires it to the discovery screen). Single-flight; 6h success-only
