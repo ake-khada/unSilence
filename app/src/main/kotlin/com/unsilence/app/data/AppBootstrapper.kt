@@ -507,8 +507,12 @@ class AppBootstrapper @Inject constructor(
         // the entire bootstrap stalls (measured: 2m27s in production).
         scope.launch { MediaPreconnect.warmUp(okHttpClient) }
 
-        // Pre-warm feed-switcher relays (pinned + read relays). Fire-and-forget —
-        // reactive flow recomputes when pinned relays change.
+        // Retire the old local pinned-relay store (one-time, idempotent) — the feed carousel
+        // now sources kind-10012 favorites. No auto-publish from old pins.
+        scope.launch { relayPreferencesStore.retirePinnedStore() }
+
+        // Pre-warm feed-switcher relays (favorites + read relays). Fire-and-forget —
+        // reactive flow recomputes when favorites change.
         feedRelayWarmer.start()
 
         cancelLegacyBackgroundSync()

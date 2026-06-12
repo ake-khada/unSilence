@@ -196,7 +196,6 @@ private fun RelayCategoryRail(
 @Composable
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
-    onStartFeed: ((url: String, label: String) -> Unit)? = null,
     onOpenDetail: (url: String) -> Unit = {},
     onOpenDiscovery: () -> Unit = {},
     viewModel: RelayManagementViewModel = hiltViewModel(),
@@ -415,9 +414,6 @@ fun RelayManagementScreen(
                                 onRemove   = { viewModel.removeFavoriteRelay(fav.url!!) },
                                 onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, fav.url!!) },
                                 onOpenDetail = { onOpenDetail(fav.url!!) },
-                                onStartFeed = onStartFeed?.let { cb ->
-                                    { cb(fav.url!!, displayUrl(fav.url!!)) }
-                                },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -694,7 +690,6 @@ private fun FavoriteRelayRow(
     onRemove: () -> Unit,
     onAddToSet: (dTag: String) -> Unit,
     onOpenDetail: () -> Unit = {},
-    onStartFeed: (() -> Unit)?,
 ) {
     var showMenu by remember { mutableStateOf(false) }
     SwipeToRemove(onRemove = onRemove, label = displayUrl(url)) {
@@ -716,29 +711,6 @@ private fun FavoriteRelayRow(
             overflow = TextOverflow.Ellipsis,
         )
         PingLabel(testedMs ?: health?.ping)
-        if (onStartFeed != null) {
-            var justAdded by remember { mutableStateOf(false) }
-            LaunchedEffect(justAdded) {
-                if (justAdded) {
-                    delay(1500)
-                    justAdded = false
-                }
-            }
-            IconButton(
-                onClick = {
-                    onStartFeed()
-                    justAdded = true
-                },
-                modifier = Modifier.size(28.dp),
-            ) {
-                Icon(
-                    if (justAdded) Icons.Filled.Check else Icons.Filled.Add,
-                    contentDescription = "Add to Feed",
-                    tint = if (justAdded) Mint else Brand,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
         RowChevron()
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             if (relaySets.isNotEmpty()) {

@@ -535,7 +535,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         feedViewModel.setFeedType(type)
                         showFeedSheet = false
                     },
-                    onRemoveFavorite = { url -> feedViewModel.removePinnedRelay(url) },
+                    onRemoveFavorite = { url -> relayManagementVm.removeFavoriteRelay(url) },
                     onNewRelaySet   = { showFeedSheet = false; showCreateRelaySet = true },
                     onRelaySettings = { showFeedSheet = false; showRelaySettings = true },
                     onDeleteSet     = { dTag ->
@@ -566,9 +566,6 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             if (showRelaySettings) {
                 RelayManagementScreen(
                     onDismiss    = { showRelaySettings = false },
-                    onStartFeed  = { url, label ->
-                        feedViewModel.addPinnedRelay(url, label)
-                    },
                     onOpenDetail = { url -> relayDetailUrl = url },
                     onOpenDiscovery = { showDiscovery = true },
                 )
