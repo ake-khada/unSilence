@@ -1637,7 +1637,7 @@ class RelayPool @Inject constructor(
         for (url in allTargets) {
             connections[url]?.let { sendOneShotToRelay(it, req) }
         }
-        Log.d(TAG, "Fetching NIP-51 relay ecosystem for ${pubkeyHex.take(8)}… from ${indexerRelayUrls.size} indexers + ${writeRelayUrls.size} write relays")
+        Log.w(TAG, "NIP-51 ecosystem fetch: indexers=${indexerRelayUrls.size} writeRelays=${writeRelayUrls.size} writeList=$writeRelayUrls (ownWrite=${memoryEventStore.get().writeRelaysFor(pubkeyHex).size})")
     }
 
     /**

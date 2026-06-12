@@ -358,7 +358,11 @@ class FeedViewModel @Inject constructor(
     val userSetsFlow: StateFlow<List<RelaySet>> =
         keyManager.getPublicKeyHex()?.let { pk ->
             memoryEventStore.getAllSetsFlow(pk)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+                // Eagerly, NOT WhileSubscribed: the end-of-restore relay-set signal bump fires
+                // while the UI subscriber may not yet be collecting; WhileSubscribed would drop the
+                // upstream and lose the bump, leaving the slide-up empty until a later relay fetch
+                // happens to coincide with a live subscriber. Eagerly keeps the upstream alive.
+                .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList())
 
     // -- Carousel single-relay feeds = the user's kind-10012 favorite relays ---
@@ -370,7 +374,9 @@ class FeedViewModel @Inject constructor(
         keyManager.getPublicKeyHex()?.let { pk ->
             memoryEventStore.favoriteRelayConfigsFlow(pk)
                 .map { favs -> favs.mapNotNull { it.url }.map { url -> FeedType.SingleRelay(url, feedRelayLabel(url)) } }
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+                // Eagerly (see userSetsFlow): never lapse, so the end-of-restore config-signal
+                // bump isn't lost during cold-start.
+                .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList())
 
     private fun feedRelayLabel(url: String): String =

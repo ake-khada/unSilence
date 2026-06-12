@@ -7,7 +7,9 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelayConfig
+import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.RelayCapabilitiesStore
@@ -350,6 +352,12 @@ class RelayManagementViewModel @Inject constructor(
                 content   = "",
             )
             val signed = signingManager.sign(template) ?: return
+            // Self-insert the just-signed event into MES so it lands in eventsById and survives
+            // cold-start via the ---EVENTS--- snapshot (insertFromSnapshot re-materializes the
+            // derived maps on restore; the end-of-restore signal bump surfaces them in the UI).
+            // Without this, own NIP-51 config (favorites/sets/relays) persists only by racy relay
+            // re-fetch. Same optimistic-insert pattern as own posts.
+            memoryEventStore.insert(signedToNostrEvent(signed))
 
             val eventJson = toEventJson(signed)
             val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
@@ -390,6 +398,12 @@ class RelayManagementViewModel @Inject constructor(
                 content   = "",
             )
             val signed = signingManager.sign(template) ?: return
+            // Self-insert the just-signed event into MES so it lands in eventsById and survives
+            // cold-start via the ---EVENTS--- snapshot (insertFromSnapshot re-materializes the
+            // derived maps on restore; the end-of-restore signal bump surfaces them in the UI).
+            // Without this, own NIP-51 config (favorites/sets/relays) persists only by racy relay
+            // re-fetch. Same optimistic-insert pattern as own posts.
+            memoryEventStore.insert(signedToNostrEvent(signed))
 
             val eventJson = toEventJson(signed)
             val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
@@ -405,5 +419,28 @@ class RelayManagementViewModel @Inject constructor(
     }
 
     private fun nowSeconds() = System.currentTimeMillis() / 1000L
+
+    /** Convert a just-signed NIP-51 event to the MES NostrEvent for self-insert. Control events
+     *  carry no thread context, so replyToId/rootId are null. */
+    private fun signedToNostrEvent(signed: Event): NostrEvent {
+        val tagsList = signed.tags.map { it.toList() }
+        return NostrEvent(
+            id = signed.id,
+            pubkey = signed.pubKey,
+            kind = signed.kind,
+            content = signed.content,
+            createdAt = signed.createdAt,
+            tags = tagsList,
+            tagsJson = tagsToJson(tagsList),
+            sig = signed.sig,
+            relayUrl = "",
+            replyToId = null,
+            rootId = null,
+            hasContentWarning = false,
+            contentWarningReason = null,
+            firstSeenAt = System.currentTimeMillis(),
+            relaysSeen = java.util.concurrent.ConcurrentHashMap.newKeySet(),
+        )
+    }
 
 }
