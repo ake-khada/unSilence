@@ -79,6 +79,7 @@ fun SettingsScreen(
     onLogout: () -> Unit,
     onEditProfile: () -> Unit = {},
     onOpenProfile: (pubkeyHex: String) -> Unit = {},
+    onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
@@ -218,7 +219,7 @@ fun SettingsScreen(
         onOpenDetail = { url -> relayDetailUrl = url },
     )
     relayDetailUrl?.let { url ->
-        RelayDetailScreen(relayUrl = url, onDismiss = { relayDetailUrl = null }, onOpenProfile = onOpenProfile)
+        RelayDetailScreen(relayUrl = url, onDismiss = { relayDetailUrl = null }, onOpenProfile = onOpenProfile, onBrowse = onBrowseRelay)
     }
     if (showMediaUpload) MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
     if (showFilters) FiltersScreen(onDismiss = { showFilters = false })

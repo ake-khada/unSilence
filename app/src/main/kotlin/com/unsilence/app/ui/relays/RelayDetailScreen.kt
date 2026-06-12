@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.relays
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,11 +25,20 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,7 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -50,7 +63,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.Nip11Source
 import com.unsilence.app.data.relay.Reachability
+import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.relay.RelayDirectoryEntry
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.parseNip05
@@ -62,6 +77,7 @@ import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
@@ -81,10 +97,12 @@ fun RelayDetailScreen(
     relayUrl: String,
     onDismiss: () -> Unit,
     onOpenProfile: (pubkeyHex: String) -> Unit = {},
+    onBrowse: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
 
     var entry by remember(relayUrl) { mutableStateOf<RelayDirectoryEntry?>(null) }
     var loading by remember(relayUrl) { mutableStateOf(true) }
@@ -93,6 +111,18 @@ fun RelayDetailScreen(
         entry = viewModel.loadRelayDetail(relayUrl)
         loading = false
     }
+
+    // Membership state (drives the sticky footer) — collected from the shared relay VM.
+    val readWriteRelays by viewModel.readWriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoriteRelays by viewModel.favoriteRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val blockedRelays by viewModel.blockedRelays.collectAsStateWithLifecycle(initialValue = emptyList())
+    val norm = remember(relayUrl) { normalizeRelayUrl(relayUrl) ?: relayUrl }
+    val memberConfig = readWriteRelays.firstOrNull { normalizeRelayUrl(it.url) == norm }
+    val isFavorite = favoriteRelays.any { it.url != null && normalizeRelayUrl(it.url!!) == norm }
+    val isBlocked = blockedRelays.any { normalizeRelayUrl(it) == norm }
+    var showBlockConfirm by remember { mutableStateOf(false) }
+    var showRemoveConfirm by remember { mutableStateOf(false) }
+    val label = entry?.name?.takeIf { it.isNotBlank() } ?: relayHost(relayUrl)
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -110,7 +140,7 @@ fun RelayDetailScreen(
             }
 
             Column(
-                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
             ) {
                 val e = entry
                 // ── Hero ─────────────────────────────────────────────────────
@@ -140,7 +170,42 @@ fun RelayDetailScreen(
                     Spacer(Modifier.height(40.dp))
                 }
             }
+
+            RelayDetailFooter(
+                relayLabel = label,
+                memberConfig = memberConfig,
+                isFavorite = isFavorite,
+                isBlocked = isBlocked,
+                onBrowse = { onBrowse(relayUrl, label) },
+                onAdd = { viewModel.addReadWriteRelay(relayUrl) },
+                onSetMarker = { m -> memberConfig?.let { viewModel.setRelayMarker(it, m) } },
+                onRemoveMember = { showRemoveConfirm = true },
+                onToggleFavorite = { if (isFavorite) viewModel.removeFavoriteRelay(relayUrl) else viewModel.addFavoriteRelay(relayUrl) },
+                onBlock = { showBlockConfirm = true },
+                onUnblock = { viewModel.removeBlockedRelay(relayUrl) },
+                onCopyUrl = { clipboard.setText(AnnotatedString(relayUrl.removeSuffix("/"))) },
+                onShare = { shareText(context, relayUrl.removeSuffix("/")) },
+            )
         }
+    }
+
+    if (showBlockConfirm) {
+        ConfirmDialog(
+            title = "Block this relay?",
+            body = "You'll stop receiving events from ${relayHost(relayUrl)} and it's added to your block list.",
+            confirmLabel = "Block",
+            onConfirm = { showBlockConfirm = false; viewModel.addBlockedRelay(relayUrl) },
+            onDismiss = { showBlockConfirm = false },
+        )
+    }
+    if (showRemoveConfirm) {
+        ConfirmDialog(
+            title = "Remove from my relays?",
+            body = "${relayHost(relayUrl)} will be removed from your relay list.",
+            confirmLabel = "Remove",
+            onConfirm = { showRemoveConfirm = false; viewModel.removeReadWriteRelay(relayUrl) },
+            onDismiss = { showRemoveConfirm = false },
+        )
     }
 }
 
@@ -393,3 +458,146 @@ private fun shortNpub(npub: String): String =
     if (npub.length > 18) "${npub.take(10)}…${npub.takeLast(6)}" else npub
 
 private val NIP_LABELS = mapOf(50 to "Search", 65 to "Outbox", 42 to "Auth")
+
+// ── Sticky action footer ──────────────────────────────────────────────────────
+
+/** §05 sticky footer: Browse-this-relay's-feed (drops into the single-relay feed we already
+ *  have) + membership actions — Add/R-W editor, favorite star, block, and an overflow for
+ *  copy/share. All actions publish through the existing relay-list repository paths. */
+@Composable
+private fun RelayDetailFooter(
+    relayLabel: String,
+    memberConfig: RelayConfig?,
+    isFavorite: Boolean,
+    isBlocked: Boolean,
+    onBrowse: () -> Unit,
+    onAdd: () -> Unit,
+    onSetMarker: (String?) -> Unit,
+    onRemoveMember: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onBlock: () -> Unit,
+    onUnblock: () -> Unit,
+    onCopyUrl: () -> Unit,
+    onShare: () -> Unit,
+) {
+    var rwEditorOpen by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    if (memberConfig == null) rwEditorOpen = false
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface1)
+            .navigationBarsPadding()
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+    ) {
+        // Browse → single-relay feed
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2)
+                .clickable(onClick = onBrowse),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Browse $relayLabel's feed", color = Brand, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.height(Spacing.small))
+
+        // Inline R/W editor (when a member and the membership pill is tapped)
+        AnimatedVisibility(visible = rwEditorOpen && memberConfig != null) {
+            val readOn = memberConfig?.marker != "write"
+            val writeOn = memberConfig?.marker != "read"
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = Spacing.small),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Reads / writes", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                RwPill("R", readOn) { val n = !readOn; if (n || writeOn) onSetMarker(rwMarkerOf(n, writeOn)) }
+                Spacer(Modifier.width(4.dp))
+                RwPill("W", writeOn) { val n = !writeOn; if (readOn || n) onSetMarker(rwMarkerOf(readOn, n)) }
+                Spacer(Modifier.width(14.dp))
+                Text("Remove", color = Like, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onRemoveMember))
+            }
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Membership pill (primary)
+            val isMember = memberConfig != null
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isMember) Surface2 else Brand)
+                    .clickable { if (isMember) rwEditorOpen = !rwEditorOpen else onAdd() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    if (isMember) markerStateLabel(memberConfig?.marker) else "Add to my relays",
+                    color = if (isMember) Color.White else Color.Black,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.width(Spacing.small))
+            FooterIconButton(Icons.Filled.StarBorder.let { if (isFavorite) Icons.Filled.Star else it }, if (isFavorite) Zap else TextSecondary, "Favorite", onToggleFavorite)
+            Spacer(Modifier.width(Spacing.small))
+            FooterIconButton(Icons.Filled.Block, if (isBlocked) Like else TextSecondary, "Block", { if (isBlocked) onUnblock() else onBlock() })
+            Spacer(Modifier.width(Spacing.small))
+            Box {
+                FooterIconButton(Icons.Filled.MoreVert, TextSecondary, "More", { showMenu = true })
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(text = { Text("Copy URL", color = Color.White, fontSize = 14.sp) }, onClick = { showMenu = false; onCopyUrl() })
+                    DropdownMenuItem(text = { Text("Share", color = Color.White, fontSize = 14.sp) }, onClick = { showMenu = false; onShare() })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FooterIconButton(icon: ImageVector, tint: Color, desc: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(Surface2).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = desc, tint = tint, modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun ConfirmDialog(title: String, body: String, confirmLabel: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel, color = Like) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) } },
+        title = { Text(title, color = Color.White) },
+        text = { Text(body, color = TextSecondary) },
+        containerColor = Surface1,
+    )
+}
+
+private fun markerStateLabel(marker: String?): String = when (marker) {
+    "read" -> "Read only ✓"
+    "write" -> "Write only ✓"
+    else -> "Read & write ✓"
+}
+
+private fun rwMarkerOf(read: Boolean, write: Boolean): String? = when {
+    read && write -> null
+    read -> "read"
+    else -> "write"
+}
+
+private fun shareText(context: android.content.Context, text: String) {
+    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(android.content.Intent.EXTRA_TEXT, text)
+    }
+    runCatching { context.startActivity(android.content.Intent.createChooser(intent, null)) }
+}

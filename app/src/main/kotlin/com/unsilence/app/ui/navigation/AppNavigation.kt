@@ -200,6 +200,15 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     // captured the old user's pubkey at init and never re-initializes.
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
+    // Browse a relay's feed (§05 detail footer): make it the active feed WITHOUT pinning it
+    // (browsing is transient — the relay shows in the carousel only while active, see feedList),
+    // dismiss the relay overlays, and drop to the feed tab.
+    val onBrowseRelayFeed: (String, String) -> Unit = { url, lbl ->
+        feedViewModel.setFeedType(FeedType.SingleRelay(url, lbl))
+        relayDetailUrl = null
+        showRelaySettings = false
+        selectedTab = 0
+    }
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
     val zapSettingsVm: ZapSettingsViewModel = hiltViewModel()
     val noteActionsVm: NoteActionsViewModel = hiltViewModel()
@@ -217,7 +226,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     val zapPreferences      by zapSettingsVm.preferences.collectAsStateWithLifecycle()
 
     // Build the ordered feed list for the carousel
-    val feedList = remember(hasFollows, pinnedRelays, userSets) {
+    val feedList = remember(hasFollows, pinnedRelays, userSets, feedType) {
         buildList {
             if (hasFollows) add(FeedType.Following to "Following")
             add(FeedType.Global to "Global")
@@ -229,6 +238,14 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             userSets.forEach { set ->
                 val name = set.title ?: set.dTag
                 add(FeedType.RelaySet(set.dTag, name) as FeedType to name)
+            }
+            // Transient "Browse this relay" feed: a SingleRelay we're viewing that isn't pinned
+            // appears in the carousel ONLY while it's active — switching feeds recomputes the
+            // list and drops it (it never becomes a permanent favorite).
+            val ft = feedType
+            if (ft is FeedType.SingleRelay && ft.url != FeedType.Popular.url &&
+                pinnedRelays.none { it.url == ft.url }) {
+                add(ft as FeedType to ft.displayLabel)
             }
         }
     }
@@ -335,7 +352,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, viewModel = hiltViewModel(key = "profile-$userPubkey"))
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, onBrowseRelay = onBrowseRelayFeed, viewModel = hiltViewModel(key = "profile-$userPubkey"))
                     else -> PlaceholderScreen()
                 }
             }
@@ -560,6 +577,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     relayUrl  = url,
                     onDismiss = { relayDetailUrl = null },
                     onOpenProfile = onAuthorClick,
+                    onBrowse = onBrowseRelayFeed,
                 )
             }
 

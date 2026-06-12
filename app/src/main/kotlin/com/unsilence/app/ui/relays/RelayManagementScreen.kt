@@ -549,9 +549,10 @@ private fun SwipeToRemove(
     }
 }
 
-/** §03 R / W toggle pill — filled cyan = enabled, ghost = disabled. */
+/** §03 R / W toggle pill — filled cyan = enabled, ghost = disabled. Shared with the §05
+ *  detail footer's R/W editor. */
 @Composable
-private fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
+internal fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(22.dp)
