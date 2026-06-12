@@ -100,6 +100,7 @@ fun ProfileScreen(
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
+    onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: ProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
@@ -516,6 +517,7 @@ fun ProfileScreen(
             onLogout  = onLogout,
             onEditProfile = { showEditProfile = true },
             onOpenProfile = onAuthorClick,
+            onBrowseRelay = onBrowseRelay,
         )
     }
     if (showEditProfile) {
