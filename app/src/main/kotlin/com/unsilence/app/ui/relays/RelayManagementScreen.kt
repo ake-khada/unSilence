@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,6 +62,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -87,16 +89,19 @@ import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BorderSubtle
 import com.unsilence.app.ui.theme.BrandSoft
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text4
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -122,8 +127,10 @@ private fun RelayCategoryRail(
     onSelect: (Int) -> Unit,
 ) {
     Column {
+        val listState = rememberLazyListState()
         Box {
             LazyRow(
+                state = listState,
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
                 modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
@@ -146,14 +153,16 @@ private fun RelayCategoryRail(
                     }
                 }
             }
-            // Right-edge fade hint — signals the rail scrolls. matchParentSize (NOT
-            // fillMaxHeight) so it matches the pill row without inflating it to full screen
-            // height (which would starve the weighted pager). Background-only → never blocks taps.
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
-            )
+            // Right-edge fade hint — ONLY while there's more to scroll, so the last pill
+            // (Blocked) is fully revealed at max scroll. matchParentSize (not fillMaxHeight)
+            // keeps the row compact; background-only → never blocks taps.
+            if (listState.canScrollForward) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
+                )
+            }
         }
         val cat = RelayCategories[selectedIndex.coerceIn(RelayCategories.indices)]
         Row(
@@ -203,6 +212,10 @@ fun RelayManagementScreen(
 
     var showCreateRelaySet by remember { mutableStateOf(false) }
     var healthDetailRelay by remember { mutableStateOf<RelayHealthInfo?>(null) }
+    // Item 3: user-initiated "Test" results. value -1 = tested & offline; absent = not tested
+    // (falls back to monitor RTT). No background pinger, no persistence (amendment a).
+    val testedRtt = remember { mutableStateMapOf<String, Int>() }
+    var testing by remember { mutableStateOf(false) }
 
     if (showCreateRelaySet) {
         CreateRelaySetScreen(
@@ -251,6 +264,30 @@ fun RelayManagementScreen(
                 onSelect = { scope.launch { pagerState.animateScrollToPage(it) } },
             )
 
+            // ── Health summary bar (active relay-list category; not Sets) ────
+            val activeRelayUrls = when (pagerState.currentPage) {
+                0 -> readWriteRelays.map { it.url }
+                1 -> indexerRelays
+                2 -> searchRelays
+                4 -> favoriteRelays.filter { it.setRef == null && it.url != null }.mapNotNull { it.url }
+                5 -> blockedRelays
+                else -> emptyList()
+            }
+            if (activeRelayUrls.isNotEmpty()) {
+                RelayHealthSummary(
+                    urls      = activeRelayUrls,
+                    latencyOf = { url -> testedRtt[url] ?: relayHealth.lookup(url)?.ping },
+                    testing   = testing,
+                    onTest    = {
+                        scope.launch {
+                            testing = true
+                            activeRelayUrls.forEach { url -> testedRtt[url] = viewModel.measureRtt(url) ?: -1 }
+                            testing = false
+                        }
+                    },
+                )
+            }
+
             // ── Pager ────────────────────────────────────────────────────────
             HorizontalPager(
                 state = pagerState,
@@ -268,6 +305,7 @@ fun RelayManagementScreen(
                             ReadWriteRelayRow(
                                 relay          = relay,
                                 health         = relayHealth.lookup(relay.url),
+                                testedMs       = testedRtt[relay.url],
                                 onToggleMarker = { viewModel.toggleMarker(relay) },
                                 onRemove       = { viewModel.removeReadWriteRelay(relay.url) },
                                 onHealthTap    = { relayHealth.lookup(relay.url)?.let { healthDetailRelay = it } },
@@ -298,6 +336,7 @@ fun RelayManagementScreen(
                                 url        = url,
                                 onRemove   = { viewModel.removeIndexerRelay(url) },
                                 health     = relayHealth.lookup(url),
+                                testedMs   = testedRtt[url],
                                 onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
@@ -316,6 +355,7 @@ fun RelayManagementScreen(
                                 url        = url,
                                 onRemove   = { viewModel.removeSearchRelay(url) },
                                 health     = relayHealth.lookup(url),
+                                testedMs   = testedRtt[url],
                                 onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
@@ -357,6 +397,7 @@ fun RelayManagementScreen(
                                 url        = fav.url!!,
                                 relaySets  = relaySets,
                                 health     = fav.url?.let { relayHealth.lookup(it) },
+                                testedMs   = fav.url?.let { testedRtt[it] },
                                 onRemove   = { viewModel.removeFavoriteRelay(fav.url!!) },
                                 onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, fav.url!!) },
                                 onHealthTap = { fav.url?.let { relayHealth.lookup(it) }?.let { healthDetailRelay = it } },
@@ -380,6 +421,7 @@ fun RelayManagementScreen(
                                 url        = url,
                                 onRemove   = { viewModel.removeBlockedRelay(url) },
                                 health     = relayHealth.lookup(url),
+                                testedMs   = testedRtt[url],
                                 onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
                             )
                         }
@@ -462,6 +504,7 @@ private fun SimpleRelayRow(
     url: String,
     onRemove: () -> Unit,
     health: RelayHealthInfo? = null,
+    testedMs: Int? = null,
     onHealthTap: () -> Unit = {},
 ) {
     Row(
@@ -470,7 +513,7 @@ private fun SimpleRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HealthDot(health, onClick = onHealthTap)
+        HealthDot(testedMs ?: health?.ping)
         Spacer(Modifier.width(8.dp))
         Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -483,7 +526,7 @@ private fun SimpleRelayRow(
             )
             HealthInfoButton(health, onClick = onHealthTap)
         }
-        PingLabel(health)
+        PingLabel(testedMs ?: health?.ping)
         IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
         }
@@ -494,6 +537,7 @@ private fun SimpleRelayRow(
 private fun ReadWriteRelayRow(
     relay: RelayConfig,
     health: RelayHealthInfo?,
+    testedMs: Int? = null,
     onToggleMarker: () -> Unit,
     onRemove: () -> Unit,
     onHealthTap: () -> Unit,
@@ -504,7 +548,7 @@ private fun ReadWriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HealthDot(health, onClick = onHealthTap)
+        HealthDot(testedMs ?: health?.ping)
         Spacer(Modifier.width(8.dp))
         Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -517,7 +561,7 @@ private fun ReadWriteRelayRow(
             )
             HealthInfoButton(health, onClick = onHealthTap)
         }
-        PingLabel(health)
+        PingLabel(testedMs ?: health?.ping)
         // R/W marker chip
         val markerLabel = when (relay.marker) {
             "read"  -> "R"
@@ -548,6 +592,7 @@ private fun FavoriteRelayRow(
     url: String,
     relaySets: List<RelaySet>,
     health: RelayHealthInfo? = null,
+    testedMs: Int? = null,
     onRemove: () -> Unit,
     onAddToSet: (dTag: String) -> Unit,
     onHealthTap: () -> Unit = {},
@@ -561,7 +606,7 @@ private fun FavoriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HealthDot(health, onClick = onHealthTap)
+        HealthDot(testedMs ?: health?.ping)
         Spacer(Modifier.width(8.dp))
         Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -574,7 +619,7 @@ private fun FavoriteRelayRow(
             )
             HealthInfoButton(health, onClick = onHealthTap)
         }
-        PingLabel(health)
+        PingLabel(testedMs ?: health?.ping)
         if (onStartFeed != null) {
             var justAdded by remember { mutableStateOf(false) }
             LaunchedEffect(justAdded) {
@@ -675,6 +720,63 @@ private fun RelaySetRow(
     }
 }
 
+/** §02/§03 health summary bar — "N healthy · N slow · N off" over the active category, with
+ *  a user-initiated "Test" action (re-pings the category; no background pinger). */
+@Composable
+private fun RelayHealthSummary(
+    urls: List<String>,
+    latencyOf: (String) -> Int?,
+    testing: Boolean,
+    onTest: () -> Unit,
+) {
+    var healthy = 0; var slowYellow = 0; var slowRed = 0; var off = 0
+    urls.forEach { url ->
+        when (val ms = latencyOf(url)) {
+            null -> {}                       // unknown — not counted
+            in 0..149 -> healthy++
+            in 150..500 -> slowYellow++
+            else -> if (ms < 0) off++ else slowRed++   // -1 = offline; >500 = very-slow (red), NOT off
+        }
+    }
+    val slow = slowYellow + slowRed
+    // "off" is for OFF; >500 is slow-but-online. Slow segment takes the dominant sub-tier's color.
+    val slowColor = if (slowRed > slowYellow) Like else Zap
+    Row(
+        modifier = Modifier
+            .padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(11.dp))
+            .background(Surface1)
+            .border(1.dp, BorderFaint, RoundedCornerShape(11.dp))
+            .padding(horizontal = 13.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SummarySeg(Mint, "$healthy healthy")
+        SummarySeg(slowColor, "$slow slow")
+        SummarySeg(Text4, "$off off")
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = if (testing) "Testing…" else "Test",
+            color = Brand,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(enabled = !testing, onClick = onTest)
+                .padding(horizontal = 6.dp, vertical = 3.dp),
+        )
+    }
+}
+
+@Composable
+private fun SummarySeg(color: Color, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Canvas(modifier = Modifier.size(7.dp)) { drawCircle(color = color) }
+        Text(text, color = TextSecondary, fontSize = 11.sp)
+    }
+}
+
 // ── Relay health components ─────────────────────────────────────────────────
 
 private val HealthGreen  = Mint
@@ -695,19 +797,29 @@ private fun pingColor(ms: Int): Color = when {
     else       -> HealthRed
 }
 
-/** Dot color: trust score if available, otherwise ping-based, otherwise grey. */
-private fun healthDotColor(health: RelayHealthInfo?): Color {
-    if (health == null) return HealthGray
-    health.score?.let { return trustColor(it) }
-    health.ping?.let { return pingColor(it) }
-    return HealthGray
+// §02/§03 latency tiers: mint <150 (fast) · zap 150–500 (slow) · like >500 or offline.
+// ms == null → no data (neutral "—"); ms < 0 → tested-and-offline. Trust score is NO LONGER
+// a list signal (amendment b) — the dot is the ONE coherent latency signal; trust resurfaces
+// on the Phase-2 detail page (trustColor below is kept for that sheet).
+private fun latencyTier(ms: Int?): Color = when {
+    ms == null -> HealthGray
+    ms < 0     -> Like
+    ms < 150   -> Mint
+    ms <= 500  -> Zap
+    else       -> Like
+}
+
+private fun latencyLabel(ms: Int?): String = when {
+    ms == null -> "—"
+    ms < 0     -> "off"
+    ms < 150   -> "fast · ${ms}ms"
+    else       -> "slow · ${ms}ms"
 }
 
 @Composable
-private fun HealthDot(health: RelayHealthInfo?, onClick: () -> Unit) {
-    val color = healthDotColor(health)
+private fun HealthDot(latencyMs: Int?) {
     Canvas(modifier = Modifier.size(10.dp)) {
-        drawCircle(color = color)
+        drawCircle(color = latencyTier(latencyMs))
     }
 }
 
@@ -725,12 +837,12 @@ private fun HealthInfoButton(health: RelayHealthInfo?, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PingLabel(health: RelayHealthInfo?) {
-    val ping = health?.ping ?: return
+private fun PingLabel(latencyMs: Int?) {
     Text(
-        text = "${ping}ms",
-        color = pingColor(ping),
+        text = latencyLabel(latencyMs),
+        color = latencyTier(latencyMs),
         fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
         modifier = Modifier.padding(end = 4.dp),
     )
 }
