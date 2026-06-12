@@ -42,7 +42,8 @@ data class RelayDirectoryEntry(
     val ourRttMs: Int? = null,                       // reserved — no per-relay device RTT today (RelayCapabilities has none)
     val ourLastReason: String? = null,               // RelayCapabilities.lastReason
     val reachability: Reachability = Reachability.UNKNOWN,
-    val popularity: Int = 0,                         // count of url across all kind-10002 read+write lists
+    val popularity: Int = 0,                         // count of url across all kind-10002 read+write lists (ranking signal)
+    val followsUsing: Int = 0,                        // people YOU follow whose kind-10002 includes this relay (detail "You follow")
     /**
      * Perspective-dependent relays exist (subnet.relays.land serves a different identity
      * per accessing subnet) — device-fetched NIP-11 (Phase 2, on detail-open) overwrites

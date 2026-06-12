@@ -515,6 +515,7 @@ fun ProfileScreen(
             onDismiss = { showSettings = false },
             onLogout  = onLogout,
             onEditProfile = { showEditProfile = true },
+            onOpenProfile = onAuthorClick,
         )
     }
     if (showEditProfile) {

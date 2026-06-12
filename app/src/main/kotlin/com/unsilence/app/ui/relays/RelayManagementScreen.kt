@@ -41,15 +41,13 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -196,6 +194,7 @@ private fun RelayCategoryRail(
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
     onStartFeed: ((url: String, label: String) -> Unit)? = null,
+    onOpenDetail: (url: String) -> Unit = {},
     viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
@@ -216,7 +215,6 @@ fun RelayManagementScreen(
     LaunchedEffect(Unit) { viewModel.phase1TriggerDirectoryBuild() }
 
     var showCreateRelaySet by remember { mutableStateOf(false) }
-    var healthDetailRelay by remember { mutableStateOf<RelayHealthInfo?>(null) }
     // Item 3: user-initiated "Test" results. value -1 = tested & offline; absent = not tested
     // (falls back to monitor RTT). No background pinger, no persistence (amendment a).
     val testedRtt = remember { mutableStateMapOf<String, Int>() }
@@ -313,7 +311,7 @@ fun RelayManagementScreen(
                                 testedMs       = testedRtt[relay.url],
                                 onSetMarker    = { m -> viewModel.setRelayMarker(relay, m) },
                                 onRemove       = { viewModel.removeReadWriteRelay(relay.url) },
-                                onHealthTap    = { relayHealth.lookup(relay.url)?.let { healthDetailRelay = it } },
+                                onOpenDetail   = { onOpenDetail(relay.url) },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -342,7 +340,7 @@ fun RelayManagementScreen(
                                 onRemove   = { viewModel.removeIndexerRelay(url) },
                                 health     = relayHealth.lookup(url),
                                 testedMs   = testedRtt[url],
-                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
+                                onOpenDetail = { onOpenDetail(url) },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -361,7 +359,7 @@ fun RelayManagementScreen(
                                 onRemove   = { viewModel.removeSearchRelay(url) },
                                 health     = relayHealth.lookup(url),
                                 testedMs   = testedRtt[url],
-                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
+                                onOpenDetail = { onOpenDetail(url) },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -405,7 +403,7 @@ fun RelayManagementScreen(
                                 testedMs   = fav.url?.let { testedRtt[it] },
                                 onRemove   = { viewModel.removeFavoriteRelay(fav.url!!) },
                                 onAddToSet = { dTag -> viewModel.addRelayToSet(dTag, fav.url!!) },
-                                onHealthTap = { fav.url?.let { relayHealth.lookup(it) }?.let { healthDetailRelay = it } },
+                                onOpenDetail = { onOpenDetail(fav.url!!) },
                                 onStartFeed = onStartFeed?.let { cb ->
                                     { cb(fav.url!!, displayUrl(fav.url!!)) }
                                 },
@@ -427,7 +425,7 @@ fun RelayManagementScreen(
                                 onRemove   = { viewModel.removeBlockedRelay(url) },
                                 health     = relayHealth.lookup(url),
                                 testedMs   = testedRtt[url],
-                                onHealthTap = { relayHealth.lookup(url)?.let { healthDetailRelay = it } },
+                                onOpenDetail = { onOpenDetail(url) },
                             )
                         }
                         item { Spacer(Modifier.height(Spacing.xl)) }
@@ -437,13 +435,6 @@ fun RelayManagementScreen(
         }
     }
 
-    // Relay health detail bottom sheet
-    healthDetailRelay?.let { health ->
-        RelayHealthDetailSheet(
-            health = health,
-            onDismiss = { healthDetailRelay = null },
-        )
-    }
 }
 
 // ── Sub-composables ─────────────────────────────────────────────────────────
@@ -584,29 +575,28 @@ private fun SimpleRelayRow(
     onRemove: () -> Unit,
     health: RelayHealthInfo? = null,
     testedMs: Int? = null,
-    onHealthTap: () -> Unit = {},
+    onOpenDetail: () -> Unit = {},
 ) {
     SwipeToRemove(onRemove = onRemove, label = displayUrl(url)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(onClick = onOpenDetail)
                 .padding(horizontal = Spacing.medium, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             HealthDot(testedMs ?: health?.ping)
             Spacer(Modifier.width(8.dp))
-            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text     = displayUrl(url),
-                    color    = Color.White,
-                    fontSize = 13.sp,
-                    modifier = Modifier.weight(1f, fill = false),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                HealthInfoButton(health, onClick = onHealthTap)
-            }
+            Text(
+                text     = displayUrl(url),
+                color    = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             PingLabel(testedMs ?: health?.ping)
+            RowChevron()
         }
     }
 }
@@ -618,7 +608,7 @@ private fun ReadWriteRelayRow(
     testedMs: Int? = null,
     onSetMarker: (String?) -> Unit,
     onRemove: () -> Unit,
-    onHealthTap: () -> Unit,
+    onOpenDetail: () -> Unit,
 ) {
     // marker: null = read+write · "read" = read-only · "write" = write-only.
     val readOn = relay.marker != "write"
@@ -627,22 +617,20 @@ private fun ReadWriteRelayRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(onClick = onOpenDetail)
                 .padding(horizontal = Spacing.medium, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             HealthDot(testedMs ?: health?.ping)
             Spacer(Modifier.width(8.dp))
-            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text     = displayUrl(relay.url),
-                    color    = Color.White,
-                    fontSize = 13.sp,
-                    modifier = Modifier.weight(1f, fill = false),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                HealthInfoButton(health, onClick = onHealthTap)
-            }
+            Text(
+                text     = displayUrl(relay.url),
+                color    = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             PingLabel(testedMs ?: health?.ping)
             Spacer(Modifier.width(8.dp))
             // Two INDEPENDENT toggles. Can't disable both (a relay must read or write) —
@@ -651,6 +639,7 @@ private fun ReadWriteRelayRow(
                 RwPill("R", readOn) { val n = !readOn; if (n || writeOn) onSetMarker(rwMarker(n, writeOn)) }
                 RwPill("W", writeOn) { val n = !writeOn; if (readOn || n) onSetMarker(rwMarker(readOn, n)) }
             }
+            RowChevron()
         }
     }
 }
@@ -670,7 +659,7 @@ private fun FavoriteRelayRow(
     testedMs: Int? = null,
     onRemove: () -> Unit,
     onAddToSet: (dTag: String) -> Unit,
-    onHealthTap: () -> Unit = {},
+    onOpenDetail: () -> Unit = {},
     onStartFeed: (() -> Unit)?,
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -678,23 +667,20 @@ private fun FavoriteRelayRow(
       Row(
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = {}, onLongClick = { showMenu = true })
+            .combinedClickable(onClick = onOpenDetail, onLongClick = { showMenu = true })
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HealthDot(testedMs ?: health?.ping)
         Spacer(Modifier.width(8.dp))
-        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = displayUrl(url),
-                color = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f, fill = false),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            HealthInfoButton(health, onClick = onHealthTap)
-        }
+        Text(
+            text = displayUrl(url),
+            color = Color.White,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         PingLabel(testedMs ?: health?.ping)
         if (onStartFeed != null) {
             var justAdded by remember { mutableStateOf(false) }
@@ -719,6 +705,7 @@ private fun FavoriteRelayRow(
                 )
             }
         }
+        RowChevron()
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             if (relaySets.isNotEmpty()) {
                 DropdownMenuItem(
@@ -859,13 +846,6 @@ private val HealthYellow = Color(0xFFFFC107)
 private val HealthRed    = Color(0xFFFF5252)
 private val HealthGray   = Text3
 
-private fun trustColor(score: Int?): Color = when {
-    score == null -> HealthGray
-    score >= 70   -> HealthGreen
-    score >= 40   -> HealthYellow
-    else          -> HealthRed
-}
-
 private fun pingColor(ms: Int): Color = when {
     ms <= 200  -> HealthGreen
     ms <= 500  -> HealthYellow
@@ -874,9 +854,9 @@ private fun pingColor(ms: Int): Color = when {
 
 // §02/§03 latency tiers: mint <150 (fast) · zap 150–500 (slow) · like >500 or offline.
 // ms == null → no data (neutral "—"); ms < 0 → tested-and-offline. Trust score is NO LONGER
-// a list signal (amendment b) — the dot is the ONE coherent latency signal; trust resurfaces
-// on the Phase-2 detail page (trustColor below is kept for that sheet).
-private fun latencyTier(ms: Int?): Color = when {
+// a list signal (amendment b) — the dot is the ONE coherent latency signal. Shared with the
+// §05 detail page (RelayDetailScreen) for the verdict row + stats strip.
+internal fun latencyTier(ms: Int?): Color = when {
     ms == null -> HealthGray
     ms < 0     -> Like
     ms < 150   -> Mint
@@ -898,17 +878,17 @@ private fun HealthDot(latencyMs: Int?) {
     }
 }
 
+/** Disclosure chevron — the row opens the §05 relay detail page. Replaces the old ⓘ
+ *  (which opened the now-removed health sheet); a trailing chevron is the conventional
+ *  "tap to open detail" affordance, so the rows read as navigable. */
 @Composable
-private fun HealthInfoButton(health: RelayHealthInfo?, onClick: () -> Unit) {
-    if (health == null) return
-    IconButton(onClick = onClick, modifier = Modifier.size(24.dp)) {
-        Icon(
-            imageVector = Icons.Outlined.Info,
-            contentDescription = "Relay info",
-            tint = TextSecondary,
-            modifier = Modifier.size(16.dp),
-        )
-    }
+private fun RowChevron() {
+    Icon(
+        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+        contentDescription = null,
+        tint = Text4,
+        modifier = Modifier.padding(start = 2.dp).size(18.dp),
+    )
 }
 
 /** Fixed-column latency: [qualifier 28dp] [· ] [ms 42dp] so they line up straight down the
@@ -930,189 +910,5 @@ private fun PingLabel(latencyMs: Int?) {
         Text(qualifier, color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, modifier = Modifier.width(28.dp))
         Text(if (pingStr.isEmpty()) "   " else " · ", color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
         Text(pingStr, color = color, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, modifier = Modifier.width(42.dp))
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun RelayHealthDetailSheet(
-    health: RelayHealthInfo,
-    onDismiss: () -> Unit,
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color(0xFF1A1A1A),
-        dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.medium)
-                .padding(bottom = 32.dp),
-        ) {
-            // Header
-            Text(
-                text = displayUrl(health.relayUrl),
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-
-            // ── Trust score section ─────────────────────────────────────
-            val score = health.trustScore
-            if (score != null) {
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Canvas(modifier = Modifier.size(10.dp)) {
-                        drawCircle(color = trustColor(score.score))
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "Trust Score: ${score.score}/100",
-                        color = trustColor(score.score),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = score.confidence.replaceFirstChar { it.uppercase() } + " confidence",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                TrustBar("Reliability", score.reliability, 0.40f)
-                TrustBar("Quality", score.quality, 0.35f)
-                TrustBar("Accessibility", score.accessibility, 0.25f)
-
-                Spacer(Modifier.height(12.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    score.policy?.let { policy ->
-                        MetadataChip(label = "Policy", value = policy)
-                    }
-                    score.countryCode?.let { cc ->
-                        MetadataChip(label = "Region", value = cc)
-                    }
-                    MetadataChip(label = "Observations", value = score.observations.toString())
-                }
-
-                score.operatorVerified?.let { method ->
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "Operator verified: $method",
-                        color = HealthGreen,
-                        fontSize = 12.sp,
-                    )
-                }
-            }
-
-            // ── Monitor / liveness section ──────────────────────────────
-            val monitor = health.monitor
-            if (monitor != null) {
-                if (score != null) {
-                    Spacer(Modifier.height(16.dp))
-                    HorizontalDivider(color = Surface2)
-                }
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "Liveness Monitor",
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    monitor.rttOpen?.let { MetadataChip(label = "Open", value = "${it}ms") }
-                    monitor.rttRead?.let { MetadataChip(label = "Read", value = "${it}ms") }
-                    monitor.rttWrite?.let { MetadataChip(label = "Write", value = "${it}ms") }
-                }
-
-                if (monitor.supportedNips.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "NIPs: ${monitor.supportedNips.sorted().joinToString(", ")}",
-                        color = TextSecondary,
-                        fontSize = 11.sp,
-                    )
-                }
-
-                monitor.network?.let { net ->
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Network: $net",
-                        color = TextSecondary,
-                        fontSize = 11.sp,
-                    )
-                }
-            }
-
-            // No data at all
-            if (score == null && monitor == null) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "No health data available for this relay.",
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TrustBar(label: String, value: Int, weight: Float) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = TextSecondary,
-            fontSize = 12.sp,
-            modifier = Modifier.width(100.dp),
-        )
-        Text(
-            text = "$value",
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.width(28.dp),
-        )
-        LinearProgressIndicator(
-            progress = { value / 100f },
-            modifier = Modifier
-                .weight(1f)
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp)),
-            color = trustColor(value),
-            trackColor = Color(0xFF333333),
-        )
-        Text(
-            text = "${(weight * 100).toInt()}%",
-            color = TextSecondary.copy(alpha = 0.6f),
-            fontSize = 10.sp,
-            modifier = Modifier.width(28.dp).padding(start = 4.dp),
-        )
-    }
-}
-
-@Composable
-private fun MetadataChip(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        Text(text = label, color = TextSecondary, fontSize = 10.sp)
     }
 }
