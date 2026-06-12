@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
@@ -487,11 +488,13 @@ fun ProfileScreen(
                 verticalAlignment     = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                TextButton(onClick = { showEditProfile = true }) {
-                    Text(
-                        text     = "Edit Profile",
-                        color    = Brand,
-                        fontSize = AppType.body,
+                // In-context edit entry — matches the Settings gear (white, 22dp).
+                IconButton(onClick = { showEditProfile = true }) {
+                    Icon(
+                        imageVector        = Icons.Filled.Edit,
+                        contentDescription = "Edit profile",
+                        tint               = Color.White,
+                        modifier           = Modifier.size(22.dp),
                     )
                 }
                 IconButton(onClick = { showSettings = true }) {
@@ -511,6 +514,7 @@ fun ProfileScreen(
         SettingsScreen(
             onDismiss = { showSettings = false },
             onLogout  = onLogout,
+            onEditProfile = { showEditProfile = true },
         )
     }
     if (showEditProfile) {
