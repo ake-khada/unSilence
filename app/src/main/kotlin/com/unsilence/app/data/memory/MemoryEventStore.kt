@@ -3578,6 +3578,12 @@ class MemoryEventStore @Inject constructor(
         _followsSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
+        // Own NIP-51 config (favorites kind-10012, relay sets kind-30002) is
+        // materialized into favoritesByPubkey/relaySetsByCoordinate during the
+        // parse loop via the snapshotDirtySink, but the sink is never flushed —
+        // bump these two here so the slide-up's Eagerly flows re-read on restore.
+        _relayConfigSignal.value = now
+        _relaySetSignal.value = now
         _snapshotRestoredSignal.value = now
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
@@ -4148,6 +4154,11 @@ class MemoryEventStore @Inject constructor(
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         _emojiSetSignal.value = now
+        // Own NIP-51 config (favorites kind-10012, relay sets kind-30002) is
+        // materialized via the snapshotDirtySink during the parse loop but the
+        // sink is never flushed — bump these so the slide-up re-reads on restore.
+        _relayConfigSignal.value = now
+        _relaySetSignal.value = now
         _snapshotRestoredSignal.value = now
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
