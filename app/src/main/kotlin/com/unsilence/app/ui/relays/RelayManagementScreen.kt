@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.Canvas
@@ -18,17 +19,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.PersonSearch
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.BottomSheetDefaults
@@ -57,9 +68,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,12 +91,91 @@ import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
+import com.unsilence.app.ui.theme.BorderSubtle
+import com.unsilence.app.ui.theme.BrandSoft
+import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Text4
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val TabLabels = listOf("Inbox/Outbox", "Index", "Search", "Relay Sets", "Favorites", "Blocked")
+private data class RelayCategory(val label: String, val icon: ImageVector, val description: String)
+
+// §02: keep all six categories; labels + copy verbatim from the doc.
+private val RelayCategories = listOf(
+    RelayCategory("My relays", Icons.Filled.Dns, "where your notes are published & read"),
+    RelayCategory("Index", Icons.Filled.PersonSearch, "where unSilence looks up profiles & follow lists"),
+    RelayCategory("Search", Icons.Filled.Search, "relays used for full-text search"),
+    RelayCategory("Sets", Icons.Filled.Layers, "your saved relay groupings"),
+    RelayCategory("Favorites", Icons.Filled.Star, "relays you've starred to reuse"),
+    RelayCategory("Blocked", Icons.Filled.Block, "relays unSilence will never connect to"),
+)
+
+/** §02 category rail — scrollable pills with leading icons, filled active pill, a
+ *  right-edge fade (kills the cut-off "Blo…"), and the active category's description +
+ *  count beneath. Replaces the ScrollableTabRow; drives the existing pager. */
+@Composable
+private fun RelayCategoryRail(
+    selectedIndex: Int,
+    counts: List<Int>,
+    onSelect: (Int) -> Unit,
+) {
+    Column {
+        Box {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+            ) {
+                itemsIndexed(RelayCategories) { i, cat ->
+                    val active = i == selectedIndex
+                    val fg = if (active) Color(0xFF001012) else TextSecondary
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (active) Brand else Surface1)
+                            .then(if (active) Modifier else Modifier.border(1.dp, BorderSubtle, RoundedCornerShape(999.dp)))
+                            .clickable { onSelect(i) }
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(cat.icon, null, tint = fg, modifier = Modifier.size(13.dp))
+                        Text(cat.label, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    }
+                }
+            }
+            // Right-edge fade hint — signals the rail scrolls. matchParentSize (NOT
+            // fillMaxHeight) so it matches the pill row without inflating it to full screen
+            // height (which would starve the weighted pager). Background-only → never blocks taps.
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
+            )
+        }
+        val cat = RelayCategories[selectedIndex.coerceIn(RelayCategories.indices)]
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = cat.description,
+                color = TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = counts.getOrElse(selectedIndex) { 0 }.toString(),
+                color = Text3,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -143,37 +236,20 @@ fun RelayManagementScreen(
                 }
             }
 
-            // ── Scrollable tab row ───────────────────────────────────────────
-            ScrollableTabRow(
-                selectedTabIndex = pagerState.currentPage,
-                containerColor = Black,
-                contentColor = Brand,
-                edgePadding = Spacing.medium,
-                indicator = { tabPositions ->
-                    if (pagerState.currentPage < tabPositions.size) {
-                        TabRowDefaults.SecondaryIndicator(
-                            modifier = Modifier.tabIndicatorOffset(tabPositions[pagerState.currentPage]),
-                            color = Brand,
-                        )
-                    }
-                },
-                divider = { HorizontalDivider(color = Surface2) },
-            ) {
-                TabLabels.forEachIndexed { index, label ->
-                    Tab(
-                        selected = pagerState.currentPage == index,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
-                        text = {
-                            Text(
-                                text = label,
-                                color = if (pagerState.currentPage == index) Brand else TextSecondary,
-                                fontSize = 13.sp,
-                                fontWeight = if (pagerState.currentPage == index) FontWeight.SemiBold else FontWeight.Normal,
-                            )
-                        },
-                    )
-                }
-            }
+            // ── Category rail (pills) + active-category description + count ──
+            val categoryCounts = listOf(
+                readWriteRelays.size,
+                indexerRelays.size,
+                searchRelays.size,
+                relaySets.size,
+                favoriteRelays.count { it.setRef == null && it.url != null },
+                blockedRelays.size,
+            )
+            RelayCategoryRail(
+                selectedIndex = pagerState.currentPage,
+                counts = categoryCounts,
+                onSelect = { scope.launch { pagerState.animateScrollToPage(it) } },
+            )
 
             // ── Pager ────────────────────────────────────────────────────────
             HorizontalPager(
@@ -328,39 +404,47 @@ fun RelayManagementScreen(
 @Composable
 private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
     var input by remember { mutableStateOf("") }
+    val hint = placeholder.substringAfter("://", placeholder)   // wss:// is a fixed prefix now
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(11.dp))
+            .background(Surface1)
+            .border(1.dp, BorderSubtle, RoundedCornerShape(11.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        Text("wss://", color = Text4, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         BasicTextField(
             value         = input,
             onValueChange = { input = it },
-            textStyle     = TextStyle(color = Color.White, fontSize = 14.sp),
+            textStyle     = TextStyle(color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
             cursorBrush   = SolidColor(Brand),
             singleLine    = true,
             decorationBox = { inner ->
-                Box(modifier = Modifier.weight(1f)) {
+                // CenterStart + matching font/size = cursor sits on the placeholder baseline.
+                Box(contentAlignment = Alignment.CenterStart) {
                     if (input.isEmpty()) {
-                        Text(placeholder, color = TextSecondary, fontSize = 14.sp)
+                        Text(hint, color = Text3, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
                     }
                     inner()
                 }
             },
             modifier = Modifier.weight(1f),
         )
-        Spacer(Modifier.width(8.dp))
-        IconButton(
-            onClick = {
-                if (input.isNotBlank()) {
-                    onAdd(input.trim())
-                    input = ""
-                }
-            },
-            modifier = Modifier.size(36.dp),
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(BrandSoft)
+                .clickable {
+                    if (input.isNotBlank()) { onAdd(input.trim()); input = "" }
+                },
+            contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand)
+            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand, modifier = Modifier.size(14.dp))
         }
     }
 }
@@ -583,7 +667,7 @@ private fun RelaySetRow(
                         }
                     }
                 }
-                AddRelayInput(placeholder = "Add relay to set") { url ->
+                AddRelayInput(placeholder = "wss://relay.example.com") { url ->
                     viewModel.addRelayToSet(set.dTag, url)
                 }
             }
