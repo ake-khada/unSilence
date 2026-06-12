@@ -2272,6 +2272,28 @@ class RelayPool @Inject constructor(
         return normalized.count { connections[it]?.isConnected == true }
     }
 
+    /** USER-INITIATED one-shot RTT probe (the relay-screen "Test" action). Times the connect
+     *  handshake on a fresh ephemeral socket. Deliberately NO background/periodic pinger and
+     *  NO persisted history — lean, on-demand only. Returns connect latency in ms, or null if
+     *  unreachable within the timeout. */
+    suspend fun measureRtt(url: String): Int? {
+        val u = normalizeRelayUrl(url) ?: return null
+        if (u in blockedUrls) return null
+        val conn = RelayConnection(u, okHttpClient, relayCapabilitiesStore)
+        val start = System.nanoTime()
+        return try {
+            conn.connect()
+            val state = withTimeoutOrNull(5_000) {
+                conn.state.first { it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED }
+            }
+            if (state == RelayState.CONNECTED) ((System.nanoTime() - start) / 1_000_000L).toInt() else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn.close()
+        }
+    }
+
     /**
      * Build/refresh the relay directory (Phase 1). Public, ON-DEMAND only — never cold-start
      * or background (Phase 2 wires it to the discovery screen). Single-flight; 6h success-only

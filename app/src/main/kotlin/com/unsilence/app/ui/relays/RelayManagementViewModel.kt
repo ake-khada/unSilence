@@ -40,6 +40,9 @@ class RelayManagementViewModel @Inject constructor(
     // PHASE-2: replace with the dedicated discovery screen's load. Temporary trigger to
     // validate the Phase-1 relay-directory firehose (ensureDirectoryFresh is on-demand only,
     // never cold-start/background). Single-flight + 6h TTL are enforced inside the call.
+    /** User-initiated one-shot RTT probe for the "Test" action (no background/persistence). */
+    suspend fun measureRtt(url: String): Int? = relayPool.measureRtt(url)
+
     fun phase1TriggerDirectoryBuild() {
         viewModelScope.launch(Dispatchers.IO) { relayPool.ensureDirectoryFresh() }
     }
