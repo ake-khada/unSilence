@@ -100,6 +100,7 @@ class RelayPool @Inject constructor(
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
     private val activeSubsSource: dagger.Lazy<ActiveSubsSource>,
     private val networkMonitor: NetworkMonitor,
+    private val nip11Fetcher: Nip11Fetcher,
 ) : RelayTransport, ReconnectSource {
     // WebSocket consume loops MUST not be starved by snapshot restore or
     // other heavy IO. limitedParallelism(8) reserves dedicated threads for
@@ -2392,6 +2393,50 @@ class RelayPool @Inject constructor(
             ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
             reachability = reach,
         )
+    }
+
+    /**
+     * Build the per-relay DETAIL view (§05, on detail-open). Overlays this device's NIP-11
+     * fetch onto the monitor seed (PERSPECTIVE RULE — device wins), takes ONE live RTT probe,
+     * and recomputes reachability from fresh caps + the probe outcome. Writes the merged entry
+     * back into the directory so the device perspective persists for the session (a 6h rebuild
+     * resets it to the monitor seed, re-fetched on next open). Returns null only for an
+     * unnormalizable url. Never throws — an unreachable host yields a monitor-seed entry with
+     * ourRttMs=null, which the detail page renders as an honest "untested/blocked" verdict.
+     */
+    suspend fun buildRelayDetail(url: String): RelayDirectoryEntry? {
+        val u = normalizeRelayUrl(url) ?: return null
+        val mes = memoryEventStore.get()
+        val base = relayDirectory[u]
+            ?: RelayDirectoryEntry(url = u, popularity = computeDirectoryPopularity(mes)[u] ?: 0)
+
+        // Device NIP-11 — the authority. Null (unreachable/blocked) keeps the monitor seed.
+        val doc = nip11Fetcher.fetch(u)
+        val overlaid = if (doc != null) RelayDirectory.overlayDeviceNip11(base, doc) else base
+
+        // One live RTT on open (the connect-handshake probe). This also refreshes caps:
+        // onOpen clears strikes; a failure records the skip reason — so read caps AFTER.
+        val rtt = measureRtt(u)
+        val caps = relayCapabilitiesStore.get(u)
+        val reach = RelayDirectory.computeReachability(
+            hasCapsEntry = caps != null || rtt != null,
+            deadFailCount = caps?.deadFailCount ?: 0,
+            authRequired = (caps?.authRequired == true) || overlaid.auth,
+            restricted = caps?.restricted == true,
+            strikes = caps?.strikes ?: 0,
+            consecutiveFailures = caps?.consecutiveFailures ?: 0,
+            lastReason = caps?.lastReason,
+            monitorRttMs = rtt ?: overlaid.monitorRttMs,
+        )
+        val detail = overlaid.copy(
+            ourRttMs = rtt,
+            ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
+            reachability = reach,
+        )
+        relayDirectory[u] = detail
+        Log.w(TAG, "DETAIL: $u src=${detail.nip11Source} rtt=${rtt}ms reach=${detail.reachability} " +
+            "nips=${detail.supportedNips.size} pop=${detail.popularity}")
+        return detail
     }
 
     /** Ephemeral, paginated (A6), VERIFIED (A1) collect of kind-30166 from one transport.
