@@ -51,6 +51,10 @@ data class RelayDirectoryEntry(
      */
     val nip11Source: Nip11Source = Nip11Source.MONITOR,
     val monitorPubkeys: Set<String> = emptySet(),    // which monitors reported (for the 2-monitor-negative rule)
+    // Detail-page fields — only populated by the device NIP-11 overlay (never by monitors).
+    val feeMsats: Long? = null,                      // fees.admission[0], normalized to msats
+    val operatorPubkey: String? = null,              // NIP-11 `pubkey` (hex) — operator self-ID, NOT verification
+    val contact: String? = null,                     // NIP-11 `contact`
 )
 
 object RelayDirectory {
@@ -184,6 +188,30 @@ object RelayDirectory {
             restrictedWrites = entries.any { it.restrictedWrites },
         )
     }
+
+    /**
+     * Overlay a device-fetched NIP-11 doc onto a monitor-sourced base entry — the PERSPECTIVE
+     * RULE. Device fields WIN wherever present (subnet.relays.land serves a different name to
+     * this device than the monitor saw); a null device field falls back to the monitor seed
+     * rather than blanking it. Getting any device doc at all flips nip11Source to DEVICE: from
+     * here on this entry's identity is what THIS device saw, not the monitor consensus.
+     */
+    fun overlayDeviceNip11(base: RelayDirectoryEntry, doc: DeviceNip11Doc): RelayDirectoryEntry =
+        base.copy(
+            name = doc.name ?: base.name,
+            description = doc.description ?: base.description,
+            icon = doc.icon ?: base.icon,
+            software = doc.software ?: base.software,
+            version = doc.version ?: base.version,
+            supportedNips = if (doc.supportedNips.isNotEmpty()) doc.supportedNips else base.supportedNips,
+            auth = doc.authRequired ?: base.auth,
+            payment = doc.paymentRequired ?: base.payment,
+            restrictedWrites = doc.restrictedWrites ?: base.restrictedWrites,
+            feeMsats = doc.feeMsats ?: base.feeMsats,
+            operatorPubkey = doc.operatorPubkey ?: base.operatorPubkey,
+            contact = doc.contact ?: base.contact,
+            nip11Source = Nip11Source.DEVICE,
+        )
 
     /**
      * Our empirical reachability verdict — pure, testable directly (computeRetryCooldownMs
