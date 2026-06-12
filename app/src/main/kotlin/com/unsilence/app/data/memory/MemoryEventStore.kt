@@ -2971,6 +2971,9 @@ class MemoryEventStore @Inject constructor(
     fun getSetMembers(ownerPubkey: String, dTag: String): List<String> =
         relaySetsByCoordinate["$ownerPubkey:$dTag"]?.members ?: emptyList()
 
+    fun getRelaySet(ownerPubkey: String, dTag: String): RelaySet? =
+        relaySetsByCoordinate["$ownerPubkey:$dTag"]
+
     fun getAllSetsFlow(ownerPubkey: String): Flow<List<RelaySet>> =
         _relaySetSignal
             .map { getAllRelaySets(ownerPubkey) }

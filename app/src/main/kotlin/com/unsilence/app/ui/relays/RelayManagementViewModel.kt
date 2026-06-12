@@ -348,9 +348,15 @@ class RelayManagementViewModel @Inject constructor(
         publishing.value = true
         try {
             val now = nowSeconds()
-            val members = memoryEventStore.getSetMembers(pk, dTag)
+            val set = memoryEventStore.getRelaySet(pk, dTag)
+            val members = set?.members ?: memoryEventStore.getSetMembers(pk, dTag)
             val tagsList = mutableListOf<Array<String>>()
             tagsList.add(arrayOf("d", dTag))
+            // Preserve NIP-51 metadata across edits — dropping `title` here was mangling
+            // the set name to the random d-tag on every relay add/remove.
+            set?.title?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("title", it)) }
+            set?.description?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("description", it)) }
+            set?.image?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("image", it)) }
             for (url in members) {
                 tagsList.add(arrayOf("relay", url))
             }
