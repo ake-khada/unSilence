@@ -2260,9 +2260,16 @@ class RelayPool @Inject constructor(
     private val relayDirectory = ConcurrentHashMap<String, RelayDirectoryEntry>()
     private val directoryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var lastDirectoryBuildAt = 0L
+    private val _directoryFlow = MutableStateFlow<Map<String, RelayDirectoryEntry>>(emptyMap())
+    private val _directoryBuilding = MutableStateFlow(false)
 
     /** Snapshot of the built directory (UI/validation). */
     fun directorySnapshot(): Map<String, RelayDirectoryEntry> = relayDirectory.toMap()
+
+    /** Reactive directory for the §04 Discovery screen — emits the full map after each build. */
+    val directoryFlow: StateFlow<Map<String, RelayDirectoryEntry>> = _directoryFlow.asStateFlow()
+    /** True while a directory build is in flight (Discovery loading state). */
+    val directoryBuilding: StateFlow<Boolean> = _directoryBuilding.asStateFlow()
 
     /** How many of [urls] (the caller's own kind-10002 relays) are CONNECTED right now.
      *  One-shot snapshot — no ticker. INTERSECTION, never connections.size: the pool idles
@@ -2311,6 +2318,7 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "DIRECTORY: build already in flight — skipping")
             return
         }
+        _directoryBuilding.value = true
         val started = System.currentTimeMillis()
         try {
             val perUrl = HashMap<String, MutableList<RelayDirectoryEntry>>()
@@ -2332,15 +2340,40 @@ class RelayPool @Inject constructor(
                 }
             }
             val mes = memoryEventStore.get()
+            val ownPkForFollows = keyManager.getPublicKeyHex()
             val trust = mes.getTrustScores()
             val popularity = computeDirectoryPopularity(mes)
+            val followsUsing = computeDirectoryFollowsUsing(mes, ownPkForFollows)
             val built = perUrl.mapValues { (_, entries) ->
                 // Dedup per monitor (newest createdAt), then merge across monitors (median RTT).
                 val perMonitorNewest = entries.groupBy { it.monitorPubkeys.firstOrNull() }
                     .values.map { grp -> grp.maxBy { it.monitorLastSeenAt } }
                 val merged = RelayDirectory.mergeMonitorEntries(perMonitorNewest)
-                enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0)
+                enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0, followsUsing[merged.url] ?: 0)
+            }.toMutableMap()
+
+            // Seed the user's OWN configured relays (r/w, search, favorites, set members) that the
+            // monitor never reported, so relays you ALREADY use are always discoverable — e.g.
+            // perspective relays like subnet.relays.land the monitor can't enumerate. Enriched with
+            // our reachability/popularity; description/geo stay null until a detail-open device fetch.
+            if (ownPkForFollows != null) {
+                val configured = buildSet {
+                    addAll(mes.writeRelaysFor(ownPkForFollows))
+                    addAll(mes.readRelaysFor(ownPkForFollows))
+                    addAll(mes.getSearchRelayUrls(ownPkForFollows))
+                    mes.getFavoriteRelayConfigs(ownPkForFollows).forEach { it.url?.let(::add) }
+                    mes.getAllRelaySets(ownPkForFollows).forEach { addAll(it.members) }
+                }.mapNotNull { normalizeRelayUrl(it) }
+                var seeded = 0
+                for (u in configured) {
+                    if (u !in built) {
+                        built[u] = enrichDirectoryEntry(RelayDirectoryEntry(url = u), trust[u]?.score, popularity[u] ?: 0, followsUsing[u] ?: 0)
+                        seeded++
+                    }
+                }
+                if (seeded > 0) Log.w(TAG, "DIRECTORY: seeded $seeded own-configured relays not in monitor data")
             }
+
             // Bound: never evict the user's own-list relays.
             val ownPk = keyManager.getPublicKeyHex()
             val ownRelays = if (ownPk != null) {
@@ -2357,11 +2390,33 @@ class RelayPool @Inject constructor(
                 "reachable=$reachable dnsBlocked=$dnsBlocked")
             val land = relayDirectory.keys.filter { it.contains("relays.land") }
             Log.w(TAG, "DIRECTORY: relays.land entries = $land")   // acceptance signal
+            _directoryFlow.value = relayDirectory.toMap()
         } catch (e: Exception) {
             Log.w(TAG, "DIRECTORY: build failed — ${e.message} (TTL not advanced, will retry)")
         } finally {
             directoryInFlight.set(false)
+            _directoryBuilding.value = false
         }
+    }
+
+    /** Per-build "N you follow" — for each url, how many of the user's follows list it in their
+     *  kind-10002. Bounded (follows set × their relay lists), computed once per build; the detail
+     *  page's per-open recompute (buildRelayDetail) stays the fresher override. */
+    private fun computeDirectoryFollowsUsing(
+        mes: com.unsilence.app.data.memory.MemoryEventStore,
+        ownPubkey: String?,
+    ): Map<String, Int> {
+        val follows = ownPubkey?.let { mes.getFollows(it) } ?: return emptyMap()
+        if (follows.isEmpty()) return emptyMap()
+        val allLists = mes.allRelayListsSnapshot()
+        val counts = HashMap<String, Int>()
+        for (fp in follows) {
+            val rl = allLists[fp] ?: continue
+            (rl.read + rl.write).mapNotNull { normalizeRelayUrl(it) }.toSet().forEach { url ->
+                counts[url] = (counts[url] ?: 0) + 1
+            }
+        }
+        return counts
     }
 
     private fun computeDirectoryPopularity(mes: com.unsilence.app.data.memory.MemoryEventStore): Map<String, Int> {
@@ -2374,7 +2429,7 @@ class RelayPool @Inject constructor(
         return counts
     }
 
-    private fun enrichDirectoryEntry(merged: RelayDirectoryEntry, trustScore: Int?, popularity: Int): RelayDirectoryEntry {
+    private fun enrichDirectoryEntry(merged: RelayDirectoryEntry, trustScore: Int?, popularity: Int, followsUsing: Int): RelayDirectoryEntry {
         val caps = relayCapabilitiesStore.get(merged.url)
         // Device-empirical evidence is the trump card (A5); monitor data only adds positive signal.
         val reach = RelayDirectory.computeReachability(
@@ -2390,6 +2445,7 @@ class RelayPool @Inject constructor(
         return merged.copy(
             trustScore = trustScore,
             popularity = popularity,
+            followsUsing = followsUsing,
             ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
             reachability = reach,
         )

@@ -39,9 +39,6 @@ class RelayManagementViewModel @Inject constructor(
     private val signingManager: SigningManager,
 ) : ViewModel() {
 
-    // PHASE-2: replace with the dedicated discovery screen's load. Temporary trigger to
-    // validate the Phase-1 relay-directory firehose (ensureDirectoryFresh is on-demand only,
-    // never cold-start/background). Single-flight + 6h TTL are enforced inside the call.
     /** User-initiated one-shot RTT probe for the "Test" action (no background/persistence). */
     suspend fun measureRtt(url: String): Int? = relayPool.measureRtt(url)
 
@@ -61,9 +58,16 @@ class RelayManagementViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) { relayPool.fetchProfiles(listOf(pubkeyHex)) }
     }
 
-    fun phase1TriggerDirectoryBuild() {
+    /** §04 Discovery: the relay-directory firehose now runs ONLY when Discovery opens (never on
+     *  relay-management open, never cold-start/background). Single-flight + 6h TTL inside. */
+    fun ensureDirectory() {
         viewModelScope.launch(Dispatchers.IO) { relayPool.ensureDirectoryFresh() }
     }
+
+    /** Built directory, reactive (emits after each build) + a build-in-flight flag. */
+    val relayDirectory: kotlinx.coroutines.flow.StateFlow<Map<String, com.unsilence.app.data.relay.RelayDirectoryEntry>> =
+        relayPool.directoryFlow
+    val directoryBuilding: kotlinx.coroutines.flow.StateFlow<Boolean> = relayPool.directoryBuilding
 
     val ownerPubkey: String? get() = keyManager.getPublicKeyHex()
 

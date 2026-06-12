@@ -57,6 +57,7 @@ import com.unsilence.app.BuildConfig
 import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.relays.RelayDetailScreen
+import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.settings.MediaUploadSettingsScreen
 import com.unsilence.app.ui.theme.Black
@@ -85,6 +86,7 @@ fun SettingsScreen(
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
     var relayDetailUrl by remember { mutableStateOf<String?>(null) }
+    var showDiscovery by remember { mutableStateOf(false) }
     var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
     var showCustomEmojis by remember { mutableStateOf(false) }
@@ -216,6 +218,11 @@ fun SettingsScreen(
     }
     if (showRelays) RelayManagementScreen(
         onDismiss = { showRelays = false },
+        onOpenDetail = { url -> relayDetailUrl = url },
+        onOpenDiscovery = { showDiscovery = true },
+    )
+    if (showDiscovery) RelayDiscoveryScreen(
+        onDismiss = { showDiscovery = false },
         onOpenDetail = { url -> relayDetailUrl = url },
     )
     relayDetailUrl?.let { url ->
