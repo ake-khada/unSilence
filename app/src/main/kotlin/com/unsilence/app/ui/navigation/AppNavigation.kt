@@ -118,6 +118,7 @@ import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.relays.RelayDetailScreen
+import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
@@ -178,6 +179,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var showCreateRelaySet   by remember { mutableStateOf(false) }
     var showRelaySettings    by remember { mutableStateOf(false) }
     var relayDetailUrl       by remember { mutableStateOf<String?>(null) }
+    var showDiscovery        by remember { mutableStateOf(false) }
     var threadEventId        by remember { mutableStateOf<String?>(null) }
     var replyToEventId       by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
@@ -568,10 +570,19 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         feedViewModel.addPinnedRelay(url, label)
                     },
                     onOpenDetail = { url -> relayDetailUrl = url },
+                    onOpenDiscovery = { showDiscovery = true },
                 )
             }
 
-            // ── Relay detail overlay (§05) — over the relay list ────────────
+            // ── Relay discovery overlay (§04) — over the relay list ─────────
+            if (showDiscovery) {
+                RelayDiscoveryScreen(
+                    onDismiss = { showDiscovery = false },
+                    onOpenDetail = { url -> relayDetailUrl = url },
+                )
+            }
+
+            // ── Relay detail overlay (§05) — over discovery + the relay list ─
             relayDetailUrl?.let { url ->
                 RelayDetailScreen(
                     relayUrl  = url,

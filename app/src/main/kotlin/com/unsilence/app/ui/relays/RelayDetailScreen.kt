@@ -60,7 +60,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.Nip11Source
 import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.memory.RelayConfig
@@ -68,7 +67,6 @@ import com.unsilence.app.data.relay.EyesAlliance
 import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
-import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.parseNip05
 import com.unsilence.app.ui.theme.BorderFaint
@@ -217,14 +215,7 @@ private fun RelayDetailHero(url: String, e: RelayDirectoryEntry?, loading: Boole
         modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.medium, vertical = Spacing.medium),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val icon = e?.icon
-        Box(modifier = Modifier.size(50.dp).clip(RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
-            if (!icon.isNullOrBlank()) {
-                AsyncImage(model = icon, contentDescription = null, modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)))
-            } else {
-                IdentIcon(pubkey = e?.operatorPubkey ?: url, modifier = Modifier.fillMaxSize())
-            }
-        }
+        RelayIcon(e?.icon, Modifier.size(50.dp))
         Spacer(Modifier.width(Spacing.medium))
         Column(modifier = Modifier.weight(1f)) {
             Text(

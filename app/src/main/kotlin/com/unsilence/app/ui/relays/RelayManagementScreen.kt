@@ -195,6 +195,7 @@ fun RelayManagementScreen(
     onDismiss: () -> Unit,
     onStartFeed: ((url: String, label: String) -> Unit)? = null,
     onOpenDetail: (url: String) -> Unit = {},
+    onOpenDiscovery: () -> Unit = {},
     viewModel: RelayManagementViewModel = hiltViewModel(),
 ) {
     BackHandler(onBack = onDismiss)
@@ -210,9 +211,8 @@ fun RelayManagementScreen(
     val relaySets       by viewModel.relaySets.collectAsStateWithLifecycle(initialValue = emptyList())
     val relayHealth     by viewModel.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
 
-    // PHASE-2: replace with the dedicated relay-discovery screen. Temporary Phase-1 trigger
-    // to build/refresh the relay directory firehose on open (single-flight + 6h TTL inside).
-    LaunchedEffect(Unit) { viewModel.phase1TriggerDirectoryBuild() }
+    // NB: the relay-directory firehose is NO LONGER triggered here — it fires only when the user
+    // opens §04 Discovery (the firehose costs nothing until someone asks to discover).
 
     var showCreateRelaySet by remember { mutableStateOf(false) }
     // Item 3: user-initiated "Test" results. value -1 = tested & offline; absent = not tested
@@ -240,7 +240,7 @@ fun RelayManagementScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(Sizing.topBarHeight)
-                        .padding(horizontal = Spacing.medium),
+                        .padding(start = Spacing.medium, end = Spacing.small),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -248,7 +248,12 @@ fun RelayManagementScreen(
                         color      = Color.White,
                         fontSize   = 16.sp,
                         fontWeight = FontWeight.SemiBold,
+                        modifier   = Modifier.weight(1f),
                     )
+                    // §04 Discovery entry — find relays you don't already know the URL of.
+                    IconButton(onClick = onOpenDiscovery) {
+                        Icon(Icons.Filled.Search, contentDescription = "Discover relays", tint = Brand, modifier = Modifier.size(22.dp))
+                    }
                 }
             }
 
