@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>unSilence — Settings & Relays Redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<style>
+  /* ============================================================
+     Scoped components for the Settings + Relays mockups.
+     Colour / spacing / type tokens are inherited from styles.css.
+     ============================================================ */
+
+  /* Bigger phone variant for dense, net-new screens */
+  .phone.lg { width: 340px; }
+
+  /* Two-column layout for net-new screens (no "current" to compare) */
+  .solo-block {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 56px;
+    align-items: start;
+  }
+
+  /* ---- Mobile app bar (settings/relay header) ---- */
+  .m-titlebar {
+    padding: 16px 18px 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .m-titlebar .back {
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-2);
+    margin-left: -6px;
+  }
+  .m-titlebar .back svg { width: 20px; height: 20px; }
+  .m-title {
+    font-family: var(--font-display);
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    color: var(--text-1);
+    white-space: nowrap;
+  }
+  .m-title-sub {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+    margin-top: 2px;
+  }
+
+  /* ---- Settings: account card ---- */
+  .set-account {
+    margin: 0 14px 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 14px;
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-faint);
+    border-radius: 14px;
+  }
+  .set-account .meta { flex: 1; min-width: 0; }
+  .set-account .nm { font-size: 14px; font-weight: 600; color: var(--text-1); }
+  .set-account .np { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); margin-top: 2px; }
+  .set-account .chev { color: var(--text-3); }
+  .set-account .chev svg { width: 16px; height: 16px; }
+
+  /* ---- Settings: group label ---- */
+  .set-group {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding: 16px 20px 7px;
+  }
+
+  /* ---- Settings: row ---- */
+  .set-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 11px 18px;
+  }
+  .set-row .ic {
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    background: var(--bg-elev-2);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-1);
+    flex-shrink: 0;
+  }
+  .set-row .ic svg { width: 16px; height: 16px; }
+  .set-row .body { flex: 1; min-width: 0; }
+  .set-row .t { font-size: 14px; color: var(--text-1); font-weight: 500; line-height: 1.2; }
+  .set-row .d { font-size: 11.5px; color: var(--text-3); margin-top: 2px; line-height: 1.3; }
+  .set-row .right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .set-row .badge {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--mint);
+    background: rgba(61,220,151,0.10);
+    border: 1px solid rgba(61,220,151,0.25);
+    padding: 2px 7px;
+    border-radius: 999px;
+    letter-spacing: 0.04em;
+  }
+  .set-row .chev { color: var(--text-4); }
+  .set-row .chev svg { width: 15px; height: 15px; }
+
+  /* soon variant — light, subordinate, single line */
+  .set-row.soon { opacity: 0.45; }
+  .set-row.soon .ic { background: transparent; }
+  .soon-chip {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    border: 1px solid var(--border-subtle);
+    padding: 2px 6px;
+    border-radius: 999px;
+  }
+
+  /* danger zone */
+  .set-danger {
+    margin: 20px 18px 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-faint);
+  }
+  .set-logout {
+    display: flex; align-items: center; gap: 10px;
+    color: var(--like);
+    font-size: 14px;
+    font-weight: 500;
+    padding: 6px 0;
+  }
+  .set-logout svg { width: 17px; height: 17px; }
+  .set-version {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--text-4);
+    margin-top: 14px;
+    letter-spacing: 0.04em;
+  }
+
+  /* ---- Relay category nav (scrollable, fade, with descriptions) ---- */
+  .relay-cats-wrap { position: relative; flex-shrink: 0; }
+  .relay-cats {
+    display: flex;
+    gap: 7px;
+    padding: 4px 16px 12px;
+    overflow: hidden;
+  }
+  .relay-cat {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-2);
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-subtle);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .relay-cat svg { width: 13px; height: 13px; opacity: 0.8; }
+  .relay-cat.active {
+    background: var(--brand);
+    color: #001012;
+    border-color: var(--brand);
+  }
+  .relay-cat.partial { opacity: 0.55; }
+  /* right edge fade hint */
+  .relay-cats-fade {
+    position: absolute; right: 0; top: 0; bottom: 12px;
+    width: 40px;
+    background: linear-gradient(to right, transparent, var(--bg-base));
+    pointer-events: none;
+  }
+  .cat-desc {
+    padding: 0 18px 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .cat-desc .txt { font-size: 11.5px; color: var(--text-2); line-height: 1.4; flex: 1; }
+  .cat-desc .cnt { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); white-space: nowrap; }
+
+  /* ---- Relay health summary bar ---- */
+  .relay-summary {
+    margin: 0 16px 6px;
+    padding: 9px 13px;
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-faint);
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .relay-summary .seg { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); }
+  .relay-summary .seg .d { width: 7px; height: 7px; border-radius: 50%; }
+  .relay-summary .test {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10px; color: var(--brand);
+  }
+  .relay-summary .test svg { width: 12px; height: 12px; }
+
+  /* ---- Add relay field ---- */
+  .relay-add {
+    margin: 6px 16px 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: 11px;
+    flex-shrink: 0;
+  }
+  .relay-add .pfx { font-family: var(--font-mono); font-size: 11px; color: var(--text-4); }
+  .relay-add .ph { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); flex: 1; }
+  .relay-add .go {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: var(--brand-soft); color: var(--brand);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .relay-add .go svg { width: 14px; height: 14px; }
+
+  /* ---- Relay row ---- */
+  .relay-list { padding: 0 16px; }
+  .relay-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .relay-row .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .relay-row .info { flex: 1; min-width: 0; }
+  .relay-row .nm { font-size: 13px; color: var(--text-1); font-weight: 500; }
+  .relay-row .meta { font-family: var(--font-mono); font-size: 10px; margin-top: 2px; }
+  .relay-row .rw { display: flex; gap: 4px; flex-shrink: 0; }
+  .rw-pill {
+    width: 22px; height: 22px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+    border: 1px solid var(--border-default);
+    color: var(--text-3);
+  }
+  .rw-pill.on { background: var(--brand-soft); border-color: rgba(0,229,255,0.4); color: var(--brand); }
+  .relay-row .chev { color: var(--text-4); flex-shrink: 0; }
+  .relay-row .chev svg { width: 15px; height: 15px; }
+
+  /* swipe-to-remove reveal */
+  .relay-row.swiped { position: relative; }
+  .swipe-remove {
+    position: absolute; right: 0; top: 4px; bottom: 4px;
+    width: 76px;
+    background: var(--like);
+    border-radius: 9px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px;
+    color: #1a0008;
+  }
+  .swipe-remove svg { width: 15px; height: 15px; }
+  .swipe-remove span { font-size: 9px; font-weight: 700; }
+
+  /* ---- Discovery ---- */
+  .disc-search {
+    margin: 4px 16px 12px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 10px 13px;
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+  .disc-search svg { width: 15px; height: 15px; color: var(--text-3); }
+  .disc-search .ph { font-size: 12.5px; color: var(--text-3); flex: 1; }
+  .disc-chips { display: flex; gap: 6px; padding: 0 16px 14px; overflow: hidden; flex-shrink: 0; }
+  .disc-chip {
+    font-size: 11px; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--border-default); color: var(--text-2);
+    white-space: nowrap;
+  }
+  .disc-chip.on { background: var(--brand-soft); color: var(--brand); border-color: rgba(0,229,255,0.35); }
+  .disc-sec-label {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 6px 16px 8px;
+  }
+  .disc-sec-label .l {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--text-3);
+  }
+  .disc-sec-label .more { font-size: 10.5px; color: var(--brand); }
+  .disc-card {
+    margin: 0 16px 8px;
+    padding: 13px;
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border-faint);
+    border-radius: 13px;
+  }
+  .disc-card .top { display: flex; align-items: center; gap: 10px; }
+  .disc-card .ava {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--brand-deep), #0a3d47);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--brand); flex-shrink: 0;
+  }
+  .disc-card .ava svg { width: 16px; height: 16px; }
+  .disc-card .hd { flex: 1; min-width: 0; }
+  .disc-card .hd .nm { font-size: 13px; font-weight: 600; color: var(--text-1); display: flex; align-items: center; gap: 6px; }
+  .disc-card .hd .sub { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-3); margin-top: 2px; }
+  .disc-card .add {
+    background: var(--brand); color: #001012; border: none;
+    font-size: 11px; font-weight: 600; padding: 6px 13px; border-radius: 999px;
+    font-family: var(--font-body); flex-shrink: 0; white-space: nowrap;
+  }
+  .disc-card .add.added { background: transparent; color: var(--text-2); border: 1px solid var(--border-default); }
+  .disc-card .desc { font-size: 11.5px; color: var(--text-2); line-height: 1.45; margin: 10px 0 0; }
+  .disc-card .foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .disc-card .stat { display: flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 9.5px; color: var(--text-3); }
+  .disc-card .stat .d { width: 6px; height: 6px; border-radius: 50%; }
+  .paid-badge {
+    font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.06em;
+    color: var(--zap); border: 1px solid rgba(255,182,39,0.3); background: rgba(255,182,39,0.08);
+    padding: 1px 6px; border-radius: 999px;
+  }
+
+  /* ---- Detail page ---- */
+  .dt-hero {
+    padding: 4px 18px 16px;
+    display: flex; align-items: center; gap: 13px;
+    border-bottom: 1px solid var(--border-faint);
+    flex-shrink: 0;
+  }
+  .dt-hero .ava {
+    width: 50px; height: 50px; border-radius: 13px;
+    background: linear-gradient(135deg, var(--brand-deep), #0a3d47);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--brand); flex-shrink: 0;
+  }
+  .dt-hero .ava svg { width: 24px; height: 24px; }
+  .dt-hero .nm { font-family: var(--font-display); font-size: 18px; font-weight: 600; color: var(--text-1); }
+  .dt-hero .url { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); margin-top: 3px; display: flex; align-items: center; gap: 6px; }
+  .dt-hero .url svg { width: 11px; height: 11px; }
+
+  .dt-stats { display: flex; gap: 1px; background: var(--border-faint); margin: 14px 16px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border-faint); flex-shrink: 0; }
+  .dt-stat { flex: 1; background: var(--bg-elev-1); padding: 11px 8px; text-align: center; }
+  .dt-stat .v { font-family: var(--font-display); font-size: 16px; font-weight: 600; }
+  .dt-stat .k { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); margin-top: 3px; }
+
+  .dt-section { padding: 6px 18px 4px; }
+  .dt-section .lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-3); margin-bottom: 8px; }
+  .dt-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+  .dt-nips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .nip-chip {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-1); background: var(--bg-elev-2);
+    border: 1px solid var(--border-faint); padding: 3px 8px; border-radius: 6px;
+  }
+  .nip-chip.hl { color: var(--brand); border-color: rgba(0,229,255,0.3); background: var(--brand-soft); }
+  .dt-kv { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border-faint); font-size: 12px; }
+  .dt-kv:last-child { border-bottom: none; }
+  .dt-kv .k { color: var(--text-3); white-space: nowrap; }
+  .dt-kv .v { color: var(--text-1); font-family: var(--font-mono); font-size: 11px; text-align: right; }
+
+  .dt-actions {
+    position: sticky; bottom: 0;
+    padding: 12px 16px 16px;
+    background: linear-gradient(to top, var(--bg-base) 70%, transparent);
+    display: flex; gap: 8px;
+    flex-shrink: 0;
+  }
+  .dt-btn {
+    flex: 1; padding: 12px; border-radius: 12px; font-weight: 600; font-size: 13px;
+    font-family: var(--font-body); border: none; text-align: center;
+  }
+  .dt-btn.primary { background: var(--brand); color: #001012; }
+  .dt-btn.ghost { background: transparent; color: var(--text-1); border: 1px solid var(--border-default); flex: 0 0 auto; width: 46px; display: flex; align-items: center; justify-content: center; }
+  .dt-btn.ghost svg { width: 17px; height: 17px; }
+
+  /* sparkline */
+  .sparkline { width: 100%; height: 36px; display: block; }
+
+  /* anatomy callout */
+  .anatomy {
+    background: var(--bg-doc);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 32px;
+    margin-top: 28px;
+  }
+  .anatomy-row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 24px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border-faint);
+    align-items: center;
+  }
+  .anatomy-row:last-child { border-bottom: none; }
+  .anatomy-tag {
+    font-family: var(--font-mono); font-size: 11px; color: var(--brand);
+    letter-spacing: 0.04em;
+  }
+  .anatomy-desc { color: var(--text-2); font-size: 13px; line-height: 1.5; }
+  .anatomy-desc strong { color: var(--text-1); }
+</style>
+</head>
+<body>
+
+<!-- ============== SIDE NAV ============== -->
+<nav class="sidenav">
+  <div class="sidenav-brand">un<span class="accent">Silence</span></div>
+  <div class="sidenav-tag">Settings &amp; Relays · v1</div>
+
+  <a href="#intro"><span class="num">00</span> Overview</a>
+  <a href="#settings"><span class="num">01</span> Settings</a>
+  <a href="#relay-nav"><span class="num">02</span> Relay navigation</a>
+  <a href="#relay-row"><span class="num">03</span> Relay row anatomy</a>
+  <a href="#discovery"><span class="num">04</span> Relay discovery</a>
+  <a href="#detail"><span class="num">05</span> Relay detail page</a>
+  <a href="#build"><span class="num">06</span> Build order</a>
+</nav>
+
+<main class="doc">
+
+  <!-- ============== HERO ============== -->
+  <header class="hero" id="intro">
+    <div class="hero-eyebrow">Settings &amp; Relays · redesign · Claude Code handoff</div>
+    <h1>
+      Make the plumbing<br>
+      <em>feel effortless.</em>
+    </h1>
+    <p class="hero-lede">
+      Relays are unSilence's superpower and its steepest cliff. The current Settings and Relay screens expose raw protocol mechanics — overflowing tabs, contradictory health signals, cryptic R/W boxes, one-tap deletes — with no way to <em>discover</em> relays or understand what one actually is. This redesign keeps every capability, applies the AMOLED + golden-ratio system, fixes the navigation, and adds the two missing surfaces: a <strong>relay discovery</strong> browser and a <strong>per-relay detail page</strong>.
+    </p>
+
+    <div class="hero-meta">
+      <div class="hero-meta-cell">
+        <div class="label">Screens</div>
+        <div class="value">2 fixed · 2 new</div>
+      </div>
+      <div class="hero-meta-cell">
+        <div class="label">Critical issues</div>
+        <div class="value">9</div>
+      </div>
+      <div class="hero-meta-cell">
+        <div class="label">New surfaces</div>
+        <div class="value">Discover · Detail</div>
+      </div>
+      <div class="hero-meta-cell">
+        <div class="label">Target device</div>
+        <div class="value">Pixel 9 Pro XL</div>
+      </div>
+    </div>
+
+    <div class="note" style="margin-top: 36px; background: var(--bg-elev-1); border: 1px solid rgba(0,229,255,0.2); border-left: 3px solid var(--brand); border-radius: 12px; padding: 20px 24px; color: var(--text-2); font-size: 14px; line-height: 1.55;">
+      <strong style="color:var(--text-1);">Design language carried over.</strong> True AMOLED <code style="font-family:var(--font-mono); color:var(--brand);">#000000</code> base, the four-step surface ladder, brand cyan as accent (not a wall), mint/amber/rose for health, Space&nbsp;Grotesk / Geist / JetBrains&nbsp;Mono, golden-ratio spacing (5·8·12·20·32·52). Everything resolves to the existing <code style="font-family:var(--font-mono); color:var(--brand);">Colors</code> / <code style="font-family:var(--font-mono); color:var(--brand);">Spacing</code> / <code style="font-family:var(--font-mono); color:var(--brand);">AppType</code> tokens.
+    </div>
+  </header>
+
+  <!-- ============== §01 — SETTINGS ============== -->
+  <section class="section" id="settings">
+    <div class="section-header">
+      <div>
+        <span class="section-number">01 / Settings</span>
+        <h2 class="section-title">A flat list becomes a map</h2>
+      </div>
+      <p class="section-subtitle">Three dimmed "Coming soon" rows currently break the scan rhythm. Group by purpose, describe every destination, and make "soon" lightweight.</p>
+    </div>
+
+    <div class="screen-block">
+      <!-- CURRENT -->
+      <div>
+        <div class="screen-col-label current"><span class="dot"></span>Current</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <img class="screenshot" src="current/settings.png" alt="Current settings screen">
+            <div class="pin" style="top: 31%; left: 35%;">1</div>
+            <div class="pin" style="top: 45%; left: 12%;">2</div>
+            <div class="pin" style="top: 23%; left: 60%;">3</div>
+            <div class="pin" style="top: 88%; left: 12%;">4</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROPOSED -->
+      <div>
+        <div class="screen-col-label proposed"><span class="dot"></span>Proposed</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <div class="m">
+              <div class="m-statusbar"><span>21:28</span><div class="right"><span>5G</span><span class="battery">68</span></div></div>
+
+              <div class="m-titlebar">
+                <div class="m-title">Settings</div>
+              </div>
+
+              <!-- Account card -->
+              <div class="set-account">
+                <div class="m-avatar purple" style="width:40px;height:40px;font-size:15px;">A</div>
+                <div class="meta">
+                  <div class="nm">amir</div>
+                  <div class="np">npub1q7p4y…vk29</div>
+                </div>
+                <div class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+              </div>
+
+              <div style="flex:1; overflow:hidden;">
+                <!-- NETWORK -->
+                <div class="set-group">Network</div>
+                <div class="set-row">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg></div>
+                  <div class="body">
+                    <div class="t">Relays</div>
+                    <div class="d">Where your notes are published &amp; read</div>
+                  </div>
+                  <div class="right">
+                    <span class="badge">3 online</span>
+                    <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></span>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>
+                  <div class="body">
+                    <div class="t">Media uploads</div>
+                    <div class="d">Where images &amp; video are hosted</div>
+                  </div>
+                  <div class="right"><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></span></div>
+                </div>
+
+                <!-- WALLET -->
+                <div class="set-group">Wallet</div>
+                <div class="set-row">
+                  <div class="ic" style="color:var(--zap);"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+                  <div class="body">
+                    <div class="t">Zaps</div>
+                    <div class="d">Default amount &amp; wallet connection</div>
+                  </div>
+                  <div class="right"><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></span></div>
+                </div>
+
+                <!-- CONTENT & SAFETY -->
+                <div class="set-group">Content &amp; safety</div>
+                <div class="set-row">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+                  <div class="body">
+                    <div class="t">Filters</div>
+                    <div class="d">Mute words, hide unwanted content</div>
+                  </div>
+                  <div class="right"><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></span></div>
+                </div>
+                <div class="set-row">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></div>
+                  <div class="body">
+                    <div class="t">Custom emojis</div>
+                    <div class="d">Manage your emoji packs</div>
+                  </div>
+                  <div class="right"><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></span></div>
+                </div>
+                <div class="set-row soon">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></div>
+                  <div class="body"><div class="t">Social graph</div></div>
+                  <div class="right"><span class="soon-chip">Soon</span></div>
+                </div>
+
+                <!-- ADVANCED -->
+                <div class="set-group">Advanced</div>
+                <div class="set-row soon">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8zm0 0L15.5 7.5"/></svg></div>
+                  <div class="body"><div class="t">Keys</div></div>
+                  <div class="right"><span class="soon-chip">Soon</span></div>
+                </div>
+                <div class="set-row soon">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+                  <div class="body"><div class="t">Console</div></div>
+                  <div class="right"><span class="soon-chip">Soon</span></div>
+                </div>
+                <div class="set-row soon">
+                  <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v12H5.2L4 17.2z"/></svg></div>
+                  <div class="body"><div class="t">Drafts</div></div>
+                  <div class="right"><span class="soon-chip">Soon</span></div>
+                </div>
+
+                <!-- DANGER -->
+                <div class="set-danger">
+                  <div class="set-logout">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    Log out
+                  </div>
+                  <div class="set-version">unSilence 0.9.2 · nostr-sdk 0.34</div>
+                </div>
+              </div>
+
+              <div class="m-home-indicator"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- NOTES -->
+      <div class="notes-panel">
+        <ul class="issues-list">
+          <li class="issue"><div class="issue-num">1</div><div><div class="issue-title">"Coming soon" rows break the rhythm</div><div class="issue-body">Three dimmed two-line rows sit <em>between</em> live items, so the eye trips over dead ends. Make them single-line, dim them harder, give them a small "Soon" chip, and gather them at the end of their section.</div></div></li>
+          <li class="issue"><div class="issue-num">2</div><div><div class="issue-title">No grouping or descriptions</div><div class="issue-body">Relays, Media, Zap, Filters all sit in one flat list with bare labels. A newcomer can't tell what "Relays" or "Filters" do. Group by purpose and add a one-line description to each.</div></div></li>
+          <li class="issue"><div class="issue-num">3</div><div><div class="issue-title">No identity context, no nav affordance</div><div class="issue-body">No account header, and rows give no hint they're tappable. Add a compact account card up top (home for the future Keys screen) and a chevron on every navigable row.</div></div></li>
+          <li class="issue"><div class="issue-num">4</div><div><div class="issue-title">Logout floats in the void</div><div class="issue-body">It sits alone with no anchor and no confirmation. Place it in a bordered "danger zone" with the app version, and require a confirm sheet on tap.</div></div></li>
+        </ul>
+
+        <div class="impl">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Implementation · settings</span>
+          </div>
+          <div class="impl-row"><div class="impl-key">File</div><div class="impl-val"><span class="file">ui/screens/SettingsScreen.kt</span> · <span class="file">SettingsRow.kt</span></div></div>
+          <div class="impl-row"><div class="impl-key">Account card</div><div class="impl-val"><code>bg=elev-1</code>, <code>radius=14</code>, 40dp avatar + display name + mono npub + chevron. Tap → profile (and eventually Keys).</div></div>
+          <div class="impl-row"><div class="impl-key">Groups</div><div class="impl-val">Mono 9.5sp uppercase labels (<code>text-3</code>): <strong>Network</strong> (Relays, Media) · <strong>Wallet</strong> (Zaps) · <strong>Content &amp; safety</strong> (Filters, Custom emojis, Social graph) · <strong>Advanced</strong> (Keys, Console, Drafts).</div></div>
+          <div class="impl-row"><div class="impl-key">Row</div><div class="impl-val">30dp rounded icon tile (<code>bg=elev-2</code>) + title 14sp + description 11.5sp <code>text-3</code> + optional status badge + chevron. Relays row shows a live <code>"N online"</code> mint badge.</div></div>
+          <div class="impl-row"><div class="impl-key">Soon rows</div><div class="impl-val"><code>alpha 0.45</code>, single line, transparent icon tile, mono "Soon" chip on the right. Not tappable. Sorted to the end of each section.</div></div>
+          <div class="impl-row"><div class="impl-key">Danger zone</div><div class="impl-val">Top hairline divider, "Log out" in <code>like</code> with a logout glyph → confirm bottom sheet. App version in mono <code>text-4</code> beneath.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== §02 — RELAY NAVIGATION ============== -->
+  <section class="section" id="relay-nav">
+    <div class="section-header">
+      <div>
+        <span class="section-number">02 / Relay navigation</span>
+        <h2 class="section-title">Stop the tabs from drowning</h2>
+      </div>
+      <p class="section-subtitle">Six tabs scroll off-screen and cut "Blocked" mid-word. Worse, none explain what they mean. Fix discoverability, then teach.</p>
+    </div>
+
+    <div class="screen-block">
+      <!-- CURRENT -->
+      <div>
+        <div class="screen-col-label current"><span class="dot"></span>Current</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <img class="screenshot" src="current/relay-inbox.png" alt="Current relay settings">
+            <div class="pin" style="top: 17%; left: 95%;">1</div>
+            <div class="pin" style="top: 26%; left: 8%;">2</div>
+            <div class="pin" style="top: 29%; left: 80%;">3</div>
+            <div class="pin" style="top: 29%; left: 88%;">4</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROPOSED -->
+      <div>
+        <div class="screen-col-label proposed"><span class="dot"></span>Proposed</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <div class="m">
+              <div class="m-statusbar"><span>21:28</span><div class="right"><span>5G</span><span class="battery">68</span></div></div>
+
+              <div class="m-titlebar">
+                <div class="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></div>
+                <div>
+                  <div class="m-title">Relays</div>
+                </div>
+                <div style="margin-left:auto; width:30px; height:30px; border-radius:9px; background:var(--brand-soft); color:var(--brand); display:flex; align-items:center; justify-content:center;">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                </div>
+              </div>
+
+              <!-- Scrollable category nav with right-edge fade -->
+              <div class="relay-cats-wrap">
+                <div class="relay-cats">
+                  <div class="relay-cat active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v6H4zM4 14h16v6H4z"/></svg>My relays</div>
+                  <div class="relay-cat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18"/></svg>Index</div>
+                  <div class="relay-cat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Search</div>
+                  <div class="relay-cat">Sets</div>
+                  <div class="relay-cat partial">Favorites</div>
+                </div>
+                <div class="relay-cats-fade"></div>
+              </div>
+
+              <!-- Active category description + count -->
+              <div class="cat-desc">
+                <div class="txt">Your main relays — where unSilence publishes your notes and reads your follows.</div>
+                <div class="cnt">3 relays</div>
+              </div>
+
+              <!-- Health summary -->
+              <div class="relay-summary">
+                <div class="seg"><span class="d" style="background:var(--mint);"></span>2 healthy</div>
+                <div class="seg"><span class="d" style="background:var(--zap);"></span>1 slow</div>
+                <div class="seg"><span class="d" style="background:var(--text-4);"></span>0 off</div>
+                <div class="test"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Test</div>
+              </div>
+
+              <!-- Add relay -->
+              <div class="relay-add">
+                <span class="pfx">wss://</span>
+                <span class="ph">add a relay…</span>
+                <div class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+              </div>
+
+              <!-- Relay list -->
+              <div class="relay-list">
+                <div class="relay-row">
+                  <div class="dot" style="background:var(--mint); box-shadow:0 0 6px var(--mint);"></div>
+                  <div class="info">
+                    <div class="nm">relay.primal.net</div>
+                    <div class="meta" style="color:var(--mint);">fast · 113 ms</div>
+                  </div>
+                  <div class="rw">
+                    <div class="rw-pill on">R</div>
+                    <div class="rw-pill on">W</div>
+                  </div>
+                  <div class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+                </div>
+                <div class="relay-row">
+                  <div class="dot" style="background:var(--mint); box-shadow:0 0 6px var(--mint);"></div>
+                  <div class="info">
+                    <div class="nm">nos.lol</div>
+                    <div class="meta" style="color:var(--mint);">fast · 123 ms</div>
+                  </div>
+                  <div class="rw">
+                    <div class="rw-pill on">R</div>
+                    <div class="rw-pill">W</div>
+                  </div>
+                  <div class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+                </div>
+                <!-- swiped row revealing remove -->
+                <div class="relay-row swiped" style="padding-right:84px;">
+                  <div class="dot" style="background:var(--zap); box-shadow:0 0 6px var(--zap);"></div>
+                  <div class="info">
+                    <div class="nm">primus.nostr1.com</div>
+                    <div class="meta" style="color:var(--zap);">slow · 520 ms</div>
+                  </div>
+                  <div class="rw">
+                    <div class="rw-pill on">R</div>
+                    <div class="rw-pill on">W</div>
+                  </div>
+                  <div class="swipe-remove">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    <span>Remove</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="m-home-indicator"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- NOTES -->
+      <div class="notes-panel">
+        <ul class="issues-list">
+          <li class="issue"><div class="issue-num">1</div><div><div class="issue-title">Tabs overflow &amp; cut off</div><div class="issue-body">Six tabs scroll horizontally; "Blocked" is sliced to "Blo…" with no signal there's more. Add a right-edge fade, leading icons, and a filled active pill so it reads as a scrollable rail — not a broken header.</div></div></li>
+          <li class="issue"><div class="issue-num">2</div><div><div class="issue-title">Categories are unexplained jargon</div><div class="issue-body">"Inbox/Outbox", "Index", "Search" are NIP-65 terms. Most users have no idea what each list controls. Show a one-line description + relay count for the active category directly beneath the rail.</div></div></li>
+          <li class="issue"><div class="issue-num">3</div><div><div class="issue-title">Health signals contradict each other</div><div class="issue-body">A green status dot beside red "520ms" says "healthy" and "broken" at once. Unify: the dot colour <em>is</em> the latency tier, and the latency text matches it (mint/amber/rose). One coherent signal.</div></div></li>
+          <li class="issue"><div class="issue-num">4</div><div><div class="issue-title">"R/W" box &amp; one-tap delete</div><div class="issue-body">The cryptic teal "R/W" gives no read of state, and the trash icon nukes a relay in one tap. Split into two labelled R / W toggle pills, and move removal behind a swipe (or the detail page) with confirm.</div></div></li>
+        </ul>
+
+        <div class="impl">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Implementation · relay navigation</span>
+          </div>
+          <div class="impl-row"><div class="impl-key">Files</div><div class="impl-val"><span class="file">ui/screens/RelaySettingsScreen.kt</span> · <span class="file">RelayCategoryRail.kt</span> · <span class="file">RelayHealthSummary.kt</span></div></div>
+          <div class="impl-row"><div class="impl-key">Category rail</div><div class="impl-val"><code>LazyRow</code> of pills, 7dp gap, leading 13dp icon. Active = <code>bg=brand</code> / <code>fg=#001012</code>. A persistent right-edge gradient fade (<code>transparent → bg-base</code>, 40dp) signals overflow. Keep all six categories: My relays · Index · Search · Sets · Favorites · Blocked.</div></div>
+          <div class="impl-row"><div class="impl-key">Category copy</div><div class="impl-val">
+            <strong>My relays</strong> "where your notes are published &amp; read" ·
+            <strong>Index</strong> "where unSilence looks up profiles &amp; follow lists" ·
+            <strong>Search</strong> "relays used for full-text search" ·
+            <strong>Sets</strong> "your saved relay groupings" ·
+            <strong>Favorites</strong> "relays you've starred to reuse" ·
+            <strong>Blocked</strong> "relays unSilence will never connect to".
+          </div></div>
+          <div class="impl-row"><div class="impl-key">Health summary</div><div class="impl-val">Pill bar above the list: <code>N healthy · N slow · N off</code> with coloured dots, plus a "Test" action that re-pings all relays in the active category. Tap a segment to filter.</div></div>
+          <div class="impl-row"><div class="impl-key">Latency tiers</div><div class="impl-val"><code>mint</code> &lt; 150 ms (fast) · <code>zap</code> 150–500 ms (slow) · <code>like</code> &gt; 500 ms or offline. Dot colour and the mono latency label always share the tier.</div></div>
+          <div class="impl-row"><div class="impl-key">Add field</div><div class="impl-val">Inline <code>bg=elev-1</code> field with a dimmed <code>wss://</code> prefix, placeholder "add a relay…", and a brand-soft "+" button. Validates the URL and pastes from clipboard on focus if a wss:// URL is detected.</div></div>
+          <div class="impl-row"><div class="impl-key">Discover entry</div><div class="impl-val">The compass/search icon in the title bar opens <a href="#discovery" style="color:var(--brand);text-decoration:none;">Relay discovery</a> (§04) — for finding relays you don't already know.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row anatomy -->
+    <div class="anatomy" id="relay-row">
+      <h3 style="font-family:var(--font-display); font-size:22px; font-weight:500; margin:0 0 6px; letter-spacing:-0.015em;">Relay row, decoded</h3>
+      <p style="color:var(--text-2); font-size:14px; margin:0 0 12px; max-width:620px;">One row, five jobs — each legible at a glance, none cryptic. Built unboxed with a hairline separator, matching the Feed.</p>
+
+      <!-- Big sample row -->
+      <div style="background:var(--bg-base); border:1px solid var(--border-faint); border-radius:12px; padding: 4px 20px; margin: 20px 0 8px;">
+        <div class="relay-row" style="border-bottom:none;">
+          <div class="dot" style="background:var(--zap); box-shadow:0 0 6px var(--zap); width:11px; height:11px;"></div>
+          <div class="info">
+            <div class="nm" style="font-size:15px;">primus.nostr1.com</div>
+            <div class="meta" style="color:var(--zap); font-size:11px;">slow · 520 ms · NIP-50 search</div>
+          </div>
+          <div class="rw" style="gap:5px;">
+            <div class="rw-pill on" style="width:26px;height:26px;font-size:11px;">R</div>
+            <div class="rw-pill on" style="width:26px;height:26px;font-size:11px;">W</div>
+          </div>
+          <div class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="anatomy-row">
+        <div class="anatomy-tag">① Health dot</div>
+        <div class="anatomy-desc"><strong>Colour = latency tier.</strong> Mint (fast), amber (slow), rose (offline). Pulses softly while a ping is in flight. This is the <em>only</em> health signal — no more dot/latency contradiction.</div>
+      </div>
+      <div class="anatomy-row">
+        <div class="anatomy-tag">② Host name</div>
+        <div class="anatomy-desc"><strong>The <code>wss://</code> is stripped</strong> for scannability; the full URL lives on the detail page. 13–15sp, <code>text-1</code>, weight 500.</div>
+      </div>
+      <div class="anatomy-row">
+        <div class="anatomy-tag">③ Meta line</div>
+        <div class="anatomy-desc"><strong>Qualitative + precise.</strong> "fast · 113 ms" tells a newcomer and a power user at once. Optional NIP highlight (e.g. "NIP-50 search") when relevant. Mono, tier-coloured.</div>
+      </div>
+      <div class="anatomy-row">
+        <div class="anatomy-tag">④ R / W pills</div>
+        <div class="anatomy-desc"><strong>Two independent toggles.</strong> Filled cyan = enabled, ghost = disabled. You can see at a glance that a relay is read-only. Replaces the opaque "R/W" box.</div>
+      </div>
+      <div class="anatomy-row">
+        <div class="anatomy-tag">⑤ Chevron / swipe</div>
+        <div class="anatomy-desc"><strong>Tap the row → detail page.</strong> Swipe left reveals a deliberate red "Remove" — no more accidental one-tap deletes. Removal also lives in the detail page with a confirm.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== §04 — RELAY DISCOVERY ============== -->
+  <section class="section" id="discovery">
+    <div class="section-header">
+      <div>
+        <span class="section-number">04 / Relay discovery <span class="tag new" style="margin-left:8px;">New</span></span>
+        <h2 class="section-title">Find relays without knowing their URL</h2>
+      </div>
+      <p class="section-subtitle">Today the only way to add a relay is to paste a <code style="font-family:var(--font-mono);">wss://</code> URL you already memorised. Discovery turns that dead end into a browsable, social, health-ranked directory.</p>
+    </div>
+
+    <div class="solo-block">
+      <div>
+        <div class="screen-col-label proposed"><span class="dot"></span>Proposed · Discover</div>
+        <div class="phone lg">
+          <div class="phone-screen">
+            <div class="m">
+              <div class="m-statusbar"><span>21:28</span><div class="right"><span>5G</span><span class="battery">68</span></div></div>
+
+              <div class="m-titlebar">
+                <div class="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></div>
+                <div class="m-title" style="font-size:17px;">Discover relays</div>
+              </div>
+
+              <div class="disc-search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <span class="ph">Search by name, topic, or operator…</span>
+              </div>
+
+              <div class="disc-chips">
+                <span class="disc-chip on">All</span>
+                <span class="disc-chip">Fast</span>
+                <span class="disc-chip">Free</span>
+                <span class="disc-chip">Paid</span>
+                <span class="disc-chip">Search</span>
+                <span class="disc-chip">Media</span>
+              </div>
+
+              <div style="flex:1; overflow:hidden;">
+                <!-- Recommended -->
+                <div class="disc-sec-label">
+                  <span class="l">Used by people you follow</span>
+                  <span class="more">See all</span>
+                </div>
+
+                <div class="disc-card">
+                  <div class="top">
+                    <div class="ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v6H4zM4 14h16v6H4z"/></svg></div>
+                    <div class="hd">
+                      <div class="nm">nostr.wine <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--brand)"><path d="M9 12l2 2 4-4M12 2l2.4 2.4 3.4-.4.4 3.4L20.6 9.6 19 12l1.6 2.4-2.4 1.2-.4 3.4-3.4-.4L12 22l-2.4-2.4-3.4.4-.4-3.4L3.4 14.4 5 12 3.4 9.6l2.4-1.2.4-3.4 3.4.4L12 2z"/></svg></div>
+                      <div class="sub">wss://nostr.wine</div>
+                    </div>
+                    <button class="add"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="vertical-align:-1px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add</button>
+                  </div>
+                  <p class="desc">Premium, well-moderated relay with long event retention. Curated community.</p>
+                  <div class="foot">
+                    <span class="stat"><span class="d" style="background:var(--mint);"></span>fast · 142 ms</span>
+                    <span class="stat"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>38 you follow</span>
+                    <span class="paid-badge">PAID · 8k sats</span>
+                  </div>
+                </div>
+
+                <div class="disc-card">
+                  <div class="top">
+                    <div class="ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v6H4zM4 14h16v6H4z"/></svg></div>
+                    <div class="hd">
+                      <div class="nm">relay.damus.io</div>
+                      <div class="sub">wss://relay.damus.io</div>
+                    </div>
+                    <button class="add"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="vertical-align:-1px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add</button>
+                  </div>
+                  <p class="desc">High-availability general relay operated by the Damus team.</p>
+                  <div class="foot">
+                    <span class="stat"><span class="d" style="background:var(--mint);"></span>fast · 88 ms</span>
+                    <span class="stat"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>124 you follow</span>
+                  </div>
+                </div>
+
+                <!-- Popular -->
+                <div class="disc-sec-label">
+                  <span class="l">Popular this week</span>
+                  <span class="more">See all</span>
+                </div>
+
+                <div class="disc-card">
+                  <div class="top">
+                    <div class="ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+                    <div class="hd">
+                      <div class="nm">relay.noswhere.com</div>
+                      <div class="sub">supports NIP-50 search</div>
+                    </div>
+                    <button class="add added">Added</button>
+                  </div>
+                  <div class="foot">
+                    <span class="stat"><span class="d" style="background:var(--zap);"></span>ok · 312 ms</span>
+                    <span class="stat" style="color:var(--brand);">Search relay</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="m-home-indicator"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="notes-panel">
+        <div class="impl" style="margin-bottom: 24px;">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+            <span>Why this matters</span>
+          </div>
+          <div style="padding: 4px 2px; color:var(--text-2); font-size:13.5px; line-height:1.6;">
+            Choosing relays is the single hardest part of onboarding to Nostr. Pasting URLs assumes tribal knowledge. Discovery reframes it as <strong style="color:var(--text-1);">"which relays do people I trust use, and which are fast for me?"</strong> — answerable in two taps.
+          </div>
+        </div>
+
+        <div class="impl">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Implementation · discovery</span>
+          </div>
+          <div class="impl-row"><div class="impl-key">Files</div><div class="impl-val"><span class="file">ui/screens/RelayDiscoveryScreen.kt</span> · <span class="file">RelayDiscoveryCard.kt</span> · <span class="file">domain/RelayDirectory.kt</span></div></div>
+          <div class="impl-row"><div class="impl-key">Entry</div><div class="impl-val">Compass/search icon in the Relays title bar, plus an empty-state CTA when a category has no relays. Opens as a full screen pushed onto the relay stack.</div></div>
+          <div class="impl-row"><div class="impl-key">Data sources</div><div class="impl-val">
+            <strong>Used by people you follow</strong> — aggregate the relay lists (NIP-65) of your follows; rank by frequency. This is the killer module — pure social proof, no directory needed.<br>
+            <strong>Popular this week</strong> — from a relay-monitor service (e.g. nostr.watch) or a bundled seed list.<br>
+            Live-ping each card for latency on appear.
+          </div></div>
+          <div class="impl-row"><div class="impl-key">Filter chips</div><div class="impl-val"><code>All · Fast · Free · Paid · Search · Media</code>. "Fast" sorts by measured latency; "Search"/"Media" filter by advertised NIP support (NIP-50, NIP-96).</div></div>
+          <div class="impl-row"><div class="impl-key">Card</div><div class="impl-val">Operator icon + host + verified glyph (if NIP-11 self-identifies) + one-line description + footer stats (latency tier, "N you follow", paid badge with sat price). Primary "Add" button; flips to a neutral "Added" state.</div></div>
+          <div class="impl-row"><div class="impl-key">Add behaviour</div><div class="impl-val">Tap "Add" → quick sheet: add to <strong>My relays</strong> (R/W), <strong>Index</strong>, <strong>Search</strong>, or <strong>Favorites</strong>. Default = My relays read+write. Long-press the card → open the detail page first.</div></div>
+          <div class="impl-row"><div class="impl-key">Tap card</div><div class="impl-val">Opens <a href="#detail" style="color:var(--brand);text-decoration:none;">the detail page</a> (§05) before committing.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== §05 — RELAY DETAIL PAGE ============== -->
+  <section class="section" id="detail">
+    <div class="section-header">
+      <div>
+        <span class="section-number">05 / Relay detail page <span class="tag new" style="margin-left:8px;">New</span></span>
+        <h2 class="section-title">Everything about one relay</h2>
+      </div>
+      <p class="section-subtitle">The current "ⓘ" goes nowhere useful. This is its destination: NIP-11 metadata, live health history, supported features, policies, and every action — so the list stays clean.</p>
+    </div>
+
+    <div class="solo-block">
+      <div>
+        <div class="screen-col-label proposed"><span class="dot"></span>Proposed · Detail</div>
+        <div class="phone lg">
+          <div class="phone-screen">
+            <div class="m">
+              <div class="m-statusbar"><span>21:28</span><div class="right"><span>5G</span><span class="battery">68</span></div></div>
+
+              <div class="m-titlebar">
+                <div class="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></div>
+                <div class="m-title" style="font-size:16px;">Relay</div>
+                <div style="margin-left:auto; color:var(--text-2);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="12" r="1.5"/></svg></div>
+              </div>
+
+              <div style="flex:1; overflow:hidden;">
+                <!-- Hero -->
+                <div class="dt-hero">
+                  <div class="ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v6H4zM4 14h16v6H4z"/><line x1="7" y1="7" x2="7.01" y2="7"/><line x1="7" y1="17" x2="7.01" y2="17"/></svg></div>
+                  <div style="min-width:0;">
+                    <div class="nm">relay.primal.net</div>
+                    <div class="url"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>wss://relay.primal.net</div>
+                  </div>
+                </div>
+
+                <!-- Stats -->
+                <div class="dt-stats">
+                  <div class="dt-stat"><div class="v" style="color:var(--mint);">113<span style="font-size:10px;">ms</span></div><div class="k">Latency</div></div>
+                  <div class="dt-stat"><div class="v">99.8<span style="font-size:10px;">%</span></div><div class="k">Uptime 30d</div></div>
+                  <div class="dt-stat"><div class="v">12</div><div class="k">NIPs</div></div>
+                  <div class="dt-stat"><div class="v">61</div><div class="k">You follow</div></div>
+                </div>
+
+                <!-- latency history -->
+                <div class="dt-section">
+                  <div class="lbl">Latency · last 24h</div>
+                  <svg class="sparkline" viewBox="0 0 300 36" preserveAspectRatio="none">
+                    <polyline fill="none" stroke="#3ddc97" stroke-width="2" points="0,24 25,20 50,26 75,18 100,22 125,14 150,19 175,16 200,12 225,20 250,15 275,13 300,17"/>
+                    <polyline fill="url(#g)" stroke="none" points="0,24 25,20 50,26 75,18 100,22 125,14 150,19 175,16 200,12 225,20 250,15 275,13 300,17 300,36 0,36"/>
+                    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3ddc97" stop-opacity="0.25"/><stop offset="1" stop-color="#3ddc97" stop-opacity="0"/></linearGradient></defs>
+                  </svg>
+                </div>
+
+                <!-- Description -->
+                <div class="dt-section" style="padding-top:12px;">
+                  <div class="lbl">About</div>
+                  <p class="dt-desc">Primal's caching relay and CDN. Optimised for fast feed loading and media. Operated by Primal.</p>
+                </div>
+
+                <!-- NIPs -->
+                <div class="dt-section" style="padding-top:14px;">
+                  <div class="lbl">Supported features</div>
+                  <div class="dt-nips">
+                    <span class="nip-chip hl">NIP-50 Search</span>
+                    <span class="nip-chip hl">NIP-65 Outbox</span>
+                    <span class="nip-chip">NIP-01</span>
+                    <span class="nip-chip">NIP-09</span>
+                    <span class="nip-chip">NIP-11</span>
+                    <span class="nip-chip">NIP-42</span>
+                    <span class="nip-chip">+6</span>
+                  </div>
+                </div>
+
+                <!-- Policy KVs -->
+                <div class="dt-section" style="padding-top:14px;">
+                  <div class="lbl">Policy</div>
+                  <div class="dt-kv"><span class="k">Payment required</span><span class="v" style="color:var(--mint);">Free</span></div>
+                  <div class="dt-kv"><span class="k">Auth required</span><span class="v">No</span></div>
+                  <div class="dt-kv"><span class="k">Software</span><span class="v">strfry 1.0</span></div>
+                  <div class="dt-kv"><span class="k">Contact</span><span class="v" style="color:var(--brand);">npub1pr…m4l</span></div>
+                </div>
+
+                <div style="height:80px;"></div>
+              </div>
+
+              <!-- Sticky actions -->
+              <div class="dt-actions">
+                <button class="dt-btn primary">Read &amp; write ✓</button>
+                <button class="dt-btn ghost"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+                <button class="dt-btn ghost" style="color:var(--like); border-color:rgba(255,56,112,0.3);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>
+              </div>
+
+              <div class="m-home-indicator"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="notes-panel">
+        <div class="impl" style="margin-bottom: 24px;">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span>What it answers</span>
+          </div>
+          <div style="padding: 4px 2px; color:var(--text-2); font-size:13.5px; line-height:1.6;">
+            "Is this relay fast and reliable? Does it support search? Will it cost me sats? Who runs it? Do people I trust use it?" — all the questions that decide whether a relay belongs in your set, on one screen instead of buried in a console.
+          </div>
+        </div>
+
+        <div class="impl">
+          <div class="impl-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Implementation · detail page</span>
+          </div>
+          <div class="impl-row"><div class="impl-key">File</div><div class="impl-val"><span class="file">ui/screens/RelayDetailScreen.kt</span></div></div>
+          <div class="impl-row"><div class="impl-key">Source</div><div class="impl-val">Fetch the relay's <strong>NIP-11</strong> document (<code>GET</code> with <code>Accept: application/nostr+json</code>) for name, description, supported_nips, software, pubkey, limitation/payments_url. Cache it; show skeletons while loading.</div></div>
+          <div class="impl-row"><div class="impl-key">Hero</div><div class="impl-val">50dp rounded operator icon (NIP-11 <code>icon</code> or generated), host name in display 18sp, full <code>wss://</code> URL in mono with a copy button.</div></div>
+          <div class="impl-row"><div class="impl-key">Stats strip</div><div class="impl-val">Four cells: live latency (tier-coloured), 30-day uptime, NIP count, "N you follow". Cells are dividers of <code>border-faint</code> on <code>elev-1</code>.</div></div>
+          <div class="impl-row"><div class="impl-key">Sparkline</div><div class="impl-val">24h latency history as a filled line chart (tier colour). Sampled from periodic pings stored locally. Hide if no history yet.</div></div>
+          <div class="impl-row"><div class="impl-key">Features</div><div class="impl-val">NIP chips; highlight the meaningful ones (Search, Outbox, Auth) in brand, the rest neutral, with a "+N" overflow that expands.</div></div>
+          <div class="impl-row"><div class="impl-key">Policy</div><div class="impl-val">Key/value rows: payment (Free / "8k sats" in zap colour), auth required, software+version, operator contact (tappable npub).</div></div>
+          <div class="impl-row"><div class="impl-key">Actions</div><div class="impl-val">Sticky footer. Primary cycles membership state: "Add to my relays" → "Read &amp; write ✓" → tap opens R/W editor. Star = favorite. Rose ⊘ = block (confirm). Overflow (⋯) = copy URL, open in browser, share, remove.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== §06 — BUILD ORDER ============== -->
+  <section class="section" id="build">
+    <div class="section-header">
+      <div>
+        <span class="section-number">06 / Build order</span>
+        <h2 class="section-title">What to ship, in what order</h2>
+      </div>
+      <p class="section-subtitle">P0 = the fixes users feel immediately. P1 = the two new surfaces. P2 = polish. Drop straight into Linear / Jira.</p>
+    </div>
+
+    <div class="checklist">
+      <div class="checklist-row header">
+        <div>Priority</div><div>Task</div><div>Scope</div><div>Effort</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p0">P0</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Fix the relay category rail</div>
+          <div style="color:var(--text-2); font-size:12px;">Scrollable pill rail with leading icons, filled active pill, right-edge fade. Add the active-category description + relay count beneath. No more cut-off "Blo…".</div>
+        </div>
+        <div class="scope">RelayCategoryRail.kt</div>
+        <div class="effort">~ 5h</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p0">P0</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Unify relay health signal</div>
+          <div style="color:var(--text-2); font-size:12px;">Dot colour = latency tier; latency text shares the tier colour. Kill the green-dot/red-ms contradiction. Add the health summary bar with "Test all".</div>
+        </div>
+        <div class="scope">RelayRow.kt · RelayHealthSummary.kt</div>
+        <div class="effort">~ 6h</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p0">P0</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">R/W pills + safe delete</div>
+          <div style="color:var(--text-2); font-size:12px;">Replace the "R/W" box with two labelled toggle pills. Replace one-tap trash with swipe-to-remove + confirm; removal also in the detail page.</div>
+        </div>
+        <div class="scope">RelayRow.kt</div>
+        <div class="effort">~ 6h</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p0">P0</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Restructure Settings</div>
+          <div style="color:var(--text-2); font-size:12px;">Account card, grouped sections with descriptions, lightweight "Soon" rows gathered per section, danger zone with logout confirm + version.</div>
+        </div>
+        <div class="scope">SettingsScreen.kt · SettingsRow.kt</div>
+        <div class="effort">~ 1d</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p1">P1</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Relay detail page</div>
+          <div style="color:var(--text-2); font-size:12px;">NIP-11 fetch + cache, hero, stats strip, 24h latency sparkline, features, policy, sticky actions. Wire the row chevron / ⓘ to open it.</div>
+        </div>
+        <div class="scope">RelayDetailScreen.kt</div>
+        <div class="effort">~ 3d</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p1">P1</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Relay discovery</div>
+          <div style="color:var(--text-2); font-size:12px;">"Used by people you follow" (aggregate follows' NIP-65 lists) + "Popular" + filter chips + live ping. Add-to sheet. Entry from the Relays title bar.</div>
+        </div>
+        <div class="scope">RelayDiscoveryScreen.kt · RelayDirectory.kt</div>
+        <div class="effort">~ 4d</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p2">P2</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Add-relay field polish</div>
+          <div style="color:var(--text-2); font-size:12px;">Inline <code>wss://</code> prefix, URL validation, clipboard auto-detect, inline error/success feedback.</div>
+        </div>
+        <div class="scope">RelaySettingsScreen.kt</div>
+        <div class="effort">~ 4h</div>
+      </div>
+
+      <div class="checklist-row">
+        <div><span class="priority p2">P2</span></div>
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Health dot ping animation</div>
+          <div style="color:var(--text-2); font-size:12px;">Soft pulse on the dot while a ping is in flight; settle to the tier colour. Persist a rolling latency history for the sparkline.</div>
+        </div>
+        <div class="scope">RelayRow.kt · RelayPinger.kt</div>
+        <div class="effort">~ 6h</div>
+      </div>
+    </div>
+
+    <p style="color:var(--text-3); margin-top:36px; font-size:12px; font-family:var(--font-mono); letter-spacing:0.08em; text-transform:uppercase; text-align:center;">
+      End of redesign · settings &amp; relays · ready for Claude Code handoff
+    </p>
+  </section>
+
+</main>
+</body>
+</html>
