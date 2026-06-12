@@ -56,7 +56,14 @@ data class RelayDirectoryEntry(
     val feeMsats: Long? = null,                      // fees.admission[0], normalized to msats
     val operatorPubkey: String? = null,              // NIP-11 `pubkey` (hex) — operator self-ID, NOT verification
     val contact: String? = null,                     // NIP-11 `contact`
+    // Geo (monitor-sourced, NIP-32 labels): SERVER IP geolocation, never legal jurisdiction.
+    val countryCode: String? = null,                 // ISO-3166 alpha-2 (uppercased)
+    val geohash: String? = null,                     // most-precise monitor geohash
 )
+
+/** Surveillance-alliance tier of a hosting country (nested: FIVE ⊂ NINE ⊂ FOURTEEN). NONE =
+ *  outside the 14 Eyes. Membership returned is the INNERMOST alliance the country belongs to. */
+enum class EyesAlliance { NONE, FIVE, NINE, FOURTEEN }
 
 object RelayDirectory {
 
@@ -141,6 +148,14 @@ object RelayDirectory {
             }
         }
 
+        // Geo (NIP-32 label pairs). The "countryCode" namespace carries three forms
+        // (alpha-2 / alpha-3 / numeric) — take the ISO alpha-2. The `g` tags are a geohash
+        // precision ladder (longest first); keep the most precise. Absent → null, never throws.
+        val countryCode = tags
+            .firstOrNull { it.size >= 3 && it[0] == "l" && it[2] == "countryCode" && it[1].matches(COUNTRY_ALPHA2) }
+            ?.get(1)?.uppercase()
+        val geohash = tags.firstOrNull { it.size >= 2 && it[0] == "g" }?.get(1)?.takeIf { it.isNotBlank() }
+
         return RelayDirectoryEntry(
             url = url,
             name = name,
@@ -157,6 +172,8 @@ object RelayDirectory {
             monitorLastSeenAt = createdAt,
             nip11Source = Nip11Source.MONITOR,
             monitorPubkeys = setOf(monitorPubkey),
+            countryCode = countryCode,
+            geohash = geohash,
         )
     }
 
@@ -187,8 +204,31 @@ object RelayDirectory {
             auth = entries.any { it.auth },
             payment = entries.any { it.payment },
             restrictedWrites = entries.any { it.restrictedWrites },
+            // Geo: newest monitor's reading wins; fall back to any monitor that has it.
+            countryCode = newest.countryCode ?: entries.firstOrNull { it.countryCode != null }?.countryCode,
+            geohash = newest.geohash ?: entries.firstOrNull { it.geohash != null }?.geohash,
         )
     }
+
+    /** Surveillance-alliance tier of a hosting country — pure, unit-tested. Returns the
+     *  INNERMOST alliance the country belongs to (FIVE ⊂ NINE ⊂ FOURTEEN); UK accepted as an
+     *  alias for the ISO alpha-2 GB. Unknown/absent → NONE. */
+    fun eyesAlliance(countryCode: String?): EyesAlliance = when (countryCode?.uppercase()) {
+        "US", "GB", "UK", "CA", "AU", "NZ" -> EyesAlliance.FIVE
+        "DK", "FR", "NL", "NO" -> EyesAlliance.NINE
+        "DE", "BE", "IT", "SE", "ES" -> EyesAlliance.FOURTEEN
+        else -> EyesAlliance.NONE
+    }
+
+    /** ISO alpha-2 → regional-indicator flag emoji. Bad input (not exactly 2 ASCII letters) →
+     *  null. Pure, unit-tested. */
+    fun flagEmoji(countryCode: String?): String? {
+        val cc = countryCode?.uppercase() ?: return null
+        if (cc.length != 2 || cc.any { it !in 'A'..'Z' }) return null
+        return cc.map { String(Character.toChars(0x1F1E6 + (it - 'A'))) }.joinToString("")
+    }
+
+    private val COUNTRY_ALPHA2 = Regex("^[A-Za-z]{2}$")
 
     /**
      * Overlay a device-fetched NIP-11 doc onto a monitor-sourced base entry — the PERSPECTIVE

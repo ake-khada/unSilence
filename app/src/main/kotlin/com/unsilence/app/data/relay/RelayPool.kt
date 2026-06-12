@@ -2446,7 +2446,8 @@ class RelayPool @Inject constructor(
         )
         relayDirectory[u] = detail
         Log.w(TAG, "DETAIL: $u src=${detail.nip11Source} rtt=${rtt}ms reach=${detail.reachability} " +
-            "nips=${detail.supportedNips.size} pop=${detail.popularity} follow=${detail.followsUsing}")
+            "nips=${detail.supportedNips.size} pop=${detail.popularity} follow=${detail.followsUsing} " +
+            "geo=${detail.countryCode} trust=${detail.trustScore}")
         return detail
     }
 
