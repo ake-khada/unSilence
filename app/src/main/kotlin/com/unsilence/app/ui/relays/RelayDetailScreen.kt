@@ -64,6 +64,8 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.Nip11Source
 import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.memory.RelayConfig
+import com.unsilence.app.data.relay.EyesAlliance
+import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.common.IdentIcon
@@ -363,6 +365,48 @@ private fun PolicyRows(e: RelayDirectoryEntry) {
             val ver = e.version?.takeIf { it.isNotBlank() && !sw.contains(it, ignoreCase = true) }
             PolicyRow("Software", listOfNotNull(sw, ver).joinToString(" "), TextSecondary)
         }
+        // Trust (kind-30385) — only when scored. Restores the trust surface lost with the old
+        // health sheet. Tier: ≥70 mint, ≥40 zap, else like.
+        e.trustScore?.let { score -> PolicyRow("Trust", "$score/100", trustTierColor(score)) }
+        // Hosted-in (server IP geolocation) — only when known; never fabricated.
+        e.countryCode?.let { cc -> HostedInRow(cc) }
+    }
+}
+
+private fun trustTierColor(score: Int): Color = when {
+    score >= 70 -> Mint
+    score >= 40 -> Zap
+    else -> Like
+}
+
+/** "Hosted in" — SERVER IP geolocation (datacenter), NOT legal jurisdiction. Anycast / CDN-
+ *  fronted relays (e.g. Cloudflare) can geolocate to an edge POP unrelated to the operator, so
+ *  the label is deliberately "Hosted in", never "Jurisdiction". The mint/zap tint is the
+ *  at-a-glance surveillance-alliance signal; the wording keeps us honest about what it proves. */
+@Composable
+private fun HostedInRow(countryCode: String) {
+    val flag = remember(countryCode) { RelayDirectory.flagEmoji(countryCode) }
+    val name = remember(countryCode) {
+        java.util.Locale("", countryCode).getDisplayCountry(java.util.Locale.ENGLISH).ifBlank { countryCode }
+    }
+    val (eyesLabel, eyesColor) = when (RelayDirectory.eyesAlliance(countryCode)) {
+        EyesAlliance.FIVE -> "Five Eyes" to Zap
+        EyesAlliance.NINE -> "Nine Eyes" to Zap
+        EyesAlliance.FOURTEEN -> "14 Eyes" to Zap
+        EyesAlliance.NONE -> "outside 14 Eyes" to Mint
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Hosted in", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text(
+            buildString { flag?.let { append("$it ") }; append(name) },
+            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp),
+        )
+        Text(" · ", color = TextSecondary, fontSize = 13.sp)
+        Text(eyesLabel, color = eyesColor, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
 

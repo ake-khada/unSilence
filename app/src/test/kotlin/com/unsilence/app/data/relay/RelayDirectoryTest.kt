@@ -199,6 +199,70 @@ class RelayDirectoryTest {
         assertFalse("oldest non-protected evicted", bounded.containsKey("wss://relay3.example"))
     }
 
+    // ── Geo parsing (NIP-32 country labels + geohash, real captured fixtures) ──
+
+    @Test
+    fun `geo - rich monitor extracts ISO alpha-2 country and most-precise geohash`() {
+        val e = byUrl("relay.nostr.io")
+        assertEquals("US", e.countryCode)        // alpha-2 only, NOT "USA" or "840"
+        assertEquals("dr722fh9m", e.geohash)     // first (longest) g tag
+    }
+
+    @Test
+    fun `geo - Cloudflare anycast still geolocates (Hosted-in not jurisdiction caveat)`() {
+        // Cloudflare-fronted relay geolocates to the edge POP (CA), not the operator — exactly
+        // why the UI says "Hosted in", never "Jurisdiction".
+        val e = byUrl("nostr-verif.slothy.win")
+        assertEquals("CA", e.countryCode)
+    }
+
+    @Test
+    fun `geo - absent on light monitor yields null country and geohash`() {
+        val e = byUrl("wot.utxo.one")
+        assertNull(e.countryCode)
+        assertNull(e.geohash)
+    }
+
+    // ── eyesAlliance (pure) ────────────────────────────────────────────────────
+
+    @Test
+    fun `eyesAlliance classifies innermost nested alliance`() {
+        assertEquals(EyesAlliance.FIVE, RelayDirectory.eyesAlliance("US"))
+        assertEquals(EyesAlliance.FIVE, RelayDirectory.eyesAlliance("GB"))
+        assertEquals(EyesAlliance.FIVE, RelayDirectory.eyesAlliance("UK"))   // alias for GB
+        assertEquals(EyesAlliance.FIVE, RelayDirectory.eyesAlliance("us"))   // case-insensitive
+        assertEquals(EyesAlliance.NINE, RelayDirectory.eyesAlliance("NO"))
+        assertEquals(EyesAlliance.FOURTEEN, RelayDirectory.eyesAlliance("DE"))
+        assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance("JP"))
+        assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance("BR"))
+        assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance(null))
+    }
+
+    // ── flagEmoji (pure) ───────────────────────────────────────────────────────
+
+    @Test
+    fun `flagEmoji builds regional-indicator pair and rejects bad input`() {
+        assertEquals("🇺🇸", RelayDirectory.flagEmoji("US"))   // 🇺🇸
+        assertEquals(RelayDirectory.flagEmoji("US"), RelayDirectory.flagEmoji("us"))
+        assertNull(RelayDirectory.flagEmoji(null))
+        assertNull(RelayDirectory.flagEmoji(""))
+        assertNull(RelayDirectory.flagEmoji("U"))
+        assertNull(RelayDirectory.flagEmoji("USA"))
+        assertNull(RelayDirectory.flagEmoji("U1"))
+    }
+
+    @Test
+    fun `merge - newest monitor geo wins, falls back when newest lacks it`() {
+        val older = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 10, countryCode = "US", geohash = "aaa")
+        val newer = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 30, countryCode = "DE", geohash = "bbb")
+        val merged = RelayDirectory.mergeMonitorEntries(listOf(older, newer))
+        assertEquals("DE", merged.countryCode)
+        assertEquals("bbb", merged.geohash)
+        val newestNoGeo = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 40)
+        val merged2 = RelayDirectory.mergeMonitorEntries(listOf(older, newestNoGeo))
+        assertEquals("US", merged2.countryCode)   // fallback to the only entry that has it
+    }
+
     @Test
     fun `merge takes median RTT and unions nips and monitors`() {
         val a = RelayDirectoryEntry(url = "wss://r.example", monitorRttMs = 100, supportedNips = setOf(1, 2), monitorPubkeys = setOf("m1"), monitorLastSeenAt = 10)
