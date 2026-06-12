@@ -30,7 +30,6 @@ private const val WARM_CAP = 10
 @Singleton
 class FeedRelayWarmer @Inject constructor(
     private val relayPool: RelayPool,
-    private val relayPreferencesStore: RelayPreferencesStore,
     private val memoryEventStore: MemoryEventStore,
     private val keyManager: KeyManager,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
@@ -48,10 +47,11 @@ class FeedRelayWarmer @Inject constructor(
         val pk = keyManager.getPublicKeyHex() ?: return
         job?.cancel()
         job = scope.launch {
-            relayPreferencesStore.pinnedRelaysFlow(pk)
-                .collectLatest { pinned ->
+            // Carousel relays = the user's kind-10012 favorites (the local pinned store is retired).
+            memoryEventStore.favoriteRelayConfigsFlow(pk)
+                .collectLatest { favs ->
                     if (relayCapabilitiesStore.isNetworkDown) return@collectLatest
-                    recompute(pk, pinned.map { it.url })
+                    recompute(pk, favs.mapNotNull { it.url })
                 }
         }
     }

@@ -8,7 +8,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.unsilence.app.data.memory.PinnedRelay
+import android.util.Log
 import com.unsilence.app.data.memory.SensitiveContentMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -98,41 +98,18 @@ class RelayPreferencesStore @Inject constructor(
      *
      * This avoids JSON serialization while keeping per-relay atomicity.
      */
-    fun pinnedRelaysFlow(pubkey: String): Flow<List<PinnedRelay>> =
-        dataStore.data
-            .map { prefs -> parsePinnedRelays(prefs, pubkey) }
-            .distinctUntilChanged()
-
-    suspend fun upsertPinnedRelay(pubkey: String, url: String, displayLabel: String?) {
-        val key = stringPreferencesKey("${PINNED_PREFIX}${pubkey}_$url")
-        val value = "${displayLabel ?: ""}|${System.currentTimeMillis() / 1000}"
-        dataStore.edit { prefs -> prefs[key] = value }
-    }
-
-    suspend fun deletePinnedRelay(pubkey: String, url: String) {
-        val key = stringPreferencesKey("${PINNED_PREFIX}${pubkey}_$url")
-        dataStore.edit { prefs -> prefs.remove(key) }
-    }
-
-    suspend fun clearAllPinnedRelays() {
+    /** One-time retirement of the old local pinned-relay store — the feed carousel now sources
+     *  the user's kind-10012 favorites directly (single source of truth, see FeedViewModel).
+     *  We deliberately do NOT auto-publish a kind-10012 from old pins: silently signing a list
+     *  event on app upgrade is wrong. Old pins not already favorited simply vanish. Idempotent. */
+    suspend fun retirePinnedStore() {
         dataStore.edit { prefs ->
-            val keysToRemove = prefs.asMap().keys.filter { it.name.startsWith(PINNED_PREFIX) }
-            keysToRemove.forEach { prefs.remove(it) }
-        }
-    }
-
-    private fun parsePinnedRelays(prefs: Preferences, pubkey: String): List<PinnedRelay> {
-        val prefix = "${PINNED_PREFIX}${pubkey}_"
-        return prefs.asMap()
-            .filter { (key, _) -> key.name.startsWith(prefix) }
-            .mapNotNull { (key, value) ->
-                val url = key.name.removePrefix(prefix)
-                val parts = (value as? String)?.split("|", limit = 2) ?: return@mapNotNull null
-                val label = parts[0].ifEmpty { null }
-                val addedAt = parts.getOrNull(1)?.toLongOrNull() ?: (System.currentTimeMillis() / 1000)
-                PinnedRelay(pubkey = pubkey, url = url, displayLabel = label, addedAt = addedAt)
+            val pinned = prefs.asMap().keys.filter { it.name.startsWith(PINNED_PREFIX) }
+            if (pinned.isNotEmpty()) {
+                Log.w("RelayPrefs", "Pinned store retired — ${pinned.size} entries dropped (carousel now reads kind-10012 favorites)")
+                pinned.forEach { prefs.remove(it) }
             }
-            .sortedBy { it.addedAt }
+        }
     }
 
     // ─── Notification Last-Seen ────────────────────────────────────────────

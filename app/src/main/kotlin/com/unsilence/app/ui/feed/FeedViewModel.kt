@@ -58,10 +58,19 @@ sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
-    data class  SingleRelay(val url: String, val label: String) : FeedType() {
+    data class  SingleRelay private constructor(val url: String, val label: String) : FeedType() {
         val displayLabel: String get() = when {
             url.contains("antiprimal.net/hot") -> "Popular"
             else -> label
+        }
+        companion object {
+            // Single choke point: every SingleRelay url is canonicalized (normalizeRelayUrl strips
+            // the trailing slash + scheme). Without this, a favorited relay (MES-normalized, no
+            // slash) and the same relay from Browse (wss://nos.lol/) compare unequal — breaking
+            // the carousel active-pill highlight and the transient-browse dedup. Normalize once,
+            // here, not in scattered comparisons.
+            operator fun invoke(url: String, label: String): SingleRelay =
+                SingleRelay(normalizeRelayUrl(url) ?: url, label)
         }
     }
 
@@ -83,9 +92,9 @@ enum class FeedContentFilter(val value: Int) {
  *     userSets, pinnedRelays, hasFollows, filter
  *   - Timeline state: _events, _newEvents, feedRows, showDot, pendingCount,
  *     isLoading, isLoadingMore (mirrors Jumble NoteList component state)
- *   - Actions: setFeedType, setContentFilter, addPinnedRelay,
- *     removePinnedRelay, updateFilter,
+ *   - Actions: setFeedType, setContentFilter, updateFilter,
  *     onViewportChanged, onDotTapped, loadMore, refresh
+ *   - pinnedRelays = the user's kind-10012 favorites (carousel single-relay feeds)
  */
 @OptIn(FlowPreview::class)
 @HiltViewModel
@@ -352,28 +361,20 @@ class FeedViewModel @Inject constructor(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
-    // -- Pinned relays (carousel) ----------------------------------------------
+    // -- Carousel single-relay feeds = the user's kind-10012 favorite relays ---
+    // Sourced LIVE from MES (not a separate pinned-relay store): favoriting a relay anywhere —
+    // relay settings, the §05 detail star, discovery's Add — surfaces it in the feed slide-up
+    // immediately, and un-favoriting removes it. The old local pinnedRelays store is retired.
 
     val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
         keyManager.getPublicKeyHex()?.let { pk ->
-            relayPreferencesStore.pinnedRelaysFlow(pk)
-                .map { list -> list.map { FeedType.SingleRelay(it.url, it.displayLabel ?: it.url) } }
+            memoryEventStore.favoriteRelayConfigsFlow(pk)
+                .map { favs -> favs.mapNotNull { it.url }.map { url -> FeedType.SingleRelay(url, feedRelayLabel(url)) } }
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         } ?: MutableStateFlow(emptyList())
 
-    fun addPinnedRelay(url: String, label: String) {
-        val pk = keyManager.getPublicKeyHex() ?: return
-        viewModelScope.launch {
-            relayPreferencesStore.upsertPinnedRelay(pk, url, label)
-        }
-    }
-
-    fun removePinnedRelay(url: String) {
-        val pk = keyManager.getPublicKeyHex() ?: return
-        viewModelScope.launch {
-            relayPreferencesStore.deletePinnedRelay(pk, url)
-        }
-    }
+    private fun feedRelayLabel(url: String): String =
+        url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
 
     // -- Carousel navigation ---------------------------------------------------
 

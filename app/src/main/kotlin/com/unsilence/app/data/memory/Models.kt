@@ -146,14 +146,6 @@ data class NotificationItem(
     val createdAt: Long,
 )
 
-/** Pinned relay in the feed picker. Pure local config, not a Nostr event. */
-data class PinnedRelay(
-    val pubkey: String,
-    val url: String,
-    val displayLabel: String?,
-    val addedAt: Long = System.currentTimeMillis() / 1000,
-)
-
 /**
  * Entry in the createdAt-sorted index. Implements comparison for
  * ConcurrentSkipListSet ordering: descending by createdAt, ascending by id
