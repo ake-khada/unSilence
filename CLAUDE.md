@@ -54,11 +54,13 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 
 - **NEVER touch video** (InlineAutoPlayVideo.kt, VideoPlaybackScope.kt) without permission. SurfaceView ignores alpha — conditional rendering, not `Modifier.alpha(0f)`
 - **Single rendering pipeline** — EventCard sole composable. Never `remember` around `getOrParseEventModel()` (`computeIfAbsent` dedups, `remember` locks null)
-- **Repost AuthorHeader:** skip `row.authorPicture`/`displayName`/`nip05` fallbacks for kind-6 so inner author never flashes reposter
+- **Repost AuthorHeader:** skip `row.authorPicture`/`displayName`/`nip05` fallbacks for kind-6 **and kind-16** so inner author never flashes reposter
+- **kind-16 == kind-6 everywhere (NIP-18 generic repost).** Any kind-6 special-case MUST also handle 16: threading switch (EventProcessor **and** Subscription), shouldChannel/isHot, MES insertCore `6, 16 -> handleRepost`, CONTENT/NOTIFICATION_KINDS, kindCaps, deriveNotifType, engagement REQs, and the notes/replies repost filter — which is **duplicated** across `FeedViewModel`, `ProfileViewModel`, `UserProfileViewModel`, and MES `feedEvents`/`userFeedEvents`/`displayableFloor` (a repost carries rootId so it "looks reply-like"; treat 6||16 as root, never reply). Consolidation candidate
+- **effectiveKind drives detection/routing** — kind-6/16 unwrap to the wrapped target's kind (`EventModel.effectiveKind`); article detection, the parse-cap, blockquote gating (kind-1), and `ArticleReaderScreen` unwrap all key off it, NOT raw `kind`. `EventCard:` article branch fires on `model.article != null`
 - **pointerInput scoped to content area** — EventActionBar OUTSIDE long-press scope. Thread depth cap 6, no inline reply bar
 - Engagement drawer toggle is **chevron only** — never re-add count-tap shortcut
 - `firstSeenAt` is epoch **ms** (`System.currentTimeMillis()`, never /1000). Single clock read; derive `nowSeconds = nowMs / 1000L`
-- Always populate threading for content kinds (1, 6, 9734, 9735, 20, 21, 30023)
+- Always populate threading for content kinds (1, 6, 16, 9734, 9735, 20, 21, 30023)
 - **Verify bugs on device** before fixing. **Diagnose before prescribing** — read actual code first
 - `key(feedKey)` on LazyListState kills video autoplay. Logout: `isLoggedIn=false` BEFORE teardown
 - Foreground-resume owned by single `UnsilenceApp` ProcessLifecycle observer — never register second
@@ -139,7 +141,8 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - **TimelineService cache persisted** — snapshot V13 (events carry tagsJson; ≤V12 reader reconstructs), `INITIAL_CACHE_EMIT_CAP`=60, `PERSISTED_REFS_CAP`=500
 - **Maintenance trims are gated** — actor/feedRow trims every 64th call; profile trim backs off 60s when a pass evicts 0 (anchored-over-cap livelock: 7.5min restore). Never call a scan-trim per insert
 - Kind-9735 `event.pubkey` is LNURL signer — use `parseZapDescription`. Notif index: `notifIdsByRecipient` per-recipient signals
-- **ContentParser DoS bound (H-spam):** INPUT `take(20k`, kind-30023 `200k)` BEFORE tokenize (regex pass is O(content)); SEGMENT `take(150)`, tail→one `"… [content truncated]"` text node; `EventModel.truncated`→chip, NO tap-to-expand (re-creates the freeze). `PARSE-HEAVY` probe permanent. Rotating-npub sybil defeats per-pubkey mute — the bound is the durable defense
+- **ContentParser DoS bound (H-spam):** INPUT `take(20k`, kind-30023 `200k)` BEFORE tokenize (regex pass is O(content)); SEGMENT cap 150 via `capSegmentsFlat` which counts `BlockQuote` INNER segments toward the cap (else a wall of `>` lines collapses to one top-level segment and bypasses the draw-bound), tail→one `"… [content truncated]"` text node; `EventModel.truncated`→chip, NO tap-to-expand (re-creates the freeze). `PARSE-HEAVY` probe permanent. Rotating-npub sybil defeats per-pubkey mute — the bound is the durable defense
+- **kind-1 blockquotes are render-only** — `Segment.BlockQuote` (leading-`>` lines, effectiveKind==1 only; articles excluded). NOT markdown-in-notes; mid-line `>` stays text; media in quotes flattened to Links. `InlineText` `textColor` param mutes quote text
 
 ---
 

@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -261,9 +260,6 @@ class NoteActionsViewModel @Inject constructor(
                 targetDTag = dTag,
                 relayHint = relayHint,
             )
-            // Operational marker (Log.w survives R8) — confirms the on-wire repost
-            // kind for the round-trip; only fires on a user-initiated repost.
-            Log.w("NoteActions", "REPOST publish: target kind=${original.kind} → repost kind=${desc.kind}, ${desc.tags.size} tags")
             // kind-6 keeps the dedicated RepostEvent type; kind-16 uses a generic
             // EventTemplate<Event> (RepostEvent assumes kind-6 — guardrail).
             val signed: Event? = if (desc.kind == RepostEvent.KIND) {
