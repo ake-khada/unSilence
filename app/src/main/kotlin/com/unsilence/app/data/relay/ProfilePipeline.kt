@@ -77,6 +77,15 @@ class ProfilePipeline @Inject constructor(
     /** Per-pubkey in-flight follower-count fetches — concurrent callers share one result. */
     private val followerCountInFlight = ConcurrentHashMap<String, Deferred<Long?>>()
 
+    /** Own pubkeys whose below-head gap was healed this session — heal runs once per login. */
+    private val gapHealedOwnPubkeys = ConcurrentHashMap.newKeySet<String>()
+
+    /** Reset per-session state. Called once per login from AppBootstrapper (this is a
+     *  @Singleton that survives logout/login, so the heal flag must be cleared explicitly). */
+    fun resetForSession() {
+        gapHealedOwnPubkeys.clear()
+    }
+
     /**
      * Load a full profile: notes, refs, engagement, own-engagement.
      * Each step is fail-soft — a network error in one step doesn't abort subsequent steps.
@@ -128,7 +137,7 @@ class ProfilePipeline @Inject constructor(
 
         // ── Step 2: Paginated note fetch (delta or full backfill) ──────
         val noteEvents = try {
-            fetchNotes(pubkey, writeRelays, maxPages)
+            fetchNotes(pubkey, writeRelays, maxPages, isOwn)
         } catch (e: Exception) {
             Log.w(TAG, "Step2 failed: ${e.message}")
             memoryEventStore.userEvents(pubkey, PROFILE_KINDS, 2500)
@@ -250,10 +259,41 @@ class ProfilePipeline @Inject constructor(
         pubkey: String,
         writeRelays: List<String>,
         maxPages: Int,
+        isOwn: Boolean,
     ): List<NostrEvent> {
         val kinds = PROFILE_KINDS.toList()
+        val nowSec = System.currentTimeMillis() / 1000
         val latestKnown = memoryEventStore.latestEventTimestampForAuthor(pubkey, PROFILE_KINDS)
-        val sevenDaysAgo = System.currentTimeMillis() / 1000 - DELTA_THRESHOLD_DAYS * 86400
+        val sevenDaysAgo = nowSec - DELTA_THRESHOLD_DAYS * 86400
+
+        // First own-profile load this session AND we have a recent head: a partial
+        // snapshot restore can seed a recent head while missing posts below it, and
+        // plain delta mode (since=latestKnown) would never request that gap. Heal it
+        // with a bounded backward walk over a flat recent window. Flat now-14d floor,
+        // NOT max(latestKnown-3d, now-14d) — that tightens the window in exactly the
+        // case we're healing (gap below a very-recent head). Runs ONCE per session;
+        // warm loads fall through to the lean delta path. Full-backfill (latestKnown
+        // null/old) is left untouched — it already walks back from newest with no hole.
+        if (isOwn && gapHealedOwnPubkeys.add(pubkey) && latestKnown != null && latestKnown > sevenDaysAgo) {
+            val healSince = nowSec - 14L * 86400
+            Log.w(TAG, "PROFILE-GAP heal: latestKnown=$latestKnown since=$healSince window=14d")
+            val filter = buildJsonObject {
+                put("kinds", buildJsonArray { PROFILE_KINDS.forEach { add(JsonPrimitive(it)) } })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("since", JsonPrimitive(healSince))
+                put("limit", JsonPrimitive(500))
+            }
+            val results = relayPool.fetchPaginatedEvents(
+                urls = writeRelays,
+                baseFilter = filter,
+                subIdPrefix = "prof-gap-${pubkey.take(8)}",
+                maxPages = 2,
+                timeoutMs = 20_000,
+                onPage = { page, count -> Log.d(TAG, "PROFILE-GAP page $page → $count") },
+            )
+            Log.w(TAG, "PROFILE-GAP done: ${results.sumOf { it.totalEvents }} events / ${results.size} relays")
+            return memoryEventStore.userEvents(pubkey, PROFILE_KINDS, 2500)
+        }
 
         if (latestKnown != null && latestKnown > sevenDaysAgo) {
             // Delta mode: MES has recent data, fetch only newer events
