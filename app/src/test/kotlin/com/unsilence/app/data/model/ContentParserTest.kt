@@ -351,14 +351,16 @@ class ContentParserTest {
     }
 
     @Test
-    fun `kind 16 with no embedded JSON but k=30023 tag resolves effective kind 30023`() {
+    fun `kind 16 with no embedded JSON but k=30023 tag has no blank article shell`() {
         val model = parse(content = "", kind = 16, tagsJson = """[["e","target-abc","wss://hint"],["k","30023"]]""")
-        assertEquals(30023, model.effectiveKind)
+        assertEquals(30023, model.effectiveKind) // kind still resolved from the k tag
         assertNotNull(model.repost)
         assertEquals("target-abc", model.repost!!.targetId)
-        // Stub article (no inner tags to source title from) — acceptable until a-tag resolution.
-        assertNotNull(model.article)
-        assertNull(model.article!!.title)
+        // No embedded JSON and no inner article tags → no real article data → must NOT
+        // emit a blank ArticleInfo shell (which would route an empty card to
+        // ArticleLayout). Falls through to the repost note stub until the a-tag/naddr
+        // resolver (#5) can fetch the real article.
+        assertNull(model.article)
     }
 
     @Test

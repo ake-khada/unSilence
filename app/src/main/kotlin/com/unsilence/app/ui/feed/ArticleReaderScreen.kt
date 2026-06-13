@@ -115,7 +115,7 @@ fun ArticleReaderScreen(
     val defaultZapMessage = firstPreset?.message
     val defaultIsPrivate = prefs.defaultPrivate
 
-    val bodyHtml = remember(model.effectiveContent) { markdownToHtml(model.effectiveContent) }
+    val bodyHtml = remember(model.articleContent) { markdownToHtml(model.articleContent ?: "") }
 
     var showRepostMenu    by remember { mutableStateOf(false) }
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
@@ -246,7 +246,8 @@ fun ArticleReaderScreen(
                             icon               = Icons.AutoMirrored.Filled.Chat,
                             count              = row.replyCount,
                             contentDescription = "Replies",
-                            onClick            = { onNoteClick(row.id) },
+                            // navigateId = the article's own id (inner event for a repost), not the wrapper.
+                            onClick            = { onNoteClick(model.navigateId) },
                         )
                     }
                     Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -269,7 +270,7 @@ fun ArticleReaderScreen(
                                 )
                                 DropdownMenuItem(
                                     text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
-                                    onClick = { onQuote(row.id); showRepostMenu = false },
+                                    onClick = { onQuote(model.navigateId); showRepostMenu = false },
                                 )
                             }
                         }
@@ -336,7 +337,7 @@ fun ArticleReaderScreen(
                             contentDescription = "Share",
                             onClick            = {
                                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
                                     type = "text/plain"
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, null))
