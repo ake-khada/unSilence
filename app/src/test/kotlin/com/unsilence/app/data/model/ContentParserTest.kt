@@ -241,6 +241,18 @@ class ContentParserTest {
     }
 
     @Test
+    fun `engagementId is rootId for kind 16 when rootId present`() {
+        val model = parse("", kind = 16, rootId = "root-xyz", id = "grepost-id")
+        assertEquals("root-xyz", model.engagementId)
+    }
+
+    @Test
+    fun `engagementId is id for kind 16 when rootId null`() {
+        val model = parse("", kind = 16, rootId = null, id = "grepost-id")
+        assertEquals("grepost-id", model.engagementId)
+    }
+
+    @Test
     fun `engagementId is id for kind 1`() {
         val model = parse("hello", kind = 1, id = "note-id")
         assertEquals("note-id", model.engagementId)

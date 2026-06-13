@@ -10,6 +10,7 @@ package com.unsilence.app.data.memory
 
 import app.cash.turbine.test
 import com.unsilence.app.data.auth.MuteKeyProvider
+import com.unsilence.app.ui.feed.engagementId
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -154,6 +155,38 @@ class MemoryEventStoreInvariantsTest {
 
         assertEquals(1, store.repostCount(parentId))
         assertEquals(0, store.repostCount(repostId))
+    }
+
+    // ── Kind 16 generic-repost: stats + engagementId key off rootId ─────────
+    // No device-visible symptom unless a generic article-repost is in-feed, so
+    // this path needs explicit coverage (toFeedRow statsId + FeedRow.engagementId).
+
+    @Test
+    fun `kind 16 repost FeedRow keys stats and engagementId off rootId`() {
+        val parentId = "parent-16"
+        store.insert(event(id = parentId, kind = 1))
+        // Give the parent a repost count to attribute.
+        store.insert(event(id = "warmup-repost", kind = 6, rootId = parentId))
+        val k16 = "k16-repost"
+        store.insert(event(id = k16, kind = 16, rootId = parentId))
+
+        val parentRepostCount = store.repostCount(parentId)
+        assertTrue("parent should have a repost count to attribute", parentRepostCount >= 1)
+
+        val row = store.feedRowsByIds(setOf(k16)).first()
+        // statsId fix: the kind-16 FeedRow's counts key off rootId, not the wrapper id.
+        assertEquals(parentRepostCount, row.repostCount)
+        assertEquals(0, store.repostCount(k16))
+        // FeedRow.engagementId getter fix: kind-16 with rootId resolves to rootId.
+        assertEquals(parentId, row.engagementId)
+    }
+
+    @Test
+    fun `kind 16 repost with null rootId keeps own id as engagementId`() {
+        val k16 = "k16-noroot"
+        store.insert(event(id = k16, kind = 16, rootId = null))
+        val row = store.feedRowsByIds(setOf(k16)).first()
+        assertEquals(k16, row.engagementId)
     }
 
     // ── NIP-10 threading ────────────────────────────────────────────────────

@@ -122,7 +122,7 @@ internal val FeedRow.displayName: String?
          ?: authorName?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
 
 internal val FeedRow.engagementId: String
-    get() = if (kind == 6 && rootId != null) rootId!! else id
+    get() = if ((kind == 6 || kind == 16) && rootId != null) rootId!! else id
 
 // ── Pure helper functions ────────────────────────────────────────────────────
 

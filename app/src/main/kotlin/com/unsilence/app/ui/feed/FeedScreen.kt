@@ -50,6 +50,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -446,29 +447,32 @@ fun FeedScreen(
     }
 
     articleRow?.let { row ->
+        // Effective engagement target: for a kind-6/16 reposted article these route
+        // to the ORIGINAL event (model.engagementId/pubkey), not the wrapper.
+        val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
         ArticleReaderScreen(
             row             = row,
             onDismiss       = { articleRow = null },
             onNoteClick     = onNoteClick,
-            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
             onReactLongPress = {
-                emojiReactTarget = row.id to row.pubkey
+                emojiReactTarget = model.engagementId to model.pubkey
                 showFullEmojiPicker = true
             },
             pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
-                actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
+                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
-            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
+            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
             onQuote         = onQuote,
-            onZap           = { req -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, req) },
+            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
             onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
             hasReacted      = row.engagementId in reactedIds,
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
-            isZapLoading    = row.id in zapLoadingIds,
-            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            isZapLoading    = model.engagementId in zapLoadingIds,
+            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
         )
     }

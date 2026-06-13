@@ -3328,7 +3328,10 @@ class MemoryEventStore @Inject constructor(
         // bumps profileUpdatedAt[X] but leaves other authors' timestamps
         // unchanged — rows for those authors stay cached. A stat update for
         // event Y bumps statsUpdatedAt[Y] but leaves other rows alone.
-        val statsId = if (event.kind == 6) event.rootId ?: event.id else event.id
+        // kind-16 (NIP-18 generic repost) keys stats off the reposted event too,
+        // not just kind-6 — so a reposted article's counts/cache-invalidation track
+        // the original, matching EventModel.engagementId.
+        val statsId = if (event.kind == 6 || event.kind == 16) event.rootId ?: event.id else event.id
         val authorProfileTs = profileUpdatedAt[event.pubkey] ?: 0L
         val statsTs = statsUpdatedAt[statsId] ?: 0L
 
