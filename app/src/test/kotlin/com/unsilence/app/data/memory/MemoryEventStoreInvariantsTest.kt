@@ -1068,6 +1068,28 @@ class MemoryEventStoreInvariantsTest {
         )
     }
 
+    // ── kind-16 reposts: notes-feed yes, replies-feed no ────────────────────
+    // A kind-16 with rootId looks reply-like (single e-tag sets replyToId too), so
+    // the content filters must treat it as a repost, not a reply.
+
+    @Test
+    fun `kind 16 repost shows in notes feed and is excluded from replies feed`() {
+        // rootId set (as threading would from the e-tag); replyToId also set to mimic
+        // the single-e-tag positional parse that makes it look reply-like.
+        store.insert(event(
+            id = "k16-feed", kind = 16, createdAt = 5000L,
+            replyToId = "orig-article", rootId = "orig-article",
+        ))
+
+        val notesOnly = store.feedEvents(FeedFilter(kinds = setOf(1, 16), contentFilter = 1))
+        assertTrue("kind-16 repost must appear in notes-only feed",
+            notesOnly.any { it.id == "k16-feed" })
+
+        val repliesOnly = store.feedEvents(FeedFilter(kinds = setOf(1, 16), contentFilter = 2))
+        assertTrue("kind-16 repost must be excluded from replies-only feed",
+            repliesOnly.none { it.id == "k16-feed" })
+    }
+
     // ── feedEvents relay URL scoping ───────────────────────────────────────
 
     @Test
@@ -1589,16 +1611,20 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "root2", pubkey = "alice", kind = 1, createdAt = 101))
         store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "root1", rootId = "root1", createdAt = 102))
         store.insert(event(id = "repost1", pubkey = "alice", kind = 6, rootId = "root1", createdAt = 103))
+        // kind-16 generic repost: carries rootId (and replyToId from single-e-tag parse)
+        // so it looks reply-like — must still count as a Notes-tab repost, like kind-6.
+        store.insert(event(id = "grepost1", pubkey = "alice", kind = 16, replyToId = "root2", rootId = "root2", createdAt = 105))
         store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
             tags = listOf(listOf("d", "slug"))))
 
         store.userFeedFlow("alice", contentFilter = 1).test {
             val rows = awaitItem()
             val ids = rows.map { it.id }
-            assertEquals("kind-1 roots + kind-6 reposts", 3, rows.size)
+            assertEquals("kind-1 roots + kind-6/16 reposts", 4, rows.size)
             assertTrue("root1 included", "root1" in ids)
             assertTrue("root2 included", "root2" in ids)
             assertTrue("repost1 included (kind-6 in Notes tab)", "repost1" in ids)
+            assertTrue("grepost1 included (kind-16 in Notes tab)", "grepost1" in ids)
             assertFalse("reply1 excluded", "reply1" in ids)
             assertFalse("article1 excluded", "article1" in ids)
             cancelAndIgnoreRemainingEvents()
@@ -1611,6 +1637,8 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "root1", rootId = "root1", createdAt = 101))
         store.insert(event(id = "reply2", pubkey = "alice", kind = 1, replyToId = "root1", createdAt = 102))
         store.insert(event(id = "repost1", pubkey = "alice", kind = 6, rootId = "root1", createdAt = 103))
+        // kind-16 repost looks reply-like (rootId set) but must be EXCLUDED from replies.
+        store.insert(event(id = "grepost1", pubkey = "alice", kind = 16, replyToId = "root1", rootId = "root1", createdAt = 105))
         store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
             tags = listOf(listOf("d", "slug"))))
 
@@ -1620,6 +1648,7 @@ class MemoryEventStoreInvariantsTest {
             assertEquals(2, rows.size)
             assertTrue("reply1 included", "reply1" in ids)
             assertTrue("reply2 included", "reply2" in ids)
+            assertFalse("grepost1 (kind-16 repost) excluded from replies", "grepost1" in ids)
             cancelAndIgnoreRemainingEvents()
         }
     }

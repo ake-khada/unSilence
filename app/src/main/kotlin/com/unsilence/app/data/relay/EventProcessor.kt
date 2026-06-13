@@ -398,7 +398,7 @@ class EventProcessor @Inject constructor(
 
         // Parse NIP-10 threading for content event kinds.
         val (replyToId, rootId) = when (dto.kind) {
-            1, 6, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
+            1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
             else -> Pair(null, null)
         }
 
@@ -452,9 +452,9 @@ class EventProcessor @Inject constructor(
         // ── Priority lanes ───────────────────────────────────────────────────
         // Kind-3 is NOT channeled — updateFollows (above) provides the MES
         // update, and the snapshot persists followsByPubkey directly.
-        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 9734, 9735, 20, 21, 30023)
+        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 9734, 9735, 16, 20, 21, 30023)
         if (shouldChannel) {
-            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 20 || dto.kind == 21 || dto.kind == 30023
+            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 || dto.kind == 21 || dto.kind == 30023
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)

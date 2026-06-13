@@ -172,7 +172,7 @@ object ContentParser {
             createdAt = effectiveCreatedAt,
             sourceCreatedAt = createdAt,
             relayUrl = relayUrl,
-            engagementId = if (kind == 6 || kind == 16) (rootId ?: id) else id,
+            engagementId = if (kind == 6 || kind == 16) (repost?.targetId ?: rootId ?: id) else id,
             navigateId = if (kind == 6 || kind == 16) (repost?.targetId ?: id) else id,
             segments = segments,
             media = manifest,

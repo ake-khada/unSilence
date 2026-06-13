@@ -756,7 +756,7 @@ class FeedViewModel @Inject constructor(
     }
 
     private fun loadCachedEvents(type: FeedType): List<NostrEvent> {
-        val kinds = setOf(1, 6, 20, 21, 30023)
+        val kinds = setOf(1, 6, 16, 20, 21, 30023)
         return when (type) {
             is FeedType.Following -> {
                 val follows = keyManager.getPublicKeyHex()
@@ -804,7 +804,7 @@ class FeedViewModel @Inject constructor(
         // (audit finding CG-R1). The bandwidth cost of fetching reposts/
         // articles/imeta-pictures the Conversations tab doesn't display
         // is bounded by the 300-event limit.
-        val kinds = listOf(1, 6, 20, 21, 30023)
+        val kinds = listOf(1, 6, 16, 20, 21, 30023)
         val config = OutboxRelayResolver.Config(
             kinds = kinds,
             limit = 300,
@@ -858,13 +858,17 @@ class FeedViewModel @Inject constructor(
         relayPool.activeSingleRelayFeedUrl = null
     }
 
-    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean =
-        when (cf) {
+    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean {
+        // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and so look
+        // reply-like — they must count as roots for notes and be excluded from replies.
+        val isRepostKind = evt.kind == 6 || evt.kind == 16
+        return when (cf) {
             FeedContentFilter.NOTES_ONLY ->
-                evt.kind == 6 || (evt.replyToId == null && evt.rootId == null)
+                isRepostKind || (evt.replyToId == null && evt.rootId == null)
             FeedContentFilter.REPLIES_ONLY ->
-                evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
+                !isRepostKind && (evt.replyToId != null || evt.rootId != null)
         }
+    }
 
     // ── Mute / Report actions ──────────────────────────────────────────────
 

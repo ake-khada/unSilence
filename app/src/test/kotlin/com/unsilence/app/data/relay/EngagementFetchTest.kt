@@ -40,7 +40,7 @@ class EngagementFetchTest {
 
         val filter = parsed[2].jsonObject
         val kinds = filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
-        assertEquals(listOf(1, 6, 7, 9735), kinds)
+        assertEquals(listOf(1, 6, 16, 7, 9735), kinds)
 
         val eTags = filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(listOf("evt-1", "evt-2"), eTags)
@@ -50,11 +50,12 @@ class EngagementFetchTest {
     }
 
     @Test
-    fun `buildBatchedEngagementReq has all four engagement kinds`() {
+    fun `buildBatchedEngagementReq includes generic-repost kind 16`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"))
         val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!
             .jsonArray.map { it.jsonPrimitive.content.toInt() }
-        assertEquals(listOf(1, 6, 7, 9735), kinds)
+        // 1 reply, 6 note-repost, 16 generic-repost, 7 reaction, 9735 zap
+        assertEquals(listOf(1, 6, 16, 7, 9735), kinds)
     }
 
     // ── engagementFreshnessInterval ─────────────────────────────────────

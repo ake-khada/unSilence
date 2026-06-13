@@ -74,9 +74,9 @@ class OwnEngagementBackfillTest {
         assertEquals(1, authors.size)
         assertEquals(ownPk, authors[0].jsonPrimitive.content)
 
-        // kinds = [7, 6]
+        // kinds = [7, 6, 16] — reactions + note reposts + generic (NIP-18) reposts
         val kinds = filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
-        assertEquals(listOf(7, 6), kinds)
+        assertEquals(listOf(7, 6, 16), kinds)
 
         // #e = [evt-1, evt-2, evt-3]
         val eTags = filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content }

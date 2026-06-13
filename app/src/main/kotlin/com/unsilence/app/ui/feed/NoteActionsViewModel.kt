@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -236,25 +237,46 @@ class NoteActionsViewModel @Inject constructor(
 
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val nowSeconds  = System.currentTimeMillis() / 1000L
-            val original   = memoryEventStore.getEventEntity(eventId)
+            val nowSeconds = System.currentTimeMillis() / 1000L
+            // Full NostrEvent: we need the ORIGINAL's kind (to pick 6 vs 16), its d tag
+            // (for an addressable a-coordinate), and a relay it was actually seen on.
+            val original = memoryEventStore.getNostrEvent(eventId)
             if (original == null) {
                 _actionError.tryEmit("Repost failed — original note not found")
                 return@launch
             }
-            val originalJson = entityToJson(original)
+            val originalJson = nostrEventToJson(original)
+            // Prefer a relay the original was seen on — the passed eventRelayUrl may be
+            // the repost-wrapper row's relay, not the original's.
+            val relayHint = original.relaysSeen.firstOrNull { it.isNotBlank() }
+                ?: original.relayUrl.takeIf { it.isNotBlank() }
+                ?: eventRelayUrl
 
-            val template = EventTemplate<RepostEvent>(
-                createdAt = nowSeconds,
-                kind      = RepostEvent.KIND,
-                tags      = arrayOf(
-                    arrayOf("e", eventId, eventRelayUrl),
-                    arrayOf("p", eventPubkey),
-                    arrayOf("k", "1"),
-                ),
-                content   = originalJson,
+            // NIP-18 kind + tags (pure, unit-tested in buildRepostDescriptor).
+            val dTag = original.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1)
+            val desc = buildRepostDescriptor(
+                targetId = eventId,
+                targetPubkey = eventPubkey,
+                targetKind = original.kind,
+                targetDTag = dTag,
+                relayHint = relayHint,
             )
-            val signed = signingManager.sign(template) ?: run {
+            // Operational marker (Log.w survives R8) — confirms the on-wire repost
+            // kind for the round-trip; only fires on a user-initiated repost.
+            Log.w("NoteActions", "REPOST publish: target kind=${original.kind} → repost kind=${desc.kind}, ${desc.tags.size} tags")
+            // kind-6 keeps the dedicated RepostEvent type; kind-16 uses a generic
+            // EventTemplate<Event> (RepostEvent assumes kind-6 — guardrail).
+            val signed: Event? = if (desc.kind == RepostEvent.KIND) {
+                signingManager.sign(EventTemplate<RepostEvent>(
+                    createdAt = nowSeconds, kind = desc.kind, tags = desc.tags, content = originalJson,
+                ))
+            } else {
+                signingManager.sign(EventTemplate<Event>(
+                    createdAt = nowSeconds, kind = desc.kind, tags = desc.tags, content = originalJson,
+                ))
+            }
+
+            if (signed == null) {
                 _actionError.tryEmit("Repost failed — signing rejected (check Amber permissions)")
                 return@launch
             }
@@ -440,6 +462,18 @@ class NoteActionsViewModel @Inject constructor(
         put("sig",        entity.sig)
     }.toString()
 
+    /** Reconstruct the original event's wire JSON from a stored NostrEvent (embedded
+     *  in a repost's content so it renders without a refetch). */
+    private fun nostrEventToJson(event: NostrEvent): String = buildJsonObject {
+        put("id",         event.id)
+        put("pubkey",     event.pubkey)
+        put("created_at", event.createdAt)
+        put("kind",       event.kind)
+        put("tags",       NostrJson.parseToJsonElement(event.tagsJson))
+        put("content",    event.content)
+        put("sig",        event.sig)
+    }.toString()
+
     /**
      * Convert a signed Quartz Event to a NostrEvent for MES optimistic insert.
      * Parses NIP-10 e-tag threading to set rootId (used by repost + zap actor indexes).
@@ -482,4 +516,48 @@ class NoteActionsViewModel @Inject constructor(
             relaysSeen = ConcurrentHashMap.newKeySet(),
         )
     }
+}
+
+/** The repost kind + tags for a target, per NIP-18. Pure (unit-tested). */
+internal data class RepostDescriptor(val kind: Int, val tags: Array<Array<String>>) {
+    // data class with Array — equals/hashCode unused by callers/tests (we assert on
+    // kind + tag contents directly), so the default reference-based ones are fine.
+    override fun equals(other: Any?) = this === other
+    override fun hashCode() = System.identityHashCode(this)
+}
+
+/**
+ * NIP-18 repost descriptor:
+ *  - kind-1 target → kind-6 note repost, tags e(id,relay) + p(author) + k("1").
+ *  - any other kind → kind-16 generic repost, tags e + p + k(<originalKind>); an
+ *    addressable target (has a non-blank d tag, e.g. 30023) also gets an
+ *    a("<kind>:<pubkey>:<d>") coordinate. A non-note target without a d tag still
+ *    publishes kind-16 with e/p/k (and the embedded JSON content), but no malformed a.
+ */
+internal fun buildRepostDescriptor(
+    targetId: String,
+    targetPubkey: String,
+    targetKind: Int,
+    targetDTag: String?,
+    relayHint: String,
+): RepostDescriptor {
+    if (targetKind == 1) {
+        return RepostDescriptor(
+            kind = RepostEvent.KIND,
+            tags = arrayOf(
+                arrayOf("e", targetId, relayHint),
+                arrayOf("p", targetPubkey),
+                arrayOf("k", "1"),
+            ),
+        )
+    }
+    val tags = mutableListOf(
+        arrayOf("e", targetId, relayHint),
+        arrayOf("p", targetPubkey),
+        arrayOf("k", targetKind.toString()),
+    )
+    if (!targetDTag.isNullOrBlank()) {
+        tags.add(arrayOf("a", "$targetKind:$targetPubkey:$targetDTag", relayHint))
+    }
+    return RepostDescriptor(kind = 16, tags = tags.toTypedArray())
 }
