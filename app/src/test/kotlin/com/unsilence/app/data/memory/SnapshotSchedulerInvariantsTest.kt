@@ -412,4 +412,71 @@ class SnapshotSchedulerInvariantsTest {
         // Events should still round-trip
         assertEquals(1, restored.eventsByIds(setOf("v3-note")).size)
     }
+
+    // ── Test 11: V14 save stamps the owner pubkey after the 32-byte header ──
+
+    @Test
+    fun `saveNow stamps owner pubkey immediately after header`() = runTest {
+        val myPk = "owner-pubkey-aaaa"
+        store.ownPubkey = myPk
+        store.insert(event(id = "stamp-1", kind = 1, createdAt = 100))
+        scheduler.saveNow()
+
+        val snapshotFile = File(tmpDir, "test.snapshot")
+        DataInputStream(snapshotFile.inputStream().buffered()).use { input ->
+            input.readFully(ByteArray(32)) // skip the 32-byte header
+            val len = input.readInt()      // length-prefixed owner string (writeStr)
+            val bytes = ByteArray(len)
+            input.readFully(bytes)
+            assertEquals(myPk, String(bytes, Charsets.UTF_8))
+        }
+    }
+
+    // ── Test 12: foreign-owner snapshot is rejected, deleted, MES empty ─────
+
+    @Test
+    fun `snapshot from a different owner is rejected and deleted`() = runTest {
+        val ownerA = "account-A-pubkey"
+        store.ownPubkey = ownerA
+        store.insert(event(id = "A-note-1", kind = 1, createdAt = 100))
+        store.insert(event(id = "A-note-2", kind = 1, createdAt = 101))
+        scheduler.saveNow()
+
+        val snapshotFile = File(tmpDir, "test.snapshot")
+        assertTrue("snapshot should exist after save", snapshotFile.exists())
+
+        // Restore into a store owned by a DIFFERENT account.
+        val ownerB = "account-B-pubkey"
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
+        restored.ownPubkey = ownerB
+        val restoredScheduler = SnapshotScheduler(restored, AtomicFile(snapshotFile))
+        restoredScheduler.restoreIfPresent()
+
+        // The throw fires before any insertion, so MES stays empty; file deleted.
+        assertTrue(
+            "MES must stay empty on owner mismatch",
+            restored.eventsByIds(setOf("A-note-1", "A-note-2")).isEmpty(),
+        )
+        assertTrue("foreign snapshot file must be deleted", !snapshotFile.exists())
+    }
+
+    // ── Test 13: same-owner snapshot restores normally ─────────────────────
+
+    @Test
+    fun `snapshot from the same owner restores normally`() = runTest {
+        val owner = "account-same-pubkey"
+        store.ownPubkey = owner
+        store.insert(event(id = "same-1", kind = 1, createdAt = 100))
+        store.insert(event(id = "same-2", kind = 1, createdAt = 101))
+        scheduler.saveNow()
+
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, com.unsilence.app.data.relay.stubTimelineServiceProvider())
+        restored.ownPubkey = owner
+        val restoredScheduler = SnapshotScheduler(
+            restored, AtomicFile(File(tmpDir, "test.snapshot")),
+        )
+        restoredScheduler.restoreIfPresent()
+
+        assertEquals(2, restored.eventsByIds(setOf("same-1", "same-2")).size)
+    }
 }

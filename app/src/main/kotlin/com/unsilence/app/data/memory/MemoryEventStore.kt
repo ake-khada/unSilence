@@ -50,8 +50,23 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
 /** V13: event records carry the pre-built tagsJson string — readers of V13+
  *  skip the per-event tagsToJson reconstruction on cold start. Older files
- *  (≤V12) still restore via the reconstruction path in readEventBinary. */
-private const val SNAPSHOT_BINARY_VERSION = 13
+ *  (≤V12) still restore via the reconstruction path in readEventBinary.
+ *  V14: a length-prefixed owner pubkey is stamped immediately after the 32-byte
+ *  header. Restore rejects a snapshot whose owner differs from the current
+ *  ownPubkey (foreign-account bleed guard). ≤V13 have no owner field and are
+ *  trusted as legacy, restamped to V14 on next save. */
+private const val SNAPSHOT_BINARY_VERSION = 14
+/** Thrown by restoreSnapshotBinary when a V14+ snapshot's stamped owner pubkey
+ *  differs from the current session's ownPubkey — a foreign-account snapshot must
+ *  not bleed into this user's MES. Thrown before any MES insertion, so the store
+ *  stays empty; SnapshotScheduler catches this, deletes the file, and starts fresh. */
+class SnapshotOwnerMismatchException(
+    val snapshotOwner: String,
+    val currentOwner: String,
+) : IOException(
+    "Snapshot owner ${snapshotOwner.take(8)}… != current ${currentOwner.take(8)}…",
+)
+
 /** Max engaged event IDs persisted per action type (react/repost/zap). */
 private const val PERSISTED_ENGAGED_CAP = 10_000
 private const val SNAPSHOT_HEADER_SIZE = 32 // bytes
@@ -3617,6 +3632,13 @@ class MemoryEventStore @Inject constructor(
     //   [24..27] eventsCount (sanity / progress)
     //   [28..31] reserved (= 0)
     //
+    // V14: immediately after the 32-byte header, a length-prefixed owner pubkey
+    // string (writeStr) precedes the FOLLOWS section. NOTE: the four section
+    // offsets above are NOT adjusted for this owner prefix — they remain the
+    // pre-V14 values and are purely informational (restore reads sequentially).
+    // TODO: any future lazy-seek implementer must account for the owner prefix
+    // length when seeking to followsOffset/eventsOffset/etc.
+    //
     // V2 TSV files are still readable — SnapshotScheduler peeks the first
     // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
 
@@ -3846,6 +3868,11 @@ class MemoryEventStore @Inject constructor(
         out.writeInt(totalEvents)
         out.writeInt(timelinesOffset) // was reserved; V12+ carries timelines offset
 
+        // V14 owner stamp — length-prefixed pubkey directly after the header.
+        // The section offsets above intentionally do NOT include this prefix
+        // (informational only; see header-layout comment TODO).
+        out.writeStr(ownPubkey ?: "")
+
         // Sections in offset order.
         out.write(followsBytes)
         out.write(eventsBytes)
@@ -3874,6 +3901,17 @@ class MemoryEventStore @Inject constructor(
         input.readInt() // relayHealthOffset
         val declaredEventsCount = input.readInt()
         input.readInt() // reserved
+
+        // V14 owner stamp — reject a snapshot belonging to a different account
+        // BEFORE any MES insertion (store stays empty on mismatch). ≤V13 files
+        // have no owner field and are trusted as legacy (restamped on next save).
+        if (version >= 14) {
+            val owner = input.readStr()
+            val current = ownPubkey
+            if (owner.isNotEmpty() && current != null && owner != current) {
+                throw SnapshotOwnerMismatchException(owner, current)
+            }
+        }
 
         // FOLLOWS section
         val followsCount = input.readInt()

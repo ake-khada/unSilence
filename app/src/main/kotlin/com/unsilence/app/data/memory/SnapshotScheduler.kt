@@ -138,6 +138,12 @@ class SnapshotScheduler @Inject constructor(
                     }
                     Log.d(TAG, "Snapshot restored (V2 TSV migration path) from ${bytes.size / 1024}KB")
                 }
+            } catch (e: SnapshotOwnerMismatchException) {
+                // Foreign-account snapshot — MES was left empty by the throw.
+                // Reject and delete so the new account starts clean.
+                Log.w(TAG, "SNAPSHOT-OWNER mismatch: snapshot=${e.snapshotOwner.take(8)}… " +
+                    "current=${e.currentOwner.take(8)}… — rejected+deleted")
+                deleteSnapshot()
             } catch (e: Exception) {
                 Log.e(TAG, "Snapshot restore failed, starting fresh", e)
             } finally {
