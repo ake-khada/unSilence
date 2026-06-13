@@ -530,4 +530,82 @@ class ContentParserTest {
         val model = parse(content = text, kind = 1)
         assertTrue("non-article over 20k chars is truncated", model.truncated)
     }
+
+    // ── Blockquotes (kind-1 render-only) ─────────────────────────────────────
+
+    @Test
+    fun `leading quote line emits one BlockQuote with inner text`() {
+        val model = parse("> hello")
+        assertEquals(1, model.segments.size)
+        val bq = model.segments[0]
+        assertTrue(bq is Segment.BlockQuote)
+        bq as Segment.BlockQuote
+        assertEquals(1, bq.segments.size)
+        assertEquals("hello", (bq.segments[0] as Segment.Text).text)
+    }
+
+    @Test
+    fun `quote line with no space after gt strips just the marker`() {
+        val model = parse(">hello")
+        val bq = model.segments[0] as Segment.BlockQuote
+        assertEquals("hello", (bq.segments[0] as Segment.Text).text)
+    }
+
+    @Test
+    fun `consecutive quote lines group into one BlockQuote`() {
+        val model = parse("> a\n> b")
+        assertEquals(1, model.segments.size)
+        val bq = model.segments[0] as Segment.BlockQuote
+        assertEquals("a\nb", (bq.segments[0] as Segment.Text).text)
+    }
+
+    @Test
+    fun `plain text before and after quote preserves order`() {
+        val model = parse("x\n> q\ny")
+        assertEquals(3, model.segments.size)
+        assertEquals("x", (model.segments[0] as Segment.Text).text)
+        assertTrue(model.segments[1] is Segment.BlockQuote)
+        assertEquals("y", (model.segments[2] as Segment.Text).text)
+    }
+
+    @Test
+    fun `mid-line greater-than is not a blockquote`() {
+        val model = parse("hello > world")
+        assertEquals(1, model.segments.size)
+        assertTrue(model.segments[0] is Segment.Text)
+        assertEquals("hello > world", (model.segments[0] as Segment.Text).text)
+        assertFalse(model.segments.any { it is Segment.BlockQuote })
+    }
+
+    @Test
+    fun `blockquote preserves link and hashtag inside`() {
+        val model = parse("> see https://example.com #tag")
+        val bq = model.segments[0] as Segment.BlockQuote
+        assertTrue("link preserved in quote", bq.segments.any { it is Segment.Link })
+        assertTrue("hashtag preserved in quote", bq.segments.any { it is Segment.Hashtag })
+    }
+
+    @Test
+    fun `reposted kind-1 note with a quote line emits BlockQuote`() {
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"created_at":999,"content":"> quoted","tags":[]}"""
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        assertEquals(1, model.effectiveKind)
+        assertTrue("reposted kind-1 supports blockquotes", model.segments.any { it is Segment.BlockQuote })
+    }
+
+    @Test
+    fun `kind 30023 starting with a quote line does not emit BlockQuote`() {
+        val model = parse(content = "> not a note quote\n\nbody", kind = 30023,
+            tagsJson = """[["title","T"],["d","slug"]]""")
+        assertFalse(model.segments.any { it is Segment.BlockQuote })
+    }
+
+    @Test
+    fun `blockquote inner segments count toward the spam segment cap`() {
+        // One consecutive quote group with many link/hashtag-bearing lines → far over
+        // MAX_SEGMENTS(150) flat → must trip truncation, NOT hide inside one BlockQuote.
+        val body = (1..120).joinToString("\n") { "> line $it https://e$it.example.com #t$it" }
+        val model = parse(body)
+        assertTrue("a wall of quote lines must trip the segment cap (H-spam)", model.truncated)
+    }
 }
