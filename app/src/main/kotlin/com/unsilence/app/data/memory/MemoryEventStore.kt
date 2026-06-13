@@ -88,8 +88,8 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
  *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
-private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 20, 21, 30023)
-private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735)
+private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023)
+private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16)
 private val DERIVED_ONLY_KINDS = setOf(30166)
 
 @Singleton
@@ -637,7 +637,7 @@ class MemoryEventStore @Inject constructor(
             1, 6, 20, 21, 30023 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
-        if (kind == 7 || kind == 6 || kind == 9734) d.action = true
+        if (kind == 7 || kind == 6 || kind == 16 || kind == 9734) d.action = true
     }
 
     /**
@@ -692,7 +692,7 @@ class MemoryEventStore @Inject constructor(
             0 -> handleProfile(event)
             1 -> handleNote(event, dirty)
             3 -> handleFollows(event, dirty)
-            6 -> handleRepost(event, dirty)
+            6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
             9734 -> handleZapRequest(event)
             9735 -> handleZapReceipt(event, dirty)
@@ -1718,6 +1718,7 @@ class MemoryEventStore @Inject constructor(
         val kindCaps = mapOf(
             1 to 5000,      // notes (roots + replies combined)
             6 to 1000,      // reposts
+            16 to 1000,     // generic reposts (NIP-18) — same cap as kind-6
             7 to 1000,      // reactions (reconstructible)
             20 to 500,      // pictures
             21 to 500,      // videos
@@ -1884,12 +1885,15 @@ class MemoryEventStore @Inject constructor(
                 val event = eventsById[entry.id] ?: continue
                 if (event.kind !in filter.kinds) continue
                 if (filter.followedPubkeys != null && event.pubkey !in filter.followedPubkeys) continue
-                // Content filter: 1 = notes only, 2 = replies only
-                if (filter.contentFilter == 1 && event.kind != 6) {
+                // Content filter: 1 = notes only, 2 = replies only.
+                // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and
+                // must NOT be treated as replies — admit them to notes, exclude from replies.
+                val isRepostKind = event.kind == 6 || event.kind == 16
+                if (filter.contentFilter == 1 && !isRepostKind) {
                     if (event.replyToId != null || event.rootId != null) continue
                 }
                 if (filter.contentFilter == 2) {
-                    if ((event.replyToId == null && event.rootId == null) || event.kind == 6) continue
+                    if ((event.replyToId == null && event.rootId == null) || isRepostKind) continue
                 }
                 // Relay URL scoping — null or empty means no relay filter (all relays pass)
                 if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
@@ -1992,7 +1996,7 @@ class MemoryEventStore @Inject constructor(
             if (event.kind !in kinds) continue
             scanned++
             result.add(event)
-            val isRoot = event.kind == 6 || (event.replyToId == null && event.rootId == null)
+            val isRoot = event.kind == 6 || event.kind == 16 || (event.replyToId == null && event.rootId == null)
             if (isRoot && isDisplayable(event)) displayable++
         }
         val bound = when { hitFloor -> "floor"; hitCap -> "cap"; else -> "exhausted" }
@@ -2428,9 +2432,9 @@ class MemoryEventStore @Inject constructor(
         val events = ids.mapNotNull { eventsById[it] }.filter { it.kind in kinds }
 
         val filtered = when (contentFilter) {
-            // Notes tab: kind-1 roots (no replies) + kind-6 reposts — matches userNotesFlow
+            // Notes tab: kind-1 roots (no replies) + kind-6/16 reposts — matches userNotesFlow
             1 -> events.filter {
-                (it.kind == 1 && it.replyToId == null && it.rootId == null) || it.kind == 6
+                (it.kind == 1 && it.replyToId == null && it.rootId == null) || it.kind == 6 || it.kind == 16
             }
             // Replies tab: kind-1 replies only (has replyToId or rootId)
             2 -> events.filter { it.kind == 1 && (it.replyToId != null || it.rootId != null) }
@@ -2684,7 +2688,7 @@ class MemoryEventStore @Inject constructor(
     fun userFeedFlow(
         pubkey: String,
         contentFilter: Int = 0,
-        kinds: Set<Int> = setOf(1, 6, 30023),
+        kinds: Set<Int> = setOf(1, 6, 16, 30023),
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
         // No _statsSignal: stats changes don't alter feed membership/order, and
@@ -3311,7 +3315,7 @@ class MemoryEventStore @Inject constructor(
      */
     private fun deriveNotifType(event: NostrEvent, recipientPubkey: String): String = when (event.kind) {
         7 -> "reaction"
-        6 -> "repost"
+        6, 16 -> "repost"
         9735 -> "zap"
         1 -> {
             val isReply = event.replyToId?.let { eventsById[it]?.pubkey == recipientPubkey } == true

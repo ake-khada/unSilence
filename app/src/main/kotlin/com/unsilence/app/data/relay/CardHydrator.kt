@@ -126,7 +126,7 @@ class CardHydrator @Inject constructor(
     }
 
     // ── Engagement count fetch ─────────────────────────────────────────
-    // Per-post bounded download: kinds [1,6,7,9735] with #e:[postId],
+    // Per-post bounded download: kinds [1,6,16,7,9735] with #e:[postId],
     // limit 100. Targets the user's NIP-65 read relays (same as fetchThread).
     // Events flow through EventProcessor → MES aggregates → statsFlow → card display.
     //
@@ -294,7 +294,7 @@ class CardHydrator @Inject constructor(
     /** Engagement target ID: for kind-6 reposts use the original event (rootId),
      *  for everything else use the event's own ID. Matches FeedRow.engagementId. */
     private fun engagementIdFor(row: FeedRow): String =
-        if (row.kind == 6 && row.rootId != null) row.rootId!! else row.id
+        if ((row.kind == 6 || row.kind == 16) && row.rootId != null) row.rootId!! else row.id
 
     /**
      * Filter novel IDs and add to pending buffer. Launches a debounced
@@ -437,7 +437,7 @@ class CardHydrator @Inject constructor(
     /**
      * Dispatch per-post engagement REQs via outbox-routed relay resolution.
      *
-     * Each post gets ONE combined REQ (kinds [1,6,7,9735]) with its own #e and
+     * Each post gets ONE combined REQ (kinds [1,6,16,7,9735]) with its own #e and
      * limit=ENGAGEMENT_LIMIT. Per-post dispatch is a spec invariant: the per-post
      * limit cap ensures bounded download per post.
      *
@@ -545,6 +545,7 @@ internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<
             put("kinds", buildJsonArray {
                 add(JsonPrimitive(7))
                 add(JsonPrimitive(6))
+                add(JsonPrimitive(16)) // own kind-16 generic reposts light up "reposted" state
             })
             put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
         })
@@ -631,10 +632,11 @@ internal fun buildBatchedEngagementReq(subId: String, eventIds: List<String>): S
         add(JsonPrimitive(subId))
         add(buildJsonObject {
             put("kinds", buildJsonArray {
-                add(JsonPrimitive(1))
-                add(JsonPrimitive(6))
-                add(JsonPrimitive(7))
-                add(JsonPrimitive(9735))
+                add(JsonPrimitive(1))   // replies
+                add(JsonPrimitive(6))   // note reposts
+                add(JsonPrimitive(16))  // generic reposts (NIP-18) — count toward repost totals
+                add(JsonPrimitive(7))   // reactions
+                add(JsonPrimitive(9735)) // zaps
             })
             put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
             put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))

@@ -58,8 +58,8 @@ class ProfilePipeline @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
 ) {
     companion object {
-        /** Kinds fetched for profile notes (notes + reposts + pictures + videos + articles). */
-        val PROFILE_KINDS = setOf(1, 6, 20, 21, 30023)
+        /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
+        val PROFILE_KINDS = setOf(1, 6, 16, 20, 21, 30023)
         private const val ENGAGEMENT_CHUNK_SIZE = 50
         private const val ENGAGEMENT_TIMEOUT_MS = 10_000L
         private const val REF_WAIT_MS = 1500L
@@ -349,8 +349,9 @@ class ProfilePipeline @Inject constructor(
         val relayHints = mutableMapOf<String, String>()
 
         for (event in events) {
-            // Kind-6 repost targets
-            if (event.kind == 6) {
+            // Kind-6 / kind-16 repost targets (e-tag). a-tag-only coordinate
+            // reposts resolve later (#5); our own reposts embed the original JSON.
+            if (event.kind == 6 || event.kind == 16) {
                 extractRepostTargetId(event.tagsJson)?.let { id ->
                     referencedIds.add(id)
                     val eTagRelay = extractRepostTargetRelay(event.tagsJson)

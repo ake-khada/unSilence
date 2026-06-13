@@ -349,13 +349,16 @@ class UserProfileViewModel @Inject constructor(
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: GLOBAL_RELAY_URLS
 
-    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean =
-        when (cf) {
+    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean {
+        // kind-6 AND kind-16 reposts carry a rootId (the reposted event) → roots, not replies.
+        val isRepostKind = evt.kind == 6 || evt.kind == 16
+        return when (cf) {
             FeedContentFilter.NOTES_ONLY ->
-                evt.kind == 6 || (evt.replyToId == null && evt.rootId == null)
+                isRepostKind || (evt.replyToId == null && evt.rootId == null)
             FeedContentFilter.REPLIES_ONLY ->
-                evt.kind != 6 && (evt.replyToId != null || evt.rootId != null)
+                !isRepostKind && (evt.replyToId != null || evt.rootId != null)
         }
+    }
 
     override fun onCleared() {
         currentHandle?.close()
@@ -376,7 +379,7 @@ class UserProfileViewModel @Inject constructor(
         }
 
         fun kindsForTab(tab: ProfileTab): List<Int> = when (tab) {
-            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6)
+            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6, 16)
             ProfileTab.LONGFORM -> listOf(30023)
         }
     }

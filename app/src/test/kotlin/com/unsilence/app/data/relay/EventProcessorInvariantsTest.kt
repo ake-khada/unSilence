@@ -340,4 +340,31 @@ class EventProcessorInvariantsTest {
             "wss://author-read.example.com" !in writeRelays,
         )
     }
+
+    // ── kind-16 generic repost ingestion (regression anchor) ────────────────
+    // The whole #2/#2c kind-16 render+stats code never executed in production
+    // because kind-16 was dropped at shouldChannel and never threaded. This is
+    // the test that would have caught that: feed a RAW kind-16 through the real
+    // DTO path and assert it lands, threads rootId from the e-tag, and increments
+    // the original's repost count via handleRepost.
+
+    @Test
+    fun `kind 16 generic repost ingests, threads rootId from e-tag, increments repost count`() = runTest {
+        val targetId = "d".repeat(64)
+        val author   = "e".repeat(64)
+        // NIP-18 content embeds the original (a kind-30023 article) so it renders without a refetch.
+        val embedded = """{"id":"$targetId","pubkey":"$author","kind":30023,"created_at":1700000000,"content":"# Article body","tags":[["title","T"],["d","my-article"]]}"""
+        val tags = """[["e","$targetId","wss://relay.example.com"],["p","$author"],["k","30023"]]"""
+        val (raw, url) = rawEvent(seed = 42, kind = 16, content = embedded, tags = tags)
+
+        processor.process(raw, url)
+        processor.drainForTest()
+
+        val stored = store.eventsByIds(setOf(eventId(42)))
+        assertEquals("kind-16 must be channeled + stored", 1, stored.size)
+        assertEquals(16, stored.first().kind)
+        assertEquals("rootId threaded from the e-tag", targetId, stored.first().rootId)
+        // handleRepost (insertCore dispatch 6,16) attributed the repost to the original.
+        assertEquals("repost count lands on the original article", 1, store.repostCount(targetId))
+    }
 }
