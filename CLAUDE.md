@@ -18,7 +18,9 @@
 
 ## Tech Stack
 
-Kotlin 2.3.0 · Compose BOM 2025.12.00 · Hilt/KSP 2.58 · Media3 1.5.1+HLS · Coil 3 (64MB cap) · Quartz 1.05.1 · AGP 8.9.1 · compileSdk 36 · JDK 17
+**Last verified against build files: 2026-06-13.**
+
+Kotlin 2.3.0 · Compose BOM 2025.12.00 · Hilt 2.58 · KSP 2.3.0 · Media3 1.5.1+HLS · Coil 3.3.0 (15% RAM image cache) · Quartz 1.05.1 · AGP 8.9.1 · compileSdk 36 · JDK 17
 
 ---
 
