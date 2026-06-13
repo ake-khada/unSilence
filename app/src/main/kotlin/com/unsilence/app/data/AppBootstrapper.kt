@@ -93,8 +93,14 @@ class AppBootstrapper @Inject constructor(
     private val feedRelayWarmer: com.unsilence.app.data.relay.FeedRelayWarmer,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Guards both doBootstrap and teardown so they never interleave on the shared
+    // singletons (RelayPool, EventProcessor, MES, KeyManager).
     private val bootstrapMutex = Mutex()
     private var bootstrapJob: Job? = null
+    // Monotonic session generation. Bumped by both bootstrap() (login) and teardown()
+    // (logout). Each holds its captured gen and, inside the mutex, bails if a newer
+    // session has superseded it — so a fast logout↔relogin can't corrupt the winner.
+    private val sessionGen = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
      * Emitted when bootstrap detects Amber NIP-44 permissions are missing
@@ -129,18 +135,30 @@ class AppBootstrapper @Inject constructor(
      * don't interleave steps.
      */
     suspend fun bootstrap(pubkeyHex: String) {
+        // Claim a new session generation; supersedes any in-flight teardown/bootstrap.
+        val myGen = sessionGen.incrementAndGet()
         // Cancel any in-progress bootstrap (e.g. from previous login session).
         // Without this, the old bootstrap holds the mutex for minutes
         // (MediaPreconnect.warmUp can hang) and the new bootstrap starves.
         bootstrapJob?.cancel()
-        bootstrapJob = scope.launch { doBootstrap(pubkeyHex) }
+        bootstrapJob = scope.launch { doBootstrap(pubkeyHex, myGen) }
         bootstrapJob?.join()
     }
 
-    private suspend fun doBootstrap(pubkeyHex: String) = bootstrapMutex.withLock {
+    private suspend fun doBootstrap(pubkeyHex: String, myGen: Int) = bootstrapMutex.withLock {
+        // If a newer session (another login, or a logout) supervened while we waited
+        // for the mutex, abandon this run — the newer one is authoritative.
+        if (sessionGen.get() != myGen) {
+            Log.w(TAG, "SESSION-FENCE: bootstrap aborted — superseded (gen=${sessionGen.get()} myGen=$myGen)")
+            return@withLock
+        }
         // ═══════════════════════════════════════════════════════════════════
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
+        // Account-switch residue: a bailed teardown may have left a different user's
+        // events in MES. Clear before claiming ownership. Same-pubkey relogin keeps data.
+        val prevOwner = memoryEventStore.ownPubkey
+        if (prevOwner != null && prevOwner != pubkeyHex) memoryEventStore.clear()
         memoryEventStore.ownPubkey = pubkeyHex
         eventProcessor.start()
 
@@ -546,48 +564,61 @@ class AppBootstrapper @Inject constructor(
      * No exitProcess — singletons survive. bootstrap() restarts subsystems.
      */
     suspend fun teardown() {
-        // 0. Cancel in-progress bootstrap — releases the mutex immediately
-        bootstrapJob?.cancel()
-        bootstrapJob = null
+        // 0. Claim a teardown generation and cancel the in-flight bootstrap. We bump
+        //    BEFORE taking the mutex so a login that supervenes will out-number us.
+        val jobToCancel = bootstrapJob
+        val tornGen = sessionGen.incrementAndGet()
+        jobToCancel?.cancel()
 
-        // 1. Close persistent subscriptions + clear relay pool caches
-        relayPool.closeLiveMuteSub()
-        relayPool.closeLiveNotifSub()
-        relayPool.clearCaches()
+        bootstrapMutex.withLock {
+            // A login that supervened now owns all shared singletons (RelayPool,
+            // EventProcessor, MES, KeyManager). Any teardown work here would corrupt
+            // the new session. Bail — the new bootstrap is authoritative.
+            if (sessionGen.get() != tornGen) {
+                Log.w(TAG, "SESSION-FENCE: teardown aborted — newer session (gen=${sessionGen.get()}) supervened tornGen=$tornGen")
+                return@withLock
+            }
+            bootstrapJob = null
 
-        // 2. Disconnect all WebSockets
-        relayPool.disconnectAll()
+            // 1. Close persistent subscriptions + clear relay pool caches
+            relayPool.closeLiveMuteSub()
+            relayPool.closeLiveNotifSub()
+            relayPool.clearCaches()
 
-        // 3. Clear ALL in-memory state — eventsById, profiles, stats, follows, relays.
-        //    clearUserState() preserved eventsById which leaked old user's cached events
-        //    into the new user's Global feed after re-login.
-        memoryEventStore.clear()
+            // 2. Disconnect all WebSockets
+            relayPool.disconnectAll()
 
-        // 3b. Delete snapshot file — prevents restoreIfPresent() from reloading
-        //     old user's events into MES on next bootstrap.
-        snapshotScheduler.deleteSnapshot()
+            // 3. Clear ALL in-memory state — eventsById, profiles, stats, follows, relays.
+            //    clearUserState() preserved eventsById which leaked old user's cached events
+            //    into the new user's Global feed after re-login.
+            memoryEventStore.clear()
 
-        // 4. Clear credentials and cached signer
-        keyManager.clear()
-        signingManager.clear()
-        nwcManager.clear()
+            // 3b. Delete snapshot file — prevents restoreIfPresent() from reloading
+            //     old user's events into MES on next bootstrap.
+            snapshotScheduler.deleteSnapshot()
 
-        // 5. Cancel child scopes (NOT this scope — it must survive for next login)
-        eventProcessor.stop()
+            // 4. Clear credentials and cached signer
+            keyManager.clear()
+            signingManager.clear()
+            nwcManager.clear()
 
-        // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
-        withContext(Dispatchers.Main) { sharedPlayerHolder.release() }
+            // 5. Cancel child scopes (NOT this scope — it must survive for next login)
+            eventProcessor.stop()
 
-        // 7. Clear profile resolver in-flight state
-        profileResolver.clear()
+            // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
+            withContext(Dispatchers.Main) { sharedPlayerHolder.release() }
 
-        // 8. Clear CardHydrator memo + own-engagement dedup sets
-        cardHydrator.resetHydratedMemo()
+            // 7. Clear profile resolver in-flight state
+            profileResolver.clear()
 
-        // In-memory state already cleared by eventProcessor.stop() (seenIds)
-        // and relayPool.disconnectAll() (connections map)
+            // 8. Clear CardHydrator memo + own-engagement dedup sets
+            cardHydrator.resetHydratedMemo()
 
-        Log.d(TAG, "Teardown complete")
+            // In-memory state already cleared by eventProcessor.stop() (seenIds)
+            // and relayPool.disconnectAll() (connections map)
+
+            Log.d(TAG, "Teardown complete")
+        }
     }
 
     /**
