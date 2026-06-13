@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -254,6 +256,34 @@ internal fun ContentFlow(
                             horizontal = hPad,
                             vertical = Spacing.small,
                         ),
+                    )
+                    i++
+                }
+                is Segment.BlockQuote -> {
+                    val seg = model.segments[i] as Segment.BlockQuote
+                    // Muted inline text with a left accent rail drawn behind it
+                    // (drawBehind matches the text height automatically, so the rail
+                    // grows with the quote without an IntrinsicSize measure pass).
+                    val railColor = TextSecondary.copy(alpha = 0.5f)
+                    InlineText(
+                        segments      = seg.segments,
+                        lookupProfile = lookupProfile,
+                        onAuthorClick = onAuthorClick,
+                        onHashtagClick = onHashtagClick,
+                        onTextClick   = { onNoteClick(navigateId) },
+                        customEmojis  = model.customEmojis,
+                        maxLines      = maxLines,
+                        overflow      = overflow,
+                        textColor     = TextSecondary,
+                        onTextLayoutResult = if (!isEmbedded) { result ->
+                            if (result.hasVisualOverflow) hasTextOverflow = true
+                        } else null,
+                        modifier      = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = hPad)
+                            .padding(bottom = Spacing.small)
+                            .drawBehind { drawRect(color = railColor, size = Size(3.dp.toPx(), size.height)) }
+                            .padding(start = Spacing.small),
                     )
                     i++
                 }

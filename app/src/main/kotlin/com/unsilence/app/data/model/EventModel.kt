@@ -89,6 +89,12 @@ sealed class Segment {
 
     @Immutable
     data class Hashtag(val tag: String) : Segment()
+
+    /** Render-only NIP-nothing: consecutive leading-`>` lines in a kind-1 note,
+     *  rendered with a quote rail + muted text. Inner segments are inline-only
+     *  (Text/Link/Mention/Hashtag) — media is flattened to Links, no grids. */
+    @Immutable
+    data class BlockQuote(val segments: List<Segment>) : Segment()
 }
 
 /**

@@ -124,15 +124,19 @@ object ContentParser {
         val rawLen = effectiveContent.length
         val inputTruncated = rawLen > maxChars
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
-        val tokenized = tokenize(parseInput, imeta, qHints, kind)
-        // Cap 2: bound SEGMENT count; collapse the tail into one plain-text marker.
-        val segmentTruncated = tokenized.size > MAX_SEGMENTS
-        val truncated = inputTruncated || segmentTruncated
-        val segments = if (truncated) {
-            tokenized.take(MAX_SEGMENTS) + Segment.Text(TRUNCATION_MARKER)
+        // kind-1 notes (incl. reposted/wrapped — effectiveKind, effectiveContent) get
+        // render-only leading-`>` blockquotes; everything else tokenizes flat.
+        val tokenized = if (effectiveKind == 1) {
+            tokenizeWithBlockquotes(parseInput, imeta, qHints, kind)
         } else {
-            tokenized
+            tokenize(parseInput, imeta, qHints, kind)
         }
+        // Cap 2: bound SEGMENT count; collapse the tail into one plain-text marker.
+        // Flat count includes BlockQuote inner segments, so a wall of `>` lines can't
+        // collapse into one top-level segment and bypass the draw-bound (H-spam).
+        val (capped, segmentTruncated) = capSegmentsFlat(tokenized, MAX_SEGMENTS)
+        val truncated = inputTruncated || segmentTruncated
+        val segments = if (truncated) capped + Segment.Text(TRUNCATION_MARKER) else tokenized
 
         // Permanent field probe — fires JUST UNDER the caps (and whenever truncation
         // actually triggers) so we keep seeing near-pathological content and can tune
@@ -404,6 +408,82 @@ object ContentParser {
         }
 
         return out
+    }
+
+    // ── Blockquotes (render-only, kind-1) ────────────────────────────────────
+
+    /**
+     * kind-1 only: split content into line-groups, emitting [Segment.BlockQuote] for
+     * runs of leading-`>` lines and delegating every other chunk to [tokenize]. Order
+     * is preserved by processing groups left-to-right; no token type spans a newline,
+     * so per-chunk tokenization is equivalent to tokenizing the whole string.
+     */
+    private fun tokenizeWithBlockquotes(
+        content: String,
+        imeta: List<ImetaMedia>,
+        qHints: Map<String, List<String>>,
+        kind: Int,
+    ): List<Segment> {
+        if ('>' !in content) return tokenize(content, imeta, qHints, kind) // no quotes: fast path
+        val lines = content.split("\n")
+        val out = mutableListOf<Segment>()
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i].startsWith(">")) {
+                val start = i
+                while (i < lines.size && lines[i].startsWith(">")) i++
+                val body = lines.subList(start, i).joinToString("\n") { stripQuotePrefix(it) }
+                val inner = tokenize(body, imeta, qHints, kind).map(::flattenMediaToLink)
+                out.add(Segment.BlockQuote(inner))
+            } else {
+                val start = i
+                while (i < lines.size && !lines[i].startsWith(">")) i++
+                val body = lines.subList(start, i).joinToString("\n")
+                out.addAll(tokenize(body, imeta, qHints, kind))
+            }
+        }
+        return out
+    }
+
+    /** Strip exactly one leading `>` then one optional following space. */
+    private fun stripQuotePrefix(line: String): String {
+        val afterGt = line.removePrefix(">")
+        return if (afterGt.startsWith(" ")) afterGt.substring(1) else afterGt
+    }
+
+    /** Media doesn't render as a grid inside a quote — keep the URL as a tappable
+     *  Link rather than dropping it (InlineText ignores Image/Video/YouTube). */
+    private fun flattenMediaToLink(seg: Segment): Segment = when (seg) {
+        is Segment.Image   -> Segment.Link(seg.url)
+        is Segment.Video   -> Segment.Link(seg.model.videoUrl)
+        is Segment.YouTube -> Segment.Link(seg.url)
+        else               -> seg
+    }
+
+    /**
+     * Bound total segments (counting [Segment.BlockQuote] inner segments) at [max].
+     * Returns (capped list, wasTruncated). Counting nested segments keeps the H-spam
+     * draw-bound intact: a wall of `>` lines can't hide thousands of segments inside
+     * one top-level BlockQuote.
+     */
+    private fun capSegmentsFlat(segments: List<Segment>, max: Int): Pair<List<Segment>, Boolean> {
+        var budget = max
+        val out = ArrayList<Segment>(minOf(segments.size, max))
+        for (seg in segments) {
+            if (budget <= 0) return out to true
+            if (seg is Segment.BlockQuote) {
+                if (seg.segments.size > budget) {
+                    out.add(Segment.BlockQuote(seg.segments.take(budget)))
+                    return out to true
+                }
+                budget -= seg.segments.size
+                out.add(seg)
+            } else {
+                out.add(seg)
+                budget -= 1
+            }
+        }
+        return out to false
     }
 
     /** Decode a nostr:bech32 URI into the appropriate Segment. */

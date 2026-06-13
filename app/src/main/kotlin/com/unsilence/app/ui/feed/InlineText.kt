@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.Placeholder
@@ -63,6 +64,7 @@ internal fun InlineText(
     overflow: TextOverflow = TextOverflow.Clip,
     textAlign: TextAlign? = null,
     onTextLayoutResult: ((TextLayoutResult) -> Unit)? = null,
+    textColor: Color? = null, // null = default onSurface; blockquotes pass TextSecondary
 ) {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
@@ -92,7 +94,7 @@ internal fun InlineText(
         }
         Text(
             text      = plainText,
-            color     = MaterialTheme.colorScheme.onSurface,
+            color     = textColor ?: MaterialTheme.colorScheme.onSurface,
             fontSize  = AppType.bodyLarge,
             lineHeight = 22.sp,
             maxLines  = maxLines,
@@ -214,7 +216,7 @@ internal fun InlineText(
     Text(
         text         = annotatedText,
         inlineContent = emojiInlineContent,
-        color        = MaterialTheme.colorScheme.onSurface,
+        color        = textColor ?: MaterialTheme.colorScheme.onSurface,
         fontSize     = AppType.bodyLarge,
         lineHeight   = 22.sp,
         maxLines     = maxLines,
