@@ -144,6 +144,11 @@ class AppBootstrapper @Inject constructor(
         memoryEventStore.ownPubkey = pubkeyHex
         eventProcessor.start()
 
+        // Once per login: clear ProfilePipeline session state so the own-post
+        // below-head gap heal runs exactly once per session, not once per process
+        // (ProfilePipeline is @Singleton and survives logout/login).
+        profilePipeline.resetForSession()
+
         // Seed kind 99 indexer relays if none exist (DataStore).
         // Suspending read waits for DataStore disk load — snapshot() would race.
         val existingIndexers = relayPreferencesStore.indexerRelayUrlsSuspending()
