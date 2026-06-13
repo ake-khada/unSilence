@@ -478,7 +478,14 @@ private fun ArticleLayout(
     modifier: Modifier = Modifier,
 ) {
     val article = model.article
-    val authorLabel = row.displayName ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
+
+    // Resolve the EFFECTIVE author reactively (model.pubkey = inner author for a
+    // 6/16 repost). For reposts the FeedRow author.* fields belong to the REPOSTER
+    // (toFeedRow uses the wrapper pubkey), so skip them — same rule as the note
+    // path (see the standard-layout AuthorHeader) so a reposted article never shows
+    // the reposter's identity.
+    val isRepost = model.repost != null
+    val articleAuthorProfile = profileFlow?.invoke(model.pubkey)?.collectAsStateWithLifecycle()?.value
 
     Column(
         modifier = modifier
@@ -489,12 +496,17 @@ private fun ArticleLayout(
         // Author row
         AuthorHeader(
             pubkey      = model.pubkey,
-            picture     = row.authorPicture,
-            displayName = authorLabel,
-            nip05       = row.authorNip05,
+            picture     = articleAuthorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+            displayName = articleAuthorProfile?.displayName?.takeIf { it.isNotBlank() }
+                ?: articleAuthorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
+                ?: (if (isRepost) null else row.displayName)
+                ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
+            nip05       = articleAuthorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
             createdAt   = model.createdAt,
-            onAuthorClick = {},
+            onAuthorClick = onAuthorClick,
             onNoteClick = { onArticleClick(row) },
+            lookupProfile = lookupProfile,
+            profileFlow   = profileFlow,
         )
 
         // Card body (grey background with rounded corners)

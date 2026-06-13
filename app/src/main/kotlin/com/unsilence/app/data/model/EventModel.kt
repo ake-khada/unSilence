@@ -21,7 +21,9 @@ data class EventModel(
     val id: String,
     val pubkey: String,                  // EFFECTIVE: kind-6 unwraps to inner author
     val sourcePubkey: String,            // RAW: kind-6 = the reposter
-    val kind: Int,
+    val kind: Int,                       // RAW outer kind (provenance: 6/16 for reposts)
+    val effectiveKind: Int,              // wrapped target's kind for 6/16; else == kind. Drives detection/routing
+    val effectiveContent: String,        // unwrapped inner content for 6/16; else == raw content. Article reader body
     val createdAt: Long,                 // EFFECTIVE
     val sourceCreatedAt: Long,           // RAW: kind-6 wrapper createdAt
     val relayUrl: String,
@@ -30,8 +32,8 @@ data class EventModel(
     val segments: List<Segment>,         // parsed content in source order
     val media: MediaManifest,            // grouped from segments
     val thread: ThreadRefs,
-    val repost: RepostInfo?,             // null unless kind == 6
-    val article: ArticleInfo?,           // null unless kind == 30023
+    val repost: RepostInfo?,             // null unless kind == 6 or 16
+    val article: ArticleInfo?,           // null unless effectiveKind == 30023
     val warnings: ContentWarnings,
     val customEmojis: Map<String, String> = emptyMap(), // NIP-30: shortcode → url
     val truncated: Boolean = false,      // content/segments capped (spam-post DoS bound) → show chip

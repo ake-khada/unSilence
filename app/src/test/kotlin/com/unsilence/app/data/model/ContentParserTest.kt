@@ -315,6 +315,75 @@ class ContentParserTest {
         assertNull(model.article)
     }
 
+    // ── Effective kind: reposted/wrapped long-form detection ─────────────────
+
+    @Test
+    fun `kind 6 wrapping a 30023 detects article from inner tags`() {
+        val innerTags = """[["title","Wrapped Long-form"],["summary","sum"],["image","https://i/x.jpg"],["d","wrapped-d"]]"""
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":30023,"created_at":999,"content":"# Heading\n\nbody","tags":$innerTags}"""
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        assertEquals(30023, model.effectiveKind)
+        assertNotNull(model.article)
+        assertEquals("Wrapped Long-form", model.article!!.title)
+        assertEquals("wrapped-d", model.article!!.dTag)
+        assertNotNull("still a repost for provenance", model.repost)
+    }
+
+    @Test
+    fun `kind 16 wrapping a 30023 detects article from inner tags`() {
+        val innerTags = """[["title","Generic Reposted Article"],["d","gen-d"]]"""
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":30023,"created_at":999,"content":"body","tags":$innerTags}"""
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","30023"]]""")
+        assertEquals(30023, model.effectiveKind)
+        assertNotNull(model.article)
+        assertEquals("Generic Reposted Article", model.article!!.title)
+        assertNotNull(model.repost)
+    }
+
+    @Test
+    fun `kind 16 wrapping a kind-1 is a note repost not an article`() {
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"created_at":999,"content":"just a note","tags":[]}"""
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","1"]]""")
+        assertEquals(1, model.effectiveKind)
+        assertNull(model.article)
+        assertNotNull(model.repost)
+        assertTrue(model.segments.any { it is Segment.Text && it.text == "just a note" })
+    }
+
+    @Test
+    fun `kind 16 with no embedded JSON but k=30023 tag resolves effective kind 30023`() {
+        val model = parse(content = "", kind = 16, tagsJson = """[["e","target-abc","wss://hint"],["k","30023"]]""")
+        assertEquals(30023, model.effectiveKind)
+        assertNotNull(model.repost)
+        assertEquals("target-abc", model.repost!!.targetId)
+        // Stub article (no inner tags to source title from) — acceptable until a-tag resolution.
+        assertNotNull(model.article)
+        assertNull(model.article!!.title)
+    }
+
+    @Test
+    fun `plain kind 30023 has effective kind 30023 and an article`() {
+        val model = parse("body", kind = 30023, tagsJson = """[["title","T"],["d","d1"]]""")
+        assertEquals(30023, model.effectiveKind)
+        assertNotNull(model.article)
+    }
+
+    @Test
+    fun `plain kind 1 has effective kind 1 and no article`() {
+        val model = parse("hello", kind = 1)
+        assertEquals(1, model.effectiveKind)
+        assertNull(model.article)
+    }
+
+    @Test
+    fun `kind 6 note-repost without inner kind resolves effective kind 1`() {
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","content":"reposted text","created_at":999,"tags":[]}"""
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        assertEquals(1, model.effectiveKind)
+        assertNull(model.article)
+        assertNotNull(model.repost)
+    }
+
     // ── Imeta integration ───────────────────────────────────────────────────
 
     @Test
