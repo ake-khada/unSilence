@@ -93,7 +93,14 @@ object ContentParser {
         preparsedImeta: List<ImetaMedia>? = null,
     ): EventModel {
         // ── Step 1: Repost unwrap ─────────────────────────────────────────
-        val repost = if (kind == 6) parseRepostInfo(content, tagsJson) else null
+        // Both kind-6 (note repost) and kind-16 (NIP-18 generic repost) wrap a
+        // target event; parseRepostInfo is generic over embedded-JSON + e-tag.
+        val repost = if (kind == 6 || kind == 16) parseRepostInfo(content, tagsJson) else null
+
+        // Effective kind drives detection/routing: a 6/16 wrapping a 30023 must be
+        // detected and rendered as an article, not raw markdown. Resolved from the
+        // wrapped target's kind (embedded JSON, kind-16 `k` tag, else note=1).
+        val effectiveKind = resolveEffectiveKind(kind, repost, tagsJson)
 
         val effectiveContent = if (repost != null) extractEffectiveContent(repost, content) else content
         val effectiveTagsJson = if (repost != null) extractEffectiveTags(repost, tagsJson) else tagsJson
@@ -113,7 +120,7 @@ object ContentParser {
         // ── Step 3: Bounded single-pass tokenization (spam-post DoS bound) ─
         // Cap 1: truncate INPUT before the O(content) regex pass. Long-form gets a
         // far larger cap (legit long prose); the segment cap below still bounds all kinds.
-        val maxChars = if (kind == 30023) MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
+        val maxChars = if (effectiveKind == 30023) MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
         val rawLen = effectiveContent.length
         val inputTruncated = rawLen > maxChars
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
@@ -139,8 +146,8 @@ object ContentParser {
         // ── Step 4: Group media for grid rendering ────────────────────────
         val manifest = buildManifest(segments)
 
-        // ── Step 5: kind-30023 article info from tags ─────────────────────
-        val article = if (kind == 30023) parseArticleInfo(effectiveTagsJson) else null
+        // ── Step 5: kind-30023 article info from tags (effective-kind aware) ─
+        val article = if (effectiveKind == 30023) parseArticleInfo(effectiveTagsJson) else null
 
         // ── Step 6: NIP-30 custom emoji tags ─────────────────────────────
         val customEmojis = parseCustomEmojis(effectiveTagsJson)
@@ -150,11 +157,13 @@ object ContentParser {
             pubkey = effectivePubkey,
             sourcePubkey = pubkey,
             kind = kind,
+            effectiveKind = effectiveKind,
+            effectiveContent = effectiveContent,
             createdAt = effectiveCreatedAt,
             sourceCreatedAt = createdAt,
             relayUrl = relayUrl,
-            engagementId = if (kind == 6) (rootId ?: id) else id,
-            navigateId = if (kind == 6) (repost?.targetId ?: id) else id,
+            engagementId = if (kind == 6 || kind == 16) (rootId ?: id) else id,
+            navigateId = if (kind == 6 || kind == 16) (repost?.targetId ?: id) else id,
             segments = segments,
             media = manifest,
             thread = ThreadRefs(replyToId, rootId),
@@ -193,6 +202,35 @@ object ContentParser {
             resolvedFromInner = embeddedJson != null,
         )
     }
+
+    /**
+     * The kind that drives detection/routing. A kind-6/16 repost wraps a target
+     * event; resolve the target's kind so a reposted long-form (30023) is parsed
+     * and rendered as an article rather than raw markdown. Resolution order:
+     *  - embedded JSON `kind` (NIP-18 quote/generic repost — both 6 and 16),
+     *  - kind-16 `k` tag (generic repost without embedded JSON),
+     *  - else 1 (kind-6 bridge reposts are note reposts by convention).
+     * A kind-16 article-repost with neither embedded JSON nor a 30023 `k` tag
+     * resolves to 1 and renders as a note stub until a-tag/naddr resolution lands.
+     * Non-reposts return their own kind.
+     */
+    private fun resolveEffectiveKind(rawKind: Int, repost: RepostInfo?, wrapperTagsJson: String): Int {
+        if (repost == null) return rawKind
+        repost.embeddedJson?.let { json ->
+            runCatching {
+                NostrJson.parseToJsonElement(json).jsonObject["kind"]?.jsonPrimitive?.content?.toIntOrNull()
+            }.getOrNull()?.let { return it }
+        }
+        if (rawKind == 16) extractKTagKind(wrapperTagsJson)?.let { return it }
+        return 1
+    }
+
+    /** NIP-18 generic repost (kind-16) tags the reposted event's kind as `k`. */
+    private fun extractKTagKind(tagsJson: String): Int? = runCatching {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val kTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "k" }
+        kTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toIntOrNull()
+    }.getOrNull()
 
     private fun effectivePubkey(repost: RepostInfo, wrapperPk: String, content: String, tagsJson: String): String {
         if (repost.embeddedJson != null) {

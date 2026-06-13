@@ -58,6 +58,7 @@ import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.data.wallet.ZapRequest
@@ -97,8 +98,14 @@ fun ArticleReaderScreen(
     extraZapSats: Long = 0L,
     zapFlash: NoteActionsViewModel.ZapFlashState? = null,
 ) {
-    val title = articleTagValue(row.tags, "title")
-    val image = articleTagValue(row.tags, "image")
+    // Unwrap reposts: for a kind-6/16 wrapper the FeedRow's tags/content belong to
+    // the wrapper (embedded JSON string + wrapper tags). Parse to the EventModel so
+    // title/image come from the INNER article tags and the body is the inner
+    // markdown — not the raw embedded-JSON dump. For non-reposts these resolve to
+    // the same values as the raw row.
+    val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
+    val title = model.article?.title ?: articleTagValue(row.tags, "title")
+    val image = model.article?.image ?: articleTagValue(row.tags, "image")
     val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
     val openZapSettings = LocalOpenZapSettings.current
@@ -108,7 +115,7 @@ fun ArticleReaderScreen(
     val defaultZapMessage = firstPreset?.message
     val defaultIsPrivate = prefs.defaultPrivate
 
-    val bodyHtml = remember(row.content) { markdownToHtml(row.content) }
+    val bodyHtml = remember(model.effectiveContent) { markdownToHtml(model.effectiveContent) }
 
     var showRepostMenu    by remember { mutableStateOf(false) }
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
