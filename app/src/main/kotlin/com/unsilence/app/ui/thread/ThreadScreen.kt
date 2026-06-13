@@ -341,28 +341,30 @@ fun ThreadScreen(
     }
 
     articleRow?.let { row ->
+        // Effective engagement target (kind-6/16 reposts → original event).
+        val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
         ArticleReaderScreen(
             row             = row,
             onDismiss       = { articleRow = null },
             onQuote         = onQuote,
-            onReact         = { actionsViewModel.react(row.id, row.pubkey) },
+            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
             onReactLongPress = {
-                emojiReactTarget = row.id to row.pubkey
+                emojiReactTarget = model.engagementId to model.pubkey
                 showFullEmojiPicker = true
             },
             pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
-                actionsViewModel.react(row.id, row.pubkey, ":${emoji.shortcode}:", emoji.url)
+                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
-            onRepost        = { actionsViewModel.repost(row.id, row.pubkey, row.relayUrl) },
-            onZap           = { req -> actionsViewModel.zap(row.id, row.pubkey, row.relayUrl, req) },
+            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
+            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
             onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
             hasReacted      = row.engagementId in reactedIds,
             hasReposted     = row.engagementId in repostedIds,
             hasZapped       = row.engagementId in zappedIds,
             isNwcConfigured = isNwcConfigured,
-            isZapLoading    = row.id in zapLoadingIds,
-            extraZapSats    = optimisticSats[row.id] ?: 0L,
+            isZapLoading    = model.engagementId in zapLoadingIds,
+            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
         )
     }

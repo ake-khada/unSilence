@@ -120,7 +120,7 @@ fun ArticleReaderScreen(
     var showRepostMenu    by remember { mutableStateOf(false) }
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
     LaunchedEffect(zapFlash) {
-        if (zapFlash != null && zapFlash.noteId == row.id && zapFlash.success) {
+        if (zapFlash != null && zapFlash.noteId == model.engagementId && zapFlash.success) {
             zapFlashTrigger++
         }
     }
