@@ -276,7 +276,7 @@ class ProfilePipeline @Inject constructor(
         // null/old) is left untouched — it already walks back from newest with no hole.
         if (isOwn && gapHealedOwnPubkeys.add(pubkey) && latestKnown != null && latestKnown > sevenDaysAgo) {
             val healSince = nowSec - 14L * 86400
-            Log.w(TAG, "PROFILE-GAP heal: latestKnown=$latestKnown since=$healSince window=14d")
+            Log.d(TAG, "PROFILE-GAP heal: latestKnown=$latestKnown since=$healSince window=14d")
             val filter = buildJsonObject {
                 put("kinds", buildJsonArray { PROFILE_KINDS.forEach { add(JsonPrimitive(it)) } })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
@@ -291,7 +291,7 @@ class ProfilePipeline @Inject constructor(
                 timeoutMs = 20_000,
                 onPage = { page, count -> Log.d(TAG, "PROFILE-GAP page $page → $count") },
             )
-            Log.w(TAG, "PROFILE-GAP done: ${results.sumOf { it.totalEvents }} events / ${results.size} relays")
+            Log.d(TAG, "PROFILE-GAP done: ${results.sumOf { it.totalEvents }} events / ${results.size} relays")
             return memoryEventStore.userEvents(pubkey, PROFILE_KINDS, 2500)
         }
 
