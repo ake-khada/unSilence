@@ -2,7 +2,10 @@ package com.unsilence.app.data.auth
 
 import android.content.SharedPreferences
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.lang.reflect.Field
 
@@ -30,6 +33,14 @@ class KeyManagerCacheTest {
         prefsField.isAccessible = true
         prefsField.set(km, lazy<SharedPreferences> { StubSharedPreferences() })
         return km
+    }
+
+    /** Reads back the (stub) SharedPreferences injected into [km] so tests can
+     *  assert raw marker state without going through crypto-deriving getters. */
+    @Suppress("UNCHECKED_CAST")
+    private fun prefsOf(km: KeyManager): SharedPreferences {
+        val f = KeyManager::class.java.getDeclaredField("prefs\$delegate").apply { isAccessible = true }
+        return (f.get(km) as Lazy<SharedPreferences>).value
     }
 
     @Test
@@ -60,6 +71,53 @@ class KeyManagerCacheTest {
         cacheField.set(km, "should-be-cleared")
         km.clear()
         assertNull("Cache must be invalidated after clear", cacheField.get(km))
+    }
+
+    // ── Cross-mode marker hygiene ──────────────────────────────────────────
+    // A prior session's signer markers must not survive a key save, or the
+    // resolved identity (isAmberMode / getPublicKeyHex / getPrivateKeyHex) is
+    // wrong. State is seeded via the real save* APIs (not raw prefs).
+    //
+    // These assert on the markers only (isAmberMode, getPrivateKeyHex, the raw
+    // pub_hex pref) — NOT on secp256k1 pubkey derivation, which is a Quartz crypto
+    // class compiled for a newer JDK than the JDK-17 unit-test runtime (documented
+    // JDK-mismatch test debt; getPublicKeyHex() in internal mode would throw
+    // UnsupportedClassVersionError here). The derivation/identity path is covered by
+    // device regression. generateNewKey() is intentionally untested here for the
+    // same reason — it calls KeyPair() (crypto) before its pref write, so it can't
+    // run under JDK 17. It uses the identical .remove(KEY_PUB_HEX)/.remove(
+    // KEY_SIGNER_TYPE) pattern proven by `savePrivateKey clears stale Amber markers`.
+
+    @Test
+    fun `savePrivateKey clears stale Amber markers`() {
+        val km = createKeyManager()
+        // Seed a prior Amber session (SIGNER_TYPE=AMBER + a stored pubkey).
+        km.saveAmberLogin("b".repeat(64))
+        assertTrue("precondition: seeded Amber state", km.isAmberMode)
+
+        km.savePrivateKey("a".repeat(64))
+
+        assertFalse("SIGNER_TYPE marker cleared → no longer Amber mode", km.isAmberMode)
+        assertEquals("new private key stored", "a".repeat(64), km.getPrivateKeyHex())
+        assertNull(
+            "stale Amber pubkey must be removed (else internal mode could surface it)",
+            prefsOf(km).getString("pub_hex", null),
+        )
+    }
+
+    @Test
+    fun `saveAmberLogin clears stale private key`() {
+        val km = createKeyManager()
+        // Seed a prior internal-key session.
+        km.savePrivateKey("a".repeat(64))
+        assertNotNull("precondition: seeded private key", km.getPrivateKeyHex())
+
+        val amberPubHex = "c".repeat(64)
+        km.saveAmberLogin(amberPubHex)
+
+        assertNull("stale private key must be removed", km.getPrivateKeyHex())
+        assertTrue("must be in Amber mode", km.isAmberMode)
+        assertEquals("Amber pubkey returned directly (no derivation)", amberPubHex, km.getPublicKeyHex())
     }
 
     /** Minimal SharedPreferences stub — all reads return null/false/0. */

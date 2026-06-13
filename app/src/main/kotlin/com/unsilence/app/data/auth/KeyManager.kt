@@ -71,7 +71,16 @@ class KeyManager @Inject constructor(
     fun savePrivateKey(hexKey: String) {
         require(hexKey.length == 64) { "Private key must be 64 hex chars" }
         cachedPubKeyHex = null
-        prefs.edit().putString(KEY_PRIV_HEX, hexKey.lowercase()).apply()
+        // Establish a clean internal-signer state: remove any Amber markers from a
+        // prior session, else isAmberMode stays true and getPublicKeyHex() returns
+        // the OLD Amber pubkey instead of deriving from this key. commit() (not
+        // apply()) — bootstrap reads auth state immediately after and it must
+        // survive process death.
+        prefs.edit()
+            .putString(KEY_PRIV_HEX, hexKey.lowercase())
+            .remove(KEY_PUB_HEX)
+            .remove(KEY_SIGNER_TYPE)
+            .commit()
     }
 
     /**
@@ -81,7 +90,12 @@ class KeyManager @Inject constructor(
     fun generateNewKey(): String {
         val keyPair = KeyPair()  // no args → Nip01.privKeyCreate() + pubKeyCreate()
         cachedPubKeyHex = null
-        prefs.edit().putString(KEY_PRIV_HEX, keyPair.privKey!!.toHexKey()).apply()
+        // Clean internal-signer state — drop any prior Amber markers (see savePrivateKey).
+        prefs.edit()
+            .putString(KEY_PRIV_HEX, keyPair.privKey!!.toHexKey())
+            .remove(KEY_PUB_HEX)
+            .remove(KEY_SIGNER_TYPE)
+            .commit()
         val pubHex = keyPair.pubKey.toHexKey()
         cachedPubKeyHex = pubHex
         return pubHex
@@ -121,10 +135,16 @@ class KeyManager @Inject constructor(
         } else {
             pubkey
         }
+        cachedPubKeyHex = null
+        // Establish a clean Amber state: remove any stale private key, else
+        // getSignerSync()/getPrivateKeyHex() would surface the PREVIOUS account's
+        // private key while logged in via Amber (wrong-identity signing + a key the
+        // user believed was logged out). commit() — bootstrap reads auth immediately.
         prefs.edit()
             .putString(KEY_PUB_HEX, hex.lowercase())
             .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
-            .apply()
+            .remove(KEY_PRIV_HEX)
+            .commit()
     }
 
     /** Removes all stored credentials (logout). Uses commit() so the write is
