@@ -23,7 +23,7 @@ data class EventModel(
     val sourcePubkey: String,            // RAW: kind-6 = the reposter
     val kind: Int,                       // RAW outer kind (provenance: 6/16 for reposts)
     val effectiveKind: Int,              // wrapped target's kind for 6/16; else == kind. Drives detection/routing
-    val effectiveContent: String,        // unwrapped inner content for 6/16; else == raw content. Article reader body
+    val articleContent: String?,         // unwrapped inner markdown for the article reader body; null for non-articles (avoids a 3rd copy of every note's text)
     val createdAt: Long,                 // EFFECTIVE
     val sourceCreatedAt: Long,           // RAW: kind-6 wrapper createdAt
     val relayUrl: String,

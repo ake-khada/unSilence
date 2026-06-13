@@ -147,7 +147,15 @@ object ContentParser {
         val manifest = buildManifest(segments)
 
         // ── Step 5: kind-30023 article info from tags (effective-kind aware) ─
-        val article = if (effectiveKind == 30023) parseArticleInfo(effectiveTagsJson) else null
+        // Only emit an article when there is REAL article data to show. A bare-
+        // coordinate kind-16 (k=30023, no embedded JSON, no inner tags) yields an
+        // empty ArticleInfo — that must NOT route a blank shell to ArticleLayout;
+        // it falls through to a note stub until the a-tag/naddr resolver (#5).
+        val article = if (effectiveKind == 30023) {
+            parseArticleInfo(effectiveTagsJson).takeIf {
+                it.title != null || it.summary != null || it.image != null || effectiveContent.isNotBlank()
+            }
+        } else null
 
         // ── Step 6: NIP-30 custom emoji tags ─────────────────────────────
         val customEmojis = parseCustomEmojis(effectiveTagsJson)
@@ -158,7 +166,9 @@ object ContentParser {
             sourcePubkey = pubkey,
             kind = kind,
             effectiveKind = effectiveKind,
-            effectiveContent = effectiveContent,
+            // Only articles carry the body string — notes leave it null so we don't
+            // duplicate every note's content (MES already holds raw; model holds segments).
+            articleContent = if (article != null) effectiveContent else null,
             createdAt = effectiveCreatedAt,
             sourceCreatedAt = createdAt,
             relayUrl = relayUrl,

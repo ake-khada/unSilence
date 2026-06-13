@@ -565,7 +565,9 @@ private fun ArticleLayout(
             // Action bar + inline engagement drawer
             var drawerOpen by remember { mutableStateOf(false) }
             EventActionBar(
-                noteId          = row.id,
+                // navigateId targets the article itself (inner event for a repost);
+                // EventActionBar keys the Quote action off noteId.
+                noteId          = model.navigateId,
                 replyCount      = replyCount,
                 repostCount     = repostCount,
                 reactionCount   = reactionCount,
