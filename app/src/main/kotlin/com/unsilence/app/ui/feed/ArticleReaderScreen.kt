@@ -6,17 +6,16 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,22 +23,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,18 +46,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
-import com.unsilence.app.ui.common.LocalOpenZapSettings
-import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.data.wallet.ZapRequest
-import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
@@ -97,6 +87,14 @@ fun ArticleReaderScreen(
     isZapLoading: Boolean = false,
     extraZapSats: Long = 0L,
     zapFlash: NoteActionsViewModel.ZapFlashState? = null,
+    // Live chrome (mirrors EventCard): null → static row.* counts + no drawer (SearchScreen).
+    onAuthorClick: (String) -> Unit = {},
+    lookupProfile: (suspend (String) -> com.unsilence.app.data.memory.UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.UserEntity?>)? = null,
+    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
+    zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
+    repostPubkeysForEvent: ((String) -> List<String>)? = null,
+    reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
 ) {
     // Unwrap reposts: for a kind-6/16 wrapper the FeedRow's tags/content belong to
     // the wrapper (embedded JSON string + wrapper tags). Parse to the EventModel so
@@ -107,24 +105,27 @@ fun ArticleReaderScreen(
     val title = model.article?.title ?: articleTagValue(row.tags, "title")
     val image = model.article?.image ?: articleTagValue(row.tags, "image")
     val context = LocalContext.current
-    val showSnackbar = LocalShowSnackbar.current
-    val openZapSettings = LocalOpenZapSettings.current
-    val prefs = LocalZapPreferences.current
-    val firstPreset = prefs.presets.firstOrNull()
-    val defaultZapAmount = firstPreset?.amountSats ?: 21L
-    val defaultZapMessage = firstPreset?.message
-    val defaultIsPrivate = prefs.defaultPrivate
 
     val bodyHtml = remember(model.articleContent) { markdownToHtml(model.articleContent ?: "") }
 
-    var showRepostMenu    by remember { mutableStateOf(false) }
-    var zapFlashTrigger by remember { mutableIntStateOf(0) }
-    LaunchedEffect(zapFlash) {
-        if (zapFlash != null && zapFlash.noteId == model.engagementId && zapFlash.success) {
-            zapFlashTrigger++
-        }
-    }
-    var showZapPicker     by remember { mutableStateOf(false) }
+    // Effective author (inner author on a reposted article — never the reposter),
+    // mirroring EventCard.ArticleLayout's resolution.
+    val isRepost = model.repost != null
+    val authorProfile = profileFlow?.invoke(model.pubkey)?.collectAsStateWithLifecycle()?.value
+    val authorLabel = authorProfile?.displayName?.takeIf { it.isNotBlank() }
+        ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
+        ?: (if (isRepost) null else row.displayName)
+        ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}"
+
+    // Live engagement counts keyed off the effective id; fall back to the static
+    // FeedRow snapshot when no statsFlow is wired (e.g. SearchScreen).
+    val liveStats = statsFlow?.invoke(model.engagementId)?.collectAsStateWithLifecycle()?.value
+    val replyCount    = liveStats?.replyCount    ?: row.replyCount
+    val repostCount   = liveStats?.repostCount   ?: row.repostCount
+    val reactionCount = liveStats?.reactionCount ?: row.reactionCount
+    val zapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
+
+    var drawerOpen by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -157,19 +158,48 @@ fun ArticleReaderScreen(
                                 modifier           = Modifier.size(22.dp),
                             )
                         }
+                        Spacer(Modifier.weight(1f))
+                        // Share lives here — EventActionBar (below) has no Share slot.
+                        IconButton(onClick = {
+                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
+                                type = "text/plain"
+                            }
+                            context.startActivity(Intent.createChooser(sendIntent, null))
+                        }) {
+                            Icon(
+                                imageVector        = Icons.Filled.Share,
+                                contentDescription = "Share",
+                                tint               = Color.White,
+                                modifier           = Modifier.size(22.dp),
+                            )
+                        }
                     }
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
-                    // ── Banner image (16:9, magazine-style header) ─────────────
+                    // ── Author header (effective author, live profile) ─────────
+                    AuthorHeader(
+                        pubkey        = model.pubkey,
+                        picture       = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+                        displayName   = authorLabel,
+                        nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
+                        createdAt     = model.createdAt,
+                        onAuthorClick = onAuthorClick,
+                        onNoteClick   = {},
+                        lookupProfile = lookupProfile,
+                        profileFlow   = profileFlow,
+                        modifier      = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                    )
+
+                    // ── Banner image — full image at its natural aspect (no crop) ──
                     if (!image.isNullOrBlank()) {
                         SubcomposeAsyncImage(
                             model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
                             contentDescription = null,
-                            contentScale       = ContentScale.Crop,
+                            contentScale       = ContentScale.FillWidth,
                             modifier           = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(16f / 9f)
                                 .clip(RoundedCornerShape(
                                     bottomStart = Sizing.mediaCornerRadius,
                                     bottomEnd   = Sizing.mediaCornerRadius,
@@ -231,132 +261,72 @@ fun ArticleReaderScreen(
                     )
                 }
 
-                // ── Sticky bottom action bar ───────────────────────────────────
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                Row(
+                // ── Sticky bottom: engagement drawer (expands upward) + action bar ──
+                // Same chrome as EventCard. The card renders the drawer BELOW an inline
+                // bar; here the bar is sticky-bottom, so the drawer sits above it and the
+                // whole container grows upward when opened.
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(SurfaceVariant)
-                        .navigationBarsPadding()
-                        .padding(vertical = Spacing.small),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .navigationBarsPadding(),
                 ) {
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        ActionButton(
-                            icon               = Icons.AutoMirrored.Filled.Chat,
-                            count              = row.replyCount,
-                            contentDescription = "Replies",
-                            // navigateId = the article's own id (inner event for a repost), not the wrapper.
-                            onClick            = { onNoteClick(model.navigateId) },
-                        )
-                    }
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        Box {
-                            ActionButton(
-                                icon               = Icons.Filled.Repeat,
-                                count              = row.repostCount,
-                                contentDescription = "Reposts",
-                                highlighted        = hasReposted,
-                                onClick            = { showRepostMenu = true },
-                            )
-                            DropdownMenu(
-                                expanded         = showRepostMenu,
-                                onDismissRequest = { showRepostMenu = false },
-                                modifier         = Modifier.background(Black),
-                            ) {
-                                DropdownMenuItem(
-                                    text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
-                                    onClick = { onRepost(); showRepostMenu = false },
-                                )
-                                DropdownMenuItem(
-                                    text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
-                                    onClick = { onQuote(model.navigateId); showRepostMenu = false },
-                                )
-                            }
-                        }
-                    }
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        var showStrip by remember { mutableStateOf(false) }
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = drawerOpen,
+                        enter   = androidx.compose.animation.expandVertically(),
+                        exit    = androidx.compose.animation.shrinkVertically(),
+                    ) {
+                        // The card's drawer scrolls with the feed LazyColumn; here it's
+                        // bottom-anchored, so cap its height and give it its own scroll —
+                        // otherwise a heavily-zapped article's list runs off-screen.
                         Box(
-                            modifier = Modifier.combinedClickable(
-                                onClick     = onReact,
-                                onLongClick = {
-                                    if (pinnedEmojis.isNotEmpty()) showStrip = true
-                                    else onReactLongPress()
-                                },
-                            ),
+                            modifier = Modifier
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
                         ) {
-                            ActionButton(
-                                icon               = Icons.Filled.Favorite,
-                                count              = row.reactionCount,
-                                contentDescription = "Reactions",
-                                highlighted        = hasReacted,
-                                highlightColor     = Like,
+                            EngagementDrawer(
+                                eventId               = model.engagementId,
+                                statsFlow             = statsFlow,
+                                zapDetailsForEvent    = zapDetailsForEvent,
+                                repostPubkeysForEvent = repostPubkeysForEvent,
+                                reactionsForEvent     = reactionsForEvent,
+                                profileFlow           = profileFlow,
+                                lookupProfile         = lookupProfile,
+                                onProfileTap          = onAuthorClick,
                             )
-                            if (showStrip) {
-                                androidx.compose.ui.window.Popup(
-                                    alignment = Alignment.BottomCenter,
-                                    onDismissRequest = { showStrip = false },
-                                    properties = androidx.compose.ui.window.PopupProperties(focusable = true),
-                                ) {
-                                    EmojiQuickStrip(
-                                        pinnedEmojis = pinnedEmojis,
-                                        onSelect = { emoji ->
-                                            onReactWithEmoji(emoji)
-                                            showStrip = false
-                                        },
-                                        onOpenFullPicker = {
-                                            showStrip = false
-                                            onReactLongPress()
-                                        },
-                                    )
-                                }
-                            }
                         }
                     }
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        ZapButton(
-                            sats         = row.zapTotalSats + extraZapSats,
-                            hasZapped    = hasZapped,
-                            isLoading    = isZapLoading,
-                            flashTrigger = zapFlashTrigger,
-                            onTap        = {
-                                if (isNwcConfigured) onZap(
-                                    ZapRequest(defaultZapAmount, defaultZapMessage, defaultIsPrivate)
-                                ) else openZapSettings()
-                            },
-                            onLongPress = {
-                                if (isNwcConfigured) showZapPicker = true else openZapSettings()
-                            },
-                        )
-                    }
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        ActionButton(
-                            icon               = Icons.Filled.Share,
-                            count              = 0,
-                            contentDescription = "Share",
-                            onClick            = {
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
-                                    type = "text/plain"
-                                }
-                                context.startActivity(Intent.createChooser(sendIntent, null))
-                            },
-                        )
-                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    EventActionBar(
+                        noteId           = model.navigateId,
+                        replyCount       = replyCount,
+                        repostCount      = repostCount,
+                        reactionCount    = reactionCount,
+                        zapTotalSats     = zapTotalSats,
+                        hasReacted       = hasReacted,
+                        hasReposted      = hasReposted,
+                        hasZapped        = hasZapped,
+                        isNwcConfigured  = isNwcConfigured,
+                        isZapLoading     = isZapLoading,
+                        extraZapSats     = extraZapSats,
+                        zapFlash         = zapFlash,
+                        drawerOpen       = drawerOpen,
+                        onChevronTap     = { drawerOpen = !drawerOpen },
+                        onNoteClick      = { onNoteClick(model.navigateId) },
+                        onComment        = { onNoteClick(model.navigateId) },
+                        onReact          = onReact,
+                        onReactLongPress = onReactLongPress,
+                        pinnedEmojis     = pinnedEmojis,
+                        onReactWithEmoji = onReactWithEmoji,
+                        onRepost         = onRepost,
+                        onQuote          = onQuote,
+                        onZap            = onZap,
+                        onSaveNwcUri     = onSaveNwcUri,
+                        modifier         = Modifier.padding(top = Spacing.small),
+                    )
                 }
             }
         }
-    }
-
-    if (showZapPicker) {
-        ZapAmountDialog(
-            onZap = { req ->
-                onZap(req)
-                showZapPicker = false
-            },
-            onDismiss = { showZapPicker = false },
-        )
     }
 }
 

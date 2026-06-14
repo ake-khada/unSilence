@@ -366,6 +366,13 @@ fun ThreadScreen(
             isZapLoading    = model.engagementId in zapLoadingIds,
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
+            onAuthorClick   = onAuthorClick,
+            lookupProfile   = actionsViewModel::lookupProfile,
+            profileFlow     = viewModel::profileFlow,
+            statsFlow       = viewModel::statsFlow,
+            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent     = viewModel::reactionsForEvent,
         )
     }
 
