@@ -692,7 +692,9 @@ private const val MAX_ENGAGEMENT_RELAYS = 25
 // DO NOT raise this without raising the limit proportionally, or posts in a chunk
 // starve each other (counts silently drop to 0). Relays widely honor limit=500 but
 // often cap higher values, so the budget is tuned via chunk size, not limit.
-private const val ENGAGEMENT_BATCH_CHUNK = 5
+// internal: ProfilePipeline reuses this as the single source of truth for its
+// engagement chunk size, so the two paths can't drift apart.
+internal const val ENGAGEMENT_BATCH_CHUNK = 5
 private const val ENGAGEMENT_BATCH_LIMIT = 500
 private const val ENGAGEMENT_BATCH_TIMEOUT_MS = 10_000L
 

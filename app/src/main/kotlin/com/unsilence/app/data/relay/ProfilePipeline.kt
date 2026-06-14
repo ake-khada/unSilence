@@ -60,7 +60,15 @@ class ProfilePipeline @Inject constructor(
     companion object {
         /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
         val PROFILE_KINDS = setOf(1, 6, 16, 20, 21, 30023)
-        private const val ENGAGEMENT_CHUNK_SIZE = 50
+        /**
+         * Posts per engagement REQ. MUST track buildBatchedEngagementReq's invariant:
+         * limit=ENGAGEMENT_BATCH_LIMIT(500) ÷ chunk = per-post event budget. At 5 →
+         * 100 events/post; a larger chunk (the old 50 → ~10/post) lets a few popular
+         * longforms consume the relay's limit before later articles in the chunk
+         * return anything ("some hydrated, some missing"). Bound to the feed path's
+         * ENGAGEMENT_BATCH_CHUNK so the two can't drift.
+         */
+        private const val PROFILE_ENGAGEMENT_CHUNK_SIZE = ENGAGEMENT_BATCH_CHUNK
         private const val ENGAGEMENT_TIMEOUT_MS = 10_000L
         private const val REF_WAIT_MS = 1500L
         /** If MES has notes newer than this, use delta mode (since cursor). */
@@ -491,9 +499,9 @@ class ProfilePipeline @Inject constructor(
         val sourceRelays = targets.flatMap { it.third }
         val targetUrls = (readRelays + sourceRelays).mapNotNull { normalizeRelayUrl(it) }.distinct()
 
-        // Chunk into ENGAGEMENT_CHUNK_SIZE per batch — REQ via the shared builder so
+        // Chunk small (per-post budget invariant) — REQ via the shared builder so
         // profile and feed paths emit identical #e + #a + #A filters (incl. kind 16).
-        val chunks = targets.chunked(ENGAGEMENT_CHUNK_SIZE)
+        val chunks = targets.chunked(PROFILE_ENGAGEMENT_CHUNK_SIZE)
         Log.d(TAG, "Step4: ${noteEvents.size} notes → ${chunks.size} chunks")
 
         for ((index, chunk) in chunks.withIndex()) {
@@ -538,7 +546,7 @@ class ProfilePipeline @Inject constructor(
             id to coord
         }
 
-        val chunks = targets.chunked(ENGAGEMENT_CHUNK_SIZE)
+        val chunks = targets.chunked(PROFILE_ENGAGEMENT_CHUNK_SIZE)
         Log.d(TAG, "Step5: ${noteEvents.size} notes → ${chunks.size} chunks (viewer=${ownPk.take(8)}…)")
 
         for ((index, chunk) in chunks.withIndex()) {
