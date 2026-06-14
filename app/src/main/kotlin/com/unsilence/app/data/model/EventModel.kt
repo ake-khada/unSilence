@@ -144,6 +144,8 @@ data class ArticleInfo(
     val image: String?,
     val publishedAt: Long?,
     val dTag: String?,
+    /** Topic tags (`t`) — longform hashtags are a separate field, not body text. */
+    val hashtags: List<String> = emptyList(),
 )
 
 @Immutable

@@ -105,6 +105,7 @@ fun UserProfileScreen(
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
     viewModel: UserProfileViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
@@ -577,6 +578,7 @@ fun UserProfileScreen(
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
             onAuthorClick   = interceptedAuthorClick,
+            onHashtagClick  = onHashtagClick,
             lookupProfile   = actionsViewModel::lookupProfile,
             profileFlow     = viewModel::profileFlow,
             statsFlow       = viewModel::statsFlow,

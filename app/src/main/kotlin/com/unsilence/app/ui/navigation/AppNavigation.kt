@@ -193,6 +193,11 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
 
     val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
     val onHashtagClick: (String) -> Unit = { tag ->
+        // Clear any open overlays (thread / user profile) so the search tab isn't
+        // hidden behind them when a hashtag is tapped from inside one (incl. the
+        // article reader hosted there).
+        threadEventId = null
+        userProfilePubkey = null
         hashtagSearchQuery = "#$tag"
         selectedTab = 1
     }
@@ -354,7 +359,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, onBrowseRelay = onBrowseRelayFeed, viewModel = hiltViewModel(key = "profile-$userPubkey"))
+                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, onHashtagClick = onHashtagClick, onBrowseRelay = onBrowseRelayFeed, viewModel = hiltViewModel(key = "profile-$userPubkey"))
                     else -> PlaceholderScreen()
                 }
             }
@@ -602,6 +607,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onNoteClick   = { eventId -> threadEventId = eventId },
                     onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
+                    onHashtagClick = onHashtagClick,
                 )
             }
 
@@ -618,6 +624,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             threadEventId = null      // dismiss thread so profile is visible
                             userProfilePubkey = pubkey
                         },
+                        onHashtagClick = onHashtagClick,
                     )
                 }
             }

@@ -75,6 +75,7 @@ fun ThreadScreen(
     onQuote: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
     viewModel: ThreadViewModel = hiltViewModel(),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
@@ -367,6 +368,7 @@ fun ThreadScreen(
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
             onAuthorClick   = onAuthorClick,
+            onHashtagClick  = onHashtagClick,
             lookupProfile   = actionsViewModel::lookupProfile,
             profileFlow     = viewModel::profileFlow,
             statsFlow       = viewModel::statsFlow,
