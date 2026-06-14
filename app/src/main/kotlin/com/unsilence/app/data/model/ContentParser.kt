@@ -608,6 +608,7 @@ object ContentParser {
         var image: String? = null
         var publishedAt: Long? = null
         var dTag: String? = null
+        val hashtags = mutableListOf<String>()
         runCatching {
             val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
             for (tag in parsed) {
@@ -620,10 +621,12 @@ object ContentParser {
                     "image" -> image = value
                     "published_at" -> publishedAt = value.toLongOrNull()
                     "d" -> dTag = value
+                    "t" -> value.trim().removePrefix("#").takeIf { it.isNotBlank() }
+                        ?.let { if (it !in hashtags) hashtags.add(it) }
                 }
             }
         }
-        return ArticleInfo(title, summary, image, publishedAt, dTag)
+        return ArticleInfo(title, summary, image, publishedAt, dTag, hashtags)
     }
 
     // ── NIP-30 emoji tags ───────────────────────────────────────────────

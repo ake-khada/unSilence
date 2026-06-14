@@ -223,7 +223,7 @@ object NativeMarkdownParser {
                 MarkdownElementTypes.IMAGE -> {
                     val url = node.findDescendant(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle() ?: ""
                     val alt = node.findDescendant(MarkdownElementTypes.LINK_TEXT)?.text(src)
-                        ?.removeSurrounding("[", "]")?.takeIf { it.isNotBlank() } ?: url
+                        ?.removeSurrounding("[", "]")?.takeIf { it.isNotBlank() }?.let(::decodeHtmlEntities) ?: url
                     if (url.isNotEmpty()) emit(out, MdInline.Link(url, listOf(MdInline.Text(alt))), ib)
                 }
 
@@ -254,8 +254,11 @@ object NativeMarkdownParser {
         return MdInline.Link(dest ?: "", children.ifEmpty { listOf(MdInline.Text(dest ?: "")) })
     }
 
-    /** Split a raw text run into Text + Hashtag inlines, SHARING the per-block budget. */
-    private fun appendTextWithHashtags(text: String, out: MutableList<MdInline>, ib: InlineBudget) {
+    /** Split a raw text run into Text + Hashtag inlines, SHARING the per-block budget.
+     *  HTML entities are decoded here (the WebView did this for free) so `&#x20;`,
+     *  `&amp;`, `&mdash;` etc. render as their characters, not literal source. */
+    private fun appendTextWithHashtags(rawText: String, out: MutableList<MdInline>, ib: InlineBudget) {
+        val text = decodeHtmlEntities(rawText)
         if (text.isEmpty()) return
         val tags = ContentParser.findHashtags(text)
         if (tags.isEmpty()) { emit(out, MdInline.Text(text), ib); return }
@@ -395,4 +398,46 @@ object NativeMarkdownParser {
     }
 
     private fun String.trimAngle(): String = trim().removeSurrounding("<", ">")
+
+    // ── HTML entities ──────────────────────────────────────────────────────────
+
+    private val NAMED_ENTITIES = mapOf(
+        "amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\"", "apos" to "'",
+        "nbsp" to " ", "copy" to "©", "reg" to "®", "trade" to "™",
+        "mdash" to "—", "ndash" to "–", "hellip" to "…", "deg" to "°",
+        "ldquo" to "“", "rdquo" to "”", "lsquo" to "‘", "rsquo" to "’",
+        "laquo" to "«", "raquo" to "»", "times" to "×", "divide" to "÷",
+        "bull" to "•", "middot" to "·", "dagger" to "†", "Dagger" to "‡",
+        "frac12" to "½", "frac14" to "¼", "frac34" to "¾",
+        "euro" to "€", "pound" to "£", "cent" to "¢", "yen" to "¥",
+        "sect" to "§", "para" to "¶",
+    )
+
+    /** Decodes named + numeric (decimal/hex) HTML entities. Unknown sequences pass
+     *  through verbatim. Cheap fast-path when the run has no `&`. */
+    private fun decodeHtmlEntities(text: String): String {
+        if ('&' !in text) return text
+        val sb = StringBuilder(text.length)
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c != '&') { sb.append(c); i++; continue }
+            val semi = text.indexOf(';', i + 1)
+            if (semi == -1 || semi - i > 12) { sb.append(c); i++; continue }
+            val body = text.substring(i + 1, semi)
+            val decoded: String? = when {
+                body.startsWith("#x") || body.startsWith("#X") ->
+                    body.substring(2).toIntOrNull(16)?.toCharsOrNull()
+                body.startsWith("#") ->
+                    body.substring(1).toIntOrNull()?.toCharsOrNull()
+                else -> NAMED_ENTITIES[body]
+            }
+            if (decoded != null) { sb.append(decoded); i = semi + 1 }
+            else { sb.append(c); i++ }
+        }
+        return sb.toString()
+    }
+
+    private fun Int.toCharsOrNull(): String? =
+        if (this in 0..0x10FFFF) runCatching { String(Character.toChars(this)) }.getOrNull() else null
 }

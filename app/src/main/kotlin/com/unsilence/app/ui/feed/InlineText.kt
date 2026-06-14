@@ -112,7 +112,7 @@ internal fun InlineText(
         }
     }
 
-    val annotatedText = remember(textSegments, profileMap, onAuthorClick, customEmojis) {
+    val annotatedText = remember(textSegments, profileMap, onAuthorClick, onHashtagClick, customEmojis) {
         buildAnnotatedString {
             for (segment in textSegments) {
                 when (segment) {

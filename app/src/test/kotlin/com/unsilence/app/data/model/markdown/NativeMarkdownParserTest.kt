@@ -132,6 +132,26 @@ class NativeMarkdownParserTest {
         assertTrue(inlines.any { it is MdInline.Hashtag && it.tag == "nostr" })
     }
 
+    @Test
+    fun `numeric HTML entity in link text is decoded`() {
+        val inlines = (blocks("See [Silent.link&#x20;eSIM](https://silent.link) now").first()
+            as MdBlock.Paragraph).inlines
+        val link = inlines.flatten().filterIsInstance<MdInline.Link>().first()
+        assertEquals("Silent.link eSIM", link.children.plain())
+    }
+
+    @Test
+    fun `named and decimal HTML entities are decoded`() {
+        val p = (blocks("Tom &amp; Jerry &#169; 2025 &mdash; end").first() as MdBlock.Paragraph)
+        assertEquals("Tom & Jerry © 2025 — end", p.inlines.plain())
+    }
+
+    @Test
+    fun `unknown entity passes through verbatim`() {
+        val p = (blocks("a &nope; b").first() as MdBlock.Paragraph)
+        assertEquals("a &nope; b", p.inlines.plain())
+    }
+
     // ── Raw HTML ─────────────────────────────────────────────────────────────────
 
     @Test
