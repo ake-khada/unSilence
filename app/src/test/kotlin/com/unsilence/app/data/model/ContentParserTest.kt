@@ -342,6 +342,23 @@ class ContentParserTest {
     }
 
     @Test
+    fun `boosted article model yields engagement coordinate from inner pubkey and d-tag`() {
+        // The boosted/embedded path: the inner kind-30023 is NOT in MES, so the
+        // engagement coordinate MUST come from the embedded model. This is exactly
+        // CardHydrator.engagementTargetFor's derivation — locking it here prevents a
+        // regression where dispatch re-derives from a bare id and loses the coord.
+        val innerPk = "b".repeat(64)
+        val innerTags = """[["title","T"],["d","wrapped-d"]]"""
+        val embedded = """{"id":"inner","pubkey":"$innerPk","kind":30023,"created_at":999,"content":"body","tags":$innerTags}"""
+        val model = parse(content = embedded, kind = 6, rootId = "target-id", tagsJson = """[["e","target-id"]]""")
+        assertEquals(30023, model.effectiveKind)
+        assertEquals(innerPk, model.pubkey)               // target author (not reposter)
+        assertEquals("target-id", model.engagementId)     // rootId for a repost
+        val coord = model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+        assertEquals("30023:$innerPk:wrapped-d", coord)
+    }
+
+    @Test
     fun `kind 16 wrapping a 30023 detects article from inner tags`() {
         val innerTags = """[["title","Generic Reposted Article"],["d","gen-d"]]"""
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":30023,"created_at":999,"content":"body","tags":$innerTags}"""

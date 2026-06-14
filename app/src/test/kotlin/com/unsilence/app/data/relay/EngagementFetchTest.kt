@@ -50,6 +50,26 @@ class EngagementFetchTest {
     }
 
     @Test
+    fun `buildBatchedEngagementReq adds hashA and hasha coordinate filters for articles`() {
+        val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"), listOf("30023:pk:slug"))
+        val filters = Json.parseToJsonElement(req).jsonArray.drop(2).map { it.jsonObject }
+        // #e filter + #a filter + #A filter
+        assertEquals(3, filters.size)
+        assertEquals(listOf("evt-1"), filters[0]["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("30023:pk:slug"), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("30023:pk:slug"), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
+        // coordinate filters fetch only reactions + zaps (replies/reposts come via #e)
+        assertEquals(listOf(7, 9735), filters[1]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+        assertEquals(listOf(7, 9735), filters[2]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+    }
+
+    @Test
+    fun `buildBatchedEngagementReq omits coordinate filters when no articles`() {
+        val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"), emptyList())
+        assertEquals(1, Json.parseToJsonElement(req).jsonArray.drop(2).size)
+    }
+
+    @Test
     fun `buildBatchedEngagementReq includes generic-repost kind 16`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"))
         val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!

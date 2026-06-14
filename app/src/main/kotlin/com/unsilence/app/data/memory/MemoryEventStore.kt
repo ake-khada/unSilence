@@ -109,6 +109,9 @@ class MemoryEventStore @Inject constructor(
     private val idsByKind = ConcurrentHashMap<Int, MutableSet<String>>()
     private val idsByPubkey = ConcurrentHashMap<String, MutableSet<String>>()
     private val idsByReplyTarget = ConcurrentHashMap<String, MutableSet<String>>()
+    /** Addressable coordinate (`30023:pubkey:d`) → article event id, so coordinate-
+     *  targeted engagement (#a/#A reactions/zaps) resolves back to the article. */
+    private val articleIdByCoord = ConcurrentHashMap<String, String>()
     private val recentByCreatedAt = ConcurrentSkipListSet<EventEntry>(
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
     )
@@ -681,6 +684,12 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
+        // 2a. Addressable index: an article's coordinate → its event id.
+        if (event.kind == 30023) {
+            val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
+            articleIdByCoord["30023:${event.pubkey}:$d"] = event.id
+        }
+
         // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
         indexRelayHints(event)
 
@@ -855,9 +864,11 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleReaction(event: NostrEvent, dirty: InsertDirty) {
-        // Last e-tag is the target
-        val targetId = event.tags
-            .lastOrNull { it.size >= 2 && it[0] == "e" }
+        // Last e-tag is the target; for a reaction to an addressable event (e.g. a
+        // long-form article) there may be no e-tag — fall back to the a/A coordinate
+        // so article likes are counted (reactionCount merges the coord key).
+        val targetId = (event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }
+            ?: event.tags.lastOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
             ?.get(1) ?: return
         val contentStr = event.content.ifBlank { "+" }
         val reactionContent = parseReactionContent(contentStr, event.tags)
@@ -868,7 +879,7 @@ class MemoryEventStore @Inject constructor(
                 .add(ReactionInfo(event.pubkey, reactionContent))
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
-        dirty.invalidatedStatsIds.add(targetId)
+        invalidateStatsForTarget(targetId, dirty)
         // Actor-side index: track what this pubkey has reacted to (skip dislikes)
         if (reactionContent != ReactionContent.Standard("-")) {
             addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
@@ -890,8 +901,8 @@ class MemoryEventStore @Inject constructor(
         var noETagCount = 0
         for (id in kind7Ids) {
             val event = eventsById[id] ?: continue
-            val targetId = event.tags
-                .lastOrNull { it.size >= 2 && it[0] == "e" }
+            val targetId = (event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }
+                ?: event.tags.lastOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
                 ?.get(1) ?: run { noETagCount++; continue }
             val contentStr = event.content.ifBlank { "+" }
             val reactionContent = parseReactionContent(contentStr, event.tags)
@@ -966,8 +977,10 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleZapReceipt(event: NostrEvent, dirty: InsertDirty) {
-        val targetId = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "e" }
+        // e-tag target; for a zap to an addressable event (article) there may be no
+        // e-tag — fall back to the a/A coordinate (zapStats merges the coord key).
+        val targetId = (event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }
+            ?: event.tags.firstOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
             ?.get(1) ?: return
 
         val sats = extractSatsFromZap(event)
@@ -976,7 +989,7 @@ class MemoryEventStore @Inject constructor(
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
-        dirty.invalidatedStatsIds.add(targetId)
+        invalidateStatsForTarget(targetId, dirty)
 
         // Parse embedded kind-9734 zap request for sender pubkey + comment.
         val desc = parseZapDescription(event)
@@ -985,10 +998,14 @@ class MemoryEventStore @Inject constructor(
             .add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = event.id))
 
         // Own-zap detection: signal VM to clear optimistic sats overlay.
-        // desc == null → anonymous, can never be our own.
+        // desc == null → anonymous, can never be our own. When the receipt targets
+        // an article COORDINATE, also emit the resolved article id — the optimistic
+        // overlay was placed on the event id, so clearing only the coord would leave
+        // a duplicate. Emit both.
         val own = ownPubkey
         if (own != null && desc != null && desc.senderPubkey == own) {
             _ownZapReceived.tryEmit(targetId)
+            if (':' in targetId) articleIdByCoord[targetId]?.let { _ownZapReceived.tryEmit(it) }
         }
 
         // NIP-57 private zap detection. The embedded kind-9734's anon tag carries
@@ -2288,8 +2305,42 @@ class MemoryEventStore @Inject constructor(
      * drawer renders (grouped by emoji) — same source, by construction.
      * Per-entry, NOT per-reactor: one pubkey reacting with two emoji counts as 2.
      */
-    fun reactionCount(eventId: String): Int = reactionsByTarget[eventId]?.size ?: 0
-    fun zapStats(eventId: String): ZapAggregate = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
+    fun reactionCount(eventId: String): Int {
+        val coord = articleCoordForEvent(eventId)
+        val direct = reactionsByTarget[eventId]
+        val viaCoord = if (coord != null) reactionsByTarget[coord] else null
+        return when {
+            viaCoord == null -> direct?.size ?: 0
+            direct == null   -> viaCoord.size
+            else             -> (direct + viaCoord).size   // Set union dedups
+        }
+    }
+
+    /** For an addressable event (kind-30023 long-form), its `kind:pubkey:d`
+     *  coordinate. Reactions/engagement often target an article by coordinate
+     *  (`a`/`A` tag) rather than event id, so article counts merge both keys, and
+     *  CardHydrator fetches by coordinate. Null for non-addressable events. */
+    fun articleCoordForEvent(eventId: String): String? {
+        val e = eventsById[eventId] ?: return null
+        if (e.kind != 30023) return null
+        val d = e.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
+        return "30023:${e.pubkey}:$d"
+    }
+
+    /** Invalidate stats for a target plus, when the target is an addressable
+     *  coordinate, the article event it resolves to — so statsFlow(articleId)
+     *  ticks live when a #a/#A reaction or zap lands. */
+    private fun invalidateStatsForTarget(targetId: String, dirty: InsertDirty) {
+        dirty.invalidatedStatsIds.add(targetId)
+        if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
+    }
+    fun zapStats(eventId: String): ZapAggregate {
+        val direct = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
+        val coord = articleCoordForEvent(eventId)
+        val viaCoord = if (coord != null) zapStatsByEventId[coord] ?: ZapAggregate.EMPTY else ZapAggregate.EMPTY
+        return if (viaCoord === ZapAggregate.EMPTY) direct
+        else ZapAggregate(direct.count + viaCoord.count, direct.totalSats + viaCoord.totalSats)
+    }
     fun statsLastUpdated(eventId: String): Long = statsUpdatedAt[eventId] ?: 0L
 
     // ─── Engagement contributor queries (drawer) ────────────────────────────
@@ -2309,13 +2360,52 @@ class MemoryEventStore @Inject constructor(
     fun repostPubkeysForEvent(eventId: String): List<String> =
         repostPubkeysByTarget[eventId]?.toList() ?: emptyList()
 
-    /** Reaction info for all reactions to [eventId]. */
-    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
-        reactionsByTarget[eventId]?.toList() ?: emptyList()
+    /** Reaction info for all reactions to [eventId] — merges id-keyed and
+     *  (for addressable events) coordinate-keyed reactions. */
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> {
+        val coord = articleCoordForEvent(eventId)
+        val direct = reactionsByTarget[eventId]
+        val viaCoord = if (coord != null) reactionsByTarget[coord] else null
+        return when {
+            viaCoord == null -> direct?.toList() ?: emptyList()
+            direct == null   -> viaCoord.toList()
+            else             -> (direct + viaCoord).toList()
+        }
+    }
 
-    /** Per-zap breakdown for [eventId]: sender, sats, optional comment. */
-    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
-        zapDetailsByTarget[eventId]?.toList() ?: emptyList()
+    /** Per-zap breakdown for [eventId]: sender, sats, optional comment. Merges
+     *  id-keyed and (addressable) coordinate-keyed zaps, and collapses optimistic
+     *  rows (eventId == null) once a matching receipt-backed row exists — so a
+     *  self-zap shows ONE row, not an optimistic + receipt duplicate. */
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> {
+        val coord = articleCoordForEvent(eventId)
+        val direct = zapDetailsByTarget[eventId]?.toList() ?: emptyList()
+        val viaCoord = if (coord != null) zapDetailsByTarget[coord]?.toList() ?: emptyList() else emptyList()
+        return dedupeZapDetails(direct + viaCoord)
+    }
+
+    /** De-dup zap rows: first by receipt id (a receipt merged from both the id and
+     *  coordinate keys appears once), then drop optimistic placeholders (no receipt
+     *  id) superseded by a receipt with the same sender + sats. Matching on
+     *  (sender, sats) — NOT the comment — since the optimistic comment can differ
+     *  from the receipt's (e.g. blank vs decrypted). */
+    private fun dedupeZapDetails(rows: List<ZapDetail>): List<ZapDetail> {
+        if (rows.size < 2) return rows
+        val seenReceiptIds = HashSet<String>()
+        val receipts = ArrayList<ZapDetail>()
+        val optimistic = ArrayList<ZapDetail>()
+        for (r in rows) {
+            if (r.eventId != null) {
+                if (seenReceiptIds.add(r.eventId)) receipts.add(r)
+            } else {
+                optimistic.add(r)
+            }
+        }
+        if (optimistic.isEmpty()) return receipts
+        val receiptKeys = receipts.map { it.senderPubkey to it.sats }.toSet()
+        val keptOptimistic = optimistic.filter { (it.senderPubkey to it.sats) !in receiptKeys }
+        return receipts + keptOptimistic
+    }
 
     /** Lookup decrypted private-zap result. Returns null if not (yet) decrypted. */
     fun getDecryptedPrivateZap(zapReceiptId: String): DecryptedPrivateZap? =
@@ -2538,30 +2628,50 @@ class MemoryEventStore @Inject constructor(
 
     // ─── A.5.1 T4: Actor-side action state flows ─────────────────────────
 
+    /** Expand a raw actor-target set so coordinate targets (#a/#A on an article)
+     *  also include the resolved article event id — otherwise `articleId in reacted`
+     *  misses for a like keyed by coordinate. */
+    private fun withResolvedCoords(targets: Set<String>?): Set<String> {
+        if (targets.isNullOrEmpty()) return emptySet()
+        // Always return a fresh snapshot — never the live mutable index set, or
+        // distinctUntilChanged would compare a reference against its own mutation
+        // and stop emitting (breaks reactive icon updates).
+        return buildSet {
+            for (t in targets) {
+                add(t)
+                if (':' in t) articleIdByCoord[t]?.let { add(it) }
+            }
+        }
+    }
+
     /** Set of target event IDs the given [pubkey] has reacted to (kind 7). */
     fun reactedEventIdsFlow(pubkey: String): Flow<Set<String>> =
         _actionSignal
-            .map { reactedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .map { withResolvedCoords(reactedTargetsByActor[pubkey]) }
             .distinctUntilChanged()
 
     /** Set of target event IDs the given [pubkey] has reposted (kind 6). */
     fun repostedEventIdsFlow(pubkey: String): Flow<Set<String>> =
         _actionSignal
-            .map { repostedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .map { withResolvedCoords(repostedTargetsByActor[pubkey]) }
             .distinctUntilChanged()
 
     /** Set of target event IDs the given [pubkey] has zapped (kind 9734, NOT 9735). */
     fun zappedEventIdsFlow(pubkey: String): Flow<Set<String>> =
         _actionSignal
-            .map { zappedTargetsByActor[pubkey]?.toSet() ?: emptySet() }
+            .map { withResolvedCoords(zappedTargetsByActor[pubkey]) }
             .distinctUntilChanged()
 
     /** Synchronous check: has the current user reacted to or reposted [eventId]?
-     *  Used by CardHydrator to skip backfill for already-lit posts. */
+     *  Used by CardHydrator to skip backfill for already-lit posts. Also checks the
+     *  article coordinate so a coordinate-keyed own like/repost counts. */
     fun isOwnEngaged(eventId: String): Boolean {
         val pk = ownPubkey ?: return false
-        return reactedTargetsByActor[pk]?.contains(eventId) == true ||
-            repostedTargetsByActor[pk]?.contains(eventId) == true
+        val coord = articleCoordForEvent(eventId)
+        val reacted = reactedTargetsByActor[pk]
+        val reposted = repostedTargetsByActor[pk]
+        return reacted?.contains(eventId) == true || reposted?.contains(eventId) == true ||
+            (coord != null && (reacted?.contains(coord) == true || reposted?.contains(coord) == true))
     }
 
     /**
@@ -4430,6 +4540,13 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
+        // Addressable index (parity with live insert) — so coordinate-targeted
+        // engagement resolves to a restored article across a cold start.
+        if (event.kind == 30023) {
+            val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
+            articleIdByCoord["30023:${event.pubkey}:$d"] = event.id
+        }
+
         indexRelayHints(event)
         indexNotificationRecipients(event)
 
@@ -4690,6 +4807,7 @@ class MemoryEventStore @Inject constructor(
         idsByKind.clear()
         idsByPubkey.clear()
         idsByReplyTarget.clear()
+        articleIdByCoord.clear()
         recentByCreatedAt.clear()
         lastTouchedAt.clear()
         replyCounts.clear()
