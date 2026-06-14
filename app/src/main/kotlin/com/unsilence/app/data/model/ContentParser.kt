@@ -29,13 +29,9 @@ private const val TAG = "ContentParser"
 // over legit, orders of magnitude below pathology. The bound IS the feature — no
 // tap-to-expand (that would re-create the freeze we prevent).
 private const val MAX_PARSE_CHARS = 20_000
-// Long-form (kind-30023) is legitimately long prose — far larger input cap. The
-// SEGMENT cap still applies to every kind, so a hostile article stuffed with links/
-// hashtags is still bounded; only genuine prose (which tokenizes to few segments)
-// benefits. 200k chars ≈ 30k words; the regex pass over it is still linear/fast.
-private const val MAX_ARTICLE_PARSE_CHARS = 200_000
+// Long-form (kind-30023) input cap + the tail marker now live in shared ParseLimits
+// (reused by the native markdown parser). The SEGMENT cap still applies to every kind.
 private const val MAX_SEGMENTS = 150
-private const val TRUNCATION_MARKER = "… [content truncated]"
 
 /**
  * Single-pass content parser. Produces an [EventModel] from raw event fields.
@@ -120,7 +116,7 @@ object ContentParser {
         // ── Step 3: Bounded single-pass tokenization (spam-post DoS bound) ─
         // Cap 1: truncate INPUT before the O(content) regex pass. Long-form gets a
         // far larger cap (legit long prose); the segment cap below still bounds all kinds.
-        val maxChars = if (effectiveKind == 30023) MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
+        val maxChars = if (effectiveKind == 30023) ParseLimits.MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
         val rawLen = effectiveContent.length
         val inputTruncated = rawLen > maxChars
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
@@ -136,7 +132,7 @@ object ContentParser {
         // collapse into one top-level segment and bypass the draw-bound (H-spam).
         val (capped, segmentTruncated) = capSegmentsFlat(tokenized, MAX_SEGMENTS)
         val truncated = inputTruncated || segmentTruncated
-        val segments = if (truncated) capped + Segment.Text(TRUNCATION_MARKER) else tokenized
+        val segments = if (truncated) capped + Segment.Text(ParseLimits.TRUNCATION_MARKER) else tokenized
 
         // Permanent field probe — fires JUST UNDER the caps (and whenever truncation
         // actually triggers) so we keep seeing near-pathological content and can tune
