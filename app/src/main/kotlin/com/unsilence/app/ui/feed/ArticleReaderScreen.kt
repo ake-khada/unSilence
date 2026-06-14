@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -42,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -189,7 +189,9 @@ fun ArticleReaderScreen(
                         onNoteClick   = {},
                         lookupProfile = lookupProfile,
                         profileFlow   = profileFlow,
-                        modifier      = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                        // AuthorHeader applies its own horizontal/vertical padding internally;
+                        // pass it bare (as EventCard.ArticleLayout does) — a modifier here
+                        // stacks and doubles the row's padding.
                     )
 
                     // ── Banner image — full image at its natural aspect (no crop) ──
@@ -207,7 +209,7 @@ fun ArticleReaderScreen(
                         )
                     }
 
-                    // ── Title ──────────────────────────────────────────────────
+                    // ── Title (centered; equal gap to banner above and body below) ──
                     if (!title.isNullOrBlank()) {
                         Text(
                             text       = title,
@@ -215,19 +217,13 @@ fun ArticleReaderScreen(
                             fontWeight = FontWeight.Bold,
                             fontSize   = AppType.title,
                             lineHeight = 30.sp,
+                            textAlign  = TextAlign.Center,
                             modifier   = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = Spacing.medium)
-                                .padding(top = Spacing.medium, bottom = Spacing.small),
+                                .padding(vertical = Spacing.large),
                         )
                     }
-
-                    HorizontalDivider(
-                        color    = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.padding(horizontal = Spacing.medium),
-                    )
-
-                    Spacer(Modifier.height(Spacing.small))
 
                     // ── Body content (WebView) ─────────────────────────────────
                     AndroidView(
@@ -360,12 +356,16 @@ body {
 }
 a { color: #00E5FF; text-decoration: none; }
 a:hover { text-decoration: underline; }
-h1, h2, h3, h4, h5, h6 { color: #FFFFFF; font-weight: bold; margin: 1.2em 0 0.4em; }
+/* First block sits flush so the Compose title padding controls the top gap. */
+body > :first-child { margin-top: 0; }
+/* Even, symmetric vertical rhythm — same gap before and after every block,
+   so sub-headers space evenly between the previous and next paragraph. */
+h1, h2, h3, h4, h5, h6 { color: #FFFFFF; font-weight: bold; margin: 1em 0; }
 h1 { font-size: 1.6em; }
 h2 { font-size: 1.4em; }
 h3 { font-size: 1.2em; }
 h4, h5, h6 { font-size: 1.05em; }
-p { margin: 0.6em 0; }
+p { margin: 0.8em 0; }
 img {
     max-width: 100%;
     height: auto;
