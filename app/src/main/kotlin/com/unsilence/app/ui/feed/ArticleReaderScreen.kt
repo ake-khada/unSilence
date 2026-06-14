@@ -14,16 +14,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Share
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.DialogProperties
@@ -71,7 +73,6 @@ import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
-import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -182,263 +183,264 @@ fun ArticleReaderScreen(
     val zapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
 
     var drawerOpen by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    // Auto-reveal the engagement drawer when the chevron opens it: it sits at the
+    // bottom of the article item, so without this it expands off-screen. Wait for the
+    // expand to lay out, then scroll it into view (slides up under the bar).
+    val drawerReveal = remember { BringIntoViewRequester() }
+    LaunchedEffect(drawerOpen) {
+        if (drawerOpen) {
+            delay(220)
+            runCatching { drawerReveal.bringIntoView() }
+        }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties       = DialogProperties(usePlatformDefaultWidth = false),
+        properties       = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows  = false,
+        ),
     ) {
+        // Edge-to-edge like the feed/profile: decorFitsSystemWindows=false lets the
+        // dialog draw into the system-bar areas, so the black background/content
+        // continues behind the gesture pill (no peek-through of the screen behind).
+        // Top gets statusBarsPadding; the gesture pill simply overlays the bottom —
+        // no navigation-bar padding anywhere.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Black),
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // ── Scrollable content ─────────────────────────────────────────
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+                // ── Pinned top bar (Close / Share stay reachable) ──────────────
+                Row(
+                    modifier          = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // ── Top bar ────────────────────────────────────────────────
-                    Row(
-                        modifier          = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = onDismiss) {
-                            Icon(
-                                imageVector        = Icons.Filled.Close,
-                                contentDescription = "Close",
-                                tint               = Color.White,
-                                modifier           = Modifier.size(22.dp),
-                            )
-                        }
-                        Spacer(Modifier.weight(1f))
-                        // Share lives here — EventActionBar (below) has no Share slot.
-                        IconButton(onClick = {
-                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
-                                type = "text/plain"
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, null))
-                        }) {
-                            Icon(
-                                imageVector        = Icons.Filled.Share,
-                                contentDescription = "Share",
-                                tint               = Color.White,
-                                modifier           = Modifier.size(22.dp),
-                            )
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-
-                    // ── Author header (effective author, live profile) ─────────
-                    AuthorHeader(
-                        pubkey        = model.pubkey,
-                        picture       = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
-                        displayName   = authorLabel,
-                        nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
-                        createdAt     = model.createdAt,
-                        onAuthorClick = onAuthorClick,
-                        onNoteClick   = {},
-                        lookupProfile = lookupProfile,
-                        profileFlow   = profileFlow,
-                        // AuthorHeader applies its own horizontal/vertical padding internally;
-                        // pass it bare (as EventCard.ArticleLayout does) — a modifier here
-                        // stacks and doubles the row's padding.
-                    )
-
-                    // ── Banner image — full image at its natural aspect (no crop) ──
-                    if (!image.isNullOrBlank()) {
-                        SubcomposeAsyncImage(
-                            model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
-                            contentDescription = null,
-                            contentScale       = ContentScale.FillWidth,
-                            modifier           = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(
-                                    bottomStart = Sizing.mediaCornerRadius,
-                                    bottomEnd   = Sizing.mediaCornerRadius,
-                                )),
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector        = Icons.Filled.Close,
+                            contentDescription = "Close",
+                            tint               = Color.White,
+                            modifier           = Modifier.size(22.dp),
                         )
                     }
+                    Spacer(Modifier.weight(1f))
+                    // Share lives here — EventActionBar (below) has no Share slot.
+                    IconButton(onClick = {
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
+                            type = "text/plain"
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, null))
+                    }) {
+                        Icon(
+                            imageVector        = Icons.Filled.Share,
+                            contentDescription = "Share",
+                            tint               = Color.White,
+                            modifier           = Modifier.size(22.dp),
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
-                    // ── Title + reading time (centered; equal gap to banner / body) ──
-                    if (!title.isNullOrBlank()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = Spacing.medium)
-                                .padding(vertical = Spacing.large),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(
-                                text       = title,
-                                color      = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize   = AppType.title,
-                                lineHeight = 30.sp,
-                                textAlign  = TextAlign.Center,
-                                modifier   = Modifier.fillMaxWidth(),
+                // ── Article + engagement in ONE LazyColumn: the action bar is now
+                //    inline (non-sticky) and the drawer expands DOWNWARD in the scroll
+                //    flow. Comments will append as further items below (phase 3b). ──
+                LazyColumn(
+                    state    = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                ) {
+                    item(key = "article") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            // ── Author header (effective author, live profile) ──
+                            // AuthorHeader applies its own padding — pass it bare.
+                            AuthorHeader(
+                                pubkey        = model.pubkey,
+                                picture       = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+                                displayName   = authorLabel,
+                                nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
+                                createdAt     = model.createdAt,
+                                onAuthorClick = onAuthorClick,
+                                onNoteClick   = {},
+                                lookupProfile = lookupProfile,
+                                profileFlow   = profileFlow,
                             )
-                            if (readingMinutes != null) {
-                                Text(
-                                    text     = "$readingMinutes min read",
-                                    color    = TextSecondary,
-                                    fontSize = AppType.caption,
-                                    modifier = Modifier.padding(top = Spacing.small),
+
+                            // ── Banner image — full image at natural aspect (no crop) ──
+                            if (!image.isNullOrBlank()) {
+                                SubcomposeAsyncImage(
+                                    model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
+                                    contentDescription = null,
+                                    contentScale       = ContentScale.FillWidth,
+                                    modifier           = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(
+                                            bottomStart = Sizing.mediaCornerRadius,
+                                            bottomEnd   = Sizing.mediaCornerRadius,
+                                        )),
                                 )
                             }
-                        }
-                    }
 
-                    // ── Body content (native markdown) ─────────────────────────
-                    // SelectionContainer makes the article body selectable; cyan
-                    // links/hashtags stay tappable under selection (LinkAnnotation
-                    // coexists with selection — verified on device).
-                    val doc = document
-                    if (doc != null) {
-                        SelectionContainer(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = Spacing.medium)
-                                .padding(bottom = Spacing.xl),
-                        ) {
-                            MarkdownContent(
-                                document             = doc,
-                                onHashtagClick       = onHashtagTap,
-                                suppressLeadingTitle = title,
-                            )
-                        }
-                    } else {
-                        // Off-main parse in flight (only shows on the first open of a
-                        // big, uncached article — usually sub-frame, so it rarely
-                        // flashes). Quiet centered spinner sized ~a body's worth.
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 160.dp)
-                                .padding(bottom = Spacing.xl),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            CircularProgressIndicator(
-                                color       = MaterialTheme.colorScheme.primary,
-                                strokeWidth = 2.dp,
-                                modifier    = Modifier.size(28.dp),
-                            )
-                        }
-                    }
-
-                    // ── Topic hashtags (longform `t` tags — a separate publish field,
-                    //    not body text) as tappable chips in one horizontally-scrollable
-                    //    row at the article end, with edge fades hinting more off-screen
-                    //    (mirrors the relay category rail). ─────────────────────────────
-                    if (hashtags.isNotEmpty()) {
-                        val tagListState = rememberLazyListState()
-                        Box(modifier = Modifier.padding(bottom = Spacing.xl)) {
-                            LazyRow(
-                                state                 = tagListState,
-                                contentPadding        = PaddingValues(horizontal = Spacing.medium),
-                                horizontalArrangement = Arrangement.spacedBy(Spacing.small),
-                            ) {
-                                items(hashtags) { tag ->
+                            // ── Title + reading time (centered; equal gap banner/body) ──
+                            if (!title.isNullOrBlank()) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = Spacing.medium)
+                                        .padding(vertical = Spacing.large),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
                                     Text(
-                                        text     = "#$tag",
-                                        color    = BrandDeep,
-                                        fontSize = AppType.footnote,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(50))
-                                            .background(Surface2)
-                                            .clickable { onHashtagTap(tag) }
-                                            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                                        text       = title,
+                                        color      = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize   = AppType.title,
+                                        lineHeight = 30.sp,
+                                        textAlign  = TextAlign.Center,
+                                        modifier   = Modifier.fillMaxWidth(),
+                                    )
+                                    if (readingMinutes != null) {
+                                        Text(
+                                            text     = "$readingMinutes min read",
+                                            color    = TextSecondary,
+                                            fontSize = AppType.caption,
+                                            modifier = Modifier.padding(top = Spacing.small),
+                                        )
+                                    }
+                                }
+                            }
+
+                            // ── Body (native markdown; selectable, tappable spans) ──
+                            val doc = document
+                            if (doc != null) {
+                                SelectionContainer(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = Spacing.medium)
+                                        .padding(bottom = Spacing.xl),
+                                ) {
+                                    MarkdownContent(
+                                        document             = doc,
+                                        onHashtagClick       = onHashtagTap,
+                                        suppressLeadingTitle = title,
+                                    )
+                                }
+                            } else {
+                                // Off-main parse in flight (only the first open of a big,
+                                // uncached article — usually sub-frame). Quiet spinner.
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 160.dp)
+                                        .padding(bottom = Spacing.xl),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CircularProgressIndicator(
+                                        color       = MaterialTheme.colorScheme.primary,
+                                        strokeWidth = 2.dp,
+                                        modifier    = Modifier.size(28.dp),
                                     )
                                 }
                             }
-                            // Edge fades — left appears once scrolled, right while more
-                            // remains. matchParentSize + background only → never block taps.
-                            if (tagListState.canScrollBackward) {
-                                Box(
-                                    modifier = Modifier
-                                        .matchParentSize()
-                                        .background(Brush.horizontalGradient(0f to Black, 0.14f to Color.Transparent)),
-                                )
-                            }
-                            if (tagListState.canScrollForward) {
-                                Box(
-                                    modifier = Modifier
-                                        .matchParentSize()
-                                        .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
-                                )
-                            }
-                        }
-                    }
-                }
 
-                // ── Sticky bottom: engagement drawer (expands upward) + action bar ──
-                // Same chrome as EventCard. The card renders the drawer BELOW an inline
-                // bar; here the bar is sticky-bottom, so the drawer sits above it and the
-                // whole container grows upward when opened.
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(SurfaceVariant)
-                        .navigationBarsPadding(),
-                ) {
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = drawerOpen,
-                        enter   = androidx.compose.animation.expandVertically(),
-                        exit    = androidx.compose.animation.shrinkVertically(),
-                    ) {
-                        // The card's drawer scrolls with the feed LazyColumn; here it's
-                        // bottom-anchored, so cap its height and give it its own scroll —
-                        // otherwise a heavily-zapped article's list runs off-screen.
-                        Box(
-                            modifier = Modifier
-                                .heightIn(max = 280.dp)
-                                .verticalScroll(rememberScrollState()),
-                        ) {
-                            EngagementDrawer(
-                                eventId               = model.engagementId,
-                                statsFlow             = statsFlow,
-                                zapDetailsForEvent    = zapDetailsForEvent,
-                                repostPubkeysForEvent = repostPubkeysForEvent,
-                                reactionsForEvent     = reactionsForEvent,
-                                profileFlow           = profileFlow,
-                                lookupProfile         = lookupProfile,
-                                onProfileTap          = onAuthorClick,
+                            // ── Topic hashtags (`t` tags) — one scrollable chip row
+                            //    with edge fades (mirrors the relay category rail). ──
+                            if (hashtags.isNotEmpty()) {
+                                val tagListState = rememberLazyListState()
+                                Box(modifier = Modifier.padding(bottom = Spacing.xl)) {
+                                    LazyRow(
+                                        state                 = tagListState,
+                                        contentPadding        = PaddingValues(horizontal = Spacing.medium),
+                                        horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+                                    ) {
+                                        items(hashtags) { tag ->
+                                            Text(
+                                                text     = "#$tag",
+                                                color    = BrandDeep,
+                                                fontSize = AppType.footnote,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(50))
+                                                    .background(Surface2)
+                                                    .clickable { onHashtagTap(tag) }
+                                                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                                            )
+                                        }
+                                    }
+                                    if (tagListState.canScrollBackward) {
+                                        Box(
+                                            modifier = Modifier
+                                                .matchParentSize()
+                                                .background(Brush.horizontalGradient(0f to Black, 0.14f to Color.Transparent)),
+                                        )
+                                    }
+                                    if (tagListState.canScrollForward) {
+                                        Box(
+                                            modifier = Modifier
+                                                .matchParentSize()
+                                                .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
+                                        )
+                                    }
+                                }
+                            }
+
+                            // ── Inline engagement bar (non-sticky) + downward drawer ──
+                            // Mirrors EventCard: bar, then the drawer expands BELOW it in
+                            // the scroll flow (no height cap / inner scroll — the
+                            // LazyColumn scrolls; comments will sit under this in 3b).
+                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                            EventActionBar(
+                                noteId           = model.navigateId,
+                                replyCount       = replyCount,
+                                repostCount      = repostCount,
+                                reactionCount    = reactionCount,
+                                zapTotalSats     = zapTotalSats,
+                                hasReacted       = hasReacted,
+                                hasReposted      = hasReposted,
+                                hasZapped        = hasZapped,
+                                isNwcConfigured  = isNwcConfigured,
+                                isZapLoading     = isZapLoading,
+                                extraZapSats     = extraZapSats,
+                                zapFlash         = zapFlash,
+                                drawerOpen       = drawerOpen,
+                                onChevronTap     = { drawerOpen = !drawerOpen },
+                                onNoteClick      = { onNoteClick(model.navigateId) },
+                                onComment        = { onNoteClick(model.navigateId) },
+                                onReact          = onReact,
+                                onReactLongPress = onReactLongPress,
+                                pinnedEmojis     = pinnedEmojis,
+                                onReactWithEmoji = onReactWithEmoji,
+                                onRepost         = onRepost,
+                                onQuote          = onQuote,
+                                onZap            = onZap,
+                                onSaveNwcUri     = onSaveNwcUri,
+                                modifier         = Modifier.padding(top = Spacing.small),
                             )
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = drawerOpen,
+                                enter   = androidx.compose.animation.expandVertically(),
+                                exit    = androidx.compose.animation.shrinkVertically(),
+                            ) {
+                                Box(modifier = Modifier.bringIntoViewRequester(drawerReveal)) {
+                                    EngagementDrawer(
+                                        eventId               = model.engagementId,
+                                        statsFlow             = statsFlow,
+                                        zapDetailsForEvent    = zapDetailsForEvent,
+                                        repostPubkeysForEvent = repostPubkeysForEvent,
+                                        reactionsForEvent     = reactionsForEvent,
+                                        profileFlow           = profileFlow,
+                                        lookupProfile         = lookupProfile,
+                                        onProfileTap          = onAuthorClick,
+                                    )
+                                }
+                            }
                         }
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                    EventActionBar(
-                        noteId           = model.navigateId,
-                        replyCount       = replyCount,
-                        repostCount      = repostCount,
-                        reactionCount    = reactionCount,
-                        zapTotalSats     = zapTotalSats,
-                        hasReacted       = hasReacted,
-                        hasReposted      = hasReposted,
-                        hasZapped        = hasZapped,
-                        isNwcConfigured  = isNwcConfigured,
-                        isZapLoading     = isZapLoading,
-                        extraZapSats     = extraZapSats,
-                        zapFlash         = zapFlash,
-                        drawerOpen       = drawerOpen,
-                        onChevronTap     = { drawerOpen = !drawerOpen },
-                        onNoteClick      = { onNoteClick(model.navigateId) },
-                        onComment        = { onNoteClick(model.navigateId) },
-                        onReact          = onReact,
-                        onReactLongPress = onReactLongPress,
-                        pinnedEmojis     = pinnedEmojis,
-                        onReactWithEmoji = onReactWithEmoji,
-                        onRepost         = onRepost,
-                        onQuote          = onQuote,
-                        onZap            = onZap,
-                        onSaveNwcUri     = onSaveNwcUri,
-                        modifier         = Modifier.padding(top = Spacing.small),
-                    )
                 }
             }
         }
