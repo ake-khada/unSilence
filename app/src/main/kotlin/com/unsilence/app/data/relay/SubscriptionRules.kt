@@ -40,6 +40,7 @@ object SubscriptionRules {
         "mute-",
         "own-eng-",
         "eng-",
+        "article-comments-",
         "emoji-list-",
         "emoji-set-",
         "emoji-discover-",

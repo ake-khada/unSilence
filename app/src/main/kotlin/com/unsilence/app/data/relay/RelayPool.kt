@@ -3345,6 +3345,41 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch comments on a long-form article by its coordinate (`30023:pk:d`).
+     * ONE REQ with two OR'd filter objects: NIP-22 kind-1111 (uppercase `#A` root
+     * scope) + legacy kind-1 (lowercase `#a`) — NOT `#e`. Ephemeral one-shot
+     * (reaches relays even if not in the persistent pool); CLOSE after EOSE.
+     */
+    suspend fun fetchArticleComments(rawRelayUrls: List<String>, coord: String) {
+        if (coord.isBlank()) return
+        val hintUrls = memoryEventStore.get().relayHintsForEvent(coord).mapNotNull { normalizeRelayUrl(it) }
+        val relayUrls = (rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet() + hintUrls).toList()
+        if (relayUrls.isEmpty()) return
+        val subId = "article-comments-${System.currentTimeMillis()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)) })       // legacy comments
+                put("#a", buildJsonArray { add(JsonPrimitive(coord)) })
+                put("limit", JsonPrimitive(200))
+            })
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1111)) })    // NIP-22 comments
+                put("#A", buildJsonArray { add(JsonPrimitive(coord)) })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+        if (!eosed) cleanupOneShotSub(subId)
+        Log.d(TAG, "Fetching comments for $coord from ${relayUrls.size} relay(s)")
+    }
+
+    /**
      * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */

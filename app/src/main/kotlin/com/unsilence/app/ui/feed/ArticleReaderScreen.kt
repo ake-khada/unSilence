@@ -59,9 +59,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.DialogProperties
+import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.markdown.MarkdownContent
+import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.markdown.MarkdownDocument
@@ -69,6 +72,7 @@ import com.unsilence.app.data.model.markdown.NativeMarkdownParser
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -131,6 +135,23 @@ fun ArticleReaderScreen(
     // that tag's feed — close the reader first, else the destination opens hidden
     // behind this Dialog and the tap looks dead.
     val onHashtagTap: (String) -> Unit = { tag -> onHashtagClick(tag); onDismiss() }
+
+    // ── Comments (NIP-22 kind-1111 + legacy kind-1 by a-coordinate) ──────────
+    // Dedicated VM owns the comment machinery + display providers; comment ACTIONS
+    // /lookups/caches come from a NoteActionsViewModel (same host owner).
+    val articleCoord = remember(model.engagementId, model.article?.dTag, model.pubkey) {
+        model.article?.dTag?.takeIf { it.isNotBlank() }?.let { "30023:${model.pubkey}:$it" }
+    }
+    val articleReaderVm: ArticleReaderViewModel = hiltViewModel()
+    val commentActionsVm: NoteActionsViewModel = hiltViewModel()
+    val commentsFlow = remember(articleCoord) { articleReaderVm.commentsFlow(articleCoord ?: "") }
+    val comments by commentsFlow.collectAsStateWithLifecycle(emptyList())
+    LaunchedEffect(articleCoord) {
+        if (articleCoord != null) {
+            articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
+        }
+    }
+    LaunchedEffect(comments) { articleReaderVm.hydrateCommentEngagement(comments) }
 
     // Native markdown body (replaces the WebView). Parsed off the composition
     // thread (Dispatchers.Default) so a max-size article can't hitch the open;
@@ -439,6 +460,58 @@ fun ArticleReaderScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    // ── Comments (NIP-22 1111 + legacy kind-1, oldest-first) ──
+                    if (comments.isNotEmpty()) {
+                        item(key = "comments-header") {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                            Text(
+                                text     = "${comments.size} ${if (comments.size == 1) "comment" else "comments"}",
+                                color    = TextSecondary,
+                                fontSize = AppType.footnote,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                            )
+                        }
+                        items(comments, key = { it.id }) { comment ->
+                            val cModel = remember(comment.id) {
+                                commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
+                            }
+                            EventCard(
+                                model                 = cModel,
+                                row                   = comment,
+                                role                  = CardRole.Reply,
+                                engagement            = EngagementSnapshot(isNwcConfigured = isNwcConfigured),
+                                onNoteClick           = onNoteClick,
+                                onComment             = { onNoteClick(comment.id) },
+                                onAuthorClick         = onAuthorClick,
+                                onHashtagClick        = onHashtagTap,
+                                onQuote               = onQuote,
+                                onArticleClick        = { onNoteClick(it.id) },
+                                onReact               = { commentActionsVm.react(comment.id, comment.pubkey) },
+                                onReactLongPress      = {},
+                                pinnedEmojis          = pinnedEmojis,
+                                onReactWithEmoji      = { emoji -> commentActionsVm.react(comment.id, comment.pubkey, ":${emoji.shortcode}:", emoji.url) },
+                                onRepost              = { commentActionsVm.repost(comment.id, comment.pubkey, comment.relayUrl) },
+                                onZap                 = { req -> commentActionsVm.zap(comment.id, comment.pubkey, comment.relayUrl, req) },
+                                onSaveNwcUri          = { uri -> commentActionsVm.saveNwcUri(uri) },
+                                lookupProfile         = commentActionsVm::lookupProfile,
+                                lookupEvent           = { id, hints -> commentActionsVm.lookupEvent(id, hints) },
+                                lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
+                                lookupModel           = commentActionsVm::getEventModel,
+                                fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
+                                profileFlow           = articleReaderVm::profileFlow,
+                                statsFlow             = articleReaderVm::statsFlow,
+                                zapDetailsForEvent    = articleReaderVm::zapDetailsForEvent,
+                                repostPubkeysForEvent = articleReaderVm::repostPubkeysForEvent,
+                                reactionsForEvent     = articleReaderVm::reactionsForEvent,
+                                imageDimensionCache   = commentActionsVm.imageDimensionCache,
+                                thumbnailCache        = commentActionsVm.videoThumbnailCache,
+                            )
+                            HorizontalDivider(color = BorderFaint)
                         }
                     }
                 }
