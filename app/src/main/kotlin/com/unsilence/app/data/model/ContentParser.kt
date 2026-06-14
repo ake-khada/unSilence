@@ -120,9 +120,9 @@ object ContentParser {
         val rawLen = effectiveContent.length
         val inputTruncated = rawLen > maxChars
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
-        // kind-1 notes (incl. reposted/wrapped — effectiveKind, effectiveContent) get
-        // render-only leading-`>` blockquotes; everything else tokenizes flat.
-        val tokenized = if (effectiveKind == 1) {
+        // kind-1 notes and kind-1111 comments (incl. reposted/wrapped — effectiveKind,
+        // effectiveContent) get render-only leading-`>` blockquotes; else tokenize flat.
+        val tokenized = if (effectiveKind == 1 || effectiveKind == 1111) {
             tokenizeWithBlockquotes(parseInput, imeta, qHints, kind)
         } else {
             tokenize(parseInput, imeta, qHints, kind)

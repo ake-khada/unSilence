@@ -88,7 +88,10 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
  *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
-private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023)
+private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023, 1111)
+
+/** Max comments surfaced per article (bounds the rendered list + scan). */
+private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16)
 private val DERIVED_ONLY_KINDS = setOf(30166)
 
@@ -116,6 +119,10 @@ class MemoryEventStore @Inject constructor(
      *  original kind-30023 is NOT in eventsById still resolves coord→count. */
     private val articleIdByCoord = ConcurrentHashMap<String, String>()
     private val articleCoordById = ConcurrentHashMap<String, String>()
+    /** Article coordinate → ids of comments referencing it (NIP-22 kind-1111 via
+     *  `A`, legacy kind-1 via `a`). Drives articleCommentsFlow + coord-aware
+     *  replyCount. Populated on live insert + snapshot restore. */
+    private val commentIdsByCoord = ConcurrentHashMap<String, MutableSet<String>>()
     private val recentByCreatedAt = ConcurrentSkipListSet<EventEntry>(
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
     )
@@ -641,7 +648,7 @@ class MemoryEventStore @Inject constructor(
         when (kind) {
             0 -> d.profile = true
             3 -> d.follows = true
-            1, 6, 20, 21, 30023 -> d.feed = true
+            1, 6, 20, 21, 30023, 1111 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
         if (kind == 7 || kind == 6 || kind == 16 || kind == 9734) d.action = true
@@ -693,6 +700,8 @@ class MemoryEventStore @Inject constructor(
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
             registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
         }
+        // Article comment index (kind-1/1111 referencing an article by a/A coord).
+        indexArticleComment(event, dirty)
 
         // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
         indexRelayHints(event)
@@ -1864,6 +1873,14 @@ class MemoryEventStore @Inject constructor(
             if (event.rootId != null && event.rootId != event.replyToId) {
                 idsByReplyTarget[event.rootId]?.remove(entry.id)
             }
+            // Article comment index: drop this id from each coord it referenced.
+            if (event.kind == 1 || event.kind == 1111) {
+                for (tag in event.tags) {
+                    if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A")) {
+                        commentIdsByCoord[tag[1]]?.remove(entry.id)
+                    }
+                }
+            }
             // Clean up caches and sidecar data
             feedRowCache.remove(entry.id)
             feedRowAccessedAt.remove(entry.id)
@@ -2301,7 +2318,12 @@ class MemoryEventStore @Inject constructor(
 
     // ─── O(1) stat reads ────────────────────────────────────────────────────
 
-    fun replyCount(eventId: String): Int = replyCounts[eventId] ?: 0
+    fun replyCount(eventId: String): Int {
+        val base = replyCounts[eventId] ?: 0
+        val coord = articleCoordForEvent(eventId)
+        val viaCoord = if (coord != null) commentIdsByCoord[coord]?.size ?: 0 else 0
+        return base + viaCoord
+    }
     fun repostCount(eventId: String): Int = repostCounts[eventId] ?: 0
     /**
      * Displayed reaction count for [eventId]: distinct (pubkey, content) entries,
@@ -2360,6 +2382,36 @@ class MemoryEventStore @Inject constructor(
         dirty.invalidatedStatsIds.add(targetId)
         if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
     }
+
+    /** Index a kind-1/1111 event as an article comment under each `a`/`A` coordinate
+     *  it references (NIP-22 + legacy). Bumps the article's reply stats. */
+    private fun indexArticleComment(event: NostrEvent, dirty: InsertDirty?) {
+        if (event.kind != 1 && event.kind != 1111) return
+        for (tag in event.tags) {
+            if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A") && tag[1].startsWith("30023:")) {
+                val coord = tag[1]
+                commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
+                dirty?.let { invalidateStatsForTarget(coord, it) }
+            }
+        }
+    }
+
+    /** Comments (FeedRow) for an article coordinate, oldest-first (chronological
+     *  comment-section ordering, NOT the newest-first main feed), id tie-break.
+     *  Bounded by [ARTICLE_COMMENT_CAP]. */
+    fun articleCommentsFlow(coord: String): Flow<List<FeedRow>> =
+        _feedSignal
+            .map { articleComments(coord) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    private fun articleComments(coord: String): List<FeedRow> {
+        val ids = commentIdsByCoord[coord] ?: return emptyList()
+        return ids.mapNotNull { eventsById[it] }
+            .sortedWith(compareBy<NostrEvent> { it.createdAt }.thenBy { it.id })
+            .take(ARTICLE_COMMENT_CAP)
+            .map { toFeedRow(it) }
+    }
     fun zapStats(eventId: String): ZapAggregate {
         // Source of truth = the SAME deduped, receipt-backed rows the drawer shows,
         // so the action-bar summary and the drawer never disagree. Optimistic rows
@@ -2380,13 +2432,13 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Engagement contributor queries (drawer) ────────────────────────────
 
-    /** Deduplicated pubkeys of users who replied to [eventId]. */
+    /** Deduplicated pubkeys of users who replied to [eventId] — includes article
+     *  comments keyed by coordinate. */
     fun replyPubkeysForEvent(eventId: String): List<String> {
-        val replyIds = idsByReplyTarget[eventId] ?: return emptyList()
         val seen = HashSet<String>()
-        for (id in replyIds) {
-            val pk = eventsById[id]?.pubkey ?: continue
-            seen.add(pk)
+        idsByReplyTarget[eventId]?.forEach { id -> eventsById[id]?.pubkey?.let { seen.add(it) } }
+        articleCoordForEvent(eventId)?.let { coord ->
+            commentIdsByCoord[coord]?.forEach { id -> eventsById[id]?.pubkey?.let { seen.add(it) } }
         }
         return seen.toList()
     }
@@ -4581,6 +4633,7 @@ class MemoryEventStore @Inject constructor(
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
             registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
         }
+        indexArticleComment(event, null)
 
         indexRelayHints(event)
         indexNotificationRecipients(event)
@@ -4844,6 +4897,7 @@ class MemoryEventStore @Inject constructor(
         idsByReplyTarget.clear()
         articleIdByCoord.clear()
         articleCoordById.clear()
+        commentIdsByCoord.clear()
         recentByCreatedAt.clear()
         lastTouchedAt.clear()
         replyCounts.clear()
