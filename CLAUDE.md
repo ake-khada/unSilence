@@ -110,6 +110,7 @@ Relay WebSocket ─┬→ EventProcessor → MemoryEventStore → signal Flows �
 - **Warm-zone hydration:** viewport-driven (Following 10/50/12, churny 10/30/6 — don't widen churny). No per-card fetches
 - **Global cache:** `recentEventsWithDisplayableFloor` 100 displayable roots, `scanCap=1000`
 - **`loadMore`→`fetchOlderTimeline`** (cache-first, relay backfill). **Engagement coalesced per-relay** (chunk=5, max 25)
+- **Article engagement is a-coordinate, not `#e`.** Long-form (kind-30023) reactions/zaps target `30023:pk:d` via `#a`/`#A`. CardHydrator carries `EngagementTarget(id, coord, authorPubkey, createdAt)` from the rendered row — coord from the EMBEDDED `model.article.dTag` (works for boosted/embedded longform absent from `eventsById`), NOT re-derived from a bare id at dispatch. REQ builders emit OR'd `#e`+`#a`+`#A`; relay routing uses the carried `authorPubkey`. MES `articleIdByCoord` (live insert + snapshot) resolves coord→article; reactionCount/reactionsForEvent/zapStats/zapDetailsForEvent + actor flows + `isOwnEngaged` merge id- and coord-keyed. `EngagementFetchState.coordFetched` forces one re-fetch past an old id-only fetch. `withResolvedCoords` MUST snapshot (never return the live index set — breaks `distinctUntilChanged`)
 - **Pull-to-refresh:** 1.5s debounce; `_isRefreshing` in-flight guard
 
 ---

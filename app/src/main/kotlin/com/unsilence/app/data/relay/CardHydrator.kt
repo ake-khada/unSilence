@@ -313,19 +313,31 @@ class CardHydrator @Inject constructor(
         val coord: String?,
         val authorPubkey: String?,
         val createdAt: Long,
+        /** Where this event/article was actually seen — current NIP-65 write relays
+         *  may not cover where an old article or its zap receipts live. */
+        val sourceRelays: List<String> = emptyList(),
     )
 
     private fun engagementTargetFor(row: FeedRow): EngagementTarget {
-        val model = row.toEventModel()
+        // Prefer MES's cached parse (computeIfAbsent) over re-parsing the row — a
+        // longform body is expensive and this runs per row per hydrate pass.
+        val model = memoryEventStore.getOrParseEventModel(row.id) ?: row.toEventModel()
         val coord = if (model.effectiveKind == 30023) {
-            model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
-                ?: memoryEventStore.articleCoordForEvent(model.engagementId)
+            (model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+                ?: memoryEventStore.articleCoordForEvent(model.engagementId))
+                ?.also { memoryEventStore.registerArticleCoord(model.engagementId, it) }
         } else null
+        val source = buildList {
+            if (row.relayUrl.isNotBlank()) add(row.relayUrl)
+            memoryEventStore.getNostrEvent(model.engagementId)?.relaysSeen?.let { addAll(it) }
+            addAll(memoryEventStore.relayHintsForEvent(model.engagementId))
+        }.mapNotNull { normalizeRelayUrl(it) }.distinct()
         return EngagementTarget(
             id = model.engagementId,
             coord = coord,
             authorPubkey = model.pubkey,
             createdAt = model.createdAt,
+            sourceRelays = source,
         )
     }
 
@@ -516,8 +528,9 @@ class CardHydrator @Inject constructor(
         //    (NOT getEventEntity — a boosted/embedded article's target may be absent
         //    from eventsById, which would drop it to the global fallback).
         val idToRelays: Map<String, List<String>> = batch.associateWith { engId ->
-            val authorPubkey = targetById[engId]?.authorPubkey
-            if (authorPubkey != null) {
+            val target = targetById[engId]
+            val authorPubkey = target?.authorPubkey
+            val base = if (authorPubkey != null) {
                 outboxResolver.resolveEngagementRelays(
                     authorPubkey = authorPubkey,
                     ownReadRelays = ownReadRelays,
@@ -526,6 +539,9 @@ class CardHydrator @Inject constructor(
             } else {
                 ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
             }
+            // Merge the event's own source/seen relays — covers old articles whose
+            // engagement isn't on the author's current write relays.
+            (base + (target?.sourceRelays ?: emptyList())).distinct()
         }
 
         // 2. Invert → one chunked REQ per relay (coverage-ranked, capped).

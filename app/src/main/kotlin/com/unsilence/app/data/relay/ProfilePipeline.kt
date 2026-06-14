@@ -156,7 +156,7 @@ class ProfilePipeline @Inject constructor(
         // ── Step 4: Engagement batch ───────────────────────────────────
         val noteIds = noteEvents.map { it.id }
         try {
-            fetchEngagement(noteIds, writeRelays)
+            fetchEngagement(noteEvents, writeRelays)
         } catch (e: Exception) {
             Log.w(TAG, "Step4 failed: ${e.message}")
         }
@@ -170,7 +170,7 @@ class ProfilePipeline @Inject constructor(
         // state is reliable by querying the viewer's write relays specifically.
         if (!isOwn) {
             try {
-                fetchOwnEngagement(noteIds)
+                fetchOwnEngagement(noteEvents)
             } catch (e: Exception) {
                 Log.w(TAG, "Step5 failed: ${e.message}")
             }
@@ -462,36 +462,45 @@ class ProfilePipeline @Inject constructor(
     // ── Step 4: Engagement batch ────────────────────────────────────────
 
     private suspend fun fetchEngagement(
-        noteIds: List<String>,
+        noteEvents: List<NostrEvent>,
         writeRelays: List<String>,
     ) {
-        if (noteIds.isEmpty()) return
+        if (noteEvents.isEmpty()) return
 
-        // Read relays for engagement (reactions/reposts/zaps come from readers)
-        val readRelays = relayPreferencesStore.indexerRelayUrlsSnapshot() +
-            writeRelays
-        val targetUrls = readRelays.distinct()
+        // Per-note engagement targets carrying the article coordinate (so longform
+        // reactions/zaps tagged #a/#A are fetched + resolvable) and the note's own
+        // source relays (current NIP-65 write relays may not be where an old article
+        // / its zap receipts were actually seen).
+        val targets = noteEvents.map { ev ->
+            val model = memoryEventStore.getOrParseEventModel(ev.id)
+            val id = model?.engagementId ?: ev.id
+            val coord = if (model?.effectiveKind == 30023) {
+                model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+                    ?: memoryEventStore.articleCoordForEvent(id)
+            } else null
+            if (coord != null) memoryEventStore.registerArticleCoord(id, coord)
+            val source = buildList {
+                addAll(ev.relaysSeen)
+                if (ev.relayUrl.isNotBlank()) add(ev.relayUrl)
+                addAll(memoryEventStore.relayHintsForEvent(id))
+            }
+            Triple(id, coord, source)
+        }
 
-        // Chunk into ENGAGEMENT_CHUNK_SIZE per batch
-        val chunks = noteIds.chunked(ENGAGEMENT_CHUNK_SIZE)
-        Log.d(TAG, "Step4: ${noteIds.size} notes → ${chunks.size} chunks")
+        val readRelays = relayPreferencesStore.indexerRelayUrlsSnapshot() + writeRelays
+        val sourceRelays = targets.flatMap { it.third }
+        val targetUrls = (readRelays + sourceRelays).mapNotNull { normalizeRelayUrl(it) }.distinct()
+
+        // Chunk into ENGAGEMENT_CHUNK_SIZE per batch — REQ via the shared builder so
+        // profile and feed paths emit identical #e + #a + #A filters (incl. kind 16).
+        val chunks = targets.chunked(ENGAGEMENT_CHUNK_SIZE)
+        Log.d(TAG, "Step4: ${noteEvents.size} notes → ${chunks.size} chunks")
 
         for ((index, chunk) in chunks.withIndex()) {
             val subId = "prof-eng-${System.nanoTime()}"
-            val req = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(subId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray {
-                        add(JsonPrimitive(1))  // replies
-                        add(JsonPrimitive(6))  // reposts
-                        add(JsonPrimitive(7))  // reactions
-                        add(JsonPrimitive(9735)) // zap receipts
-                    })
-                    put("#e", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
-                    put("limit", JsonPrimitive(500))
-                })
-            }.toString()
+            val ids = chunk.map { it.first }
+            val coords = chunk.mapNotNull { it.second }
+            val req = buildBatchedEngagementReq(subId, ids, coords)
 
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
@@ -508,33 +517,35 @@ class ProfilePipeline @Inject constructor(
 
     // ── Step 5: Own-engagement marker ───────────────────────────────────
 
-    private suspend fun fetchOwnEngagement(noteIds: List<String>) {
+    private suspend fun fetchOwnEngagement(noteEvents: List<NostrEvent>) {
         val ownPk = memoryEventStore.ownPubkey ?: return
-        if (noteIds.isEmpty()) return
+        if (noteEvents.isEmpty()) return
 
         // Use the VIEWER's write relays, not the profile owner's
         val viewerWriteRelays = memoryEventStore.writeRelaysFor(ownPk)
             .ifEmpty { relayPool.connectedRelayUrls() }
         if (viewerWriteRelays.isEmpty()) return
 
-        val chunks = noteIds.chunked(ENGAGEMENT_CHUNK_SIZE)
-        Log.d(TAG, "Step5: ${noteIds.size} notes → ${chunks.size} chunks (viewer=${ownPk.take(8)}…)")
+        // Same coord derivation as step 4 so own coordinate-targeted likes light up.
+        val targets = noteEvents.map { ev ->
+            val model = memoryEventStore.getOrParseEventModel(ev.id)
+            val id = model?.engagementId ?: ev.id
+            val coord = if (model?.effectiveKind == 30023) {
+                model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+                    ?: memoryEventStore.articleCoordForEvent(id)
+            } else null
+            if (coord != null) memoryEventStore.registerArticleCoord(id, coord)
+            id to coord
+        }
+
+        val chunks = targets.chunked(ENGAGEMENT_CHUNK_SIZE)
+        Log.d(TAG, "Step5: ${noteEvents.size} notes → ${chunks.size} chunks (viewer=${ownPk.take(8)}…)")
 
         for ((index, chunk) in chunks.withIndex()) {
             val subId = "prof-own-eng-${System.nanoTime()}"
-            val req = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(subId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray {
-                        add(JsonPrimitive(7))    // reactions
-                        add(JsonPrimitive(6))    // reposts
-                        add(JsonPrimitive(9735)) // zap receipts
-                    })
-                    put("authors", buildJsonArray { add(JsonPrimitive(ownPk)) })
-                    put("#e", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
-                })
-            }.toString()
+            val ids = chunk.map { it.first }
+            val coords = chunk.mapNotNull { it.second }
+            val req = buildOwnEngagementReq(subId, ownPk, ids, coords)
 
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred

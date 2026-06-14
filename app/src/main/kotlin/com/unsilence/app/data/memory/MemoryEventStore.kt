@@ -109,9 +109,13 @@ class MemoryEventStore @Inject constructor(
     private val idsByKind = ConcurrentHashMap<Int, MutableSet<String>>()
     private val idsByPubkey = ConcurrentHashMap<String, MutableSet<String>>()
     private val idsByReplyTarget = ConcurrentHashMap<String, MutableSet<String>>()
-    /** Addressable coordinate (`30023:pubkey:d`) → article event id, so coordinate-
-     *  targeted engagement (#a/#A reactions/zaps) resolves back to the article. */
+    /** Addressable coordinate (`30023:pubkey:d`) ⇄ article event id, so coordinate-
+     *  targeted engagement (#a/#A reactions/zaps) resolves back to the article — in
+     *  BOTH directions. The reverse map ([articleCoordById]) is also fed from the
+     *  rendered row (registerArticleCoord) so a boosted/embedded article whose
+     *  original kind-30023 is NOT in eventsById still resolves coord→count. */
     private val articleIdByCoord = ConcurrentHashMap<String, String>()
+    private val articleCoordById = ConcurrentHashMap<String, String>()
     private val recentByCreatedAt = ConcurrentSkipListSet<EventEntry>(
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
     )
@@ -684,10 +688,10 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
-        // 2a. Addressable index: an article's coordinate → its event id.
+        // 2a. Addressable index: an article's coordinate ⇄ its event id.
         if (event.kind == 30023) {
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
-            articleIdByCoord["30023:${event.pubkey}:$d"] = event.id
+            registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
         }
 
         // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
@@ -2319,12 +2323,34 @@ class MemoryEventStore @Inject constructor(
     /** For an addressable event (kind-30023 long-form), its `kind:pubkey:d`
      *  coordinate. Reactions/engagement often target an article by coordinate
      *  (`a`/`A` tag) rather than event id, so article counts merge both keys, and
-     *  CardHydrator fetches by coordinate. Null for non-addressable events. */
-    fun articleCoordForEvent(eventId: String): String? {
-        val e = eventsById[eventId] ?: return null
-        if (e.kind != 30023) return null
-        val d = e.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
-        return "30023:${e.pubkey}:$d"
+     *  CardHydrator fetches by coordinate. Consults the row-registered reverse map
+     *  FIRST (so a boosted/embedded article absent from eventsById still resolves),
+     *  then derives from the stored event. Null for non-addressable events. */
+    fun articleCoordForEvent(eventId: String): String? =
+        articleCoordById[eventId]
+            ?: eventsById[eventId]
+                ?.takeIf { it.kind == 30023 }
+                ?.let { e ->
+                    val d = e.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1).orEmpty()
+                    "30023:${e.pubkey}:$d"
+                }
+
+    /**
+     * Register an article's id⇄coordinate mapping from the rendered row (where the
+     * embedded model carries the coordinate even if the original kind-30023 isn't
+     * in eventsById). When the mapping is novel, nudge the article's stats so any
+     * already-fetched coordinate-keyed engagement displays immediately.
+     */
+    fun registerArticleCoord(eventId: String, coord: String) {
+        val novel = articleCoordById.put(eventId, coord) != coord
+        articleIdByCoord[coord] = eventId
+        if (novel) {
+            statsUpdatedAt[eventId] = maxOf(
+                statsUpdatedAt[eventId] ?: 0L,
+                statsUpdatedAt[coord] ?: System.currentTimeMillis(),
+            )
+            _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(eventId)))
+        }
     }
 
     /** Invalidate stats for a target plus, when the target is an addressable
@@ -2335,6 +2361,15 @@ class MemoryEventStore @Inject constructor(
         if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
     }
     fun zapStats(eventId: String): ZapAggregate {
+        // Source of truth = the SAME deduped, receipt-backed rows the drawer shows,
+        // so the action-bar summary and the drawer never disagree. Optimistic rows
+        // are excluded here (extraZapSats overlays those). Fall back to the raw
+        // aggregate only when there are no receipt-backed details (legacy snapshots
+        // that persisted aggregates without per-zap detail rows).
+        val receipts = zapDetailsForEvent(eventId).filter { it.eventId != null }
+        if (receipts.isNotEmpty()) {
+            return ZapAggregate(receipts.size, receipts.sumOf { it.sats })
+        }
         val direct = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
         val coord = articleCoordForEvent(eventId)
         val viaCoord = if (coord != null) zapStatsByEventId[coord] ?: ZapAggregate.EMPTY else ZapAggregate.EMPTY
@@ -4544,7 +4579,7 @@ class MemoryEventStore @Inject constructor(
         // engagement resolves to a restored article across a cold start.
         if (event.kind == 30023) {
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
-            articleIdByCoord["30023:${event.pubkey}:$d"] = event.id
+            registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
         }
 
         indexRelayHints(event)
@@ -4808,6 +4843,7 @@ class MemoryEventStore @Inject constructor(
         idsByPubkey.clear()
         idsByReplyTarget.clear()
         articleIdByCoord.clear()
+        articleCoordById.clear()
         recentByCreatedAt.clear()
         lastTouchedAt.clear()
         replyCounts.clear()

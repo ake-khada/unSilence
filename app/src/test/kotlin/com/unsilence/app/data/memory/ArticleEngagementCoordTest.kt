@@ -112,6 +112,51 @@ class ArticleEngagementCoordTest {
         assertEquals("zap-2", rows.first().eventId)
     }
 
+    // ── Boosted/embedded: original kind-30023 NEVER inserted, coord registered
+    //    from the rendered row only. ──────────────────────────────────────────
+
+    @Test
+    fun `registered coord resolves reactions when the article event is absent`() {
+        // No insertArticle() — the article isn't in eventsById (boosted/embedded).
+        store.registerArticleCoord("article-x", coord)
+        store.insert(event(id = "react-x", pubkey = sender, kind = 7, content = "+", tags = listOf(listOf("a", coord))))
+        assertEquals(1, store.reactionCount("article-x"))
+    }
+
+    @Test
+    fun `registered coord resolves zaps and isOwnEngaged when the article event is absent`() {
+        store.ownPubkey = sender
+        store.registerArticleCoord("article-x", coord)
+        store.insert(event(id = "react-x", pubkey = sender, kind = 7, content = "+", tags = listOf(listOf("a", coord))))
+        assertTrue(store.isOwnEngaged("article-x"))
+        store.insert(
+            event(
+                id = "zap-x", pubkey = sender, kind = 9735,
+                tags = listOf(listOf("a", coord), listOf("amount", "21000")),
+            ),
+        )
+        assertEquals(1, store.zapStats("article-x").count)
+        assertEquals(21L, store.zapStats("article-x").totalSats)
+    }
+
+    @Test
+    fun `zapStats uses deduped receipt details not a stale raw aggregate`() {
+        insertArticle()
+        val desc = """{"pubkey":"$sender","content":"gm"}"""
+        // Two real receipt zaps (21 each) on the coordinate.
+        store.insert(event(id = "z1", pubkey = "l".repeat(64), kind = 9735,
+            tags = listOf(listOf("a", coord), listOf("amount", "21000"), listOf("description", desc))))
+        store.insert(event(id = "z2", pubkey = "l".repeat(64), kind = 9735,
+            tags = listOf(listOf("a", coord), listOf("amount", "21000"), listOf("description", desc))))
+        // Inflate the raw aggregate so it disagrees with the actual receipts.
+        store.incrementZapStats("article-1", 1000L)
+        val zs = store.zapStats("article-1")
+        // Must match the deduped receipt rows the drawer shows (2 × 21), not raw.
+        assertEquals(2, zs.count)
+        assertEquals(42L, zs.totalSats)
+        assertEquals(2, store.zapDetailsForEvent("article-1").count { it.eventId != null })
+    }
+
     @Test
     fun `non-article event has no coordinate and counts only by id`() {
         store.insert(event(id = "note-1", kind = 1, content = "hi"))
