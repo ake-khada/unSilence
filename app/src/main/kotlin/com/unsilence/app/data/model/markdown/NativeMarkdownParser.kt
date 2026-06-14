@@ -32,6 +32,12 @@ object NativeMarkdownParser {
     private const val MAX_TABLE_COLS = 12
     private const val MAX_TABLE_ROWS = 200
     private const val MAX_CELL_CHARS = 4_000
+    /** Document-wide cell budget across ALL tables — bounds the ~50k-cell case the
+     *  200k input cap otherwise allows; generous for legit multi-table articles. */
+    private const val MAX_TABLE_CELLS_TOTAL = 5_000
+
+    /** Inline metacharacters; absence lets a table cell skip the sub-parse (fast path). */
+    private val INLINE_MARKUP = charArrayOf('*', '_', '~', '\\', '[', ']', '(', ')', '<', '>', '!', '`')
 
     /** Inline delimiter tokens that must not leak into rendered text. */
     private val DELIMITERS = setOf(
@@ -48,9 +54,18 @@ object NativeMarkdownParser {
         MarkdownTokenTypes.EXCLAMATION_MARK,
     )
 
+    /** Document-wide budget: total blocks + total table cells. */
     private class Budget {
         var truncated = false
         var blocksRemaining = MAX_BLOCKS
+        var cellsRemaining = MAX_TABLE_CELLS_TOTAL
+    }
+
+    /** Per-block inline budget — fresh for each block/heading/cell, shared across that
+     *  block's nested spans so the TOTAL flattened inline count is bounded (the bug a
+     *  per-list cap missed; mirrors the note path's capSegmentsFlat). */
+    private class InlineBudget(val doc: Budget) {
+        var remaining = MAX_INLINES_PER_BLOCK
     }
 
     fun parse(markdown: String): MarkdownDocument {
@@ -137,8 +152,8 @@ object NativeMarkdownParser {
             .trim('\n')
 
     private fun imageBlock(node: ASTNode, src: String): MdBlock.Image {
-        val url = node.findChild(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle() ?: ""
-        val alt = node.findChild(MarkdownElementTypes.LINK_TEXT)?.text(src)
+        val url = node.findDescendant(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle() ?: ""
+        val alt = node.findDescendant(MarkdownElementTypes.LINK_TEXT)?.text(src)
             ?.removeSurrounding("[", "]")?.takeIf { it.isNotBlank() }
         return MdBlock.Image(url, alt)
     }
@@ -155,96 +170,103 @@ object NativeMarkdownParser {
         else parseInlines(node, src, budget)
     }
 
-    /** Walk a block node's children into inline spans, bounded by the per-block cap. */
-    private fun parseInlines(node: ASTNode, src: String, budget: Budget): List<MdInline> {
+    /** Walk a block node's children into inline spans, bounded by a fresh per-block budget. */
+    private fun parseInlines(node: ASTNode, src: String, doc: Budget): List<MdInline> {
         val out = mutableListOf<MdInline>()
-        appendInlines(node.children, src, out, budget)
+        appendInlines(node.children, src, out, InlineBudget(doc))
         return out
+    }
+
+    /** Adds one inline, decrementing the SHARED per-block budget; no-op when exhausted. */
+    private fun emit(out: MutableList<MdInline>, inline: MdInline, ib: InlineBudget) {
+        if (ib.remaining <= 0) { ib.doc.truncated = true; return }
+        out.add(inline)
+        ib.remaining--
     }
 
     private fun appendInlines(
         nodes: List<ASTNode>,
         src: String,
         out: MutableList<MdInline>,
-        budget: Budget,
+        ib: InlineBudget,
     ) {
         for (node in nodes) {
-            if (out.size >= MAX_INLINES_PER_BLOCK) { budget.truncated = true; return }
+            if (ib.remaining <= 0) { ib.doc.truncated = true; return }
             when (node.type) {
                 MarkdownTokenTypes.TEXT, MarkdownTokenTypes.WHITE_SPACE ->
-                    appendTextWithHashtags(node.text(src), out)
-                MarkdownTokenTypes.EOL -> out.add(MdInline.Text(" "))
-                MarkdownTokenTypes.HARD_LINE_BREAK -> out.add(MdInline.Text("\n"))
+                    appendTextWithHashtags(node.text(src), out, ib)
+                MarkdownTokenTypes.EOL -> emit(out, MdInline.Text(" "), ib)
+                MarkdownTokenTypes.HARD_LINE_BREAK -> emit(out, MdInline.Text("\n"), ib)
 
+                // Children parsed first (sharing ib), then the wrapper emitted.
                 MarkdownElementTypes.EMPH ->
-                    out.add(MdInline.Emphasis(childInlines(node, src, budget)))
+                    emit(out, MdInline.Emphasis(childInlines(node, src, ib)), ib)
                 MarkdownElementTypes.STRONG ->
-                    out.add(MdInline.Strong(childInlines(node, src, budget)))
+                    emit(out, MdInline.Strong(childInlines(node, src, ib)), ib)
                 GFMElementTypes.STRIKETHROUGH ->
-                    out.add(MdInline.Strikethrough(childInlines(node, src, budget)))
+                    emit(out, MdInline.Strikethrough(childInlines(node, src, ib)), ib)
                 MarkdownElementTypes.CODE_SPAN ->
-                    out.add(MdInline.Code(node.text(src).trim('`').trim()))
+                    emit(out, MdInline.Code(node.text(src).trim('`').trim()), ib)
 
                 MarkdownElementTypes.INLINE_LINK,
                 MarkdownElementTypes.FULL_REFERENCE_LINK,
                 MarkdownElementTypes.SHORT_REFERENCE_LINK ->
-                    out.add(linkInline(node, src, budget))
+                    emit(out, linkInline(node, src, ib), ib)
 
                 MarkdownElementTypes.AUTOLINK, GFMTokenTypes.GFM_AUTOLINK, MarkdownTokenTypes.AUTOLINK,
                 MarkdownTokenTypes.EMAIL_AUTOLINK -> {
                     val url = node.text(src).trimAngle()
-                    out.add(MdInline.Link(url, listOf(MdInline.Text(url))))
+                    emit(out, MdInline.Link(url, listOf(MdInline.Text(url))), ib)
                 }
 
                 // Inline image (not a standalone block) → flatten to a link (no media).
                 MarkdownElementTypes.IMAGE -> {
-                    val url = node.findChild(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle() ?: ""
-                    val alt = node.findChild(MarkdownElementTypes.LINK_TEXT)?.text(src)
+                    val url = node.findDescendant(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle() ?: ""
+                    val alt = node.findDescendant(MarkdownElementTypes.LINK_TEXT)?.text(src)
                         ?.removeSurrounding("[", "]")?.takeIf { it.isNotBlank() } ?: url
-                    if (url.isNotEmpty()) out.add(MdInline.Link(url, listOf(MdInline.Text(alt))))
+                    if (url.isNotEmpty()) emit(out, MdInline.Link(url, listOf(MdInline.Text(alt))), ib)
                 }
 
                 in DELIMITERS -> { /* skip delimiters */ }
 
                 else ->
                     // Unknown element → recurse; unknown leaf token → keep its text (don't drop content).
-                    if (node.children.isEmpty()) {
-                        appendTextWithHashtags(node.text(src), out)
-                    } else {
-                        appendInlines(node.children, src, out, budget)
-                    }
+                    if (node.children.isEmpty()) appendTextWithHashtags(node.text(src), out, ib)
+                    else appendInlines(node.children, src, out, ib)
             }
         }
     }
 
-    /** Inlines of a wrapper node (emph/strong/strikethrough/link-text) minus delimiters. */
-    private fun childInlines(node: ASTNode, src: String, budget: Budget): List<MdInline> {
+    /** Inlines of a wrapper node (emph/strong/strikethrough/link-text), SHARING the budget. */
+    private fun childInlines(node: ASTNode, src: String, ib: InlineBudget): List<MdInline> {
         val out = mutableListOf<MdInline>()
-        appendInlines(node.children, src, out, budget)
+        appendInlines(node.children, src, out, ib)
         return out
     }
 
-    private fun linkInline(node: ASTNode, src: String, budget: Budget): MdInline {
+    private fun linkInline(node: ASTNode, src: String, ib: InlineBudget): MdInline {
         val dest = node.findChild(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle()
         val textNode = node.findChild(MarkdownElementTypes.LINK_TEXT)
-        val children = if (textNode != null) childInlines(textNode, src, budget)
+        val children = if (textNode != null) childInlines(textNode, src, ib)
             else listOf(MdInline.Text(node.text(src)))
-        // Reference links without a resolvable destination → render the text, no url.
+        // FULL/SHORT_REFERENCE_LINK carry no LINK_DESTINATION → url "" (definitions
+        // aren't resolved in v1); phase 2 renders empty-url Links as plain styled text.
         return MdInline.Link(dest ?: "", children.ifEmpty { listOf(MdInline.Text(dest ?: "")) })
     }
 
-    /** Split a raw text run into Text + Hashtag inlines (reuses the note tokenizer's rule). */
-    private fun appendTextWithHashtags(text: String, out: MutableList<MdInline>) {
+    /** Split a raw text run into Text + Hashtag inlines, SHARING the per-block budget. */
+    private fun appendTextWithHashtags(text: String, out: MutableList<MdInline>, ib: InlineBudget) {
         if (text.isEmpty()) return
         val tags = ContentParser.findHashtags(text)
-        if (tags.isEmpty()) { out.add(MdInline.Text(text)); return }
+        if (tags.isEmpty()) { emit(out, MdInline.Text(text), ib); return }
         var cursor = 0
         for ((start, end, tag) in tags) {
-            if (start > cursor) out.add(MdInline.Text(text.substring(cursor, start)))
-            out.add(MdInline.Hashtag(tag))
+            if (ib.remaining <= 0) { ib.doc.truncated = true; return }
+            if (start > cursor) emit(out, MdInline.Text(text.substring(cursor, start)), ib)
+            emit(out, MdInline.Hashtag(tag), ib)
             cursor = end
         }
-        if (cursor < text.length) out.add(MdInline.Text(text.substring(cursor)))
+        if (cursor < text.length) emit(out, MdInline.Text(text.substring(cursor)), ib)
     }
 
     // ── Tables ───────────────────────────────────────────────────────────────
@@ -264,6 +286,7 @@ object NativeMarkdownParser {
         val headerCells = splitRow(lines[0]).let { capCells(it, budget) }
         val aligns = splitRow(lines[1]).map(::alignOf)
         val columns = headerCells.mapIndexed { i, cell ->
+            budget.cellsRemaining--
             MdTableColumn(
                 header = parseInlineMarkdown(cell, budget),
                 align = aligns.getOrElse(i) { MdAlign.Left },
@@ -272,13 +295,17 @@ object NativeMarkdownParser {
         val colCount = columns.size
         val bodyLines = lines.drop(2)
         if (bodyLines.size > MAX_TABLE_ROWS) budget.truncated = true
-        val rows = bodyLines.take(MAX_TABLE_ROWS).map { line ->
-            val cells = splitRow(line).let { capCells(it, budget) }
+        val rows = mutableListOf<MdTableRow>()
+        for (line in bodyLines.take(MAX_TABLE_ROWS)) {
+            // Global cell budget: stop emitting rows once the document-wide cap is hit.
+            if (budget.cellsRemaining <= 0) { budget.truncated = true; break }
+            val cells = capCells(splitRow(line), budget)
             // Normalize to header column count: pad missing, truncate extras.
             val normalized = (0 until colCount).map { idx ->
+                budget.cellsRemaining--
                 parseInlineMarkdown(cells.getOrElse(idx) { "" }, budget)
             }
-            MdTableRow(normalized)
+            rows.add(MdTableRow(normalized))
         }
         return MdBlock.Table(MdTable(columns, rows))
     }
@@ -290,15 +317,23 @@ object NativeMarkdownParser {
         }
     }
 
-    /** Parse a fragment's text as inline markdown (table cells + headings) via a sub-parse. */
-    private fun parseInlineMarkdown(cellText: String, budget: Budget): List<MdInline> {
-        val t = cellText.trim()
+    /** Parse a fragment's text as inline markdown (table cells + headings). Fresh
+     *  per-fragment inline budget; plain fragments skip the sub-parse (fast path). */
+    private fun parseInlineMarkdown(text: String, doc: Budget): List<MdInline> {
+        val t = text.trim()
         if (t.isEmpty()) return emptyList()
-        val tree = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(t)
+        val ib = InlineBudget(doc)
         val out = mutableListOf<MdInline>()
-        // Collect inlines from every paragraph in the sub-tree (cells are single-line).
+        // Fast path: no inline markup → skip buildMarkdownTreeFromString, but still
+        // hashtag-split and respect the per-fragment budget (collapses the per-cell
+        // sub-parse cost on the common all-plain table).
+        if (t.none { it in INLINE_MARKUP }) {
+            appendTextWithHashtags(t, out, ib)
+            return out.ifEmpty { listOf(MdInline.Text(t)) }
+        }
+        val tree = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(t)
         fun walk(n: ASTNode) {
-            if (n.type == MarkdownElementTypes.PARAGRAPH) appendInlines(n.children, t, out, budget)
+            if (n.type == MarkdownElementTypes.PARAGRAPH) appendInlines(n.children, t, out, ib)
             else n.children.forEach(::walk)
         }
         walk(tree)
@@ -348,6 +383,16 @@ object NativeMarkdownParser {
 
     private fun ASTNode.findChild(type: org.intellij.markdown.IElementType): ASTNode? =
         children.firstOrNull { it.type == type }
+
+    /** Depth-first descendant search — an IMAGE wraps an INLINE_LINK in 0.7.3, so its
+     *  LINK_DESTINATION/LINK_TEXT aren't direct children. */
+    private fun ASTNode.findDescendant(type: org.intellij.markdown.IElementType): ASTNode? {
+        for (c in children) {
+            if (c.type == type) return c
+            c.findDescendant(type)?.let { return it }
+        }
+        return null
+    }
 
     private fun String.trimAngle(): String = trim().removeSurrounding("<", ">")
 }

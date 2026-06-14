@@ -275,4 +275,67 @@ class NativeMarkdownParserTest {
         assertTrue(doc.blocks.any { it is MdBlock.CodeBlock })
         assertTrue(doc.blocks.any { it is MdBlock.BlockQuote })
     }
+
+    // ── Phase 1b: nested cap, global cells, fast path, contracts ────────────────
+
+    @Test
+    fun `nested inline spans count toward the shared per-block cap`() {
+        // 4 adjacent bold spans, each 60 code-spans → no single inline list exceeds 150,
+        // but the TOTAL flattened count does. A per-list cap (the old bug) would miss it;
+        // the shared per-block budget catches it.
+        val md = (1..4).joinToString(" ") { "**" + (1..60).joinToString(" ") { "`c`" } + "**" }
+        assertTrue("nested spans must count toward the per-block bound", parse(md).truncated)
+    }
+
+    @Test
+    fun `flat per-block hashtag cap still trips (regression)`() {
+        val manyTags = (1..400).joinToString(" ") { "#t$it" }
+        assertTrue(parse(manyTags).truncated)
+    }
+
+    @Test
+    fun `combined table cells over the global budget truncate`() {
+        fun table(rows: Int, cols: Int): String {
+            val header = "| " + (1..cols).joinToString(" | ") { "h$it" } + " |"
+            val sep = "|" + "---|".repeat(cols)
+            val body = (1..rows).joinToString("\n") { "| " + (1..cols).joinToString(" | ") { "c" } + " |" }
+            return "$header\n$sep\n$body"
+        }
+        // 3 × (200 rows × 12 cols) = 7200 cells > the 5000 global budget.
+        val md = (1..3).joinToString("\n\n") { table(200, 12) }
+        assertTrue(parse(md).truncated)
+    }
+
+    @Test
+    fun `plain table cell still splits hashtags via the fast path`() {
+        val md = """
+            | topic | x |
+            |-------|---|
+            | #nostr | y |
+        """.trimIndent()
+        val t = (blocks(md).first() as MdBlock.Table).table
+        assertTrue(t.rows[0].cells[0].any { it is MdInline.Hashtag && it.tag == "nostr" })
+    }
+
+    @Test
+    fun `reference link has empty url contract`() {
+        val md = "see [docs][ref] here\n\n[ref]: https://e.com"
+        val link = (blocks(md).first() as MdBlock.Paragraph).inlines
+            .filterIsInstance<MdInline.Link>().single()
+        assertEquals("", link.url)
+        assertEquals("docs", link.children.plain())
+    }
+
+    @Test
+    fun `image inside a table cell flattens to a link`() {
+        val md = """
+            | pic | x |
+            |-----|---|
+            | ![alt](https://e.com/i.png) | y |
+        """.trimIndent()
+        val t = (blocks(md).first() as MdBlock.Table).table
+        val link = t.rows[0].cells[0].filterIsInstance<MdInline.Link>().single()
+        assertEquals("https://e.com/i.png", link.url)
+        assertEquals("alt", link.children.plain())
+    }
 }
