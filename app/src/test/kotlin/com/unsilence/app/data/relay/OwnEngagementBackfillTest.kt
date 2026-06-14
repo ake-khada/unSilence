@@ -91,6 +91,18 @@ class OwnEngagementBackfillTest {
         assertEquals(listOf("only-one"), eTags)
     }
 
+    @Test
+    fun `buildOwnEngagementReq adds author-scoped coordinate filters for articles`() {
+        val req = buildOwnEngagementReq("s1", "ownpk", listOf("evt"), listOf("30023:a:slug"))
+        val filters = Json.parseToJsonElement(req).jsonArray.drop(2).map { it.jsonObject }
+        assertEquals(3, filters.size) // #e + #a + #A
+        // coordinate filters are author-scoped and kind-7 only (own likes)
+        assertEquals(listOf("ownpk"), filters[1]["authors"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf(7), filters[1]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+        assertEquals(listOf("30023:a:slug"), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("30023:a:slug"), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
+    }
+
     // ── Dedup sets ───────────────────────────────────────────────────────
 
     @Test

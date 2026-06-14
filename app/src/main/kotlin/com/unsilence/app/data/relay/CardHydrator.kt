@@ -3,6 +3,7 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
@@ -117,12 +118,12 @@ class CardHydrator @Inject constructor(
             mediaHydrated.clear()
         }
         backfillScope.coroutineContext.cancelChildren()
-        pendingBackfillIds.clear()
+        pendingBackfillTargets.clear()
         ownEngagementInFlight.clear()
         ownEngagementChecked.clear()
         engagementTracker.clear()
         engagementInFlight.clear()
-        pendingEngagementIds.clear()
+        pendingEngagementTargets.clear()
     }
 
     // ── Engagement count fetch ─────────────────────────────────────────
@@ -133,10 +134,13 @@ class CardHydrator @Inject constructor(
     // Freshness tiers gate re-fetch based on post age:
     //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
 
-    /** Per-post engagement fetch state: when we last fetched, capped flag. */
+    /** Per-post engagement fetch state: when we last fetched, capped flag, and
+     *  whether the article coordinate (#a/#A) was fetched — so an old id-only
+     *  fetch can't mark an article "fresh" and suppress the coordinate fetch. */
     internal data class EngagementFetchState(
         val lastFetchedAt: Long = 0L,
         val capped: Boolean = false,
+        val coordFetched: Boolean = false,
     )
 
     /** Tracks per-post engagement fetch state. Cleared on logout/reset. */
@@ -145,8 +149,8 @@ class CardHydrator @Inject constructor(
     /** Posts whose engagement REQ is currently in flight. */
     private val engagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Pending post IDs accumulated from hydrateVisibleCards, awaiting debounced dispatch. */
-    private val pendingEngagementIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** Pending engagement targets (id → target) awaiting debounced dispatch. */
+    private val pendingEngagementTargets = ConcurrentHashMap<String, EngagementTarget>()
 
     /** Debounce job for engagement fetch — cancelled and relaunched on each accumulation. */
     private var engagementDebounceJob: Job? = null
@@ -171,8 +175,8 @@ class CardHydrator @Inject constructor(
     /** Posts whose backfill REQ is in flight — prevents duplicate dispatch. */
     private val ownEngagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Pending IDs accumulated from hydrateVisibleCards, awaiting debounced dispatch. */
-    private val pendingBackfillIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** Pending own-engagement targets (id → target) awaiting debounced dispatch. */
+    private val pendingBackfillTargets = ConcurrentHashMap<String, EngagementTarget>()
 
     /** The debounce job — cancelled and relaunched on each new accumulation. */
     private var backfillDebounceJob: Job? = null
@@ -266,9 +270,9 @@ class CardHydrator @Inject constructor(
         // hydrateMedia remains load-bearing for layout stability (image dims).
         hydrateMedia(events, mmrAllowed = false)
 
-        // Own-engagement backfill: accumulate novel IDs, dispatch after 250ms
-        // debounce so hydrateVisibleCards returns immediately.
-        accumulateOwnEngagement(events.map { it.id })
+        // Own-engagement backfill: accumulate novel targets (id+coord+author),
+        // dispatch after 250ms debounce so hydrateVisibleCards returns immediately.
+        accumulateOwnEngagement(events)
 
         // Engagement counts: viewport + forward look-ahead (IDs from caller).
         accumulateEngagement(events.filter { it.id in viewportIds })
@@ -297,23 +301,53 @@ class CardHydrator @Inject constructor(
         if ((row.kind == 6 || row.kind == 16) && row.rootId != null) row.rootId!! else row.id
 
     /**
+     * Everything the engagement pipeline needs, captured from the rendered row
+     * BEFORE dispatch loses context. The article coordinate (30023:pk:d) derives
+     * from the embedded article model — works for boosted/embedded longform whose
+     * kind-30023 may NOT be in eventsById — with an MES fallback. Without carrying
+     * this, dispatch would re-derive from a bare id and lose the coordinate (so no
+     * #a/#A fetch, no article likes/zaps).
+     */
+    internal data class EngagementTarget(
+        val id: String,
+        val coord: String?,
+        val authorPubkey: String?,
+        val createdAt: Long,
+    )
+
+    private fun engagementTargetFor(row: FeedRow): EngagementTarget {
+        val model = row.toEventModel()
+        val coord = if (model.effectiveKind == 30023) {
+            model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+                ?: memoryEventStore.articleCoordForEvent(model.engagementId)
+        } else null
+        return EngagementTarget(
+            id = model.engagementId,
+            coord = coord,
+            authorPubkey = model.pubkey,
+            createdAt = model.createdAt,
+        )
+    }
+
+    /**
      * Filter novel IDs and add to pending buffer. Launches a debounced
      * background dispatch — each call resets the 250ms timer so rapid
      * viewport changes coalesce into a single REQ.
      */
-    internal fun accumulateOwnEngagement(eventIds: List<String>) {
+    internal fun accumulateOwnEngagement(rows: List<FeedRow>) {
         val ownPk = memoryEventStore.ownPubkey ?: return
-        if (eventIds.isEmpty()) return
+        if (rows.isEmpty()) return
 
-        val novel = eventIds.filter { id ->
-            !memoryEventStore.isOwnEngaged(id) &&
-                id !in ownEngagementChecked &&
-                id !in ownEngagementInFlight &&
-                id !in pendingBackfillIds
+        var added = false
+        for (row in rows) {
+            val t = engagementTargetFor(row)
+            if (memoryEventStore.isOwnEngaged(t.id)) continue
+            if (t.id in ownEngagementChecked || t.id in ownEngagementInFlight ||
+                pendingBackfillTargets.containsKey(t.id)) continue
+            pendingBackfillTargets[t.id] = t
+            added = true
         }
-        if (novel.isEmpty()) return
-
-        pendingBackfillIds.addAll(novel)
+        if (!added) return
 
         // Cancel only the pending debounce delay — an in-flight dispatch
         // (separate coroutine) keeps running undisturbed.
@@ -332,14 +366,18 @@ class CardHydrator @Inject constructor(
      */
     private suspend fun dispatchOwnEngagement(ownPk: String) {
         // Drain pending buffer
-        val batch = pendingBackfillIds.toList()
-        pendingBackfillIds.clear()
-        if (batch.isEmpty()) return
+        val targets = pendingBackfillTargets.values.toList()
+        pendingBackfillTargets.clear()
+        if (targets.isEmpty()) return
+        val batch = targets.map { it.id }
 
         batch.forEach { ownEngagementInFlight.add(it) }
 
         val subId = "own-eng-${System.nanoTime()}"
-        val req = buildOwnEngagementReq(subId, ownPk, batch)
+        // Article rows: also fetch own coordinate-targeted reactions (#a/#A) —
+        // coord carried from the row, so embedded/boosted longform works too.
+        val coords = targets.mapNotNull { it.coord }
+        val req = buildOwnEngagementReq(subId, ownPk, batch, coords)
 
         val writeRelays = memoryEventStore.writeRelaysFor(ownPk)
         val targetUrls = writeRelays.ifEmpty { relayPool.connectedRelayUrls() }
@@ -394,17 +432,15 @@ class CardHydrator @Inject constructor(
         val nowMs = System.currentTimeMillis()
         val nowSec = nowMs / 1000L
 
-        val novel = events.filter { row ->
-            val engId = engagementIdFor(row)
-            engId !in engagementInFlight &&
-                engId !in pendingEngagementIds &&
-                isEngagementStale(engId, row.createdAt, nowMs, nowSec)
+        var added = false
+        for (row in events) {
+            val t = engagementTargetFor(row)
+            if (t.id in engagementInFlight || pendingEngagementTargets.containsKey(t.id)) continue
+            if (!isEngagementStale(t.id, t.createdAt, t.coord != null, nowMs, nowSec)) continue
+            pendingEngagementTargets[t.id] = t
+            added = true
         }
-        if (novel.isEmpty()) return
-
-        for (row in novel) {
-            pendingEngagementIds.add(engagementIdFor(row))
-        }
+        if (!added) return
 
         engagementDebounceJob?.cancel()
         engagementDebounceJob = backfillScope.launch {
@@ -420,11 +456,16 @@ class CardHydrator @Inject constructor(
     internal fun isEngagementStale(
         eventId: String,
         postCreatedAt: Long,
+        hasCoord: Boolean = false,
         nowMs: Long = System.currentTimeMillis(),
         nowSec: Long = nowMs / 1000L,
     ): Boolean {
         val state = engagementTracker[eventId]
         if (state == null) return true // never fetched
+
+        // Article whose coordinate was never fetched (e.g. an old id-only fetch) —
+        // force one re-fetch so #a/#A likes/zaps land.
+        if (hasCoord && !state.coordFetched) return true
 
         val ageSec = nowSec - postCreatedAt
         val staleSec = engagementFreshnessInterval(ageSec)
@@ -448,9 +489,13 @@ class CardHydrator @Inject constructor(
      * EOSE-gated completion via oneShotEoseCallbacks.
      */
     private suspend fun dispatchEngagement() {
-        val batch = pendingEngagementIds.toList()
-        pendingEngagementIds.clear()
-        if (batch.isEmpty()) return
+        val targets = pendingEngagementTargets.values.toList()
+        pendingEngagementTargets.clear()
+        if (targets.isEmpty()) return
+        val batch = targets.map { it.id }
+        val targetById = targets.associateBy { it.id }
+        // IDs whose coordinate was fetched this pass (drives coordFetched state).
+        val coordIds = targets.filter { it.coord != null }.map { it.id }.toSet()
 
         batch.forEach { engagementInFlight.add(it) }
 
@@ -467,9 +512,11 @@ class CardHydrator @Inject constructor(
 
         val nowMs = System.currentTimeMillis()
 
-        // 1. Resolve each post's outbox relays (same resolution — same coverage).
+        // 1. Resolve each post's outbox relays from the carried author pubkey
+        //    (NOT getEventEntity — a boosted/embedded article's target may be absent
+        //    from eventsById, which would drop it to the global fallback).
         val idToRelays: Map<String, List<String>> = batch.associateWith { engId ->
-            val authorPubkey = memoryEventStore.getEventEntity(engId)?.pubkey
+            val authorPubkey = targetById[engId]?.authorPubkey
             if (authorPubkey != null) {
                 outboxResolver.resolveEngagementRelays(
                     authorPubkey = authorPubkey,
@@ -491,7 +538,10 @@ class CardHydrator @Inject constructor(
         // 3. Fire one sub per (relay, chunk).
         for ((relay, ids) in relayBatches) {
             val subId = "eng-${System.nanoTime()}"
-            val req = buildBatchedEngagementReq(subId, ids)
+            // Article rows: also fetch coordinate-targeted reactions/zaps (#a/#A) —
+            // coord carried from the row, so embedded/boosted longform works too.
+            val coords = ids.mapNotNull { targetById[it]?.coord }
+            val req = buildBatchedEngagementReq(subId, ids, coords)
 
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
@@ -500,7 +550,7 @@ class CardHydrator @Inject constructor(
                 try {
                     relayPool.sendOneShotBatch(listOf(relay), listOf(req), listOf(subId))
                     val eosed = withTimeoutOrNull(ENGAGEMENT_BATCH_TIMEOUT_MS) { eoseDeferred.await() } != null
-                    markEngagementFetched(ids, nowMs)
+                    markEngagementFetched(ids, nowMs, coordIds)
                     if (!eosed) relayPool.cleanupOneShotSub(subId)
                 } finally {
                     backfillScope.launch {
@@ -514,29 +564,47 @@ class CardHydrator @Inject constructor(
         // 4. Backstop: flush any post not marked by a covering sub within the window.
         backfillScope.launch {
             delay(ENGAGEMENT_BATCH_TIMEOUT_MS + 500)
-            markEngagementFetched(batch.filter { it in engagementInFlight }, nowMs)
+            markEngagementFetched(batch.filter { it in engagementInFlight }, nowMs, coordIds)
         }
 
         Log.d(TAG, "Engagement: ${batch.size} posts → ${relayBatches.size} REQ(s) across " +
             "${relayBatches.map { it.first }.distinct().size} relay(s)")
     }
 
-    /** Per-post completion: snapshot stats, set capped, update freshness tracker, clear in-flight. Idempotent. */
-    private fun markEngagementFetched(ids: List<String>, nowMs: Long) {
+    /** Per-post completion: snapshot stats, set capped, update freshness tracker, clear
+     *  in-flight. [coordIds] are the ids whose article coordinate was fetched this pass —
+     *  recorded so an id-only fetch can't later be mistaken for a coordinate fetch. Idempotent. */
+    private fun markEngagementFetched(ids: List<String>, nowMs: Long, coordIds: Set<String>) {
         for (id in ids) {
             if (id !in engagementInFlight) continue
             val stats = memoryEventStore.currentStatsSnapshot(id)
             val total = stats.replyCount + stats.repostCount + stats.reactionCount + stats.zapCount
             val capped = total >= ENGAGEMENT_LIMIT
             if (capped) memoryEventStore.markEngagementCapped(id)
-            engagementTracker[id] = EngagementFetchState(lastFetchedAt = nowMs, capped = capped)
+            engagementTracker[id] = EngagementFetchState(
+                lastFetchedAt = nowMs,
+                capped = capped,
+                coordFetched = id in coordIds,
+            )
             engagementInFlight.remove(id)
         }
     }
 }
 
-/** Build the one-shot REQ JSON for own-engagement backfill. Package-private for testing. */
-internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<String>): String =
+/**
+ * Build the one-shot REQ JSON for own-engagement backfill. Package-private for testing.
+ *
+ * Emits OR'd filters: the #e filter (reactions/reposts by event id) plus, when any
+ * articles are visible, author-scoped #a/#A filters for kind-7 — own likes on a
+ * long-form target the article COORDINATE, not its event id, so without these
+ * hasReacted never lights for articles.
+ */
+internal fun buildOwnEngagementReq(
+    subId: String,
+    ownPk: String,
+    eventIds: List<String>,
+    coords: List<String> = emptyList(),
+): String =
     buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive(subId))
@@ -549,6 +617,18 @@ internal fun buildOwnEngagementReq(subId: String, ownPk: String, eventIds: List<
             })
             put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
         })
+        if (coords.isNotEmpty()) {
+            add(buildJsonObject {
+                put("authors", buildJsonArray { add(JsonPrimitive(ownPk)) })
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
+                put("#a", buildJsonArray { coords.forEach { add(JsonPrimitive(it)) } })
+            })
+            add(buildJsonObject {
+                put("authors", buildJsonArray { add(JsonPrimitive(ownPk)) })
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
+                put("#A", buildJsonArray { coords.forEach { add(JsonPrimitive(it)) } })
+            })
+        }
     }.toString()
 
 /** Per-post engagement REQ limit. Posts reaching this show "N+" in the UI. */
@@ -625,8 +705,18 @@ internal fun coalesceByRelay(
         .flatMap { (relay, ids) -> ids.chunked(chunkSize).map { relay to it } }
 }
 
-/** Build batched engagement REQ: engagement kinds, multiple #e ids, shared limit. */
-internal fun buildBatchedEngagementReq(subId: String, eventIds: List<String>): String =
+/**
+ * Build batched engagement REQ as OR'd filters: the #e filter (all engagement
+ * kinds by event id) plus, when any articles are in the batch, #a and #A filters
+ * for kind-7/9735 — reactions and zaps on a long-form target the article
+ * COORDINATE (30023:pk:d), not its event id, so without these the article's likes
+ * and zaps read as zero. [coords] are the article coordinates in this batch.
+ */
+internal fun buildBatchedEngagementReq(
+    subId: String,
+    eventIds: List<String>,
+    coords: List<String> = emptyList(),
+): String =
     buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive(subId))
@@ -641,6 +731,18 @@ internal fun buildBatchedEngagementReq(subId: String, eventIds: List<String>): S
             put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
             put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
         })
+        if (coords.isNotEmpty()) {
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)); add(JsonPrimitive(9735)) })
+                put("#a", buildJsonArray { coords.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
+            })
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(7)); add(JsonPrimitive(9735)) })
+                put("#A", buildJsonArray { coords.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
+            })
+        }
     }.toString()
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
