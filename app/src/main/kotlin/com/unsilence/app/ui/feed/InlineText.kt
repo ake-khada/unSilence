@@ -15,26 +15,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Brand
-import com.unsilence.app.ui.theme.BrandDeep
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -140,52 +132,13 @@ internal fun InlineText(
                             ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                             ?: npubFallback
 
-                        withLink(
-                            LinkAnnotation.Clickable(
-                                tag = segment.pubkeyHex,
-                                styles = TextLinkStyles(
-                                    style = SpanStyle(
-                                        color          = Brand,
-                                        fontWeight     = FontWeight.Medium,
-                                        textDecoration = TextDecoration.None,
-                                    ),
-                                ),
-                                linkInteractionListener = { onAuthorClick(segment.pubkeyHex) },
-                            ),
-                        ) {
-                            append("@$displayName")
-                        }
+                        appendMentionSpan(segment.pubkeyHex, displayName, onAuthorClick)
                     }
                     is Segment.Link -> {
-                        withLink(
-                            LinkAnnotation.Url(
-                                url = segment.url,
-                                styles = TextLinkStyles(
-                                    style = SpanStyle(
-                                        color          = Brand,
-                                        textDecoration = TextDecoration.None,
-                                    ),
-                                ),
-                            ),
-                        ) {
-                            append(segment.url)
-                        }
+                        appendLinkSpan(segment.url)
                     }
                     is Segment.Hashtag -> {
-                        withLink(
-                            LinkAnnotation.Clickable(
-                                tag = "hashtag:${segment.tag}",
-                                styles = TextLinkStyles(
-                                    style = SpanStyle(
-                                        color          = BrandDeep,
-                                        textDecoration = TextDecoration.None,
-                                    ),
-                                ),
-                                linkInteractionListener = { onHashtagClick(segment.tag) },
-                            ),
-                        ) {
-                            append("#${segment.tag}")
-                        }
+                        appendHashtagSpan(segment.tag, onHashtagClick)
                     }
                     else -> { /* skip non-text segments */ }
                 }

@@ -1,10 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import android.content.Intent
-import android.net.Uri
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -30,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +50,10 @@ import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.model.markdown.NativeMarkdownParser
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
@@ -62,9 +63,6 @@ import com.unsilence.app.ui.theme.SurfaceVariant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
-import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
-import org.intellij.markdown.html.HtmlGenerator
-import org.intellij.markdown.parser.MarkdownParser
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -89,6 +87,7 @@ fun ArticleReaderScreen(
     zapFlash: NoteActionsViewModel.ZapFlashState? = null,
     // Live chrome (mirrors EventCard): null → static row.* counts + no drawer (SearchScreen).
     onAuthorClick: (String) -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
     lookupProfile: (suspend (String) -> com.unsilence.app.data.memory.UserEntity?)? = null,
     profileFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.UserEntity?>)? = null,
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
@@ -106,7 +105,18 @@ fun ArticleReaderScreen(
     val image = model.article?.image ?: articleTagValue(row.tags, "image")
     val context = LocalContext.current
 
-    val bodyHtml = remember(model.articleContent) { markdownToHtml(model.articleContent ?: "") }
+    // Native markdown body (replaces the WebView). Parsed once per article on a
+    // background-free pure-Kotlin pass; bounded by ParseLimits (H-spam discipline).
+    val document = remember(model.articleContent) {
+        NativeMarkdownParser.parse(model.articleContent ?: "")
+    }
+    // Draw-bound probe at the parse→render boundary (mirrors the note path's
+    // PARSE-HEAVY signal). Log.w survives R8 in release.
+    LaunchedEffect(document.truncated, model.navigateId) {
+        if (document.truncated) {
+            Log.w("ARTICLE-PARSE-HEAVY", "id=${model.navigateId} blocks=${document.blocks.size} (capped)")
+        }
+    }
 
     // Effective author (inner author on a reposted article — never the reposter),
     // mirroring EventCard.ArticleLayout's resolution.
@@ -225,36 +235,22 @@ fun ArticleReaderScreen(
                         )
                     }
 
-                    // ── Body content (WebView) ─────────────────────────────────
-                    AndroidView(
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                setBackgroundColor(android.graphics.Color.BLACK)
-                                settings.javaScriptEnabled = false
-                                settings.loadWithOverviewMode = true
-                                settings.useWideViewPort = true
-                                isVerticalScrollBarEnabled = false
-                                isHorizontalScrollBarEnabled = false
-
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView?,
-                                        request: WebResourceRequest?,
-                                    ): Boolean {
-                                        request?.url?.let { uri ->
-                                            ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
-                                        }
-                                        return true
-                                    }
-                                }
-
-                                loadDataWithBaseURL(null, bodyHtml, "text/html", "UTF-8", null)
-                            }
-                        },
+                    // ── Body content (native markdown) ─────────────────────────
+                    // SelectionContainer makes the article body selectable; cyan
+                    // links/hashtags stay tappable under selection (LinkAnnotation
+                    // coexists with selection — verified on device).
+                    SelectionContainer(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(horizontal = Spacing.medium)
                             .padding(bottom = Spacing.xl),
-                    )
+                    ) {
+                        MarkdownContent(
+                            document             = document,
+                            onHashtagClick       = onHashtagClick,
+                            suppressLeadingTitle = title,
+                        )
+                    }
                 }
 
                 // ── Sticky bottom: engagement drawer (expands upward) + action bar ──
@@ -325,115 +321,6 @@ fun ArticleReaderScreen(
         }
     }
 }
-
-// ── Markdown → HTML conversion ────────────────────────────────────────────────
-
-private fun markdownToHtml(markdown: String): String {
-    val flavour = GFMFlavourDescriptor()
-    val tree = MarkdownParser(flavour).buildMarkdownTreeFromString(markdown)
-    val body = HtmlGenerator(markdown, tree, flavour).generateHtml()
-    return wrapHtml(body)
-}
-
-private fun wrapHtml(body: String): String = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-* { box-sizing: border-box; }
-body {
-    background: #000000;
-    color: #FFFFFF;
-    font-family: -apple-system, system-ui, sans-serif;
-    font-size: 16px;
-    line-height: 1.6;
-    margin: 0;
-    padding: 0 16px 32px 16px;
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-}
-a { color: #00E5FF; text-decoration: none; }
-a:hover { text-decoration: underline; }
-/* First block sits flush so the Compose title padding controls the top gap. */
-body > :first-child { margin-top: 0; }
-/* Even, symmetric vertical rhythm — same gap before and after every block,
-   so sub-headers space evenly between the previous and next paragraph. */
-h1, h2, h3, h4, h5, h6 { color: #FFFFFF; font-weight: bold; margin: 1em 0; }
-h1 { font-size: 1.6em; }
-h2 { font-size: 1.4em; }
-h3 { font-size: 1.2em; }
-h4, h5, h6 { font-size: 1.05em; }
-p { margin: 0.8em 0; }
-img {
-    max-width: 100%;
-    height: auto;
-    border-radius: 8px;
-    margin: 8px 0;
-    display: block;
-}
-pre {
-    background: #1A1A1A;
-    padding: 12px;
-    border-radius: 8px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    margin: 12px 0;
-}
-pre code {
-    background: none;
-    padding: 0;
-    border-radius: 0;
-    font-size: 14px;
-}
-code {
-    background: #1A1A1A;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: 'Courier New', monospace;
-    font-size: 14px;
-}
-blockquote {
-    border-left: 3px solid #00E5FF;
-    padding-left: 16px;
-    color: #AAAAAA;
-    margin: 12px 0;
-}
-table {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 12px 0;
-    overflow-x: auto;
-    display: block;
-}
-th, td {
-    border: 1px solid #333333;
-    padding: 8px;
-    text-align: left;
-}
-th {
-    font-weight: bold;
-    background: #0D0D0D;
-}
-ul, ol {
-    padding-left: 24px;
-    margin: 8px 0;
-    color: #FFFFFF;
-}
-li { margin: 4px 0; }
-hr {
-    border: none;
-    border-top: 1px solid #333333;
-    margin: 16px 0;
-}
-</style>
-</head>
-<body>
-$body
-</body>
-</html>
-""".trimIndent()
 
 private fun articleTagValue(tagsJson: String, key: String): String? = runCatching {
     Json.parseToJsonElement(tagsJson).jsonArray

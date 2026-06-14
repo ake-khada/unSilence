@@ -475,6 +475,7 @@ fun FeedScreen(
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
             onAuthorClick   = onAuthorClick,
+            onHashtagClick  = onHashtagClick,
             lookupProfile   = actionsViewModel::lookupProfile,
             profileFlow     = viewModel::profileFlow,
             statsFlow       = viewModel::statsFlow,
