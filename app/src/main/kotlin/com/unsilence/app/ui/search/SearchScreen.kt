@@ -433,6 +433,10 @@ fun SearchScreen(
             isZapLoading    = model.engagementId in zapLoadingIds,
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
+            onAuthorClick   = onAuthorClick,
+            lookupProfile   = actionsViewModel::lookupProfile,
+            // SearchScreen has no per-event aggregation flows → reader falls back to
+            // static row.* counts + empty drawer (profileFlow/statsFlow/... default null).
         )
     }
 
