@@ -48,22 +48,45 @@ class ArticleReaderViewModel @Inject constructor(
      * article's seen/hint relays, the rendered row's relay, and indexers — current
      * NIP-65 write relays alone may not cover where an old article's comments live.
      */
+    @Volatile private var lastCommentCoord: String? = null
+
     fun fetchComments(coord: String, articleId: String, authorPubkey: String, fallbackRelayUrl: String?) {
         if (coord.isBlank()) return
+        // New article → reset the reply-fetch dedupe so a prior failed child fetch
+        // retries on reopen.
+        if (coord != lastCommentCoord) {
+            lastCommentCoord = coord
+            fetchedReplyParents.clear()
+        }
         // Ensure MES knows id⇄coord in every entry point (quote/boost/search), so
         // replyCount merges #A comments + stats invalidations target the article id.
         if (articleId.isNotBlank()) memoryEventStore.registerArticleCoord(articleId, coord)
         viewModelScope.launch {
-            val relays = buildSet {
-                addAll(memoryEventStore.writeRelaysFor(authorPubkey))
-                memoryEventStore.getNostrEvent(articleId)?.relaysSeen?.let { addAll(it) }
-                addAll(memoryEventStore.relayHintsForEvent(articleId))
-                fallbackRelayUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
-                addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
-            }.toList()
-            relayPool.fetchArticleComments(relays, coord)
+            relayPool.fetchArticleComments(articleRelays(authorPubkey, articleId, fallbackRelayUrl), coord)
         }
     }
+
+    /** Already-fetched comment ids (dedupe so the replies fetch can't loop). */
+    private val fetchedReplyParents = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Staged fetch of replies-to-comments — descendants that carry no #a/#A tag
+     *  and so aren't returned by fetchComments. Driven by the comment list. */
+    fun fetchCommentReplies(parentIds: List<String>, author: String, articleId: String, fallbackRelayUrl: String?) {
+        val novel = parentIds.filter { fetchedReplyParents.add(it) }
+        if (novel.isEmpty()) return
+        viewModelScope.launch {
+            relayPool.fetchCommentReplies(articleRelays(author, articleId, fallbackRelayUrl), novel)
+        }
+    }
+
+    private fun articleRelays(author: String, articleId: String, fallbackRelayUrl: String?): List<String> =
+        buildSet {
+            addAll(memoryEventStore.writeRelaysFor(author))
+            memoryEventStore.getNostrEvent(articleId)?.relaysSeen?.let { addAll(it) }
+            addAll(memoryEventStore.relayHintsForEvent(articleId))
+            fallbackRelayUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
+            addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
+        }.toList()
 
     /** Hydrate engagement (reactions/zaps/reposts/replies) for the rendered
      *  comment rows, so comment cards don't show stale zero counts. */

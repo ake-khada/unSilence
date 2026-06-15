@@ -92,7 +92,7 @@ private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023, 1111)
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
-private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16)
+private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16, 1111)
 private val DERIVED_ONLY_KINDS = setOf(30166)
 
 @Singleton
@@ -2485,13 +2485,27 @@ class MemoryEventStore @Inject constructor(
      */
     private fun articleCommentIds(coord: String): Set<String> {
         val ids = LinkedHashSet<String>()
-        commentIdsByCoord[coord]?.forEach { id ->
-            if (eventsById[id]?.kind == 1111) ids.add(id)
+        val queue = ArrayDeque<String>()
+        // Seed with DIRECT article comments (the false-attribution guard lives here —
+        // never an arbitrary #a mention).
+        commentIdsByCoord[coord]?.forEach { id ->                 // NIP-22 kind-1111 (uppercase A)
+            if (eventsById[id]?.kind == 1111 && ids.add(id)) queue.add(id)
         }
-        articleIdByCoord[coord]?.let { articleId ->
+        articleIdByCoord[coord]?.let { articleId ->               // legacy kind-1 replies to the article event
             idsByReplyTarget[articleId]?.forEach { id ->
                 val e = eventsById[id]
-                if (e?.kind == 1 && e.tags.none { it.size >= 2 && it[0] == "q" }) ids.add(id)
+                if (e?.kind == 1 && e.tags.none { it.size >= 2 && it[0] == "q" } && ids.add(id)) queue.add(id)
+            }
+        }
+        // BFS-expand descendants (replies to comments) through idsByReplyTarget — a
+        // reply to an accepted comment is an article-comment descendant even if it
+        // carries no #a/#A tag. Bounded by ARTICLE_COMMENT_CAP.
+        while (queue.isNotEmpty() && ids.size < ARTICLE_COMMENT_CAP) {
+            val parent = queue.removeFirst()
+            idsByReplyTarget[parent]?.forEach { childId ->
+                val c = eventsById[childId] ?: return@forEach
+                val ok = c.kind == 1111 || (c.kind == 1 && c.tags.none { it.size >= 2 && it[0] == "q" })
+                if (ok && ids.add(childId)) queue.add(childId)
             }
         }
         return ids
@@ -3604,7 +3618,9 @@ class MemoryEventStore @Inject constructor(
         7 -> "reaction"
         6, 16 -> "repost"
         9735 -> "zap"
-        1 -> {
+        1, 1111 -> {
+            // kind-1111 (NIP-22 comment) threads via lowercase e (parseNip22Threading
+            // → replyToId); a reply to the recipient's note/comment/article is a reply.
             val isReply = event.replyToId?.let { eventsById[it]?.pubkey == recipientPubkey } == true
                 || event.rootId?.let { eventsById[it]?.pubkey == recipientPubkey } == true
             if (isReply) "reply" else "mention"

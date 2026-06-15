@@ -3407,6 +3407,32 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch replies to a set of article comments (kind 1 or 1111 referencing the
+     * comment via `#e`) — descendants that may carry no `#a`/`#A` article tag and
+     * so aren't caught by fetchArticleComments. One-shot; CLOSE after EOSE.
+     */
+    suspend fun fetchCommentReplies(rawRelayUrls: List<String>, parentIds: List<String>) {
+        if (parentIds.isEmpty()) return
+        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        if (relayUrls.isEmpty()) return
+        val subId = "comment-replies-${System.currentTimeMillis()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(1111)) })
+                put("#e", buildJsonArray { parentIds.take(200).forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(200))
+            })
+        }.toString()
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+        if (!eosed) cleanupOneShotSub(subId)
+    }
+
+    /**
      * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */

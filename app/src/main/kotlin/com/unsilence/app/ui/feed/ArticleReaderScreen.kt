@@ -44,6 +44,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -158,7 +160,15 @@ fun ArticleReaderScreen(
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
         }
     }
-    LaunchedEffect(comments) { articleReaderVm.hydrateCommentEngagement(comments) }
+    LaunchedEffect(comments) {
+        articleReaderVm.hydrateCommentEngagement(comments)
+        if (articleCoord != null) {
+            articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
+        }
+    }
+    // Depth-ordered for display: replies nest under their parent (header count
+    // stays comments.size). Same flat list drives count/contributors in MES.
+    val depthComments = remember(comments) { flattenArticleComments(comments) }
 
     // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
     // threading through the 5 reader call sites; reader stays behind the compose.
@@ -504,10 +514,24 @@ fun ArticleReaderScreen(
                                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                             )
                         }
-                        items(comments, key = { it.id }) { comment ->
+                        items(depthComments, key = { it.row.id }) { dc ->
+                            val comment = dc.row
+                            val depth = dc.depth
                             val cModel = remember(comment.id) {
                                 commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
                             }
+                            val guideColor = Color.White.copy(alpha = 0.10f)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .drawBehind {
+                                        for (d in 1..depth) {
+                                            val x = (d * 12).dp.toPx()
+                                            drawLine(guideColor, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+                                        }
+                                    }
+                                    .padding(start = (depth * 12).dp),
+                            ) {
                             EventCard(
                                 model                 = cModel,
                                 row                   = comment,
@@ -558,6 +582,7 @@ fun ArticleReaderScreen(
                                 imageDimensionCache   = commentActionsVm.imageDimensionCache,
                                 thumbnailCache        = commentActionsVm.videoThumbnailCache,
                             )
+                            }
                             HorizontalDivider(color = BorderFaint)
                         }
                     }
