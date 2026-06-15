@@ -304,7 +304,10 @@ class NoteActionsViewModel @Inject constructor(
         val amountSats = request.amountSats
         _zapLoading.value = _zapLoading.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
-            val result = zapRepository.zap(eventId, eventPubkey, relayUrl, request)
+            // Outbox-targeted zap (H20c): the receipt should land on own write +
+            // recipient read + the event's relays — not every open socket.
+            val zapTargets = engagementTargets(eventId, eventPubkey, relayUrl)
+            val result = zapRepository.zap(eventId, eventPubkey, relayUrl, request, zapTargets)
             if (result.isSuccess) {
                 val signed = result.getOrThrow()
                 // Optimistic insert → MES actor-index updates → zappedEventIdsFlow re-emits

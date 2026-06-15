@@ -72,7 +72,12 @@ class ZapRepository @Inject constructor(
         eventPubkey: String,
         relayUrl: String,
         request: ZapRequest,
+        targetRelays: List<String> = emptyList(),
     ): Result<Event> {
+        // NIP-57 relay set: where the recipient's wallet should publish the kind-9735
+        // receipt AND where we publish the zap request — own write + recipient read +
+        // event relays (H20c outbox targeting), falling back to the single relayUrl.
+        val zapRelays = targetRelays.ifEmpty { listOf(relayUrl) }
         val t0 = System.currentTimeMillis()
         val amountSats = request.amountSats
 
@@ -101,14 +106,15 @@ class ZapRepository @Inject constructor(
 
         val zapRequest: Event = if (request.isPrivate) {
             buildPrivateZapRequest(
-                eventPubkey, eventId, relayUrl, msats, nowSeconds, request.message,
+                eventPubkey, eventId, zapRelays, msats, nowSeconds, request.message,
             ) ?: return Result.failure(Exception("Private zap signing failed"))
         } else {
             val template = EventTemplate<Event>(
                 createdAt = nowSeconds,
                 kind      = 9734,
                 tags      = arrayOf(
-                    arrayOf("relays", relayUrl),
+                    // NIP-57 ["relays", url1, url2, …] — wallet publishes the receipt here.
+                    (listOf("relays") + zapRelays).toTypedArray(),
                     arrayOf("amount", msats.toString()),
                     arrayOf("p", eventPubkey),
                     arrayOf("e", eventId),
@@ -119,8 +125,9 @@ class ZapRepository @Inject constructor(
                 ?: return Result.failure(IllegalStateException("Signing failed"))
         }
 
-        // Publish the zap request to the relay so the recipient's wallet can see it
-        relayPool.publish(toEventJson(zapRequest))
+        // Publish the zap request to the target relay set (not a broadcast) so the
+        // recipient's wallet can see it (H20c).
+        relayPool.publish(toEventJson(zapRequest), zapRelays)
 
         // ── 4. Fetch bolt11 + warm up NWC WebSocket IN PARALLEL ───────────────
         val warmSocket = nwcManager.warmUp()
@@ -158,13 +165,13 @@ class ZapRepository @Inject constructor(
     private suspend fun buildPrivateZapRequest(
         recipientPubkey: String,
         eventId: String,
-        relayUrl: String,
+        zapRelays: List<String>,
         msats: Long,
         nowSeconds: Long,
         message: String?,
     ): Event? {
         val tags = arrayOf(
-            arrayOf("relays", relayUrl),
+            (listOf("relays") + zapRelays).toTypedArray(),
             arrayOf("amount", msats.toString()),
             arrayOf("p", recipientPubkey),
             arrayOf("e", eventId),
