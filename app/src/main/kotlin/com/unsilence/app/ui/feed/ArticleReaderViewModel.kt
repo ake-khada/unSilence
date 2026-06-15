@@ -72,6 +72,28 @@ class ArticleReaderViewModel @Inject constructor(
         cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
     }
 
+    // ── Quoted/embedded article resolution (for the canonical card) ───────────
+
+    /** The article FeedRow for a coordinate, live from MES (null until resolved). */
+    fun articleRowFlow(coord: String): Flow<FeedRow?> = memoryEventStore.articleRowByCoordFlow(coord)
+
+    /** Fire-and-forget fetch of an absent article by coord, then hydrate its
+     *  engagement so the embedded card's action bar is correct. No-op if cached. */
+    fun ensureArticle(coord: String, author: String, dTag: String, hints: List<String>) {
+        if (memoryEventStore.articleRowByCoord(coord) != null) {
+            memoryEventStore.articleRowByCoord(coord)?.let { hydrateCommentEngagement(listOf(it)) }
+            return
+        }
+        viewModelScope.launch {
+            val relays = buildSet {
+                addAll(hints)
+                addAll(memoryEventStore.writeRelaysFor(author))
+                addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
+            }.toList()
+            relayPool.fetchArticleByCoord(relays, author, dTag)
+        }
+    }
+
     // ── Display providers for comment EventCards (MES-backed, cached) ──────────
 
     private val profileCache = LruCache<String, StateFlow<UserEntity?>>(300)

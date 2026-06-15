@@ -3380,6 +3380,33 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Fetch a long-form article by its addressable coordinate (author + d-tag) so a
+     * quoted/embedded `naddr` reference can render the canonical article card.
+     * One-shot; CLOSE after EOSE.
+     */
+    suspend fun fetchArticleByCoord(rawRelayUrls: List<String>, author: String, dTag: String) {
+        if (author.isBlank()) return
+        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        if (relayUrls.isEmpty()) return
+        val subId = "article-addr-${System.currentTimeMillis()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30023)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(author)) })
+                put("#d", buildJsonArray { add(JsonPrimitive(dTag)) })
+                put("limit", JsonPrimitive(2))
+            })
+        }.toString()
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+        if (!eosed) cleanupOneShotSub(subId)
+    }
+
+    /**
      * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */
