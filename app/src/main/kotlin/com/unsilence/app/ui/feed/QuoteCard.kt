@@ -114,6 +114,24 @@ internal fun QuoteCard(
         value = QuoteResolution(ev, auth, model)
     }
 
+    // A quoted event that resolves to a long-form → render the canonical article
+    // card (not the embedded markdown body). Same component as feed/naddr quotes.
+    val resolvedModel = quoteData.model
+    val resolvedDTag = resolvedModel?.article?.dTag
+    if (resolvedModel?.effectiveKind == 30023 && resolvedDTag != null && nestDepth < 1) {
+        EmbeddedArticleCard(
+            coord         = "30023:${resolvedModel.pubkey}:$resolvedDTag",
+            author        = resolvedModel.pubkey,
+            dTag          = resolvedDTag,
+            hints         = segment.hints,
+            onNoteClick   = onNoteClick,
+            onAuthorClick = onAuthorClick,
+            nestDepth     = nestDepth,
+            modifier      = modifier,
+        )
+        return
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()

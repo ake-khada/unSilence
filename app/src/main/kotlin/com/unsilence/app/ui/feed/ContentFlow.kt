@@ -238,14 +238,29 @@ internal fun ContentFlow(
                 }
                 is Segment.QuoteAddress -> {
                     val seg = model.segments[i] as Segment.QuoteAddress
-                    AddressChip(
-                        segment       = seg,
-                        onNoteClick   = onNoteClick,
-                        lookupProfile = lookupProfile,
-                        modifier      = Modifier
-                            .padding(horizontal = hPad)
-                            .padding(bottom = Spacing.small),
-                    )
+                    val chipMod = Modifier
+                        .padding(horizontal = hPad)
+                        .padding(bottom = Spacing.small)
+                    if (seg.kind == 30023) {
+                        // Quoted long-form → the canonical article card (same as feed).
+                        EmbeddedArticleCard(
+                            coord         = "30023:${seg.author}:${seg.dTag}",
+                            author        = seg.author,
+                            dTag          = seg.dTag,
+                            hints         = seg.hints,
+                            onNoteClick   = onNoteClick,
+                            onAuthorClick = onAuthorClick,
+                            nestDepth     = nestDepth,
+                            modifier      = chipMod,
+                        )
+                    } else {
+                        AddressChip(
+                            segment       = seg,
+                            onNoteClick   = onNoteClick,
+                            lookupProfile = lookupProfile,
+                            modifier      = chipMod,
+                        )
+                    }
                     i++
                 }
                 is Segment.YouTube -> {

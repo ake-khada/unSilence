@@ -2416,6 +2416,19 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    /** The article FeedRow for a coordinate (`30023:pubkey:d`), or null if not in
+     *  MES. Resolves via the coord⇄id index — used to render a quoted/embedded
+     *  article as the canonical card. */
+    fun articleRowByCoord(coord: String): FeedRow? =
+        articleIdByCoord[coord]?.let { feedRowsByIds(setOf(it)).firstOrNull() }
+
+    /** Reactive version — re-emits when the referenced article arrives. */
+    fun articleRowByCoordFlow(coord: String): Flow<FeedRow?> =
+        _feedSignal
+            .map { articleRowByCoord(coord) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     /**
      * The ONE source of truth for an article's comments — used for the rendered
      * list, the count, AND the contributor pubkeys, so they can never disagree.

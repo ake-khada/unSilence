@@ -41,6 +41,7 @@ object SubscriptionRules {
         "own-eng-",
         "eng-",
         "article-comments-",
+        "article-addr-",
         "emoji-list-",
         "emoji-set-",
         "emoji-discover-",
