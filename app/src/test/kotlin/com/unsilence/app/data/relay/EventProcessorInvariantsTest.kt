@@ -367,4 +367,37 @@ class EventProcessorInvariantsTest {
         // handleRepost (insertCore dispatch 6,16) attributed the repost to the original.
         assertEquals("repost count lands on the original article", 1, store.repostCount(targetId))
     }
+
+    // ── kind-1111 NIP-22 comments must be channeled into MemoryEventStore ────
+    @Test
+    fun `kind 1111 NIP-22 comment is channeled and stored`() = runTest {
+        val articleAuthor = "e".repeat(64)
+        val coord = "30023:$articleAuthor:my-article"
+        // NIP-22 root scope: uppercase A (article coord) + K + P.
+        val tags = """[["A","$coord"],["K","30023"],["P","$articleAuthor"]]"""
+        val (raw, url) = rawEvent(seed = 71, kind = 1111, content = "great article", tags = tags)
+
+        processor.process(raw, url)
+        processor.drainForTest()
+
+        // Before this fix 1111 was absent from shouldChannel and silently dropped:
+        // remote comments authored by others never reached MES (only local writes
+        // and legacy kind-1 had ingest paths). Now it is channeled via the hot lane.
+        val stored = store.eventsByIds(setOf(eventId(71)))
+        assertEquals("kind-1111 comment must be channeled + stored", 1, stored.size)
+        assertEquals(1111, stored.first().kind)
+    }
+
+    // ── shouldChannel stays selective: an unhandled kind is not stored ───────
+    @Test
+    fun `unchanneled kind is dropped, not stored`() = runTest {
+        // kind-1984 (report) is neither a content nor a control kind — must be dropped.
+        val (raw, url) = rawEvent(seed = 72, kind = 1984, content = "report")
+        processor.process(raw, url)
+        processor.drainForTest()
+        assertTrue(
+            "kind-1984 is not in shouldChannel and must not be stored",
+            store.eventsByIds(setOf(eventId(72))).isEmpty(),
+        )
+    }
 }
