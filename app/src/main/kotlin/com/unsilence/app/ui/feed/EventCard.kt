@@ -223,6 +223,7 @@ fun EventCard(
             zapDetailsForEvent = zapDetailsForEvent,
             repostPubkeysForEvent = repostPubkeysForEvent,
             reactionsForEvent = reactionsForEvent,
+            sourceProfile = sourceProfile,
             modifier = modifier,
         )
         return
@@ -475,6 +476,7 @@ private fun ArticleLayout(
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
     reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
+    sourceProfile: UserEntity? = null,
     modifier: Modifier = Modifier,
 ) {
     val article = model.article
@@ -493,6 +495,18 @@ private fun ArticleLayout(
             .padding(horizontal = Spacing.medium, vertical = Spacing.small)
             .clickable { onArticleClick(row) },
     ) {
+        // Repost provenance — reposted longform (kind-6/16 → 30023) shows the
+        // reposter above the inner article's author row (same RepostHeader as notes;
+        // the article AuthorHeader stays the INNER author).
+        if (model.repost != null) {
+            RepostHeader(
+                sourcePubkey    = model.sourcePubkey,
+                sourceCreatedAt = model.sourceCreatedAt,
+                sourceProfile   = sourceProfile,
+                onClick         = { onNoteClick(model.navigateId) },
+            )
+        }
+
         // Author row
         AuthorHeader(
             pubkey      = model.pubkey,

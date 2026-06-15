@@ -150,6 +150,64 @@ class ArticleCommentsTest {
     }
 
     @Test
+    fun `reply to a comment (no a-tag) is included as a descendant`() = runTest {
+        insertArticle()
+        // Direct legacy kind-1 comment threaded to the article.
+        store.insert(
+            NostrEvent(
+                id = "comment", pubkey = "c".repeat(64), kind = 1, content = "top",
+                createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "article-1", rootId = "article-1",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
+        // Reply to that comment — NO #a article tag, only replyToId=comment.
+        store.insert(
+            NostrEvent(
+                id = "child", pubkey = "d".repeat(64), kind = 1, content = "nested",
+                createdAt = 1001, tags = listOf(listOf("e", "comment")),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "comment", rootId = "comment",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
+        val ids = store.articleCommentsFlow(coord).first().map { it.id }
+        assertEquals(listOf("comment", "child"), ids)
+        // Count equals the visible rows (direct + descendant).
+        assertEquals(2, store.replyCount("article-1"))
+    }
+
+    @Test
+    fun `a quote reply to a comment is excluded from descendants`() = runTest {
+        insertArticle()
+        store.insert(
+            NostrEvent(
+                id = "comment", pubkey = "c".repeat(64), kind = 1, content = "top",
+                createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "article-1", rootId = "article-1",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
+        // A quote post replying to the comment → has a q tag → excluded.
+        store.insert(
+            NostrEvent(
+                id = "quote-child", pubkey = "d".repeat(64), kind = 1, content = "quoting",
+                createdAt = 1001, tags = listOf(listOf("e", "comment"), listOf("q", "something")),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "comment", rootId = "comment",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
+        assertEquals(listOf("comment"), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
     fun `comments are oldest-first with id tie-break`() = runTest {
         insertArticle()
         store.insert(event(id = "newer", kind = 1111, createdAt = 2000, tags = listOf(listOf("A", coord))))

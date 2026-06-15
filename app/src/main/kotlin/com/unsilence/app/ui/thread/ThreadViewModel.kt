@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -47,12 +49,19 @@ class ThreadViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val userRepository: UserRepository,
     private val outboxResolver: OutboxRelayResolver,
+    private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
+    /** Set when the thread root is a long-form article — replies then come from the
+     *  article-comment source (kind-1 #a + kind-1111 #A), the SAME contract as the
+     *  reader, instead of the #e-only kind-1 thread index. */
+    private val coordFlow = MutableStateFlow<String?>(null)
+    @Volatile private var articleCommentRelays: List<String> = emptyList()
+    private val fetchedReplyParents = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var tappedId: String? = null
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -65,13 +74,35 @@ class ThreadViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            eventIdFlow
-                .filterNotNull()
-                .flatMapLatest { id -> memoryEventStore.threadFeedRowFlow(id) }
-                .collect { rows ->
-                    val focusedId = eventIdFlow.value ?: return@collect
-                    val focused = rows.firstOrNull { it.id == focusedId }
-                    val replyRows = rows.filter { it.id != focusedId && it.kind == 1 }
+            combine(eventIdFlow.filterNotNull(), coordFlow) { id, coord -> id to coord }
+                .flatMapLatest { (id, coord) ->
+                    if (coord != null) memoryEventStore.articleCommentsFlow(coord).map { Triple(id, true, it) }
+                    else memoryEventStore.threadFeedRowFlow(id).map { Triple(id, false, it) }
+                }
+                .collect { (focusedId, articleMode, rows) ->
+                    // Article mode: the focused article isn't in the comment list, and
+                    // replies include NIP-22 kind-1111 (not just kind-1).
+                    val focused = if (articleMode) {
+                        memoryEventStore.feedRowsByIds(setOf(focusedId)).firstOrNull()
+                    } else {
+                        rows.firstOrNull { it.id == focusedId }
+                    }
+                    val replyRows = if (articleMode) {
+                        rows.filter { it.id != focusedId && (it.kind == 1 || it.kind == 1111) }
+                    } else {
+                        rows.filter { it.id != focusedId && it.kind == 1 }
+                    }
+
+                    // Comment cards need live engagement — hydrate, same as the reader.
+                    // Also stage-fetch replies-to-comments (descendants with no #a/#A
+                    // tag) so nested replies show; dedupe so it can't loop.
+                    if (articleMode && rows.isNotEmpty()) {
+                        cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
+                        val novel = rows.map { it.id }.filter { fetchedReplyParents.add(it) }
+                        if (novel.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
+                            viewModelScope.launch { relayPool.fetchCommentReplies(articleCommentRelays, novel) }
+                        }
+                    }
 
                     // Build parent→children map
                     val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
@@ -130,8 +161,35 @@ class ThreadViewModel @Inject constructor(
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
         eventIdFlow.value = null
+        coordFlow.value = null
+        articleCommentRelays = emptyList()
+        fetchedReplyParents.clear()
         tappedId = null
         _uiState.value = ThreadUiState()
+    }
+
+    /**
+     * Point the thread at [rootId]. A long-form article root switches to the
+     * article-comment contract (kind-1 #a + kind-1111 #A, same as the reader),
+     * fetching with the article's own relays merged in; anything else uses the
+     * standard #e thread fetch.
+     */
+    private suspend fun applyRoot(rootId: String, urls: List<String>) {
+        eventIdFlow.value = rootId
+        val rootEvent = memoryEventStore.getEventEntity(rootId)
+        val coord = if (rootEvent?.kind == 30023) memoryEventStore.articleCoordForEvent(rootId) else null
+        if (coord != null) {
+            memoryEventStore.registerArticleCoord(rootId, coord)
+            coordFlow.value = coord
+            val relays = (urls +
+                (memoryEventStore.getNostrEvent(rootId)?.relaysSeen ?: emptySet()) +
+                memoryEventStore.relayHintsForEvent(rootId)).distinct()
+            articleCommentRelays = relays
+            relayPool.fetchArticleComments(relays, coord)
+        } else {
+            coordFlow.value = null
+            relayPool.fetchThread(urls, rootId)
+        }
     }
 
     fun loadThread(eventId: String) {
@@ -166,8 +224,7 @@ class ThreadViewModel @Inject constructor(
 
             if (eventIdFlow.value == bestGuessRoot) return@launch
 
-            eventIdFlow.value = bestGuessRoot
-            relayPool.fetchThread(urls, bestGuessRoot)
+            applyRoot(bestGuessRoot, urls)
 
             // Refine root in background — walk UP the reply chain fetching ancestors
             launch {
@@ -175,8 +232,6 @@ class ThreadViewModel @Inject constructor(
                     resolveThreadRoot(eventId, urls)
                 } ?: return@launch
                 if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
-                    eventIdFlow.value = trueRoot
-
                     // Re-resolve relays for the true root's author — may differ
                     // from the tapped event's author.
                     val trueRootEvent = memoryEventStore.getEventEntity(trueRoot)
@@ -189,7 +244,7 @@ class ThreadViewModel @Inject constructor(
                         )
                     } else urls
 
-                    relayPool.fetchThread(refinedUrls, trueRoot)
+                    applyRoot(trueRoot, refinedUrls)
                 }
             }
         }
