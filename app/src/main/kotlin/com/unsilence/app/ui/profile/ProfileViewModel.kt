@@ -322,8 +322,34 @@ class ProfileViewModel @Inject constructor(
             )
 
             val signed = signingManager.sign(template) ?: return@launch
-            relayPool.publish(toEventJson(signed))
 
+            // Optimistic local update — kind-0 is replaceable (newest wins), so insert
+            // the just-signed event so the profile reflects IMMEDIATELY. Previously the
+            // UI only updated via a relay echo of the broadcast; with the targeted
+            // publish (H20c) we update locally instead of depending on an echo.
+            val nowMs = System.currentTimeMillis()
+            memoryEventStore.insert(
+                NostrEvent(
+                    id = signed.id,
+                    pubkey = signed.pubKey,
+                    kind = 0,
+                    content = signed.content,
+                    createdAt = signed.createdAt,
+                    tags = emptyList(),
+                    tagsJson = "[]",
+                    sig = signed.sig,
+                    relayUrl = "local",
+                    replyToId = null,
+                    rootId = null,
+                    hasContentWarning = false,
+                    contentWarningReason = null,
+                    firstSeenAt = nowMs,
+                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                ),
+            )
+
+            // kind-0 goes ONLY to own write + indexer relays (targeted) — not a raw
+            // broadcast to every open socket (H20c).
             val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             val targetUrls = (writeUrls + indexerUrls).distinct()
