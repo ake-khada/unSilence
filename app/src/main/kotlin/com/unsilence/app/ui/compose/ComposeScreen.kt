@@ -93,6 +93,7 @@ fun ComposeScreen(
     onDismiss: () -> Unit,
     replyToEventId: String? = null,
     quoteEventId: String? = null,
+    articleCommentTarget: ArticleCommentTarget? = null,
     viewModel: ComposeViewModel = hiltViewModel(),
 ) {
     val pubkeyHex      = viewModel.pubkeyHex
@@ -115,7 +116,9 @@ fun ComposeScreen(
     val pinnedShortcodes  by viewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pendingEmoji      by viewModel.pendingEmojiInsert.collectAsStateWithLifecycle()
 
-    val isReply = replyToEventId != null
+    // Article comments preview/post like a reply (parent card + "Replying" chrome);
+    // the VM routes to the NIP-22 kind-1111 path via articleCommentTarget.
+    val isReply = replyToEventId != null || articleCommentTarget != null
     val isQuote = quoteEventId != null
     val replyToRow = viewModel.replyToRow
     val quoteRow = viewModel.quoteRow
@@ -129,6 +132,7 @@ fun ComposeScreen(
         viewModel.reset()
         if (replyToEventId != null) viewModel.loadReplyTo(replyToEventId)
         if (quoteEventId != null) viewModel.loadQuoteTo(quoteEventId)
+        if (articleCommentTarget != null) viewModel.loadArticleComment(articleCommentTarget)
     }
 
     // Auto-dismiss once the note is published

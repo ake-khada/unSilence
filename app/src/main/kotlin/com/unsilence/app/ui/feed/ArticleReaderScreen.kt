@@ -62,6 +62,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.ui.compose.ArticleCommentTarget
+import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -136,6 +138,11 @@ fun ArticleReaderScreen(
     // behind this Dialog and the tap looks dead.
     val onHashtagTap: (String) -> Unit = { tag -> onHashtagClick(tag); onDismiss() }
 
+    // Profile/thread navigation must close the reader first — otherwise the
+    // destination opens BEHIND this Dialog and the tap looks dead.
+    val onAuthorTap: (String) -> Unit = { pubkey -> onDismiss(); onAuthorClick(pubkey) }
+    val onNoteTap: (String) -> Unit = { id -> onDismiss(); onNoteClick(id) }
+
     // ── Comments (NIP-22 kind-1111 + legacy kind-1 by a-coordinate) ──────────
     // Dedicated VM owns the comment machinery + display providers; comment ACTIONS
     // /lookups/caches come from a NoteActionsViewModel (same host owner).
@@ -152,6 +159,22 @@ fun ArticleReaderScreen(
         }
     }
     LaunchedEffect(comments) { articleReaderVm.hydrateCommentEngagement(comments) }
+
+    // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
+    // threading through the 5 reader call sites; reader stays behind the compose.
+    var commentTarget by remember { mutableStateOf<ArticleCommentTarget?>(null) }
+    var legacyReplyToEventId by remember { mutableStateOf<String?>(null) }
+    val articleRelayHint = row.relayUrl.takeIf { it.isNotBlank() }
+    val openArticleComment: () -> Unit = {
+        if (articleCoord != null) {
+            commentTarget = ArticleCommentTarget(
+                articleId = model.engagementId,
+                articleCoord = articleCoord,
+                articlePubkey = model.pubkey,
+                articleRelayHint = articleRelayHint,
+            )
+        } else onNoteTap(model.navigateId)
+    }
 
     // Native markdown body (replaces the WebView). Parsed off the composition
     // thread (Dispatchers.Default) so a max-size article can't hitch the open;
@@ -195,13 +218,18 @@ fun ArticleReaderScreen(
         ?: (if (isRepost) null else row.displayName)
         ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}"
 
-    // Live engagement counts keyed off the effective id; fall back to the static
-    // FeedRow snapshot when no statsFlow is wired (e.g. SearchScreen).
-    val liveStats = statsFlow?.invoke(model.engagementId)?.collectAsStateWithLifecycle()?.value
-    val replyCount    = liveStats?.replyCount    ?: row.replyCount
-    val repostCount   = liveStats?.repostCount   ?: row.repostCount
-    val reactionCount = liveStats?.reactionCount ?: row.reactionCount
-    val zapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
+    // Live engagement counts keyed off the effective id. The host statsFlow (feed/
+    // profile VM) when present, else the reader VM's own MES-backed statsFlow — NEVER
+    // the static FeedRow snapshot, which would leak a stale count (e.g. quote-posts
+    // removed from the comment list but the old reply count lingering).
+    val articleStatsFlow = remember(model.engagementId) {
+        statsFlow?.invoke(model.engagementId) ?: articleReaderVm.statsFlow(model.engagementId)
+    }
+    val articleStats by articleStatsFlow.collectAsStateWithLifecycle()
+    val replyCount    = articleStats.replyCount
+    val repostCount   = articleStats.repostCount
+    val reactionCount = articleStats.reactionCount
+    val zapTotalSats  = articleStats.zapTotalSats
 
     var drawerOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -287,7 +315,7 @@ fun ArticleReaderScreen(
                                 displayName   = authorLabel,
                                 nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
                                 createdAt     = model.createdAt,
-                                onAuthorClick = onAuthorClick,
+                                onAuthorClick = onAuthorTap,
                                 onNoteClick   = {},
                                 lookupProfile = lookupProfile,
                                 profileFlow   = profileFlow,
@@ -430,8 +458,8 @@ fun ArticleReaderScreen(
                                 zapFlash         = zapFlash,
                                 drawerOpen       = drawerOpen,
                                 onChevronTap     = { drawerOpen = !drawerOpen },
-                                onNoteClick      = { onNoteClick(model.navigateId) },
-                                onComment        = { onNoteClick(model.navigateId) },
+                                onNoteClick      = { onNoteTap(model.navigateId) },
+                                onComment        = openArticleComment,
                                 onReact          = onReact,
                                 onReactLongPress = onReactLongPress,
                                 pinnedEmojis     = pinnedEmojis,
@@ -456,7 +484,7 @@ fun ArticleReaderScreen(
                                         reactionsForEvent     = reactionsForEvent,
                                         profileFlow           = profileFlow,
                                         lookupProfile         = lookupProfile,
-                                        onProfileTap          = onAuthorClick,
+                                        onProfileTap          = onAuthorTap,
                                     )
                                 }
                             }
@@ -485,12 +513,31 @@ fun ArticleReaderScreen(
                                 row                   = comment,
                                 role                  = CardRole.Reply,
                                 engagement            = EngagementSnapshot(isNwcConfigured = isNwcConfigured),
-                                onNoteClick           = onNoteClick,
-                                onComment             = { onNoteClick(comment.id) },
-                                onAuthorClick         = onAuthorClick,
+                                onNoteClick           = onNoteTap,
+                                onComment             = {
+                                    // kind-1111 comment → NIP-22 reply (kind-1111).
+                                    // legacy kind-1 comment → normal kind-1 reply, but opened
+                                    // as a LOCAL compose overlay (NIP-22 forbids 1111 replies to
+                                    // kind-1; onNoteClick would open the thread behind the reader).
+                                    if (comment.kind == 1111 && articleCoord != null) {
+                                        commentTarget = ArticleCommentTarget(
+                                            articleId = model.engagementId,
+                                            articleCoord = articleCoord,
+                                            articlePubkey = model.pubkey,
+                                            articleRelayHint = articleRelayHint,
+                                            parentId = comment.id,
+                                            parentKind = comment.kind,
+                                            parentPubkey = comment.pubkey,
+                                            parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
+                                        )
+                                    } else {
+                                        legacyReplyToEventId = comment.id
+                                    }
+                                },
+                                onAuthorClick         = onAuthorTap,
                                 onHashtagClick        = onHashtagTap,
                                 onQuote               = onQuote,
-                                onArticleClick        = { onNoteClick(it.id) },
+                                onArticleClick        = { onNoteTap(it.id) },
                                 onReact               = { commentActionsVm.react(comment.id, comment.pubkey) },
                                 onReactLongPress      = {},
                                 pinnedEmojis          = pinnedEmojis,
@@ -515,6 +562,22 @@ fun ArticleReaderScreen(
                         }
                     }
                 }
+            }
+
+            // ── Article-comment compose overlay (NIP-22 kind-1111) ──
+            // Full-screen overlay above the reader; reader stays behind.
+            commentTarget?.let { target ->
+                ComposeScreen(
+                    articleCommentTarget = target,
+                    onDismiss            = { commentTarget = null },
+                )
+            }
+            // Legacy kind-1 comment → normal kind-1 reply, opened above the reader.
+            legacyReplyToEventId?.let { id ->
+                ComposeScreen(
+                    replyToEventId = id,
+                    onDismiss      = { legacyReplyToEventId = null },
+                )
             }
         }
     }

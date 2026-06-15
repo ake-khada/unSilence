@@ -50,6 +50,9 @@ class ArticleReaderViewModel @Inject constructor(
      */
     fun fetchComments(coord: String, articleId: String, authorPubkey: String, fallbackRelayUrl: String?) {
         if (coord.isBlank()) return
+        // Ensure MES knows id⇄coord in every entry point (quote/boost/search), so
+        // replyCount merges #A comments + stats invalidations target the article id.
+        if (articleId.isNotBlank()) memoryEventStore.registerArticleCoord(articleId, coord)
         viewModelScope.launch {
             val relays = buildSet {
                 addAll(memoryEventStore.writeRelaysFor(authorPubkey))
