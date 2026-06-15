@@ -40,7 +40,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
@@ -596,6 +598,7 @@ class ComposeViewModel @Inject constructor(
         replyToRow = null
         quoteRow = null
         quoteEventId = null
+        articleCommentTarget = null
         _sendState.value = SendState.Composing
         _focusedBlockId.value = null
         _pendingMentionInsert.value = null
@@ -616,6 +619,22 @@ class ComposeViewModel @Inject constructor(
     fun loadReplyTo(eventId: String) {
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         replyToRow = rows.firstOrNull()
+    }
+
+    // ── Article comment mode (NIP-22 kind-1111) ──────────────────────────────
+
+    /** Target when composing a comment on a long-form article (null otherwise). */
+    var articleCommentTarget by mutableStateOf<ArticleCommentTarget?>(null)
+        private set
+
+    fun loadArticleComment(target: ArticleCommentTarget) {
+        articleCommentTarget = target
+        // Preview the thing being commented on: the parent comment for a reply,
+        // else the article itself. Reuses the reply-preview card (replyToRow).
+        val previewId = target.parentId ?: target.articleId
+        if (previewId != null) {
+            replyToRow = memoryEventStore.feedRowsByIds(setOf(previewId)).firstOrNull()
+        }
     }
 
     // ── Quote mode ─────────────────────────────────────────────────────────
@@ -657,17 +676,25 @@ class ComposeViewModel @Inject constructor(
 
     fun confirmPublish() {
         val state = _sendState.value as? SendState.Confirming ?: return
-        if (state.isReply) publishReply(state.notifyActive) else publishNote(state.notifyActive)
+        when {
+            articleCommentTarget != null -> publishArticleComment(state.notifyActive)
+            state.isReply                -> publishReply(state.notifyActive)
+            else                         -> publishNote(state.notifyActive)
+        }
     }
 
     fun retryPublish() {
         val state = _sendState.value as? SendState.Failed ?: return
-        // Re-enter Composing then re-request — blocks + reply state are intact
+        // Re-enter Composing then re-request — blocks + reply/comment state intact
         _sendState.value = SendState.Composing
         val isReply = replyToRow != null
         requestPublish(isReply)
         val confirming = _sendState.value as? SendState.Confirming ?: return
-        if (confirming.isReply) publishReply(confirming.notifyActive) else publishNote(confirming.notifyActive)
+        when {
+            articleCommentTarget != null -> publishArticleComment(confirming.notifyActive)
+            confirming.isReply           -> publishReply(confirming.notifyActive)
+            else                         -> publishNote(confirming.notifyActive)
+        }
     }
 
     fun toggleNotify(pubkey: String) {
@@ -687,7 +714,14 @@ class ComposeViewModel @Inject constructor(
         val candidates = mutableListOf<NotifyCandidate>()
         val seen = mutableSetOf(ownPubkey)
 
-        if (isReply) {
+        val articleComment = articleCommentTarget
+        if (articleComment != null) {
+            // NIP-22 P/p (article author + parent author) are protocol-mandated and
+            // ALWAYS published — they're not optional toggles, so don't list them
+            // (listing would let the user "turn off" a tag we still send → a lie).
+            seen.add(articleComment.articlePubkey)
+            articleComment.parentPubkey?.let { seen.add(it) }
+        } else if (isReply) {
             val parent = replyToRow
             if (parent != null && parent.pubkey !in seen) {
                 candidates.add(buildCandidate(parent.pubkey, NotifySource.ReplyParent))
@@ -729,6 +763,8 @@ class ComposeViewModel @Inject constructor(
     }
 
     private fun buildPreviewContent(blocks: List<ComposeBlock>, isReply: Boolean): String {
+        // Article comments carry their reference in tags (NIP-22), not inline.
+        if (articleCommentTarget != null) return blocksToContent(blocks)
         var content = blocksToContent(blocks)
         val qId = quoteEventId
         val quotedAuthor = quoteRow?.pubkey
@@ -745,6 +781,18 @@ class ComposeViewModel @Inject constructor(
         val tags = mutableListOf<Array<String>>()
         val existingPTags = mutableSetOf<String>()
         tags.addAll(blocksToImetaTags(blocks))
+        articleCommentTarget?.let { target ->
+            // NIP-22 kind-1111 article comment tags.
+            tags.addAll(Nip22Tags.articleComment(target))
+            existingPTags.add(target.articlePubkey)
+            target.parentPubkey?.let { existingPTags.add(it) }
+            val content = blocksToContent(blocks)
+            extractMentionPubkeys(content).forEach { pk -> if (pk !in existingPTags) tags.add(arrayOf("p", pk)) }
+            tags.addAll(extractEmojiTags(content))
+            tags.addAll(extractHashtags(content))
+            if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
+            return tags
+        }
         if (isReply) {
             val parent = replyToRow ?: return tags
             val threadRootId = parent.rootId ?: parent.id
@@ -835,6 +883,76 @@ class ComposeViewModel @Inject constructor(
                         relayUrl = "local",
                         replyToId = replyToId,
                         rootId = threadRootId,
+                        hasContentWarning = _isSensitive.value,
+                        contentWarningReason = null,
+                        firstSeenAt = nowMs,
+                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                    )
+                )
+            }
+        }
+    }
+
+    /** Publish a NIP-22 (kind-1111) comment on a long-form article. Distinct from
+     *  publishReply (kind-1 #e replies) — article comments use A/K/P + a/e/k/p. */
+    private fun publishArticleComment(activeNotifyPubkeys: Set<String>) {
+        val target = articleCommentTarget ?: return
+        publishError = null
+        viewModelScope.launch {
+            val current = _blocks.value
+            val finalContent = blocksToContent(current)
+            val imetaTags = blocksToImetaTags(current)
+            val mentionPubkeys = extractMentionPubkeys(finalContent)
+            val emojiTags = extractEmojiTags(finalContent)
+            val hashtagTags = extractHashtags(finalContent)
+
+            val protocolPTags = buildSet {
+                add(target.articlePubkey)
+                target.parentPubkey?.let { add(it) }
+            }
+            val tagList = buildList {
+                addAll(Nip22Tags.articleComment(target))   // A/K/P + a/e/k/p (protocol)
+                addAll(imetaTags)
+                mentionPubkeys.forEach { pk ->
+                    if (pk !in protocolPTags && pk in activeNotifyPubkeys) add(arrayOf("p", pk))
+                }
+                emojiTags.forEach { add(it) }
+                hashtagTags.forEach { add(it) }
+                if (_isSensitive.value) add(arrayOf("content-warning", ""))
+            }
+
+            val template = EventTemplate<Event>(
+                createdAt = System.currentTimeMillis() / 1000L,
+                kind      = 1111,
+                tags      = tagList.toTypedArray(),
+                content   = finalContent,
+            )
+            val signed = signingManager.sign(template) ?: run {
+                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
+                return@launch
+            }
+
+            // rootId = article (the thread root); replyToId = parent comment, or the
+            // article for a top-level comment — so MES threads + the comment list update.
+            val rootId = target.articleId
+            val replyToId = target.parentId ?: target.articleId
+            val eventJson = toEventJson(signed)
+            publishAndTrack(signed.id, eventJson, replyToId, rootId) {
+                val nowMs = System.currentTimeMillis()
+                val parsedTags = signed.tags.map { it.toList() }
+                memoryEventStore.insert(
+                    NostrEvent(
+                        id = signed.id,
+                        pubkey = signed.pubKey,
+                        kind = signed.kind,
+                        content = signed.content,
+                        createdAt = signed.createdAt,
+                        tags = parsedTags,
+                        tagsJson = tagsToJson(parsedTags),
+                        sig = signed.sig,
+                        relayUrl = "local",
+                        replyToId = replyToId,
+                        rootId = rootId,
                         hasContentWarning = _isSensitive.value,
                         contentWarningReason = null,
                         firstSeenAt = nowMs,

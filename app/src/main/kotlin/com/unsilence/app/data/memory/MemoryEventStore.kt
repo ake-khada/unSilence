@@ -2319,10 +2319,10 @@ class MemoryEventStore @Inject constructor(
     // ─── O(1) stat reads ────────────────────────────────────────────────────
 
     fun replyCount(eventId: String): Int {
-        val base = replyCounts[eventId] ?: 0
         val coord = articleCoordForEvent(eventId)
-        val viaCoord = if (coord != null) commentIdsByCoord[coord]?.size ?: 0 else 0
-        return base + viaCoord
+        // Articles: count the EXACT same set the comment list renders (one source of
+        // truth) — never replyCounts + coord-index, which can disagree.
+        return if (coord != null) articleCommentIds(coord).size else (replyCounts[eventId] ?: 0)
     }
     fun repostCount(eventId: String): Int = repostCounts[eventId] ?: 0
     /**
@@ -2383,17 +2383,28 @@ class MemoryEventStore @Inject constructor(
         if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
     }
 
-    /** Index a kind-1/1111 event as an article comment under each `a`/`A` coordinate
-     *  it references (NIP-22 + legacy). Bumps the article's reply stats. */
+    /**
+     * Index a kind-1/1111 event as an article comment under the article coordinate
+     * it is ROOTED at — NOT one it merely quotes/mentions. A post that quotes an
+     * article (NIP-18 `q` tag) or replies elsewhere while referencing the article
+     * must NOT show up in the article's comment section.
+     *
+     * - kind-1111 (NIP-22): the article is the comment's root iff an uppercase `A`
+     *   tag matches the coordinate. (Quotes inside a comment use `q`, not `A`.)
+     * - kind-1 (legacy): a lowercase `a` to the coord, but only when the event is
+     *   not a quote (`q` tag) and isn't actually a reply to a different event.
+     */
     private fun indexArticleComment(event: NostrEvent, dirty: InsertDirty?) {
-        if (event.kind != 1 && event.kind != 1111) return
-        for (tag in event.tags) {
-            if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A") && tag[1].startsWith("30023:")) {
-                val coord = tag[1]
-                commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
-                dirty?.let { invalidateStatsForTarget(coord, it) }
-            }
-        }
+        // Only NIP-22 kind-1111 is coordinate-indexed here, by its uppercase `A`
+        // root scope. Legacy kind-1 article comments are NOT indexed by tag — they
+        // flow through the normal reply machinery (replyCounts / idsByReplyTarget),
+        // keyed by the article EVENT id, which inherently counts only genuine replies
+        // and excludes quote/mention posts (they reply elsewhere). Indexing legacy
+        // kind-1 here too would double-count it (handleNote + this index).
+        if (event.kind != 1111) return
+        val coord = event.tags.firstOrNull { it.size >= 2 && it[0] == "A" && it[1].startsWith("30023:") }?.get(1) ?: return
+        commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
+        dirty?.let { invalidateStatsForTarget(coord, it) }
     }
 
     /** Comments (FeedRow) for an article coordinate, oldest-first (chronological
@@ -2405,13 +2416,33 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
-    private fun articleComments(coord: String): List<FeedRow> {
-        val ids = commentIdsByCoord[coord] ?: return emptyList()
-        return ids.mapNotNull { eventsById[it] }
+    /**
+     * The ONE source of truth for an article's comments — used for the rendered
+     * list, the count, AND the contributor pubkeys, so they can never disagree.
+     * NIP-22 kind-1111 (uppercase `A`, filtered to kind 1111 so stale legacy
+     * coord-index entries can't leak) + genuine kind-1 replies to the article event
+     * (idsByReplyTarget, excluding quote-posts).
+     */
+    private fun articleCommentIds(coord: String): Set<String> {
+        val ids = LinkedHashSet<String>()
+        commentIdsByCoord[coord]?.forEach { id ->
+            if (eventsById[id]?.kind == 1111) ids.add(id)
+        }
+        articleIdByCoord[coord]?.let { articleId ->
+            idsByReplyTarget[articleId]?.forEach { id ->
+                val e = eventsById[id]
+                if (e?.kind == 1 && e.tags.none { it.size >= 2 && it[0] == "q" }) ids.add(id)
+            }
+        }
+        return ids
+    }
+
+    private fun articleComments(coord: String): List<FeedRow> =
+        articleCommentIds(coord)
+            .mapNotNull { eventsById[it] }
             .sortedWith(compareBy<NostrEvent> { it.createdAt }.thenBy { it.id })
             .take(ARTICLE_COMMENT_CAP)
             .map { toFeedRow(it) }
-    }
     fun zapStats(eventId: String): ZapAggregate {
         // Source of truth = the SAME deduped, receipt-backed rows the drawer shows,
         // so the action-bar summary and the drawer never disagree. Optimistic rows
@@ -2432,14 +2463,13 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Engagement contributor queries (drawer) ────────────────────────────
 
-    /** Deduplicated pubkeys of users who replied to [eventId] — includes article
-     *  comments keyed by coordinate. */
+    /** Deduplicated pubkeys of users who replied to [eventId]. For articles, uses
+     *  the same comment-id source as the list/count. */
     fun replyPubkeysForEvent(eventId: String): List<String> {
+        val coord = articleCoordForEvent(eventId)
+        val ids = if (coord != null) articleCommentIds(coord) else (idsByReplyTarget[eventId] ?: emptySet())
         val seen = HashSet<String>()
-        idsByReplyTarget[eventId]?.forEach { id -> eventsById[id]?.pubkey?.let { seen.add(it) } }
-        articleCoordForEvent(eventId)?.let { coord ->
-            commentIdsByCoord[coord]?.forEach { id -> eventsById[id]?.pubkey?.let { seen.add(it) } }
-        }
+        for (id in ids) eventsById[id]?.pubkey?.let { seen.add(it) }
         return seen.toList()
     }
 

@@ -47,11 +47,45 @@ class ArticleCommentsTest {
     }
 
     @Test
-    fun `legacy kind-1 comment with a-tag is indexed and counted`() = runTest {
+    fun `legacy kind-1 with only an a-tag (no article thread) is NOT indexed`() = runTest {
         insertArticle()
-        store.insert(event(id = "c1", kind = 1, tags = listOf(listOf("a", coord))))
+        // A quote/mention post: references the article via #a but isn't a reply to it.
+        store.insert(event(id = "mention", kind = 1, tags = listOf(listOf("a", coord))))
+        assertEquals(0, store.replyCount("article-1"))
+        assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
+    fun `legacy kind-1 reply threaded to the article id IS indexed`() = runTest {
+        insertArticle()
+        store.insert(
+            NostrEvent(
+                id = "legacy-comment", pubkey = "c".repeat(64), kind = 1, content = "good read",
+                createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "article-1", rootId = "article-1",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
         assertEquals(1, store.replyCount("article-1"))
-        assertEquals(listOf("c1"), store.articleCommentsFlow(coord).first().map { it.id })
+        assertEquals(listOf("legacy-comment"), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
+    fun `legacy kind-1 with a-tag but unknown article is NOT indexed`() = runTest {
+        // Article never inserted/registered → can't confirm the thread → skip.
+        store.insert(
+            NostrEvent(
+                id = "orphan", pubkey = "c".repeat(64), kind = 1, content = "x",
+                createdAt = 1000, tags = listOf(listOf("a", coord)),
+                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+                replyToId = "something-else", rootId = "something-else",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
+        assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
     }
 
     @Test
@@ -59,6 +93,33 @@ class ArticleCommentsTest {
         insertArticle()
         store.insert(event(id = "other", kind = 1111, tags = listOf(listOf("A", "30023:$author:different"))))
         assertEquals(0, store.replyCount("article-1"))
+        assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
+    fun `kind-1 quoting the article (q tag) is NOT indexed as a comment`() = runTest {
+        insertArticle()
+        // A reply elsewhere that quotes the article: has `a` to the coord but also a
+        // `q` quote tag → must not be attributed as a comment on the article.
+        store.insert(event(id = "quoter", kind = 1, tags = listOf(listOf("a", coord), listOf("q", "article-1"))))
+        assertEquals(0, store.replyCount("article-1"))
+        assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
+    fun `kind-1 replying to a different event but referencing the article is NOT indexed`() = runTest {
+        insertArticle()
+        store.insert(event(id = "somenote", kind = 1))
+        // Reply to somenote that mentions the article via `a`: replyToId != articleId.
+        store.insert(
+            NostrEvent(
+                id = "reply-elsewhere", pubkey = "c".repeat(64), kind = 1, content = "see this",
+                createdAt = 1000, tags = listOf(listOf("a", coord)), tagsJson = "[]", sig = "sig",
+                relayUrl = "wss://r.example", replyToId = "somenote", rootId = "somenote",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
+            ),
+        )
         assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
     }
 
