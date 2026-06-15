@@ -403,6 +403,7 @@ class Subscription @Inject constructor(
         }
 
         val (replyToId, rootId) = when (dto.kind) {
+            1111 -> parseNip22Threading(dto.tags)
             1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
             else -> Pair(null, null)
         }

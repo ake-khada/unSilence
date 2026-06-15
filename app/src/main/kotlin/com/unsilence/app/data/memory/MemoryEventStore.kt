@@ -713,6 +713,7 @@ class MemoryEventStore @Inject constructor(
         when (event.kind) {
             0 -> handleProfile(event)
             1 -> handleNote(event, dirty)
+            1111 -> handleNip22Comment(event, dirty)
             3 -> handleFollows(event, dirty)
             6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
@@ -836,6 +837,52 @@ class MemoryEventStore @Inject constructor(
             replyCounts.compute(event.rootId) { _, v -> (v ?: 0) + 1 }
             statsUpdatedAt[event.rootId] = System.currentTimeMillis()
             dirty.invalidatedStatsIds.add(event.rootId)
+        }
+    }
+
+    private fun handleNip22Comment(event: NostrEvent, dirty: InsertDirty) {
+        // Article-root counts come from articleCommentIds(coord), which is also the
+        // rendered list source. This handler counts ONLY replies to another
+        // kind-1111 comment, so the parent comment card can show its reply count.
+        val parentKind = event.tags
+            .firstOrNull { it.size >= 2 && it[0] == "k" }
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+        if (parentKind != 1111) return
+
+        val parentId = event.replyToId
+            ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+            ?: return
+        if (parentId == event.id) return
+
+        replyCounts.compute(parentId) { _, v -> (v ?: 0) + 1 }
+        statsUpdatedAt[parentId] = System.currentTimeMillis()
+        dirty.invalidatedStatsIds.add(parentId)
+    }
+
+    private fun reconcileNip22CommentReplyCountsFromEvents() {
+        val derived = HashMap<String, Int>()
+        for (event in eventsById.values) {
+            if (event.kind != 1111) continue
+            val parentKind = event.tags
+                .firstOrNull { it.size >= 2 && it[0] == "k" }
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+            if (parentKind != 1111) continue
+            val parentId = event.replyToId
+                ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+                ?: continue
+            if (parentId == event.id) continue
+            derived[parentId] = (derived[parentId] ?: 0) + 1
+        }
+        for ((parentId, count) in derived) {
+            if ((replyCounts[parentId] ?: 0) < count) {
+                replyCounts[parentId] = count
+                statsUpdatedAt[parentId] = maxOf(
+                    statsUpdatedAt[parentId] ?: 0L,
+                    System.currentTimeMillis(),
+                )
+            }
         }
     }
 
@@ -3830,6 +3877,10 @@ class MemoryEventStore @Inject constructor(
 
         // Rebuild reaction set from raw kind-7 events (same as binary path)
         reindexReactionsFromEvents()
+        // Backfill parent reply counts for old snapshots created before
+        // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
+        // so newer snapshots that already persisted the counts do not double.
+        reconcileNip22CommentReplyCountsFromEvents()
 
         // Bump all signals once (follows signal fires again — idempotent,
         // consumers use distinctUntilChanged or one-shot .first())
@@ -4425,6 +4476,10 @@ class MemoryEventStore @Inject constructor(
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
+        // Backfill parent reply counts for old snapshots created before
+        // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
+        // so newer snapshots that already persisted the counts do not double.
+        reconcileNip22CommentReplyCountsFromEvents()
 
         // Notification recipient index: already populated per-event by
         // insertFromSnapshot via indexNotificationRecipients — no rebuild pass.

@@ -345,6 +345,11 @@ class EventProcessor @Inject constructor(
             return null
         }
         if (dto.id != eventId) return null
+        val (replyToId, rootId) = when (dto.kind) {
+            1111 -> parseNip22Threading(dto.tags)
+            1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
+            else -> Pair(null, null)
+        }
         val event = NostrEvent(
             id = dto.id,
             pubkey = dto.pubkey,
@@ -355,8 +360,8 @@ class EventProcessor @Inject constructor(
             tagsJson = tagsToJson(dto.tags),
             sig = dto.sig,
             relayUrl = relayUrl,
-            replyToId = null,
-            rootId = null,
+            replyToId = replyToId,
+            rootId = rootId,
             hasContentWarning = false,
             contentWarningReason = null,
             firstSeenAt = System.currentTimeMillis(),
@@ -396,8 +401,10 @@ class EventProcessor @Inject constructor(
         // posted as kind-1 notes. Normal notes are always plain text/markdown.
         if (dto.kind == 1 && (dto.content.startsWith("{") || dto.content.startsWith("xitchat-broadcast-v1-"))) return
 
-        // Parse NIP-10 threading for content event kinds.
+        // Parse threading for content event kinds. NIP-22 kind-1111 uses
+        // uppercase root scope and lowercase parent scope, not NIP-10 markers.
         val (replyToId, rootId) = when (dto.kind) {
+            1111 -> parseNip22Threading(tags)
             1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
             else -> Pair(null, null)
         }
@@ -638,6 +645,34 @@ internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String
         0    -> Pair(null, null)
         1    -> Pair(ids[0], ids[0])   // single e = both root and reply-to
         else -> Pair(ids.last(), ids.first())
+    }
+}
+
+// ── NIP-22: comments (kind-1111) parent/root threading ───────────────────────
+
+/**
+ * Returns (replyToId, rootId) parsed from NIP-22 kind-1111 tags.
+ *
+ * Uppercase tags describe the root scope (`A`/`K`/`P`). Lowercase tags describe
+ * the direct parent. For an article comment:
+ *
+ * - top-level: lowercase `k=30023`, optional lowercase `e=<article event id>`
+ * - reply to comment: lowercase `k=1111`, lowercase `e=<parent comment id>`
+ *
+ * The article root is usually addressable (`A=30023:pubkey:d`) and may not have
+ * a known event id at parse time, so only top-level comments with a lowercase
+ * article `e` get a rootId. Comment replies always get replyToId from lowercase
+ * `e`, which is what MES needs for parent comment reply counts.
+ */
+internal fun parseNip22Threading(tags: List<List<String>>): Pair<String?, String?> {
+    val parentKind = tags.firstOrNull { it.size >= 2 && it[0] == "k" }?.getOrNull(1)?.toIntOrNull()
+    val parentId = tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+
+    return when {
+        parentId == null -> Pair(null, null)
+        parentKind == 30023 -> Pair(parentId, parentId)
+        parentKind == 1111 -> Pair(parentId, null)
+        else -> Pair(parentId, null)
     }
 }
 
