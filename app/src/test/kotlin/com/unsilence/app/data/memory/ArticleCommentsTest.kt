@@ -47,6 +47,32 @@ class ArticleCommentsTest {
     }
 
     @Test
+    fun `kind-1111 reply to comment increments parent count and remains flat under article`() = runTest {
+        insertArticle()
+        store.insert(
+            event(
+                id = "parent",
+                kind = 1111,
+                createdAt = 1000,
+                tags = listOf(listOf("A", coord), listOf("k", "30023")),
+            )
+        )
+        store.insert(
+            event(
+                id = "child",
+                kind = 1111,
+                createdAt = 1001,
+                tags = listOf(listOf("A", coord), listOf("e", "parent"), listOf("k", "1111")),
+            )
+        )
+
+        assertEquals(2, store.replyCount("article-1"))
+        assertEquals(1, store.replyCount("parent"))
+        assertEquals(0, store.replyCount("child"))
+        assertEquals(listOf("parent", "child"), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
     fun `legacy kind-1 with only an a-tag (no article thread) is NOT indexed`() = runTest {
         insertArticle()
         // A quote/mention post: references the article via #a but isn't a reply to it.
