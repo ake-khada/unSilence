@@ -196,6 +196,21 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Public actions ────────────────────────────────────────────────────────
 
+    /** Outbox-correct target relays for publishing an engagement event (H20c) —
+     *  own write + target author's read/inbox + the event's seen relays + hints +
+     *  optional fallback; NEVER a broadcast. Falls back to GLOBAL only if empty. */
+    private fun engagementTargets(targetId: String, targetAuthor: String, fallbackHint: String?): List<String> {
+        val own = pubkeyHex
+        return engagementPublishRelays(
+            ownWrite         = own?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList(),
+            targetAuthorRead = memoryEventStore.readRelaysFor(targetAuthor),
+            eventSeen        = memoryEventStore.getNostrEvent(targetId)?.relaysSeen?.toList() ?: emptyList(),
+            relayHints       = memoryEventStore.relayHintsForEvent(targetId),
+            fallbackHint     = fallbackHint,
+            blocked          = own?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() } ?: emptySet(),
+        ).ifEmpty { GLOBAL_RELAY_URLS }
+    }
+
     fun react(
         eventId: String,
         eventPubkey: String,
@@ -226,7 +241,7 @@ class NoteActionsViewModel @Inject constructor(
                 return@launch
             }
 
-            relayPool.publish(toEventJson(signed))
+            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, null))
 
             // Optimistic insert → MES actor-index updates → reactedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed))
@@ -277,7 +292,7 @@ class NoteActionsViewModel @Inject constructor(
                 return@launch
             }
 
-            relayPool.publish(toEventJson(signed))
+            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, relayHint))
 
             // Optimistic insert → MES actor-index updates → repostedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
@@ -556,4 +571,33 @@ internal fun buildRepostDescriptor(
         tags.add(arrayOf("a", "$targetKind:$targetPubkey:$targetDTag", relayHint))
     }
     return RepostDescriptor(kind = 16, tags = tags.toTypedArray())
+}
+
+/**
+ * Target relay set for publishing an engagement event (reaction/repost) — the
+ * outbox-correct destinations, NOT a broadcast to every open socket (H20c) and
+ * NOT the read-path resolveEngagementRelays (that's for FETCHING engagement).
+ * = own write + the target author's read/inbox + the event's seen relays + stored
+ * hints + an optional UI fallback; normalized, blocked-filtered, deduped. Pure +
+ * testable. The caller snapshots relaysSeen via .toList() before passing it
+ * (it's a ConcurrentHashMap.newKeySet mutated on other threads).
+ */
+internal fun engagementPublishRelays(
+    ownWrite: List<String>,
+    targetAuthorRead: List<String>,
+    eventSeen: Collection<String>,
+    relayHints: Collection<String>,
+    fallbackHint: String?,
+    blocked: Set<String>,
+): List<String> {
+    val blockedNorm = blocked.mapNotNull { normalizeRelayUrl(it) }.toSet()
+    return buildList {
+        addAll(ownWrite)
+        addAll(targetAuthorRead)
+        addAll(eventSeen)
+        addAll(relayHints)
+        fallbackHint?.takeIf { it.isNotBlank() }?.let { add(it) }
+    }.mapNotNull { normalizeRelayUrl(it) }
+        .filter { it !in blockedNorm }
+        .distinct()
 }
