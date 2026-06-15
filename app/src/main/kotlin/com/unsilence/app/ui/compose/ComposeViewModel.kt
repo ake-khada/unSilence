@@ -762,6 +762,22 @@ class ComposeViewModel @Inject constructor(
         _sendState.value = SendState.Composing
     }
 
+    /** Relay hint for the quoted event — where others can fetch it. Prefers the
+     *  relay the quote was seen on, falls back to MES e-tag hints, else blank. */
+    private fun quoteRelayHintRaw(qId: String): String =
+        quoteRow?.relayUrl?.takeIf { it.isNotBlank() }
+            ?: memoryEventStore.relayHintsForEvent(qId).firstOrNull()
+            ?: ""
+
+    /** Same hint as a Quartz NormalizedRelayUrl for the inline nostr:nevent
+     *  builder; null when absent or unparseable (normalize can throw). */
+    private fun quoteRelayHintNormalized(qId: String): com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl? =
+        quoteRelayHintRaw(qId).takeIf { it.isNotBlank() }?.let {
+            runCatching {
+                com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer.normalize(it)
+            }.getOrNull()
+        }
+
     private fun buildPreviewContent(blocks: List<ComposeBlock>, isReply: Boolean): String {
         // Article comments carry their reference in tags (NIP-22), not inline.
         if (articleCommentTarget != null) return blocksToContent(blocks)
@@ -770,7 +786,7 @@ class ComposeViewModel @Inject constructor(
         val quotedAuthor = quoteRow?.pubkey
         if (!isReply && qId != null) {
             val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
-                .create(qId, quotedAuthor, null, null as com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl?)
+                .create(qId, quotedAuthor, null, quoteRelayHintNormalized(qId))
             content = if (content.isBlank()) "nostr:$nevent"
                 else "$content\n\nnostr:$nevent"
         }
@@ -806,7 +822,7 @@ class ComposeViewModel @Inject constructor(
             val qId = quoteEventId
             val quotedAuthor = quoteRow?.pubkey
             if (qId != null) {
-                tags.add(arrayOf("q", qId, "", quotedAuthor ?: ""))
+                tags.add(arrayOf("q", qId, quoteRelayHintRaw(qId), quotedAuthor ?: ""))
                 if (quotedAuthor != null) {
                     tags.add(arrayOf("p", quotedAuthor))
                     existingPTags.add(quotedAuthor)
@@ -975,7 +991,7 @@ class ComposeViewModel @Inject constructor(
             val quotedAuthor = quoteRow?.pubkey
             if (qId != null) {
                 val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
-                    .create(qId, quotedAuthor, null, null as com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl?)
+                    .create(qId, quotedAuthor, null, quoteRelayHintNormalized(qId))
                 finalContent = if (finalContent.isBlank()) "nostr:$nevent"
                     else "$finalContent\n\nnostr:$nevent"
             }
@@ -987,7 +1003,7 @@ class ComposeViewModel @Inject constructor(
             val template = TextNoteEvent.build(note = finalContent) {
                 imetaTags.forEach { add(it) }
                 if (qId != null) {
-                    add(arrayOf("q", qId, "", quotedAuthor ?: ""))
+                    add(arrayOf("q", qId, quoteRelayHintRaw(qId), quotedAuthor ?: ""))
                     if (quotedAuthor != null && quotedAuthor in activeNotifyPubkeys) {
                         add(arrayOf("p", quotedAuthor))
                         existingPTags.add(quotedAuthor)
