@@ -211,6 +211,23 @@ class NoteActionsViewModel @Inject constructor(
         ).ifEmpty { GLOBAL_RELAY_URLS }
     }
 
+    /** Relay set for the NIP-57 zap-request ["relays", …] tag — where the wallet
+     *  publishes the kind-9735 receipt. Mirrors the engagement READ path (target
+     *  author WRITE + own READ + event seen/hints) so the receipt lands where the
+     *  app actually fetches it; the inverse of [engagementTargets]. Falls back to
+     *  GLOBAL only if empty. */
+    private fun zapReceiptTargets(targetId: String, targetAuthor: String, fallbackHint: String?): List<String> {
+        val own = pubkeyHex
+        return zapReceiptRelays(
+            targetAuthorWrite = memoryEventStore.writeRelaysFor(targetAuthor),
+            ownRead           = own?.let { memoryEventStore.readRelaysFor(it) } ?: emptyList(),
+            eventSeen         = memoryEventStore.getNostrEvent(targetId)?.relaysSeen?.toList() ?: emptyList(),
+            relayHints        = memoryEventStore.relayHintsForEvent(targetId),
+            fallbackHint      = fallbackHint,
+            blocked           = own?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() } ?: emptySet(),
+        ).ifEmpty { GLOBAL_RELAY_URLS }
+    }
+
     fun react(
         eventId: String,
         eventPubkey: String,
@@ -304,9 +321,13 @@ class NoteActionsViewModel @Inject constructor(
         val amountSats = request.amountSats
         _zapLoading.value = _zapLoading.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
-            // Outbox-targeted zap (H20c): the receipt should land on own write +
-            // recipient read + the event's relays — not every open socket.
-            val zapTargets = engagementTargets(eventId, eventPubkey, relayUrl)
+            // Outbox-targeted zap receipt: the wallet publishes the kind-9735 to the
+            // zap-request ["relays", …] tag, so it must point at the engagement READ
+            // path (recipient WRITE + own READ + event relays) — NOT the engagement
+            // publish path (own write + recipient read) used for reactions/reposts.
+            // Otherwise the receipt lands where this app never fetches it and the sats
+            // count never updates.
+            val zapTargets = zapReceiptTargets(eventId, eventPubkey, relayUrl)
             val result = zapRepository.zap(eventId, eventPubkey, relayUrl, request, zapTargets)
             if (result.isSuccess) {
                 val signed = result.getOrThrow()
@@ -597,6 +618,38 @@ internal fun engagementPublishRelays(
     return buildList {
         addAll(ownWrite)
         addAll(targetAuthorRead)
+        addAll(eventSeen)
+        addAll(relayHints)
+        fallbackHint?.takeIf { it.isNotBlank() }?.let { add(it) }
+    }.mapNotNull { normalizeRelayUrl(it) }
+        .filter { it !in blockedNorm }
+        .distinct()
+}
+
+/**
+ * Target relay set for the NIP-57 zap-request ["relays", …] tag — where the
+ * recipient's wallet/LNURL provider publishes the kind-9735 receipt. This is the
+ * deliberate INVERSE of [engagementPublishRelays]: the app FETCHES zap receipts
+ * from the engagement READ path (target author WRITE + own READ, see
+ * OutboxRelayResolver.resolveEngagementRelays), so the wallet must publish there
+ * or the receipt lands where we never query and the sats count never updates.
+ * = target author write + own read + the event's seen relays + stored hints +
+ * an optional UI fallback; normalized, blocked-filtered, deduped. Pure + testable.
+ * The caller snapshots relaysSeen via .toList() before passing it in (it's a
+ * ConcurrentHashMap.newKeySet mutated on other threads).
+ */
+internal fun zapReceiptRelays(
+    targetAuthorWrite: List<String>,
+    ownRead: List<String>,
+    eventSeen: Collection<String>,
+    relayHints: Collection<String>,
+    fallbackHint: String?,
+    blocked: Set<String>,
+): List<String> {
+    val blockedNorm = blocked.mapNotNull { normalizeRelayUrl(it) }.toSet()
+    return buildList {
+        addAll(targetAuthorWrite)
+        addAll(ownRead)
         addAll(eventSeen)
         addAll(relayHints)
         fallbackHint?.takeIf { it.isNotBlank() }?.let { add(it) }
