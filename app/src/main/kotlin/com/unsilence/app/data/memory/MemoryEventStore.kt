@@ -55,7 +55,10 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
  *  header. Restore rejects a snapshot whose owner differs from the current
  *  ownPubkey (foreign-account bleed guard). ≤V13 have no owner field and are
  *  trusted as legacy, restamped to V14 on next save. */
-private const val SNAPSHOT_BINARY_VERSION = 14
+/** V15 appends the own-anon-zap pubkey set (private-zap self-recognition). */
+private const val SNAPSHOT_BINARY_VERSION = 15
+/** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
+private const val OWN_ANON_ZAP_CAP = 500
 /** Thrown by restoreSnapshotBinary when a V14+ snapshot's stamped owner pubkey
  *  differs from the current session's ownPubkey — a foreign-account snapshot must
  *  not bleed into this user's MES. Thrown before any MES insertion, so the store
@@ -173,6 +176,27 @@ class MemoryEventStore @Inject constructor(
     private val repostPubkeysByTarget = ConcurrentHashMap<String, MutableSet<String>>()
     private val reactionsByTarget = ConcurrentHashMap<String, MutableSet<ReactionInfo>>()
     private val zapDetailsByTarget = ConcurrentHashMap<String, MutableList<ZapDetail>>()
+
+    // Anon pubkeys of OUR OWN outgoing private zaps. A private zap to another
+    // user is anon-signed, so its kind-9735 receipt carries the anon pubkey, not
+    // ours; we record it here so handleZapReceipt can promote that receipt's
+    // sender → own (sender-local only; never published). Bounded, insertion-order
+    // eviction, persisted (V15) since the optimistic drawer row also persists and
+    // the receipt can arrive in a later session. Entries are removed once matched.
+    private val ownAnonZapPubkeys = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
+    private fun addOwnAnonZap(anon: String) {
+        synchronized(ownAnonZapPubkeys) {
+            ownAnonZapPubkeys.add(anon)
+            while (ownAnonZapPubkeys.size > OWN_ANON_ZAP_CAP) {
+                ownAnonZapPubkeys.remove(ownAnonZapPubkeys.iterator().next())
+            }
+        }
+    }
+
+    /** Check-and-consume: true (and removes) if [anon] is one of our pending own anon zaps. */
+    private fun consumeOwnAnonZap(anon: String): Boolean =
+        synchronized(ownAnonZapPubkeys) { ownAnonZapPubkeys.remove(anon) }
 
     // ─── Notification recipient index (M4) ────────────────────────────────
 
@@ -1047,6 +1071,17 @@ class MemoryEventStore @Inject constructor(
         // Parse embedded kind-9734 zap request for sender pubkey + comment.
         val desc = parseZapDescription(event)
 
+        // Patch-as-own: a private zap WE sent is anon-signed, so this receipt's
+        // embedded sender is the anon pubkey, not ours. If it matches a pending
+        // own-anon mapping, promote the stored sender → own so the existing
+        // (sender, sats) dedup collapses it against the optimistic own row. This is
+        // sender-local only — the receipt on the wire / for other clients stays
+        // anonymous; we never publish or expose the anon→own link.
+        val own = ownPubkey
+        val rawSender = desc?.senderPubkey
+        val promotedToOwn = rawSender != null && own != null && rawSender != own && consumeOwnAnonZap(rawSender)
+        val effectiveSender = if (promotedToOwn) own else rawSender
+
         // Detail row FIRST and idempotent by receipt id: the per-zap rows are the
         // durable source of truth (zapStats derives from them, and the restore
         // repair pass rebuilds them from receipt events). A receipt re-seen across
@@ -1055,7 +1090,7 @@ class MemoryEventStore @Inject constructor(
             .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
         val added = synchronized(list) {
             if (list.any { it.eventId == event.id }) false
-            else { list.add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = event.id)); true }
+            else { list.add(ZapDetail(effectiveSender, sats, desc?.comment, eventId = event.id)); true }
         }
         if (!added) return  // duplicate receipt — already counted
 
@@ -1066,13 +1101,13 @@ class MemoryEventStore @Inject constructor(
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         invalidateStatsForTarget(targetId, dirty)
 
-        // Own-zap detection: signal VM to clear optimistic sats overlay.
-        // desc == null → anonymous, can never be our own. When the receipt targets
-        // an article COORDINATE, also emit the resolved article id — the optimistic
-        // overlay was placed on the event id, so clearing only the coord would leave
-        // a duplicate. Emit both.
-        val own = ownPubkey
-        if (own != null && desc != null && desc.senderPubkey == own) {
+        // Own-zap detection: signal VM to clear optimistic sats overlay. Uses the
+        // effective sender, so a promoted private zap (anon→own) clears the overlay
+        // just like a public own zap. effectiveSender == null → anonymous, never ours.
+        // When the receipt targets an article COORDINATE, also emit the resolved
+        // article id — the optimistic overlay was placed on the event id, so clearing
+        // only the coord would leave a duplicate. Emit both.
+        if (own != null && effectiveSender == own) {
             _ownZapReceived.tryEmit(targetId)
             if (':' in targetId) articleIdByCoord[targetId]?.let { _ownZapReceived.tryEmit(it) }
         }
@@ -2943,7 +2978,15 @@ class MemoryEventStore @Inject constructor(
                 if (list.none { it.eventId == rid }) {
                     val sats = extractSatsFromZap(event)
                     val desc = parseZapDescription(event)
-                    list.add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = rid))
+                    // Promote our own private-zap receipt (anon-signed) → own, same as
+                    // the live path, so a restored-but-lost detail row dedups against
+                    // the persisted optimistic own row instead of doubling.
+                    val rawSender = desc?.senderPubkey
+                    val own = ownPubkey
+                    val effectiveSender =
+                        if (rawSender != null && own != null && rawSender != own && consumeOwnAnonZap(rawSender)) own
+                        else rawSender
+                    list.add(ZapDetail(effectiveSender, sats, desc?.comment, eventId = rid))
                 }
             }
             touchedTargets.add(targetId)
@@ -2958,6 +3001,56 @@ class MemoryEventStore @Inject constructor(
                 zapStatsByEventId[targetId] = ZapAggregate(receipts.size, receipts.sumOf { it.sats })
             }
         }
+    }
+
+    /**
+     * Register the anon pubkey of an outgoing private zap to [targetId] so a
+     * later kind-9735 receipt (anon-signed) is recognized as ours and its drawer
+     * row is promoted to own. Also reconciles a receipt that ALREADY arrived
+     * (before this call): any receipt-backed row under [targetId]/its coord whose
+     * sender == [anonPubkey] is patched to own in place, and the existing
+     * (sender, sats) dedup then collapses it against the optimistic own row.
+     * Returns true iff it patched an already-present receipt — the caller uses
+     * that to clear the optimistic overlay (the live emit was missed because the
+     * receipt was processed before the mapping existed). Sender-local only.
+     */
+    internal fun registerPendingPrivateZap(targetId: String, anonPubkey: String): Boolean {
+        val own = ownPubkey
+        if (own == null || anonPubkey == own) return false
+        addOwnAnonZap(anonPubkey)
+        var matched = false
+        val keys = listOfNotNull(targetId, articleCoordForEvent(targetId))
+        for (key in keys) {
+            val list = zapDetailsByTarget[key] ?: continue
+            synchronized(list) {
+                val it = list.listIterator()
+                while (it.hasNext()) {
+                    val row = it.next()
+                    if (row.eventId != null && row.senderPubkey == anonPubkey) {
+                        it.set(row.copy(senderPubkey = own))
+                        matched = true
+                    }
+                }
+            }
+        }
+        if (matched) {
+            consumeOwnAnonZap(anonPubkey) // matched → no longer pending
+            statsUpdatedAt[targetId] = System.currentTimeMillis()
+            _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
+        }
+        return matched
+    }
+
+    /** True if a receipt-backed zap by OUR pubkey is present for [eventId] (or its
+     *  article coord) — the state predicate behind the race-safe optimistic-overlay
+     *  clear (covers a receipt processed before the VM's flow collector subscribed). */
+    fun hasOwnZapReceipt(eventId: String): Boolean {
+        val own = ownPubkey ?: return false
+        fun anyOwnReceipt(key: String?): Boolean {
+            val list = key?.let { zapDetailsByTarget[it] } ?: return false
+            return synchronized(list) { list.any { it.eventId != null && it.senderPubkey == own } }
+        }
+        return anyOwnReceipt(eventId) || anyOwnReceipt(articleCoordForEvent(eventId))
     }
 
     /**
@@ -4261,6 +4354,12 @@ class MemoryEventStore @Inject constructor(
         out.write(aggregatesBytes)
         out.write(relayHealthBytes)
         out.write(timelinesBytes)
+
+        // V15 (appended after timelines; not in the informational offset table) —
+        // own outgoing private-zap anon pubkeys, for cross-session self-recognition.
+        val anons = synchronized(ownAnonZapPubkeys) { ownAnonZapPubkeys.toList() }
+        out.writeInt(anons.size)
+        for (a in anons) out.writeStr(a)
     }
 
     suspend fun restoreSnapshotBinary(input: DataInputStream) {
@@ -4555,6 +4654,14 @@ class MemoryEventStore @Inject constructor(
                 restored[key] = TimelineService.Timeline(refs = refs, filter = filter, urls = urls)
             }
             timelineServiceProvider.get().restoreFromSnapshot(restored)
+        }
+
+        // V15: own private-zap anon pubkeys (appended after timelines). Restore
+        // BEFORE the repair pass so it can promote our own anon receipts → own.
+        if (version >= 15) {
+            val anonCount = input.readInt()
+            if (anonCount < 0 || anonCount > 1_000_000) throw IOException("Invalid anon-zap count: $anonCount")
+            for (i in 0 until anonCount) addOwnAnonZap(input.readStr())
         }
 
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
@@ -5093,6 +5200,7 @@ class MemoryEventStore @Inject constructor(
         repostPubkeysByTarget.clear()
         reactionsByTarget.clear()
         zapDetailsByTarget.clear()
+        ownAnonZapPubkeys.clear()
         profilesByPubkey.clear()
         profileUpdatedAt.clear()
         profileFieldsCache.clear()
