@@ -347,6 +347,13 @@ class NoteActionsViewModel @Inject constructor(
                         eventId, pubkeyHex, amountSats, request.message,
                     )
                 }
+                // A private zap is anon-signed, so its kind-9735 receipt carries the
+                // anon pubkey (== signed.pubKey), not ours. Register it so MES promotes
+                // that receipt's drawer row → own (collapsing it against the optimistic
+                // own row); also reconciles a receipt that already arrived. Sender-local.
+                if (request.isPrivate && pubkeyHex != null && signed.pubKey != pubkeyHex) {
+                    memoryEventStore.registerPendingPrivateZap(eventId, signed.pubKey)
+                }
                 snapshotScheduler.scheduleImmediate()
             }
             withContext(Dispatchers.Main) {
@@ -373,17 +380,30 @@ class NoteActionsViewModel @Inject constructor(
     private val optimisticClearJobs = ConcurrentHashMap<String, Job>()
 
     /**
-     * Auto-clear the optimistic sats overlay for [eventId] once OUR own
-     * kind-9735 receipt arrives. Identity-based: fires only when the
-     * receipt's embedded kind-9734 author matches ownPubkey, so someone
-     * else's zap on the same post doesn't clear our overlay prematurely.
+     * Auto-clear the optimistic sats overlay for [eventId] once OUR own kind-9735
+     * receipt arrives. Identity-based: fires only for our own zap (public sender ==
+     * own, or a private zap promoted anon→own in MES), so someone else's zap on the
+     * same post doesn't clear our overlay.
+     *
+     * Race-safe SUBSCRIBE-THEN-CHECK: ownZapReceivedFlow is a replay-0 SharedFlow, so
+     * a receipt processed before we subscribe would be missed. We start collecting
+     * FIRST, then read the [hasOwnZapReceipt] state predicate — which reflects every
+     * receipt processed up to that read. Anything in the gap is caught by the
+     * already-active collector; the clear is idempotent so a double-fire is harmless.
      */
     private fun clearOptimisticOnReceipt(eventId: String) {
         optimisticClearJobs[eventId]?.cancel()
         val job = viewModelScope.launch {
-            memoryEventStore.ownZapReceivedFlow
-                .first { it == eventId }
-            _optimisticZapSats.value = _optimisticZapSats.value - eventId
+            val collector = launch {
+                memoryEventStore.ownZapReceivedFlow.first { it == eventId }
+                _optimisticZapSats.value = _optimisticZapSats.value - eventId
+            }
+            // THEN check: a receipt seen before the collector subscribed is caught here.
+            val already = withContext(Dispatchers.IO) { memoryEventStore.hasOwnZapReceipt(eventId) }
+            if (already) {
+                _optimisticZapSats.value = _optimisticZapSats.value - eventId
+                collector.cancel()
+            }
         }
         optimisticClearJobs[eventId] = job
         job.invokeOnCompletion { optimisticClearJobs.remove(eventId, job) }
