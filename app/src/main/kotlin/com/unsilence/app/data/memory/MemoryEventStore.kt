@@ -1044,18 +1044,27 @@ class MemoryEventStore @Inject constructor(
             ?.get(1) ?: return
 
         val sats = extractSatsFromZap(event)
+        // Parse embedded kind-9734 zap request for sender pubkey + comment.
+        val desc = parseZapDescription(event)
+
+        // Detail row FIRST and idempotent by receipt id: the per-zap rows are the
+        // durable source of truth (zapStats derives from them, and the restore
+        // repair pass rebuilds them from receipt events). A receipt re-seen across
+        // relays, or replayed by repair, must not add a duplicate row or double-count.
+        val list = zapDetailsByTarget
+            .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
+        val added = synchronized(list) {
+            if (list.any { it.eventId == event.id }) false
+            else { list.add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = event.id)); true }
+        }
+        if (!added) return  // duplicate receipt — already counted
+
         zapStatsByEventId.compute(targetId) { _, existing ->
             val current = existing ?: ZapAggregate.EMPTY
             ZapAggregate(current.count + 1, current.totalSats + sats)
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         invalidateStatsForTarget(targetId, dirty)
-
-        // Parse embedded kind-9734 zap request for sender pubkey + comment.
-        val desc = parseZapDescription(event)
-        zapDetailsByTarget
-            .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            .add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = event.id))
 
         // Own-zap detection: signal VM to clear optimistic sats overlay.
         // desc == null → anonymous, can never be our own. When the receipt targets
@@ -2572,7 +2581,20 @@ class MemoryEventStore @Inject constructor(
         val coord = articleCoordForEvent(eventId)
         val direct = zapDetailsByTarget[eventId]?.toList() ?: emptyList()
         val viaCoord = if (coord != null) zapDetailsByTarget[coord]?.toList() ?: emptyList() else emptyList()
-        return dedupeZapDetails(direct + viaCoord)
+        val deduped = dedupeZapDetails(direct + viaCoord)
+        if (deduped.isNotEmpty()) return deduped
+        // Legacy/bad-snapshot fallback: a raw aggregate persisted without detail
+        // rows and no surviving receipt event to repair from → synthesize one
+        // anonymous row so the drawer is never empty while the summary shows sats.
+        // eventId == null keeps it out of zapStats' receipt-backed path, so it
+        // never double-counts; a real receipt row always supersedes it.
+        val agg = zapStatsByEventId[eventId]
+            ?: coord?.let { zapStatsByEventId[it] }
+            ?: ZapAggregate.EMPTY
+        if (agg.count > 0 || agg.totalSats > 0L) {
+            return listOf(ZapDetail(senderPubkey = null, sats = agg.totalSats, comment = null, eventId = null))
+        }
+        return deduped
     }
 
     /** De-dup zap rows: first by receipt id (a receipt merged from both the id and
@@ -2893,6 +2915,49 @@ class MemoryEventStore @Inject constructor(
             .add(ZapDetail(senderPubkey, sats, comment, eventId = null))
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
+    }
+
+    /**
+     * Restore repair: rebuild per-zap detail rows from retained kind-9735 receipt
+     * events, then recompute the aggregate from those rows. insertFromSnapshot does
+     * NOT run handleZapReceipt, and the detail section persists independently of the
+     * aggregate section, so a restored snapshot can hold a zap aggregate with no
+     * detail rows — the action-bar count shows but the drawer is empty. This pass
+     * makes the receipt events the source of truth and is idempotent (matched by
+     * receipt id). It deliberately does NOT emit ownZapReceived — there is no VM
+     * optimistic overlay to clear during restore. Legacy aggregate-only entries
+     * with no surviving receipt event are left untouched (the drawer fallback in
+     * [zapDetailsForEvent] covers those).
+     */
+    internal fun repairZapDetailsFromReceipts() {
+        val receiptIds = idsByKind[9735]?.toList() ?: emptyList()
+        val touchedTargets = HashSet<String>()
+        for (rid in receiptIds) {
+            val event = eventsById[rid] ?: continue
+            val targetId = (event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }
+                ?: event.tags.firstOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
+                ?.get(1) ?: continue
+            val list = zapDetailsByTarget
+                .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
+            synchronized(list) {
+                if (list.none { it.eventId == rid }) {
+                    val sats = extractSatsFromZap(event)
+                    val desc = parseZapDescription(event)
+                    list.add(ZapDetail(desc?.senderPubkey, sats, desc?.comment, eventId = rid))
+                }
+            }
+            touchedTargets.add(targetId)
+        }
+        // Recompute the aggregate from receipt-backed rows for targets that have
+        // them, so summary == drawer. Targets with only the optimistic/legacy
+        // aggregate (no receipt rows) keep their existing raw aggregate.
+        for (targetId in touchedTargets) {
+            val list = zapDetailsByTarget[targetId] ?: continue
+            val receipts = synchronized(list) { list.filter { it.eventId != null } }
+            if (receipts.isNotEmpty()) {
+                zapStatsByEventId[targetId] = ZapAggregate(receipts.size, receipts.sumOf { it.sats })
+            }
+        }
     }
 
     /**
@@ -3897,6 +3962,9 @@ class MemoryEventStore @Inject constructor(
         // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
         // so newer snapshots that already persisted the counts do not double.
         reconcileNip22CommentReplyCountsFromEvents()
+        // V2 aggregates persist zap counts but no per-zap detail rows — rebuild
+        // them from retained kind-9735 events so the drawer matches the summary.
+        repairZapDetailsFromReceipts()
 
         // Bump all signals once (follows signal fires again — idempotent,
         // consumers use distinctUntilChanged or one-shot .first())
@@ -4496,6 +4564,10 @@ class MemoryEventStore @Inject constructor(
         // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
         // so newer snapshots that already persisted the counts do not double.
         reconcileNip22CommentReplyCountsFromEvents()
+        // Rebuild zap detail rows from retained kind-9735 events so the drawer
+        // matches the persisted summary (the detail section can drift from the
+        // aggregate section across saves; insertFromSnapshot skips handleZapReceipt).
+        repairZapDetailsFromReceipts()
 
         // Notification recipient index: already populated per-event by
         // insertFromSnapshot via indexNotificationRecipients — no rebuild pass.
@@ -4717,7 +4789,7 @@ class MemoryEventStore @Inject constructor(
         return NostrFilter(kinds, authors, ids, since, until, limit, search, tags)
     }
 
-    private fun insertFromSnapshot(event: NostrEvent) {
+    internal fun insertFromSnapshot(event: NostrEvent) {
         val nowSec = System.currentTimeMillis() / 1000L
         if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return
         if (event.kind in DERIVED_ONLY_KINDS) {
