@@ -361,6 +361,14 @@ fun EventCard(
                         imageDimensionCache = imageDimensionCache,
                         onNoteClick = onNoteClick,
                         onAuthorClick = onAuthorClick,
+                        thumbnailCache = thumbnailCache,
+                        exoPlayer = exoPlayer,
+                        isActiveVideo = isActiveVideo,
+                        activeVideoUrl = activeVideoUrl,
+                        isFullscreen = isFullscreen,
+                        onOpenFullscreen = onOpenFullscreen,
+                        isMuted = isMuted,
+                        onToggleMute = onToggleMute,
                     )
                 }
             }

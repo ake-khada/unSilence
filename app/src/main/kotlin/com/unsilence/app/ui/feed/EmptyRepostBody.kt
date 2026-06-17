@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ContentParser
@@ -51,6 +52,17 @@ fun EmptyRepostBody(
     imageDimensionCache: ImageDimensionCache?,
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit,
+    // Video env — forwarded so a poster-less reposted video gets the MMR
+    // first-frame (thumbnailCache) instead of a dark placeholder, and so the
+    // target video can attach the shared player when this row is active.
+    thumbnailCache: VideoThumbnailCache? = null,
+    exoPlayer: ExoPlayer? = null,
+    isActiveVideo: Boolean = false,
+    activeVideoUrl: String? = null,
+    isFullscreen: Boolean = false,
+    onOpenFullscreen: () -> Unit = {},
+    isMuted: Boolean = true,
+    onToggleMute: () -> Unit = {},
 ) {
     val state by produceState(EmptyRepostState(), targetId) {
         val ev = lookupEventWithAuthor(targetId, relayHints, targetAuthorPubkey)
@@ -95,6 +107,14 @@ fun EmptyRepostBody(
                 lookupModel         = lookupModel,
                 fetchOgMetadata     = fetchOgMetadata,
                 imageDimensionCache = imageDimensionCache,
+                thumbnailCache      = thumbnailCache,
+                exoPlayer           = exoPlayer,
+                isActiveVideo       = isActiveVideo,
+                activeVideoUrl      = activeVideoUrl,
+                isFullscreen        = isFullscreen,
+                onOpenFullscreen    = onOpenFullscreen,
+                isMuted             = isMuted,
+                onToggleMute        = onToggleMute,
                 nestDepth           = 0,
             )
         }
