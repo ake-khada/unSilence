@@ -115,6 +115,7 @@ fun UserProfileScreen(
     val pubkeyHex       by viewModel.pubkeyHex.collectAsStateWithLifecycle()
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val isLoadingPosts  by viewModel.isLoadingPosts.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
@@ -520,6 +521,7 @@ fun UserProfileScreen(
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                     showThreadParents = selectedTab == ProfileTab.REPLIES,
                     eventModelProvider = actionsViewModel::getEventModel,
+                    sensitiveMode = sensitiveMode,
                 )
             }
 

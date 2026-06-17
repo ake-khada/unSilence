@@ -20,6 +20,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
@@ -68,6 +69,7 @@ internal fun ContentFlow(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
     nestDepth: Int = 0,
     modifier: Modifier = Modifier,
 ) {
@@ -235,6 +237,7 @@ internal fun ContentFlow(
                         isMuted         = isMuted,
                         onToggleMute    = onToggleMute,
                         thumbnailCache  = thumbnailCache,
+                        sensitiveMode   = sensitiveMode,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
                             .padding(horizontal = hPad)
@@ -257,6 +260,7 @@ internal fun ContentFlow(
                             onNoteClick   = onNoteClick,
                             onAuthorClick = onAuthorClick,
                             nestDepth     = nestDepth,
+                            sensitiveMode = sensitiveMode,
                             modifier      = chipMod,
                         )
                     } else {

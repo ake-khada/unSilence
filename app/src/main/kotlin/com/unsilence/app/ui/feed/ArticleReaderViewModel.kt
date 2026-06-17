@@ -39,6 +39,12 @@ class ArticleReaderViewModel @Inject constructor(
     private val cardHydrator: CardHydrator,
 ) : ViewModel() {
 
+    /** NIP-36 sensitive-content display mode (shared with feed). */
+    val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
+        relayPreferencesStore.sensitiveContentModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly,
+                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+
     /** Comments for an article coordinate (oldest-first), live from MES. */
     fun commentsFlow(coord: String): Flow<List<FeedRow>> =
         memoryEventStore.articleCommentsFlow(coord)

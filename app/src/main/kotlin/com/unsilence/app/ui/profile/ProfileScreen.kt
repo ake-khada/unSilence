@@ -108,6 +108,7 @@ fun ProfileScreen(
 ) {
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
     val followerCount   by viewModel.followerCount.collectAsStateWithLifecycle()
@@ -439,6 +440,7 @@ fun ProfileScreen(
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
                     showThreadParents = selectedTab == ProfileTab.REPLIES,
                     eventModelProvider = actionsViewModel::getEventModel,
+                    sensitiveMode = sensitiveMode,
                 )
             }
 

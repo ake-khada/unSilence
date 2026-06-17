@@ -104,6 +104,7 @@ fun SearchScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(),
 ) {
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
+    val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val trendingHashtags by viewModel.trendingHashtags.collectAsStateWithLifecycle()
     val trendingUsers   by viewModel.trendingUsers.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
@@ -349,6 +350,7 @@ fun SearchScreen(
                                 thumbnailCache = actionsViewModel.videoThumbnailCache,
                                 imageDimensionCache = actionsViewModel.imageDimensionCache,
                                 eventModelProvider = actionsViewModel::getEventModel,
+                                sensitiveMode = sensitiveMode,
                             )
                         }
                     }
@@ -398,6 +400,7 @@ fun SearchScreen(
                                 thumbnailCache = actionsViewModel.videoThumbnailCache,
                                 imageDimensionCache = actionsViewModel.imageDimensionCache,
                                 eventModelProvider = actionsViewModel::getEventModel,
+                                sensitiveMode = sensitiveMode,
                             )
                         }
                     }

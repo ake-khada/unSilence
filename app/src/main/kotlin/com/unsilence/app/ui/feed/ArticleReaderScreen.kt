@@ -236,6 +236,7 @@ fun ArticleReaderScreen(
         statsFlow?.invoke(model.engagementId) ?: articleReaderVm.statsFlow(model.engagementId)
     }
     val articleStats by articleStatsFlow.collectAsStateWithLifecycle()
+    val sensitiveMode by articleReaderVm.sensitiveContentMode.collectAsStateWithLifecycle()
     val replyCount    = articleStats.replyCount
     val repostCount   = articleStats.repostCount
     val reactionCount = articleStats.reactionCount
@@ -581,6 +582,9 @@ fun ArticleReaderScreen(
                                 reactionsForEvent     = articleReaderVm::reactionsForEvent,
                                 imageDimensionCache   = commentActionsVm.imageDimensionCache,
                                 thumbnailCache        = commentActionsVm.videoThumbnailCache,
+                                sensitiveMode         = sensitiveMode,
+                                isSensitive           = comment.hasContentWarning,
+                                contentWarningReason  = comment.contentWarningReason,
                             )
                             }
                             HorizontalDivider(color = BorderFaint)

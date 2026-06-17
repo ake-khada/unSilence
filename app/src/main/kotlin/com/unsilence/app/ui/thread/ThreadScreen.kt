@@ -83,6 +83,7 @@ fun ThreadScreen(
     DisposableEffect(Unit) { onDispose { viewModel.clearThread() } }
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
+    val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -245,6 +246,9 @@ fun ThreadScreen(
                                     activeVideoUrl      = videoScope.activeVideoUrl,
                                     isFullscreen        = videoScope.showFullscreenVideo,
                                     onOpenFullscreen    = { videoScope.openFullscreen(note.id) },
+                                    sensitiveMode       = sensitiveMode,
+                                    isSensitive         = note.hasContentWarning,
+                                    contentWarningReason = note.contentWarningReason,
                                 )
                                 HorizontalDivider(
                                     color     = BorderFaint,
@@ -333,6 +337,9 @@ fun ThreadScreen(
                                         activeVideoUrl      = videoScope.activeVideoUrl,
                                         isFullscreen        = videoScope.showFullscreenVideo,
                                         onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
+                                        sensitiveMode       = sensitiveMode,
+                                        isSensitive         = reply.hasContentWarning,
+                                        contentWarningReason = reply.contentWarningReason,
                                     )
                                 }
                             }

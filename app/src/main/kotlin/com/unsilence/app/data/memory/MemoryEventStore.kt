@@ -31,6 +31,7 @@ import java.io.DataOutputStream
 import java.io.IOException
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.NostrFilter
+import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -4772,6 +4773,11 @@ class MemoryEventStore @Inject constructor(
         val relaysSeen = ConcurrentHashMap.newKeySet<String>()
         for (i in 0 until seenCount) relaysSeen.add(readStr())
 
+        // Migration: recompute effective CW for kind-6/16 so embedded-repost
+        // wrappers persisted before the effective-warning fix get flagged.
+        val (effHasCw, effCwReason) = if (kind == 6 || kind == 16)
+            effectiveContentWarning(kind, content, tags) else (hasCW to cwReason)
+
         return NostrEvent(
             id = id,
             pubkey = pubkey,
@@ -4784,8 +4790,8 @@ class MemoryEventStore @Inject constructor(
             relayUrl = relayUrl,
             replyToId = replyToId,
             rootId = rootId,
-            hasContentWarning = hasCW,
-            contentWarningReason = cwReason,
+            hasContentWarning = effHasCw,
+            contentWarningReason = effCwReason,
             firstSeenAt = firstSeenAt,
             relaysSeen = relaysSeen,
         )
@@ -5058,11 +5064,17 @@ class MemoryEventStore @Inject constructor(
         val parts = line.split('\t')
         if (parts.size < 14) return null
         val tags = deserializeTags(parts[5])
+        val evKind = parts[2].toIntOrNull() ?: return null
+        val evContent = unescapeContent(parts[3])
+        // Migration: recompute effective CW for kind-6/16 (see binary path).
+        val (effHasCw, effCwReason) = if (evKind == 6 || evKind == 16)
+            effectiveContentWarning(evKind, evContent, tags)
+            else ((parts[10].toBooleanStrictOrNull() ?: false) to parts[11].ifEmpty { null })
         return NostrEvent(
             id = parts[0],
             pubkey = parts[1],
-            kind = parts[2].toIntOrNull() ?: return null,
-            content = unescapeContent(parts[3]),
+            kind = evKind,
+            content = evContent,
             createdAt = parts[4].toLongOrNull() ?: return null,
             tags = tags,
             tagsJson = tagsToJson(tags),
@@ -5070,8 +5082,8 @@ class MemoryEventStore @Inject constructor(
             relayUrl = parts[7],
             replyToId = parts[8].ifEmpty { null },
             rootId = parts[9].ifEmpty { null },
-            hasContentWarning = parts[10].toBooleanStrictOrNull() ?: false,
-            contentWarningReason = parts[11].ifEmpty { null },
+            hasContentWarning = effHasCw,
+            contentWarningReason = effCwReason,
             firstSeenAt = parts[12].toLongOrNull() ?: 0L,
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply {
                 addAll(parts[13].split(",").filter { it.isNotEmpty() })

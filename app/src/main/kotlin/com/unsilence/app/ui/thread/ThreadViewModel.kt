@@ -50,7 +50,14 @@ class ThreadViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val outboxResolver: OutboxRelayResolver,
     private val cardHydrator: CardHydrator,
+    private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
 ) : ViewModel() {
+
+    /** NIP-36 sensitive-content display mode (shared with feed). */
+    val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
+        relayPreferencesStore.sensitiveContentModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly,
+                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
 
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()

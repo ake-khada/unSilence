@@ -362,7 +362,7 @@ fun FeedScreen(
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
                         showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
                         eventModelProvider = actionsViewModel::getEventModel,
-                        sensitiveBlur = sensitiveMode == SensitiveContentMode.BLUR,
+                        sensitiveMode = sensitiveMode,
                     )
 
                     // "Load more" button at the end of the current batch.

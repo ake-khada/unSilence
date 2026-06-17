@@ -407,7 +407,7 @@ class Subscription @Inject constructor(
             1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
             else -> Pair(null, null)
         }
-        val (hasCw, cwReason) = parseContentWarning(dto.tags)
+        val (hasCw, cwReason) = effectiveContentWarning(dto.kind, dto.content, dto.tags)
 
         return NostrEvent(
             id = dto.id,
