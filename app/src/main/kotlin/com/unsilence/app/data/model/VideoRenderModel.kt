@@ -55,7 +55,7 @@ fun buildVideoRenderModels(
     content: String,
     tags: List<List<String>>,
 ): List<VideoRenderModel> {
-    val (effectiveContent, imetaMedia) = if (kind == 6 && content.isNotBlank()) {
+    val (effectiveContent, imetaMedia) = if ((kind == 6 || kind == 16) && content.isNotBlank()) {
         runCatching {
             val inner = NostrJson.parseToJsonElement(content).jsonObject
             val innerContent = inner["content"]?.jsonPrimitive?.content ?: content
@@ -77,10 +77,10 @@ fun buildVideoRenderModels(
 }
 
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
-    // For kind-6 reposts, extract effective content AND tags from the embedded
-    // inner event JSON.  The outer wrapper's tags have no imeta; using them
-    // would produce zero video metadata (wrong aspect ratio, no poster URL).
-    val (effectiveContent, imetaMedia) = if (row.kind == 6 && row.content.isNotBlank()) {
+    // For kind-6 / kind-16 reposts, extract effective content AND tags from the
+    // embedded inner event JSON.  The outer wrapper's tags have no imeta; using
+    // them would produce zero video metadata (wrong aspect ratio, no poster URL).
+    val (effectiveContent, imetaMedia) = if ((row.kind == 6 || row.kind == 16) && row.content.isNotBlank()) {
         runCatching {
             val inner = NostrJson.parseToJsonElement(row.content).jsonObject
             val content = inner["content"]?.jsonPrimitive?.content ?: row.content

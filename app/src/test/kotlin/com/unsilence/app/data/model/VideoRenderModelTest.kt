@@ -1,0 +1,67 @@
+package com.unsilence.app.data.model
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Unit tests for [buildVideoRenderModels] — the insert-time sidecar path that
+ * pre-computes video metadata (poster, aspect, dims) consumed by
+ * VideoPlaybackScope for autoplay eligibility (`noteIdsWithVideo`).
+ *
+ * This is a SEPARATE code path from ContentParser.tokenize: it has its own
+ * kind-6/16 repost unwrap, so it needs its own coverage. The wrapper `tags`
+ * are deliberately empty in the repost cases so the video can ONLY be derived
+ * by unwrapping the embedded inner-event JSON — a true regression guard.
+ */
+class VideoRenderModelTest {
+
+    private val innerVideoEvent = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":21,""" +
+        """"content":"","created_at":900,""" +
+        """"tags":[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1920x1080","image https://vid.host/poster.jpg"]]}"""
+
+    @Test
+    fun `kind 16 embedded repost derives inner video metadata from embedded json`() {
+        val models = buildVideoRenderModels(kind = 16, content = innerVideoEvent, tags = emptyList())
+        assertEquals(1, models.size)
+        val m = models[0]
+        assertEquals("https://vid.host/clip.mp4", m.videoUrl)
+        assertEquals(1920f / 1080f, m.aspectRatio, 0.01f)
+        assertEquals("https://vid.host/poster.jpg", m.posterUrl)
+        assertEquals(1920, m.widthPx)
+        assertEquals(1080, m.heightPx)
+    }
+
+    @Test
+    fun `kind 6 embedded repost derives inner video metadata from embedded json`() {
+        val models = buildVideoRenderModels(kind = 6, content = innerVideoEvent, tags = emptyList())
+        assertEquals(1, models.size)
+        assertEquals("https://vid.host/clip.mp4", models[0].videoUrl)
+        assertEquals("https://vid.host/poster.jpg", models[0].posterUrl)
+    }
+
+    @Test
+    fun `native video note reads imeta from its own tags`() {
+        val tags = listOf(
+            listOf("imeta", "url https://vid.host/native.mp4", "m video/mp4", "dim 1280x720"),
+        )
+        val models = buildVideoRenderModels(kind = 1, content = "", tags = tags)
+        assertEquals(1, models.size)
+        assertEquals("https://vid.host/native.mp4", models[0].videoUrl)
+        assertEquals(1280f / 720f, models[0].aspectRatio, 0.01f)
+    }
+
+    @Test
+    fun `repost with no inner video yields no models`() {
+        val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"content":"just text","tags":[]}"""
+        val models = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList())
+        assertTrue(models.isEmpty())
+    }
+
+    @Test
+    fun `malformed embedded json does not crash`() {
+        val models = buildVideoRenderModels(kind = 16, content = "not json", tags = emptyList())
+        assertNotNull(models)
+    }
+}

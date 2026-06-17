@@ -131,9 +131,12 @@ internal fun ContentFlow(
                     // without this trim.
                     trimTextRunEdges(runForInline)
 
-                    if (runForInline.isEmpty()) { i = j; continue }
-
-                    InlineText(
+                    // A run may be link-only (e.g. a bare-URL note): runForInline
+                    // is empty but ogToRender still holds the link. Skip only the
+                    // inline text in that case — the OG card loop below MUST still
+                    // run, otherwise the note renders completely blank (no URL, no
+                    // preview). Do NOT `continue` here.
+                    if (runForInline.isNotEmpty()) InlineText(
                         segments      = runForInline,
                         lookupProfile = lookupProfile,
                         onAuthorClick = onAuthorClick,

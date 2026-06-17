@@ -4933,7 +4933,7 @@ class MemoryEventStore @Inject constructor(
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
-        if (event.kind in setOf(1, 6, 20, 21)) {
+        if (event.kind in setOf(1, 6, 16, 20, 21)) {
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
             val models = com.unsilence.app.data.model.buildVideoRenderModels(
                 event.kind, event.content, event.tags,
