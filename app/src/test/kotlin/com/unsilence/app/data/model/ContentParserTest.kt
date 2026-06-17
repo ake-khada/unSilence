@@ -454,6 +454,50 @@ class ContentParserTest {
         assertTrue(model.segments[0] is Segment.Video)
     }
 
+    // ── Reposted NIP-68: imeta prepend must key off effectiveKind, not raw kind ─
+    // A kind-6/16 repost wrapping a blank-content kind-21 carries its video only
+    // in the INNER imeta tags. The prepend used to gate on the wrapper's raw kind
+    // (6/16) and dropped the video entirely; it now keys off effectiveKind (21).
+
+    @Test
+    fun `kind 6 wrapping a NIP-68 video prepends the inner imeta video`() {
+        val innerPk = "b".repeat(64)
+        val embedded = """{"id":"inner","pubkey":"$innerPk","kind":21,"content":"","created_at":900,""" +
+            """"tags":[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1920x1080","image https://vid.host/poster.jpg"]]}"""
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","inner"]]""")
+        assertEquals(21, model.effectiveKind)
+        val video = model.segments.filterIsInstance<Segment.Video>().firstOrNull()
+        assertNotNull("reposted kind-21 must surface its inner imeta video", video)
+        assertEquals("https://vid.host/clip.mp4", video!!.model.videoUrl)
+        assertEquals(1920f / 1080f, video.model.aspectRatio, 0.01f)
+        assertEquals("https://vid.host/poster.jpg", video.model.posterUrl)
+    }
+
+    @Test
+    fun `kind 16 wrapping a NIP-68 video prepends the inner imeta video`() {
+        val innerPk = "c".repeat(64)
+        val embedded = """{"id":"inner","pubkey":"$innerPk","kind":21,"content":"","created_at":900,""" +
+            """"tags":[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1280x720"]]}"""
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","21"]]""")
+        assertEquals(21, model.effectiveKind)
+        val video = model.segments.filterIsInstance<Segment.Video>().firstOrNull()
+        assertNotNull("generic-reposted kind-21 must surface its inner imeta video", video)
+        assertEquals("https://vid.host/clip.mp4", video!!.model.videoUrl)
+        assertEquals(1280f / 720f, video.model.aspectRatio, 0.01f)
+    }
+
+    @Test
+    fun `kind 16 wrapping a NIP-68 picture prepends the inner imeta image`() {
+        val innerPk = "d".repeat(64)
+        val embedded = """{"id":"inner","pubkey":"$innerPk","kind":20,"content":"","created_at":900,""" +
+            """"tags":[["imeta","url https://img.host/photo.jpg","dim 800x600"]]}"""
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","20"]]""")
+        assertEquals(20, model.effectiveKind)
+        val image = model.segments.filterIsInstance<Segment.Image>().firstOrNull()
+        assertNotNull("generic-reposted kind-20 must surface its inner imeta image", image)
+        assertEquals("https://img.host/photo.jpg", image!!.url)
+    }
+
     // ── Q-tag relay hints ───────────────────────────────────────────────────
 
     @Test

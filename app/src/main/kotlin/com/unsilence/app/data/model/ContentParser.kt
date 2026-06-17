@@ -122,10 +122,13 @@ object ContentParser {
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
         // kind-1 notes and kind-1111 comments (incl. reposted/wrapped — effectiveKind,
         // effectiveContent) get render-only leading-`>` blockquotes; else tokenize flat.
+        // Pass effectiveKind (not raw kind) so a kind-6/16 repost wrapping a
+        // NIP-68 picture/video (20/21) prepends its imeta-only media. For native
+        // events effectiveKind == kind, so this is a no-op there.
         val tokenized = if (effectiveKind == 1 || effectiveKind == 1111) {
-            tokenizeWithBlockquotes(parseInput, imeta, qHints, kind)
+            tokenizeWithBlockquotes(parseInput, imeta, qHints, effectiveKind)
         } else {
-            tokenize(parseInput, imeta, qHints, kind)
+            tokenize(parseInput, imeta, qHints, effectiveKind)
         }
         // Cap 2: bound SEGMENT count; collapse the tail into one plain-text marker.
         // Flat count includes BlockQuote inner segments, so a wall of `>` lines can't

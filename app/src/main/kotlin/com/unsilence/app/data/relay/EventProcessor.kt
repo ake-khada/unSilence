@@ -603,7 +603,7 @@ class EventProcessor @Inject constructor(
         // Pre-compute media metadata at insert time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
         for (event in eventList) {
-            if (event.kind in setOf(1, 6, 20, 21)) {
+            if (event.kind in setOf(1, 6, 16, 20, 21)) {
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
                 val models = buildVideoRenderModels(event.kind, event.content, event.tags)
                 memoryEventStore.putVideoRenderModels(event.id, models)
