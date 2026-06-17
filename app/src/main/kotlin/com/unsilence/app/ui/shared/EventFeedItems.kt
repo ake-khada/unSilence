@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.ContentParser
@@ -116,7 +117,7 @@ fun LazyListScope.eventFeedItems(
     imageDimensionCache: ImageDimensionCache? = null,
     showThreadParents: Boolean = false,
     eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveBlur: Boolean = false,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
     // Resolve once per items-builder pass — getPinnedEmojis() allocates a fresh
     // list per call, which defeats Compose skipping when invoked per item.
@@ -143,7 +144,7 @@ fun LazyListScope.eventFeedItems(
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
                 eventModelProvider = eventModelProvider,
-                sensitiveBlur = sensitiveBlur,
+                sensitiveMode = sensitiveMode,
             )
         } else {
             EventFeedItem(
@@ -158,7 +159,7 @@ fun LazyListScope.eventFeedItems(
                 thumbnailCache = thumbnailCache,
                 imageDimensionCache = imageDimensionCache,
                 eventModelProvider = eventModelProvider,
-                sensitiveBlur = sensitiveBlur,
+                sensitiveMode = sensitiveMode,
             )
         }
         HorizontalDivider(
@@ -187,7 +188,7 @@ private fun ThreadedReplyItem(
     thumbnailCache: VideoThumbnailCache? = null,
     imageDimensionCache: ImageDimensionCache? = null,
     eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveBlur: Boolean = false,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
     // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
     // Pass the reply's source relay as a hint — the parent event is most likely
@@ -231,7 +232,7 @@ private fun ThreadedReplyItem(
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
         eventModelProvider = eventModelProvider,
-        sensitiveBlur = sensitiveBlur,
+        sensitiveMode = sensitiveMode,
     )
 }
 
@@ -251,6 +252,7 @@ internal fun ThreadParentCard(
     onAuthorClick: (String) -> Unit = {},
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
     modifier: Modifier = Modifier,
 ) {
     val model = remember(event.id) {
@@ -309,18 +311,25 @@ internal fun ThreadParentCard(
 
         if (model != null) {
             Spacer(Modifier.height(4.dp))
-            ContentFlow(
-                model               = model,
-                role                = CardRole.Embedded,
-                onNoteClick         = onNoteClick,
-                onAuthorClick       = onAuthorClick,
-                lookupProfile       = lookupProfile,
-                lookupEvent         = lookupEvent,
-                lookupModel         = lookupModel,
-                fetchOgMetadata     = fetchOgMetadata,
-                imageDimensionCache = imageDimensionCache,
-                nestDepth           = 1,
-            )
+            // NIP-36: gate on the parent's own content-warning.
+            EmbeddedSensitiveGate(
+                mode = sensitiveMode,
+                sensitive = event.hasContentWarning,
+                reason = event.contentWarningReason,
+            ) {
+                ContentFlow(
+                    model               = model,
+                    role                = CardRole.Embedded,
+                    onNoteClick         = onNoteClick,
+                    onAuthorClick       = onAuthorClick,
+                    lookupProfile       = lookupProfile,
+                    lookupEvent         = lookupEvent,
+                    lookupModel         = lookupModel,
+                    fetchOgMetadata     = fetchOgMetadata,
+                    imageDimensionCache = imageDimensionCache,
+                    nestDepth           = 1,
+                )
+            }
         }
     }
 }
@@ -340,7 +349,7 @@ private fun EventFeedItem(
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
     eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveBlur: Boolean = false,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
     val model = remember(row.id) {
         eventModelProvider?.invoke(row.id) ?: row.toEventModel()
@@ -420,7 +429,8 @@ private fun EventFeedItem(
         parentEvent         = parentEvent,
         parentAuthor        = parentAuthor,
         onLongPress         = callbacks.onLongPress?.let { lp -> { lp(row) } },
-        sensitiveBlur       = sensitiveBlur && row.hasContentWarning,
+        sensitiveMode       = sensitiveMode,
+        isSensitive         = row.hasContentWarning,
         contentWarningReason = row.contentWarningReason,
     )
 }

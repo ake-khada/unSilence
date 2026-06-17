@@ -14,6 +14,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import com.unsilence.app.data.model.buildVideoRenderModels
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -409,7 +412,7 @@ class EventProcessor @Inject constructor(
             else -> Pair(null, null)
         }
 
-        val (hasCw, cwReason) = parseContentWarning(tags)
+        val (hasCw, cwReason) = effectiveContentWarning(dto.kind, dto.content, tags)
 
         val nostrEvent = NostrEvent(
             id = dto.id,
@@ -688,4 +691,30 @@ internal fun parseContentWarning(tags: List<List<String>>): Pair<Boolean, String
         ?: return Pair(false, null)
     val reason = cwTag.getOrNull(1)?.takeIf { it.isNotBlank() }
     return Pair(true, reason)
+}
+
+/**
+ * Effective NIP-36 content-warning, repost-aware. For kind-6/16 reposts that
+ * embed the target event as JSON in `content`, the wrapper's own tags carry no
+ * `content-warning` (it lives on the inner event), so [parseContentWarning] on
+ * the wrapper would miss a sensitive target. This ORs the inner event's warning
+ * in so a repost of sensitive content is itself flagged sensitive — the flag the
+ * feed hide-filter and card blur/hide gates consume. Wrapper reason wins, else
+ * inner. Shared by EventProcessor + Subscription (same package, top-level).
+ */
+internal fun effectiveContentWarning(
+    kind: Int,
+    content: String,
+    tags: List<List<String>>,
+): Pair<Boolean, String?> {
+    val (wrapperCw, wrapperReason) = parseContentWarning(tags)
+    if ((kind != 6 && kind != 16) || content.isBlank()) return wrapperCw to wrapperReason
+    val inner = runCatching {
+        val obj = NostrJson.parseToJsonElement(content).jsonObject
+        val innerTags = obj["tags"]?.jsonArray?.map { tagEl ->
+            tagEl.jsonArray.map { it.jsonPrimitive.content }
+        } ?: emptyList()
+        parseContentWarning(innerTags)
+    }.getOrNull() ?: (false to null)
+    return (wrapperCw || inner.first) to (wrapperReason ?: inner.second)
 }

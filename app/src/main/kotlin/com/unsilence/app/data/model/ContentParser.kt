@@ -182,10 +182,33 @@ object ContentParser {
             thread = ThreadRefs(replyToId, rootId),
             repost = repost,
             article = article,
-            warnings = ContentWarnings(hasContentWarning, contentWarningReason),
+            warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTagsJson),
             customEmojis = customEmojis,
             truncated = truncated,
         )
+    }
+
+    /**
+     * Effective NIP-36 warning for the model. For kind-6/16 reposts the inner
+     * (effective) tags carry the target's content-warning, which the wrapper's
+     * passed-in flag misses. ORs them so [EventModel.warnings] is honest for any
+     * consumer. Mirrors EventProcessor.effectiveContentWarning (which sets the
+     * FeedRow flag that actually gates feed hide + card blur/hide).
+     */
+    private fun effectiveWarnings(
+        repost: RepostInfo?,
+        wrapperHasCw: Boolean,
+        wrapperReason: String?,
+        effectiveTagsJson: String,
+    ): ContentWarnings {
+        if (repost == null) return ContentWarnings(wrapperHasCw, wrapperReason)
+        val inner = runCatching {
+            val arr = NostrJson.parseToJsonElement(effectiveTagsJson).jsonArray
+            val cw = arr.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "content-warning" }
+            if (cw == null) false to null
+            else true to cw.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+        }.getOrDefault(false to null)
+        return ContentWarnings(wrapperHasCw || inner.first, wrapperReason ?: inner.second)
     }
 
     // ── Repost parsing ───────────────────────────────────────────────────

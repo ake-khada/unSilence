@@ -34,6 +34,8 @@ internal fun EmbeddedArticleCard(
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit,
     nestDepth: Int = 0,
+    sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
+        com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
     modifier: Modifier = Modifier,
 ) {
     if (nestDepth >= 1) {
@@ -91,6 +93,9 @@ internal fun EmbeddedArticleCard(
         reactionsForEvent     = providerVm::reactionsForEvent,
         imageDimensionCache   = actionsVm.imageDimensionCache,
         thumbnailCache        = actionsVm.videoThumbnailCache,
+        sensitiveMode         = sensitiveMode,
+        isSensitive           = r.hasContentWarning,
+        contentWarningReason  = r.contentWarningReason,
         modifier              = modifier,
     )
 }

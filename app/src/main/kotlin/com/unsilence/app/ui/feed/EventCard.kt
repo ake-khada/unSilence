@@ -50,8 +50,10 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
 import com.unsilence.app.ui.shared.ThreadParentCard
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
@@ -119,7 +121,8 @@ fun EventCard(
     // Long-press actions
     onLongPress: (() -> Unit)? = null,
     // NIP-36 content warning
-    sensitiveBlur: Boolean = false,
+    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
+    isSensitive: Boolean = false,
     contentWarningReason: String? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -139,9 +142,10 @@ fun EventCard(
         }
     }
 
-    // NIP-36 blur state — tap to reveal, per-card
+    // NIP-36 blur/hide state — tap to reveal, per-card
     var revealed by remember { mutableStateOf(false) }
-    val showBlur = sensitiveBlur && !revealed
+    val showBlur = sensitiveMode == SensitiveContentMode.BLUR && isSensitive && !revealed
+    val hideWhole = sensitiveMode == SensitiveContentMode.HIDE && isSensitive
 
     // Resolve source profile for repost header (kind-6 wrapper author).
     val sourceProfile = if (model.repost != null && profileFlow != null) {
@@ -312,11 +316,20 @@ fun EventCard(
                 onAuthorClick       = onAuthorClick,
                 fetchOgMetadata     = fetchOgMetadata,
                 imageDimensionCache = imageDimensionCache,
+                sensitiveMode       = sensitiveMode,
                 modifier            = Modifier.padding(bottom = Spacing.small),
             )
         }
 
-        // NIP-36 content warning blur overlay
+        // NIP-36 content warning blur/hide overlay. HIDE shows a compact
+        // placeholder (feed already drops these via its filter; this covers
+        // non-feed surfaces — profile/thread — and preserves thread structure).
+        if (hideWhole) {
+            SensitiveContentHiddenCard(
+                reason = contentWarningReason,
+                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
+        } else
         Box {
             Column(modifier = if (showBlur) Modifier.blur(24.dp) else Modifier) {
                 // Content flow — walks segments and renders primitives
@@ -340,6 +353,7 @@ fun EventCard(
                     isMuted             = isMuted,
                     onToggleMute        = onToggleMute,
                     thumbnailCache      = thumbnailCache,
+                    sensitiveMode       = sensitiveMode,
                 )
 
                 // Empty-content repost fallback (mostr.pub bridge style):
@@ -369,6 +383,7 @@ fun EventCard(
                         onOpenFullscreen = onOpenFullscreen,
                         isMuted = isMuted,
                         onToggleMute = onToggleMute,
+                        sensitiveMode = sensitiveMode,
                     )
                 }
             }

@@ -98,6 +98,12 @@ class UserProfileViewModel @Inject constructor(
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** NIP-36 sensitive-content display mode (shared with feed). */
+    val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
+        relayPreferencesStore.sensitiveContentModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly,
+                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+
     // ── Profile tabs ─────────────────────────────────────────────────────
 
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)

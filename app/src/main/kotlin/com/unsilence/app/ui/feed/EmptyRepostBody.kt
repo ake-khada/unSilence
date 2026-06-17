@@ -63,6 +63,8 @@ fun EmptyRepostBody(
     onOpenFullscreen: () -> Unit = {},
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
+    sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
+        com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
 ) {
     val state by produceState(EmptyRepostState(), targetId) {
         val ev = lookupEventWithAuthor(targetId, relayHints, targetAuthorPubkey)
@@ -97,26 +99,33 @@ fun EmptyRepostBody(
         state.event != null && state.model != null -> {
             // Render inline using ContentFlow — same pipeline as native posts.
             // No bordered box because the whole card IS the quote.
-            ContentFlow(
-                model               = state.model!!,
-                role                = CardRole.Embedded,
-                onNoteClick         = onNoteClick,
-                onAuthorClick       = onAuthorClick,
-                lookupProfile       = lookupProfile,
-                lookupEvent         = { id, h -> lookupEventWithAuthor(id, h, null) },
-                lookupModel         = lookupModel,
-                fetchOgMetadata     = fetchOgMetadata,
-                imageDimensionCache = imageDimensionCache,
-                thumbnailCache      = thumbnailCache,
-                exoPlayer           = exoPlayer,
-                isActiveVideo       = isActiveVideo,
-                activeVideoUrl      = activeVideoUrl,
-                isFullscreen        = isFullscreen,
-                onOpenFullscreen    = onOpenFullscreen,
-                isMuted             = isMuted,
-                onToggleMute        = onToggleMute,
-                nestDepth           = 0,
-            )
+            // NIP-36: gate on the reposted TARGET's own content-warning.
+            com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
+                mode = sensitiveMode,
+                sensitive = state.event!!.hasContentWarning,
+                reason = state.event!!.contentWarningReason,
+            ) {
+                ContentFlow(
+                    model               = state.model!!,
+                    role                = CardRole.Embedded,
+                    onNoteClick         = onNoteClick,
+                    onAuthorClick       = onAuthorClick,
+                    lookupProfile       = lookupProfile,
+                    lookupEvent         = { id, h -> lookupEventWithAuthor(id, h, null) },
+                    lookupModel         = lookupModel,
+                    fetchOgMetadata     = fetchOgMetadata,
+                    imageDimensionCache = imageDimensionCache,
+                    thumbnailCache      = thumbnailCache,
+                    exoPlayer           = exoPlayer,
+                    isActiveVideo       = isActiveVideo,
+                    activeVideoUrl      = activeVideoUrl,
+                    isFullscreen        = isFullscreen,
+                    onOpenFullscreen    = onOpenFullscreen,
+                    isMuted             = isMuted,
+                    onToggleMute        = onToggleMute,
+                    nestDepth           = 0,
+                )
+            }
         }
         state.unresolved -> {
             // Terminal failure — tappable fallback row. Card must always have height.

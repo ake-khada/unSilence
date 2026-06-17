@@ -2,6 +2,8 @@ package com.unsilence.app.ui.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.UserEntity
@@ -43,10 +45,17 @@ class SearchViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
     private val trendingClient: TrendingClient,
+    private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
     val uiState: StateFlow<SearchUiState> = _uiState.asStateFlow()
+
+    /** NIP-36 sensitive-content display mode (shared with feed). */
+    val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
+        relayPreferencesStore.sensitiveContentModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly,
+                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
 
     /** Trending hashtags from client-side t-tag frequency scan (top 8). */
     private val _trendingHashtags = MutableStateFlow<List<Pair<String, Int>>>(emptyList())

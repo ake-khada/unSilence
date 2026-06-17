@@ -85,6 +85,8 @@ internal fun QuoteCard(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
+        com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
@@ -115,11 +117,17 @@ internal fun QuoteCard(
         value = QuoteResolution(ev, auth, model)
     }
 
+    // NIP-36: the quoted TARGET's own content-warning (separate resolved event).
+    val targetSensitive = quoteData.event?.hasContentWarning == true
+    val targetReason = quoteData.event?.contentWarningReason
+
     // A quoted event that resolves to a long-form → render the canonical article
     // card (not the embedded markdown body). Same component as feed/naddr quotes.
     val resolvedModel = quoteData.model
     val resolvedDTag = resolvedModel?.article?.dTag
     if (resolvedModel?.effectiveKind == 30023 && resolvedDTag != null && nestDepth < 1) {
+        // EmbeddedArticleCard self-gates via its own EventCard (using the
+        // resolved article's content-warning), so no outer gate here.
         EmbeddedArticleCard(
             coord         = "30023:${resolvedModel.pubkey}:$resolvedDTag",
             author        = resolvedModel.pubkey,
@@ -128,6 +136,7 @@ internal fun QuoteCard(
             onNoteClick   = onNoteClick,
             onAuthorClick = onAuthorClick,
             nestDepth     = nestDepth,
+            sensitiveMode = sensitiveMode,
             modifier      = modifier,
         )
         return
@@ -185,6 +194,9 @@ internal fun QuoteCard(
                 }
                 Spacer(Modifier.height(4.dp))
 
+                com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
+                    mode = sensitiveMode, sensitive = targetSensitive, reason = targetReason,
+                ) {
                 if (eventModel != null && nestDepth < 1) {
                     // Full source-order rendering via ContentFlow (same pipeline as top-level cards)
                     ContentFlow(
@@ -240,6 +252,7 @@ internal fun QuoteCard(
                             overflow      = TextOverflow.Ellipsis,
                         )
                     }
+                }
                 }
             }
         } else if (quoteData.unresolved) {
