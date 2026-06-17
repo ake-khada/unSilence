@@ -105,6 +105,7 @@ fun EventCard(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     isActiveVideo: Boolean = false,
+    activeVideoUrl: String? = null,
     isFullscreen: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
     // New-post animation
@@ -332,6 +333,7 @@ fun EventCard(
                     fetchOgMetadata     = fetchOgMetadata,
                     imageDimensionCache = imageDimensionCache,
                     isActiveVideo       = isActiveVideo,
+                    activeVideoUrl      = activeVideoUrl,
                     isFullscreen        = isFullscreen,
                     onOpenFullscreen    = onOpenFullscreen,
                     exoPlayer           = exoPlayer,

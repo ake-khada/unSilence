@@ -63,6 +63,12 @@ internal fun EventVideoGrid(
     isMuted: Boolean,
     onToggleMute: () -> Unit,
     thumbnailCache: VideoThumbnailCache? = null,
+    // URL bound to the shared player for the active row. When non-null, the
+    // primary cell attaches the player ONLY if its own model.videoUrl matches —
+    // so a row with both its own video and a quoted video drives only the one
+    // the active URL points at. Null = caller didn't supply it: fall back to
+    // grid-level isActiveVideo (preserves existing behavior).
+    activeVideoUrl: String? = null,
     modifier: Modifier = Modifier,
 ) {
     if (videos.isEmpty()) return
@@ -78,8 +84,11 @@ internal fun EventVideoGrid(
     @Composable
     fun PrimaryVideoCell(video: Segment.Video, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
         val model = video.model
+        // Attach the shared player only when this cell's video is the one bound
+        // to the active URL (or when no URL was supplied — legacy fallback).
+        val urlMatchesActive = activeVideoUrl == null || model.videoUrl == activeVideoUrl
         if (isDirectVideoUrl(model.videoUrl)) {
-            if (isActiveVideo && exoPlayer != null) {
+            if (isActiveVideo && urlMatchesActive && exoPlayer != null) {
                 InlineVideoPlayer(
                     model            = model,
                     exoPlayer        = exoPlayer,

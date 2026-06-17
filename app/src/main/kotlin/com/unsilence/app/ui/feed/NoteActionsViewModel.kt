@@ -95,6 +95,14 @@ class NoteActionsViewModel @Inject constructor(
     /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
     fun getEventModel(eventId: String) = memoryEventStore.getOrParseEventModel(eventId)
 
+    /**
+     * CACHE-ONLY EventModel lookup (no parse). Returns null if the model has not
+     * already been parsed. Safe to call per-row on the UI path — unlike
+     * [getEventModel], it never triggers ContentParser on the composition thread.
+     * Used by VideoPlaybackScope to discover quote-only video rows.
+     */
+    fun getCachedEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
+
     // ── Custom emoji picker data ─────────────────────────────────────────────
 
     /** All resolved custom emoji for the logged-in user (inline + subscribed sets). */

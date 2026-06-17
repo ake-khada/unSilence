@@ -412,6 +412,7 @@ private fun EventFeedItem(
         isMuted             = videoScope?.isMuted ?: true,
         onToggleMute        = onToggleMute,
         isActiveVideo       = videoScope?.isActiveVideo(row.id) ?: false,
+        activeVideoUrl      = videoScope?.activeVideoUrl,
         isFullscreen        = videoScope?.showFullscreenVideo ?: false,
         onOpenFullscreen    = onOpenFullscreen,
         isNewPost           = isNewPost,
