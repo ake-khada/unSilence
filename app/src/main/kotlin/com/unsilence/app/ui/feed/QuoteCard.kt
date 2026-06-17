@@ -81,6 +81,7 @@ internal fun QuoteCard(
     imageDimensionCache: ImageDimensionCache? = null,
     exoPlayer: ExoPlayer? = null,
     isActiveVideo: Boolean = false,
+    activeVideoUrl: String? = null,
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
@@ -199,6 +200,11 @@ internal fun QuoteCard(
                         imageDimensionCache = imageDimensionCache,
                         exoPlayer           = exoPlayer,
                         isActiveVideo       = isActiveVideo,
+                        activeVideoUrl      = activeVideoUrl,
+                        // Tap on a quoted video NAVIGATES to the quoted note (unchanged).
+                        // Inline autoplay is wired, but fullscreen is intentionally not:
+                        // the parent row's openFullscreen(row.id) would bind to the
+                        // parent's own URL for own+quote rows. Documented, not "fixed".
                         onOpenFullscreen    = { onNoteClick(segment.eventId) },
                         isMuted             = isMuted,
                         onToggleMute        = onToggleMute,

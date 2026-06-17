@@ -167,6 +167,7 @@ fun UserProfileScreen(
         events = posts,
         listState = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
+        cachedModelProvider = actionsViewModel::getCachedEventModel,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────

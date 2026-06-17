@@ -162,6 +162,7 @@ fun FeedScreen(
         events = events,
         listState = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
+        cachedModelProvider = actionsViewModel::getCachedEventModel,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────

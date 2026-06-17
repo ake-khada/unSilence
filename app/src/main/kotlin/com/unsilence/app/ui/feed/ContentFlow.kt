@@ -61,6 +61,7 @@ internal fun ContentFlow(
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     imageDimensionCache: ImageDimensionCache?,
     isActiveVideo: Boolean = false,
+    activeVideoUrl: String? = null,
     isFullscreen: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
     exoPlayer: ExoPlayer? = null,
@@ -201,6 +202,7 @@ internal fun ContentFlow(
                     EventVideoGrid(
                         videos           = videos,
                         isActiveVideo    = if (showVideo) isActiveVideo else false,
+                        activeVideoUrl   = activeVideoUrl,
                         isFullscreen     = isFullscreen,
                         onOpenFullscreen = onOpenFullscreen,
                         exoPlayer        = if (showVideo) exoPlayer else null,
@@ -229,6 +231,7 @@ internal fun ContentFlow(
                         imageDimensionCache = imageDimensionCache,
                         exoPlayer       = if (showVideo) exoPlayer else null,
                         isActiveVideo   = if (showVideo) isActiveVideo else false,
+                        activeVideoUrl  = activeVideoUrl,
                         isMuted         = isMuted,
                         onToggleMute    = onToggleMute,
                         thumbnailCache  = thumbnailCache,

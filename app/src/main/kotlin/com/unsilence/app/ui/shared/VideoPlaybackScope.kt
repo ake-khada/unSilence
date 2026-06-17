@@ -18,6 +18,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.SharedPlayerHolder
@@ -73,6 +75,17 @@ class VideoPlaybackScope(
 
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
 
+    /**
+     * URL of the video currently bound to the shared player, derived from the
+     * active row's first render model. For a quote-only row this resolves to the
+     * QUOTED video's URL (the map keys the parent row.id to the quoted models),
+     * which lets nested grids attach the player only when their own
+     * model.videoUrl matches — preventing an own-video row from also driving a
+     * nested quoted video. Null when nothing is active.
+     */
+    val activeVideoUrl: String?
+        get() = activeVideoNoteId?.let { videoRenderModels[it]?.firstOrNull()?.videoUrl }
+
     fun toggleMute() { isMuted = !isMuted }
 
     fun openFullscreen(noteId: String) {
@@ -96,9 +109,44 @@ class VideoPlaybackScope(
 }
 
 /**
+ * Resolve the [VideoRenderModel]s that a feed row's lazy item should map to.
+ *
+ * Own videos always win. If a row has no own video, fall back to the FIRST
+ * quoted event that has video models — so a quote-only video row becomes
+ * autoplay-eligible at the parent row's lazy-item granularity (the detector
+ * keys off top-level lazy item keys, so the entry must be keyed by parent
+ * row.id). A row with BOTH its own video and a quoted video keeps its own
+ * video, so the shared player binds to the parent's URL — the per-video URL
+ * gate in EventVideoGrid then prevents the nested quoted grid from attaching.
+ *
+ * Pure function (no Compose/Android deps) — unit-tested.
+ */
+internal fun resolveRowVideoModels(
+    ownModels: List<VideoRenderModel>,
+    quoteEventIds: List<String>,
+    videoModelsFor: (String) -> List<VideoRenderModel>,
+): List<VideoRenderModel> {
+    if (ownModels.isNotEmpty()) return ownModels
+    return quoteEventIds
+        .firstNotNullOfOrNull { id -> videoModelsFor(id).takeIf { it.isNotEmpty() } }
+        ?: emptyList()
+}
+
+/** Quote-event ids from a (cached) parent model, in source order. */
+internal fun quoteEventIdsOf(model: EventModel?): List<String> =
+    model?.segments
+        ?.filterIsInstance<Segment.QuoteEvent>()
+        ?.map { it.eventId }
+        ?: emptyList()
+
+/**
  * Creates and wires a [VideoPlaybackScope] with lifecycle, mute sync,
  * playback transitions, and active-video detection — all the plumbing
  * that was previously duplicated per screen.
+ *
+ * [cachedModelProvider] MUST be cache-only (no parse) — it is called per row
+ * while building the model map on the composition thread. Passing a parsing
+ * provider would reintroduce UI-path ContentParser calls.
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Composable
@@ -108,6 +156,7 @@ fun rememberVideoPlaybackScope(
     events: List<FeedRow>,
     listState: LazyListState,
     videoModelProvider: ((String) -> List<VideoRenderModel>)? = null,
+    cachedModelProvider: ((String) -> EventModel?)? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
@@ -136,12 +185,22 @@ fun rememberVideoPlaybackScope(
 
     // Read pre-computed VideoRenderModels from MES sidecar cache (populated at insert time).
     // Falls back to buildVideoRenderModels(row) for events not in cache (e.g. optimistic inserts).
+    // Quote-only rows map to the QUOTED event's models (keyed by parent row.id).
+    // Quote discovery is cache-only: quoteEventIdsOf reads an already-parsed
+    // parent model via cachedModelProvider (no parse), and videoModelProvider is
+    // the MES sidecar lookup. A quote-only row therefore becomes eligible once
+    // its parent model is cached AND the quoted video's sidecar exists; the map
+    // recomputes on the next `events` change (frequent on a live feed).
     val renderModelsMap = remember(events) {
         events
             .filter { it.kind != 30023 }
             .mapNotNull { row ->
-                val models = videoModelProvider?.invoke(row.id)?.takeIf { it.isNotEmpty() }
+                val own = videoModelProvider?.invoke(row.id)?.takeIf { it.isNotEmpty() }
                     ?: buildVideoRenderModels(row)
+                val quoteIds = if (own.isEmpty()) quoteEventIdsOf(cachedModelProvider?.invoke(row.id)) else emptyList()
+                val models = resolveRowVideoModels(own, quoteIds) { id ->
+                    videoModelProvider?.invoke(id) ?: emptyList()
+                }
                 if (models.isNotEmpty()) row.id to models else null
             }
             .toMap()
@@ -205,7 +264,11 @@ fun rememberVideoPlaybackScope(
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
     LaunchedEffect(Unit) {
-        snapshotFlow { listState.layoutInfo }
+        // Reading scope.videoRenderModels inside the producer registers it as a
+        // snapshot dependency, so the detector re-evaluates when a late-resolved
+        // quote-only row enters the map (otherwise a static list would not pick
+        // up newly-eligible videos until the next scroll).
+        snapshotFlow { scope.videoRenderModels; listState.layoutInfo }
             .map { layoutInfo ->
                 // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value

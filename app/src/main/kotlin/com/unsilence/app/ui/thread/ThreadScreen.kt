@@ -128,6 +128,7 @@ fun ThreadScreen(
         events             = allThreadRows,
         listState          = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
+        cachedModelProvider = actionsViewModel::getCachedEventModel,
     )
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
@@ -241,6 +242,7 @@ fun ThreadScreen(
                                     isMuted             = videoScope.isMuted,
                                     onToggleMute        = { videoScope.toggleMute() },
                                     isActiveVideo       = videoScope.isActiveVideo(note.id),
+                                    activeVideoUrl      = videoScope.activeVideoUrl,
                                     isFullscreen        = videoScope.showFullscreenVideo,
                                     onOpenFullscreen    = { videoScope.openFullscreen(note.id) },
                                 )
@@ -328,6 +330,7 @@ fun ThreadScreen(
                                         isMuted             = videoScope.isMuted,
                                         onToggleMute        = { videoScope.toggleMute() },
                                         isActiveVideo       = videoScope.isActiveVideo(reply.id),
+                                        activeVideoUrl      = videoScope.activeVideoUrl,
                                         isFullscreen        = videoScope.showFullscreenVideo,
                                         onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
                                     )
