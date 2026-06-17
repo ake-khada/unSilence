@@ -89,6 +89,12 @@ class VideoPlaybackScope(
     fun toggleMute() { isMuted = !isMuted }
 
     fun openFullscreen(noteId: String) {
+        // Only claim fullscreen when the row resolves to a bound video URL.
+        // A cold empty-repost target may render its preview before the model map
+        // recomputes to include row.id → targetModels; without this guard,
+        // tapping it would open an empty (black) fullscreen with no media. The
+        // tap is a no-op until the target warms (map recompute on next `events`).
+        if (videoRenderModels[noteId]?.firstOrNull()?.videoUrl == null) return
         val wasActive = activeVideoNoteId
         if (noteId != wasActive) {
             // Different video — clear decoder output so the dialog doesn't
@@ -112,32 +118,47 @@ class VideoPlaybackScope(
  * Resolve the [VideoRenderModel]s that a feed row's lazy item should map to.
  *
  * Own videos always win. If a row has no own video, fall back to the FIRST
- * quoted event that has video models — so a quote-only video row becomes
- * autoplay-eligible at the parent row's lazy-item granularity (the detector
- * keys off top-level lazy item keys, so the entry must be keyed by parent
- * row.id). A row with BOTH its own video and a quoted video keeps its own
- * video, so the shared player binds to the parent's URL — the per-video URL
- * gate in EventVideoGrid then prevents the nested quoted grid from attaching.
+ * candidate event (quoted note, or empty-repost target) that has video models
+ * — so a quote-only / empty-repost video row becomes autoplay-eligible at the
+ * parent row's lazy-item granularity (the detector keys off top-level lazy
+ * item keys, so the entry must be keyed by parent row.id). A row with BOTH its
+ * own video and a candidate video keeps its own video, so the shared player
+ * binds to the parent's URL — the per-video URL gate in EventVideoGrid then
+ * prevents the nested grid from attaching.
  *
  * Pure function (no Compose/Android deps) — unit-tested.
  */
 internal fun resolveRowVideoModels(
     ownModels: List<VideoRenderModel>,
-    quoteEventIds: List<String>,
+    candidateEventIds: List<String>,
     videoModelsFor: (String) -> List<VideoRenderModel>,
 ): List<VideoRenderModel> {
     if (ownModels.isNotEmpty()) return ownModels
-    return quoteEventIds
+    return candidateEventIds
         .firstNotNullOfOrNull { id -> videoModelsFor(id).takeIf { it.isNotEmpty() } }
         ?: emptyList()
 }
 
-/** Quote-event ids from a (cached) parent model, in source order. */
-internal fun quoteEventIdsOf(model: EventModel?): List<String> =
-    model?.segments
+/**
+ * Event ids whose video models a row may adopt when it has none of its own,
+ * in priority order:
+ *   1. Empty kind-6/16 repost target (NIP-10 rootId) — discoverable straight
+ *      from the FeedRow, so we don't need the parent model to be parsed/cached.
+ *   2. Quote-event ids from the (cached) parent model, in source order.
+ *
+ * [cachedModel] is cache-only (may be null); the rootId path covers the common
+ * empty-repost case without it.
+ */
+internal fun videoSourceCandidateIds(row: FeedRow, cachedModel: EventModel?): List<String> {
+    val ids = ArrayList<String>(2)
+    if ((row.kind == 6 || row.kind == 16) && row.content.isBlank()) {
+        row.rootId?.let { ids.add(it) }
+    }
+    cachedModel?.segments
         ?.filterIsInstance<Segment.QuoteEvent>()
-        ?.map { it.eventId }
-        ?: emptyList()
+        ?.forEach { ids.add(it.eventId) }
+    return ids
+}
 
 /**
  * Creates and wires a [VideoPlaybackScope] with lifecycle, mute sync,
@@ -185,20 +206,23 @@ fun rememberVideoPlaybackScope(
 
     // Read pre-computed VideoRenderModels from MES sidecar cache (populated at insert time).
     // Falls back to buildVideoRenderModels(row) for events not in cache (e.g. optimistic inserts).
-    // Quote-only rows map to the QUOTED event's models (keyed by parent row.id).
-    // Quote discovery is cache-only: quoteEventIdsOf reads an already-parsed
-    // parent model via cachedModelProvider (no parse), and videoModelProvider is
-    // the MES sidecar lookup. A quote-only row therefore becomes eligible once
-    // its parent model is cached AND the quoted video's sidecar exists; the map
-    // recomputes on the next `events` change (frequent on a live feed).
+    // Quote-only and empty-repost rows map to the QUOTED/TARGET event's models
+    // (keyed by parent row.id). Discovery is cache-only: videoSourceCandidateIds
+    // reads the empty-repost target from FeedRow.rootId and quote ids from an
+    // already-parsed model via cachedModelProvider (no parse); videoModelProvider
+    // is the MES sidecar lookup. Such a row becomes eligible once the target's
+    // video sidecar exists; the map recomputes on the next `events` change
+    // (frequent on a live feed) — see openFullscreen's guard for the cold case.
     val renderModelsMap = remember(events) {
         events
             .filter { it.kind != 30023 }
             .mapNotNull { row ->
                 val own = videoModelProvider?.invoke(row.id)?.takeIf { it.isNotEmpty() }
                     ?: buildVideoRenderModels(row)
-                val quoteIds = if (own.isEmpty()) quoteEventIdsOf(cachedModelProvider?.invoke(row.id)) else emptyList()
-                val models = resolveRowVideoModels(own, quoteIds) { id ->
+                val candidateIds = if (own.isEmpty())
+                    videoSourceCandidateIds(row, cachedModelProvider?.invoke(row.id))
+                else emptyList()
+                val models = resolveRowVideoModels(own, candidateIds) { id ->
                     videoModelProvider?.invoke(id) ?: emptyList()
                 }
                 if (models.isNotEmpty()) row.id to models else null
