@@ -1038,7 +1038,6 @@ private fun FeedSelectorSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState       = sheetState,
-        containerColor   = Surface1,
         shape            = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         dragHandle       = {
             Box(

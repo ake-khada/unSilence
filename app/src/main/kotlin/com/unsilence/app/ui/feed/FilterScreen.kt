@@ -43,7 +43,6 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Text3
-import com.unsilence.app.ui.theme.Surface1
 
 // ── Zap slider breakpoints (sats) ───────────────────────────────────────────
 private val ZAP_BREAKPOINTS = longArrayOf(
@@ -102,7 +101,6 @@ fun FilterBottomSheet(
             onDismiss()
         },
         sheetState     = sheetState,
-        containerColor = Surface1,
         shape          = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         dragHandle     = {
             Box(
