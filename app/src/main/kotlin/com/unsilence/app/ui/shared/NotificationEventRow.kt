@@ -3,18 +3,17 @@ package com.unsilence.app.ui.shared
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AlternateEmail
@@ -22,7 +21,6 @@ import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -30,12 +28,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.data.memory.NotificationActor
 import com.unsilence.app.data.memory.NotificationRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.relativeTime
@@ -45,16 +45,16 @@ import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
-import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 
 /**
- * Unified notification row that renders actor info + notification type icon +
- * an embedded compact note preview using the shared rendering pipeline.
+ * Notification rows share ONE typography rhythm across every type — replies,
+ * mentions, likes, boosts, zaps — so the grouped and single layouts read as one
+ * system (see notifications_grouped_hybrid_layout.html).
  *
- * Replaces the old custom NotificationItem that had its own inline text
- * preview instead of sharing the same event rendering logic.
+ *   • Single  → 32dp avatar + corner type badge · "Name action · time" / 1-line text
+ *   • Grouped → type icon → overlapping actor strip → time · "N verb · sats" / 1-line preview
  */
 @Composable
 fun NotificationEventRow(
@@ -67,12 +67,91 @@ fun NotificationEventRow(
     }
 }
 
+// ── Shared notification typography ──────────────────────────────────────────
+// One rhythm for every row type. Line height = AppType.bodyLarge (15sp): the
+// type-scale step that fits two bodySmall (13sp) lines just inside the 32dp
+// avatar. The φ spacing splits (12/20) bracket it — 12 would clip 13sp text, 20
+// is too airy — so the type-scale step is the correct compact anchor, snapped to
+// a named token rather than a raw literal.
+private val NotifLineHeight = AppType.bodyLarge
+
+// Trim the leading above the first line and below the last, and center glyphs
+// within each line box. Without this, lineHeight (15sp) on 13sp text distributes
+// the extra leading proportionally — more above each line — so the glyph mass
+// sits low and the block reads slightly below the avatar's centre. Trimming lets
+// the Row's CenterVertically center the actual glyphs, not the padded box.
+private val NotifTextStyle = TextStyle(
+    lineHeightStyle = LineHeightStyle(
+        alignment = LineHeightStyle.Alignment.Center,
+        trim = LineHeightStyle.Trim.Both,
+    ),
+)
+
+/** Name / action / count — bodySmall, tight line height, single line. */
+@Composable
+private fun NotificationPrimaryText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.White,
+    fontWeight: FontWeight = FontWeight.Normal,
+) {
+    Text(
+        text = text,
+        modifier = modifier,
+        color = color,
+        fontSize = AppType.bodySmall,
+        lineHeight = NotifLineHeight,
+        fontWeight = fontWeight,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = NotifTextStyle,
+    )
+}
+
+/** Target/preview text — same metrics, dim, always a single line. */
+@Composable
+private fun NotificationPreviewText(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = text,
+        modifier = modifier,
+        color = TextSecondary.copy(alpha = 0.7f),
+        fontSize = AppType.bodySmall,
+        lineHeight = NotifLineHeight,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = NotifTextStyle,
+    )
+}
+
+/** Right-edge timestamp — caption scale. */
+@Composable
+private fun NotificationTimestamp(
+    createdAt: Long,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = relativeTime(createdAt),
+        modifier = modifier,
+        color = TextSecondary,
+        fontSize = AppType.caption,
+        maxLines = 1,
+    )
+}
+
 @Composable
 private fun SingleNotificationRow(
     row: NotificationRow.Single,
     onNoteClick: (String) -> Unit,
 ) {
-    val (icon, iconTint, actionText) = notifMeta(row.notifType)
+    // Compact: 32dp avatar with a corner type badge, "Name action · time" on one
+    // line, then the reply/mention text on a single dim line — no grey box.
+    val (badgeIcon, badgeTint, action) = when (row.notifType) {
+        "reply" -> Triple(Icons.AutoMirrored.Filled.Chat, Brand, "replied")
+        else -> Triple(Icons.Filled.AlternateEmail, TextSecondary, "mentioned you")
+    }
     val actorLabel = row.actorDisplayName?.takeIf { it.isNotBlank() }
         ?: row.actorName?.takeIf { it.isNotBlank() }
         ?: "${row.actorPubkey.take(6)}…${row.actorPubkey.takeLast(4)}"
@@ -83,16 +162,12 @@ private fun SingleNotificationRow(
             .clickable(enabled = row.targetNoteId != null) {
                 row.targetNoteId?.let { onNoteClick(it) }
             }
-            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-        verticalAlignment = Alignment.Top,
+            .padding(horizontal = Spacing.medium, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Actor avatar with notification type icon below
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(Sizing.avatar)
-                    .clip(CircleShape),
-            ) {
+        // Avatar with a corner type badge.
+        Box(modifier = Modifier.size(Sizing.avatar)) {
+            Box(modifier = Modifier.fillMaxSize().clip(CircleShape)) {
                 IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
                 if (!row.actorPicture.isNullOrBlank()) {
                     AsyncImage(
@@ -102,82 +177,56 @@ private fun SingleNotificationRow(
                     )
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = iconTint,
-                modifier = Modifier.size(14.dp),
-            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(badgeTint)
+                    .border(2.dp, Color.Black, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(badgeIcon, contentDescription = null, tint = Color.Black, modifier = Modifier.size(9.dp))
+            }
         }
 
         Spacer(Modifier.width(Spacing.small))
 
-        // Content column
+        // Natural-height text block, centered against the avatar by the Row's
+        // CenterVertically + tight line heights → two lines land just inside the
+        // avatar height, aligned, without clipping. The timestamp lives OUTSIDE
+        // this column (below), so BOTH lines are width-bounded to its left — the
+        // content "…" ends just before the date, never under it.
         Column(modifier = Modifier.weight(1f)) {
-            // Actor + action label
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
+                NotificationPrimaryText(
                     text = actorLabel,
                     color = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = AppType.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 Spacer(Modifier.width(4.dp))
-                Text(
-                    text = actionText,
-                    color = TextSecondary,
-                    fontSize = AppType.bodySmall,
-                )
+                NotificationPrimaryText(text = action, color = TextSecondary)
             }
-
-            // For replies: show the parent note (what was replied to) then the reply
-            if (row.notifType == "reply" && row.parentNoteContent.isNotBlank()) {
-                CompactNotePreview(
-                    content = row.parentNoteContent,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-
-            // Compact embedded note preview — plain text for replies/reactions, grey box for reposts/zaps/mentions
             if (row.targetNoteContent.isNotBlank()) {
-                if (row.notifType == "reply" || row.notifType == "reaction") {
-                    Text(
-                        text = row.targetNoteContent.trim(),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (row.notifType == "reply") 0.85f else 0.7f),
-                        fontSize = AppType.bodySmall,
-                        lineHeight = 18.sp,
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                } else {
-                    CompactNotePreview(
-                        content = row.targetNoteContent,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
+                NotificationPreviewText(row.targetNoteContent.trim())
             }
         }
 
+        // Top-aligned so it sits with the name line; natural width, so the text
+        // column above stops before it.
         Spacer(Modifier.width(Spacing.small))
-
-        // Timestamp
-        Text(
-            text = relativeTime(row.createdAt),
-            color = TextSecondary,
-            fontSize = AppType.caption,
-        )
+        NotificationTimestamp(row.createdAt, modifier = Modifier.align(Alignment.Top))
     }
 }
 
 /**
- * Grouped reactions/reposts/zaps. INTERIM Phase-1 visuals — first actor's avatar
- * + count + verb (+ summed sats for zaps) + target preview. The overlapping actor
- * strip and tap-to-open actor sheet land in later phases.
+ * Grouped reactions/reposts/zaps. Three-line rhythm matching the mockup:
+ *   1. type icon → overlapping actor strip → timestamp (right edge)
+ *   2. "N liked/boosted/zapped your note" (+ summed sats for zaps)
+ *   3. one-line dim target preview
+ * Uses the same primary/preview text metrics as single rows. Tap-to-open actor
+ * sheet lands in a later phase.
  */
 @Composable
 private fun GroupedNotificationRow(
@@ -185,22 +234,88 @@ private fun GroupedNotificationRow(
     onNoteClick: (String) -> Unit,
 ) {
     val (icon, iconTint, verb) = notifMeta(row.notifType)
-    val firstActor = row.actors.firstOrNull()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = row.targetNoteId != null) { row.targetNoteId?.let { onNoteClick(it) } }
-            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-        verticalAlignment = Alignment.Top,
+            .padding(horizontal = Spacing.medium, vertical = 9.dp),
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(modifier = Modifier.size(Sizing.avatar).clip(CircleShape)) {
-                val pk = firstActor?.pubkey
+        // Content column — width-bounded to the left of the timestamp (below), so
+        // the strip, verb, and preview lines all stop before the date.
+        Column(modifier = Modifier.weight(1f)) {
+            // Strip line: type icon → overlapping avatars.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(Spacing.small))
+                ActorStrip(actors = row.actors, people = row.people)
+            }
+
+            // Verb line: "N verb (· sats)".
+            Row(
+                modifier = Modifier.padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NotificationPrimaryText(text = row.people.toString(), fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(4.dp))
+                NotificationPrimaryText(text = verb, color = TextSecondary)
+                if (row.notifType == "zap" && row.sumSats > 0) {
+                    Spacer(Modifier.width(4.dp))
+                    NotificationPrimaryText(
+                        text = "· ${formatSats(row.sumSats)} sats",
+                        color = Zap,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+
+            // Preview line: one dim line, same metrics as single rows.
+            if (row.targetNoteContent.isNotBlank()) {
+                NotificationPreviewText(
+                    text = row.targetNoteContent.trim(),
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+
+        // Top-aligned with the strip line; natural width, so the column stops before it.
+        Spacer(Modifier.width(Spacing.small))
+        NotificationTimestamp(row.mostRecentAt, modifier = Modifier.align(Alignment.Top))
+    }
+}
+
+/**
+ * Overlapping avatar strip. Up to five actor avatars at 27dp with a 2dp black
+ * ring, drawn with a negative gap so each laps the previous; a "+N" chip closes
+ * the strip when more actors remain.
+ */
+@Composable
+private fun ActorStrip(
+    actors: List<NotificationActor>,
+    people: Int,
+) {
+    val shown = actors.take(5)
+    Row(
+        horizontalArrangement = Arrangement.spacedBy((-7).dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        shown.forEach { actor ->
+            Box(
+                modifier = Modifier
+                    .size(27.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, Color.Black, CircleShape),
+            ) {
+                val pk = actor.pubkey
                 if (pk != null) {
                     IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
-                    if (!firstActor.picture.isNullOrBlank()) {
+                    if (!actor.picture.isNullOrBlank()) {
                         AsyncImage(
-                            model = rememberAvatarImageRequest(firstActor.picture, Sizing.avatar),
+                            model = rememberAvatarImageRequest(actor.picture, 27.dp),
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -209,44 +324,25 @@ private fun GroupedNotificationRow(
                     Box(modifier = Modifier.fillMaxSize().background(Surface2))
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Icon(imageVector = icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(14.dp))
         }
-
-        Spacer(Modifier.width(Spacing.small))
-
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        val extra = people - shown.size
+        if (extra > 0) {
+            Box(
+                modifier = Modifier
+                    .size(27.dp)
+                    .clip(CircleShape)
+                    .background(Surface2)
+                    .border(2.dp, Color.Black, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = row.people.toString(),
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = AppType.bodySmall,
+                    text = "+$extra",
+                    color = TextSecondary,
+                    fontSize = AppType.caption,
+                    maxLines = 1,
                 )
-                Spacer(Modifier.width(4.dp))
-                Text(text = verb, color = TextSecondary, fontSize = AppType.bodySmall)
-                if (row.notifType == "zap" && row.sumSats > 0) {
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "· ${formatSats(row.sumSats)} sats",
-                        color = Zap,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = AppType.bodySmall,
-                    )
-                }
-            }
-            if (row.targetNoteContent.isNotBlank()) {
-                CompactNotePreview(content = row.targetNoteContent, modifier = Modifier.padding(top = 4.dp))
             }
         }
-
-        Spacer(Modifier.width(Spacing.small))
-
-        Text(
-            text = relativeTime(row.mostRecentAt),
-            color = TextSecondary,
-            fontSize = AppType.caption,
-        )
     }
 }
 
@@ -254,35 +350,6 @@ private fun formatSats(sats: Long): String = when {
     sats >= 1_000_000 -> "%.1fM".format(sats / 1_000_000.0)
     sats >= 1_000 -> "%.1fk".format(sats / 1_000.0)
     else -> sats.toString()
-}
-
-/**
- * Compact note content preview — used inside notification rows and anywhere
- * a minimal inline event display is needed. Consistent with the embedded
- * quote card style but without the border for notifications.
- */
-@Composable
-private fun CompactNotePreview(
-    content: String,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(6.dp))
-            .background(SurfaceVariant)
-            .border(0.5.dp, Surface2, RoundedCornerShape(6.dp))
-            .padding(horizontal = Spacing.small, vertical = 6.dp),
-    ) {
-        Text(
-            text = content,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-            fontSize = AppType.bodySmall,
-            lineHeight = 18.sp,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -300,4 +367,3 @@ private fun notifMeta(notifType: String): NotifMeta = when (notifType) {
     "zap" -> NotifMeta(Icons.Filled.ElectricBolt, Zap, "zapped your note")
     else -> NotifMeta(Icons.Filled.AlternateEmail, TextSecondary, "mentioned you")
 }
-
