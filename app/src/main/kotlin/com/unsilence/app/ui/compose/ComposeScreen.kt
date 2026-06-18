@@ -86,7 +86,7 @@ import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.Zap
+import com.unsilence.app.ui.theme.Warn
 
 @Composable
 fun ComposeScreen(
@@ -499,7 +499,7 @@ fun ComposeScreen(
                             Icon(
                                 imageVector = Icons.Filled.WarningAmber,
                                 contentDescription = if (isSensitive) "Marked sensitive" else "Mark as sensitive",
-                                tint = if (isSensitive) Zap else TextSecondary.copy(alpha = 0.5f),
+                                tint = if (isSensitive) Warn else TextSecondary.copy(alpha = 0.5f),
                                 modifier = Modifier.size(24.dp),
                             )
                         }
@@ -516,7 +516,7 @@ fun ComposeScreen(
                         if (typedChars > 280) {
                             Text(
                                 text = "$typedChars",
-                                color = if (typedChars > 9000) Zap else TextSecondary,
+                                color = if (typedChars > 9000) Warn else TextSecondary,
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(end = 4.dp),
                             )
@@ -586,13 +586,13 @@ fun ComposeScreen(
                                 Icon(
                                     imageVector = Icons.Filled.WarningAmber,
                                     contentDescription = null,
-                                    tint = Zap,
+                                    tint = Warn,
                                     modifier = Modifier.size(14.dp),
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text(
                                     text = "Marked sensitive \u2014 viewers see a blur until tap",
-                                    color = Zap,
+                                    color = Warn,
                                     fontSize = AppType.caption,
                                 )
                             }
@@ -867,7 +867,7 @@ private fun PublishStatusPanel(
                     RelayPublishStatus.Pending  -> Icons.Filled.HourglassEmpty to TextSecondary
                     RelayPublishStatus.Accepted -> Icons.Filled.Check to Mint
                     RelayPublishStatus.Rejected -> Icons.Filled.Close to Like
-                    RelayPublishStatus.TimedOut -> Icons.Filled.ErrorOutline to Zap
+                    RelayPublishStatus.TimedOut -> Icons.Filled.ErrorOutline to Warn
                 }
                 Icon(icon, contentDescription = null, tint = tint,
                     modifier = Modifier.size(14.dp))

@@ -61,7 +61,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.Zap
+import com.unsilence.app.ui.theme.Warn
 
 private enum class MuteTab { USERS, WORDS, HASHTAGS }
 
@@ -574,7 +574,7 @@ private fun MuteSyncBanner(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Spacing.small))
-            .background(Zap.copy(alpha = 0.12f))
+            .background(Warn.copy(alpha = 0.12f))
             .padding(Spacing.medium),
     ) {
         Text(
@@ -585,7 +585,7 @@ private fun MuteSyncBanner(
                 "Mute sync disabled \u2014 encryption check failed. " +
                     "Mutes work locally but won\u2019t sync to relays or other clients."
             },
-            color = Zap,
+            color = Warn,
             fontSize = AppType.caption,
         )
         if (isAmberMode) {
@@ -594,7 +594,7 @@ private fun MuteSyncBanner(
                 onClick = onRetry,
                 shape = RoundedCornerShape(Spacing.small),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Zap,
+                    containerColor = Warn,
                     contentColor = Black,
                 ),
                 modifier = Modifier.fillMaxWidth(),
