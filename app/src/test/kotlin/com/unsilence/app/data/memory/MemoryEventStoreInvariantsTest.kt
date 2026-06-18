@@ -3292,11 +3292,13 @@ class MemoryEventStoreInvariantsTest {
         ))
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
-        assertEquals("Should have 1 notification", 1, notifs.size)
-        assertEquals("reaction", notifs[0].notifType)
-        assertEquals(otherPubkey, notifs[0].actorPubkey)
-        assertEquals("my-note", notifs[0].targetNoteId)
-        assertEquals("hello world", notifs[0].targetNoteContent)
+        assertEquals("Should have 1 grouped notification", 1, notifs.size)
+        val g = notifs[0] as NotificationRow.Grouped
+        assertEquals("reaction", g.notifType)
+        assertEquals("my-note", g.targetNoteId)
+        assertEquals("hello world", g.targetNoteContent)
+        assertEquals(1, g.people)
+        assertEquals(otherPubkey, g.actors.single().pubkey)
     }
 
     @Test
@@ -3310,10 +3312,11 @@ class MemoryEventStoreInvariantsTest {
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
         assertEquals(1, notifs.size)
-        assertEquals("reply", notifs[0].notifType)
-        assertEquals("reply-1", notifs[0].targetNoteId)
-        assertEquals("nice post!", notifs[0].targetNoteContent)
-        assertEquals("original", notifs[0].parentNoteContent)
+        val s = notifs[0] as NotificationRow.Single
+        assertEquals("reply", s.notifType)
+        assertEquals("reply-1", s.targetNoteId)
+        assertEquals("nice post!", s.targetNoteContent)
+        assertEquals("original", s.parentNoteContent)
     }
 
     @Test
@@ -3327,9 +3330,11 @@ class MemoryEventStoreInvariantsTest {
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
         assertEquals(1, notifs.size)
-        assertEquals("repost", notifs[0].notifType)
-        assertEquals("my-note", notifs[0].targetNoteId)
-        assertEquals("great content", notifs[0].targetNoteContent)
+        val g = notifs[0] as NotificationRow.Grouped
+        assertEquals("repost", g.notifType)
+        assertEquals("my-note", g.targetNoteId)
+        assertEquals("great content", g.targetNoteContent)
+        assertEquals(otherPubkey, g.actors.single().pubkey)
     }
 
     @Test
@@ -3343,8 +3348,13 @@ class MemoryEventStoreInvariantsTest {
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
         assertEquals(1, notifs.size)
-        assertEquals("zap", notifs[0].notifType)
-        assertEquals("my-note", notifs[0].targetNoteId)
+        val g = notifs[0] as NotificationRow.Grouped
+        assertEquals("zap", g.notifType)
+        assertEquals("my-note", g.targetNoteId)
+        // no description tag → anonymous aggregate; bolt11 lnbc10u = 1000 sats
+        assertEquals(1, g.anonymousCount)
+        assertEquals(0, g.actors.size)
+        assertEquals(1000L, g.sumSats)
     }
 
     @Test
@@ -3356,9 +3366,10 @@ class MemoryEventStoreInvariantsTest {
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
         assertEquals(1, notifs.size)
-        assertEquals("mention", notifs[0].notifType)
-        assertEquals("mention-1", notifs[0].targetNoteId)
-        assertEquals("hey @user check this", notifs[0].targetNoteContent)
+        val s = notifs[0] as NotificationRow.Single
+        assertEquals("mention", s.notifType)
+        assertEquals("mention-1", s.targetNoteId)
+        assertEquals("hey @user check this", s.targetNoteContent)
     }
 
     @Test
@@ -3372,7 +3383,7 @@ class MemoryEventStoreInvariantsTest {
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
         assertEquals("Should have exactly 1 notification, not 2", 1, notifs.size)
-        assertEquals("reply", notifs[0].notifType)
+        assertEquals("reply", (notifs[0] as NotificationRow.Single).notifType)
     }
 
     @Test
@@ -3393,10 +3404,14 @@ class MemoryEventStoreInvariantsTest {
         ))
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
-        assertEquals(3, notifs.size)
-        assertEquals("new-react", notifs[0].id)
-        assertEquals("mid-reply", notifs[1].id)
-        assertEquals("old-react", notifs[2].id)
+        // old-react + new-react fold into ONE reaction group (most-recent 300);
+        // mid-reply stays a single (200). Two rows, group first by recency.
+        assertEquals(2, notifs.size)
+        val group = notifs[0] as NotificationRow.Grouped
+        assertEquals("reaction", group.notifType)
+        assertEquals(2, group.people)
+        assertEquals(300L, group.mostRecentAt)
+        assertEquals("mid-reply", (notifs[1] as NotificationRow.Single).id)
     }
 
     @Test
@@ -3483,27 +3498,35 @@ class MemoryEventStoreInvariantsTest {
 
             val updated = awaitItem()
             assertEquals(1, updated.size)
-            assertEquals("reaction", updated[0].notifType)
+            assertEquals("reaction", (updated[0] as NotificationRow.Grouped).notifType)
 
             cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun `limit parameter caps notification count`() = runTest {
-        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "target", createdAt = 50))
+    fun `limit caps visible rows (groups), not raw events`() = runTest {
+        // Five reactions on the SAME note fold to ONE row regardless of limit.
+        store.insert(event(id = "one-note", pubkey = myPubkey, kind = 1, content = "x", createdAt = 50))
         repeat(5) { i ->
             store.insert(event(
-                id = "react-$i", pubkey = "pk-$i", kind = 7, content = "+", createdAt = (100 + i).toLong(),
-                tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+                id = "same-$i", pubkey = "pk-$i", kind = 7, content = "+", createdAt = (100 + i).toLong(),
+                tags = listOf(listOf("e", "one-note"), listOf("p", myPubkey)),
             ))
         }
+        assertEquals("five reactions on one note = one row", 1, store.getNotifications(myPubkey, limit = 3).size)
 
+        // Reactions on five DIFFERENT notes = five groups; limit caps to 3 most recent.
+        repeat(5) { i ->
+            store.insert(event(id = "note-$i", pubkey = myPubkey, kind = 1, content = "n$i", createdAt = (10 + i).toLong()))
+            store.insert(event(
+                id = "rx-$i", pubkey = "rpk-$i", kind = 7, content = "+", createdAt = (200 + i).toLong(),
+                tags = listOf(listOf("e", "note-$i"), listOf("p", myPubkey)),
+            ))
+        }
         val limited = store.getNotifications(myPubkey, limit = 3)
         assertEquals(3, limited.size)
-        assertEquals("react-4", limited[0].id)
-        assertEquals("react-3", limited[1].id)
-        assertEquals("react-2", limited[2].id)
+        assertEquals("note-4", (limited[0] as NotificationRow.Grouped).targetNoteId)
     }
 
     @Test
@@ -3520,12 +3543,37 @@ class MemoryEventStoreInvariantsTest {
             tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
         ))
 
-        val all = store.getNotifications(myPubkey, limit = 50)
-        assertEquals("All notifications should be 2", 2, all.size)
+        val all = store.getNotifications(myPubkey, limit = 50).single() as NotificationRow.Grouped
+        assertEquals("both fold to one group, 2 actors", 2, all.people)
 
-        val followingOnly = store.getNotifications(myPubkey, limit = 50, followedOnly = true)
-        assertEquals("Following-only should be 1", 1, followingOnly.size)
-        assertEquals("followed-pk", followingOnly[0].actorPubkey)
+        val followingOnly = store.getNotifications(myPubkey, limit = 50, followedOnly = true).single() as NotificationRow.Grouped
+        assertEquals("filtered before grouping → 1 actor", 1, followingOnly.people)
+        assertEquals("followed-pk", followingOnly.actors.single().pubkey)
+    }
+
+    @Test
+    fun `NIP-25 dislike reactions are excluded from notifications`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "x", createdAt = 50))
+        store.insert(event(
+            id = "dislike", pubkey = otherPubkey, kind = 7, content = "-", createdAt = 100,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey)),
+        ))
+        assertEquals("\"-\" must not surface as a notification", 0, store.getNotifications(myPubkey, limit = 50).size)
+    }
+
+    @Test
+    fun `grouped reaction reports the dominant emoji`() = runTest {
+        store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "x", createdAt = 50))
+        store.insert(event(id = "r1", pubkey = "a", kind = 7, content = "🔥", createdAt = 100,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey))))
+        store.insert(event(id = "r2", pubkey = "b", kind = 7, content = "🔥", createdAt = 110,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey))))
+        store.insert(event(id = "r3", pubkey = "c", kind = 7, content = "+", createdAt = 120,
+            tags = listOf(listOf("e", "my-note"), listOf("p", myPubkey))))
+
+        val g = store.getNotifications(myPubkey, limit = 50).single() as NotificationRow.Grouped
+        assertEquals(3, g.people)
+        assertEquals(ReactionContent.Standard("🔥"), g.dominantReaction)
     }
 
     // ── Snapshot escape-sequence round-trip ─────────────────────────────────

@@ -133,16 +133,60 @@ data class RelaySet(
  * Built at scan time from eventsById + profile lookups.
  * Carries enough resolved data for the UI to render without additional lookups.
  */
-data class NotificationItem(
-    val id: String,
-    val notifType: String,   // "reaction" | "reply" | "repost" | "zap" | "mention"
-    val actorPubkey: String,
-    val actorName: String?,
-    val actorDisplayName: String?,
-    val actorPicture: String?,
-    val targetNoteId: String?,
-    val targetNoteContent: String,
-    val parentNoteContent: String,
+sealed interface NotificationRow {
+    /** Stable key for LazyColumn. */
+    val key: String
+    /** Newest contributing event — drives DESC ordering across groups + singles. */
+    val mostRecentAt: Long
+
+    /**
+     * Reply or mention — one event, one actor (the old NotificationItem shape).
+     */
+    data class Single(
+        val id: String,
+        val notifType: String,   // "reply" | "mention"
+        val actorPubkey: String,
+        val actorName: String?,
+        val actorDisplayName: String?,
+        val actorPicture: String?,
+        val targetNoteId: String?,
+        val targetNoteContent: String,
+        val parentNoteContent: String,
+        val createdAt: Long,
+    ) : NotificationRow {
+        override val key get() = id
+        override val mostRecentAt get() = createdAt
+    }
+
+    /**
+     * Reactions / reposts (kind 6 & 16) / zaps folded by (targetNoteId, notifType).
+     * Anonymous zaps are collapsed into [anonymousCount]/[anonymousSats] — never
+     * shown as distinct LNURL identicons.
+     */
+    data class Grouped(
+        val notifType: String,   // "reaction" | "repost" | "zap"
+        val targetNoteId: String?,
+        val targetNoteContent: String,
+        val actors: List<NotificationActor>,   // named, deduped by pubkey, recency-sorted
+        val people: Int,                        // distinct named actors + anonymous zaps
+        val sumSats: Long,                      // zaps
+        val dominantReaction: ReactionContent?, // reactions
+        val anonymousCount: Int,
+        val anonymousSats: Long,
+        override val mostRecentAt: Long,
+    ) : NotificationRow {
+        override val key get() = "$notifType|$targetNoteId"
+    }
+}
+
+/** One actor inside a [NotificationRow.Grouped]. [pubkey] null ⇒ anonymous zap. */
+data class NotificationActor(
+    val pubkey: String?,
+    val name: String?,
+    val displayName: String?,
+    val picture: String?,
+    val sats: Long = 0,
+    val reaction: ReactionContent? = null,
     val createdAt: Long,
 )
 

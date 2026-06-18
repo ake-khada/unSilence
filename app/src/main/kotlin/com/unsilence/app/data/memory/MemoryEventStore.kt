@@ -3593,43 +3593,98 @@ class MemoryEventStore @Inject constructor(
      *
      * @param limit Maximum rows to return. null = unlimited.
      */
+    /**
+     * Notifications for [recipientPubkey], grouped for display.
+     *
+     * Reactions, reposts (kind 6 & 16) and zaps fold by (targetNoteId, notifType)
+     * into [NotificationRow.Grouped]; replies and mentions stay individual
+     * [NotificationRow.Single] rows. Rows are returned newest-first by their most
+     * recent contributing event.
+     *
+     * [limit] caps the number of VISIBLE ROWS returned (groups + singles combined),
+     * NOT raw events. The recipient index is scanned DESC and bounded by
+     * [NOTIF_RAW_SCAN_CAP] raw events; a group's member count / summed sats reflect
+     * only events within that window. The bell/unread count stays event-based in
+     * [notificationCountSince] and is unaffected by grouping.
+     *
+     * Filtering (self-exclusion, followed-only, NIP-25 "-" dislikes) is applied per
+     * raw event BEFORE folding, so group counts are correct.
+     */
     fun getNotifications(
         recipientPubkey: String,
         followedOnly: Boolean = false,
         limit: Int? = null,
-    ): List<NotificationItem> {
+    ): List<NotificationRow> {
         val entries = notifIdsByRecipient[recipientPubkey] ?: return emptyList()
         val follows = if (followedOnly) followsByPubkey[recipientPubkey] else null
-        val items = ArrayList<NotificationItem>(limit ?: 200)
         val cap = limit ?: Int.MAX_VALUE
 
-        for (entry in entries) {
-            if (items.size >= cap) break
-            val event = eventsById[entry.eventId] ?: continue
+        val singles = ArrayList<NotificationRow.Single>()
+        val groups = LinkedHashMap<String, NotifGroupAcc>()
+        fun slots() = singles.size + groups.size
+        var scanned = 0
 
-            // Resolve kind-9735 zap identity ONCE per event and reuse it for
-            // self-exclusion AND buildNotificationItem — parseZapDescription
-            // is a JSON parse, not a map lookup. zapDesc is only consulted
-            // when no decrypted private zap exists, so skip the parse otherwise.
+        for (entry in entries) {
+            if (scanned >= NOTIF_RAW_SCAN_CAP) break
+            val event = eventsById[entry.eventId] ?: continue
+            scanned++
+
+            // Resolve kind-9735 zap identity ONCE per event (parseZapDescription is a
+            // JSON parse) — reused for self-exclusion, follows filter, and the actor.
             val decryptedZap = if (event.kind == 9735) privateZapDecryptedById[event.id] else null
             val zapDesc = if (event.kind == 9735 && decryptedZap == null) parseZapDescription(event) else null
-
-            // Self-exclusion: kind-9735 must use parsed sender, not LNURL service.
             val effectivePubkey = if (event.kind == 9735) {
-                decryptedZap?.senderPubkey
-                    ?: zapDesc?.senderPubkey
-                    ?: event.pubkey
-            } else {
-                event.pubkey
-            }
+                decryptedZap?.senderPubkey ?: zapDesc?.senderPubkey ?: event.pubkey
+            } else event.pubkey
             if (effectivePubkey == recipientPubkey) continue
-
             if (follows != null && effectivePubkey !in follows) continue
 
-            val item = buildNotificationItem(event, recipientPubkey, decryptedZap, zapDesc) ?: continue
-            items.add(item)
+            val notifType = deriveNotifType(event, recipientPubkey)
+
+            // NIP-25 "-" dislikes are not displayable notifications (mirrors the card path).
+            val reaction = if (notifType == "reaction") {
+                val rc = parseReactionContent(event.content.ifBlank { "+" }, event.tags)
+                if (rc == ReactionContent.Standard("-")) continue
+                rc
+            } else null
+
+            when (notifType) {
+                "reply", "mention" -> {
+                    if (slots() >= cap) continue
+                    singles.add(buildSingleNotification(event, notifType))
+                }
+                "reaction", "repost", "zap" -> {
+                    val targetId = notifTargetId(event, notifType)
+                    val gkey = "$notifType|$targetId"
+                    var g = groups[gkey]
+                    if (g == null) {
+                        if (slots() >= cap) continue
+                        g = NotifGroupAcc(notifType, targetId, targetId?.let { eventsById[it]?.content } ?: "")
+                        groups[gkey] = g
+                    }
+                    val sats = if (event.kind == 9735) extractSatsFromZap(event) else 0L
+                    val actorPubkey: String?
+                    val actorFields: Map<String, String?>
+                    if (event.kind == 9735) {
+                        when {
+                            decryptedZap != null -> { actorPubkey = decryptedZap.senderPubkey; actorFields = cachedProfileFields(decryptedZap.senderPubkey) }
+                            zapDesc != null -> { actorPubkey = zapDesc.senderPubkey; actorFields = cachedProfileFields(zapDesc.senderPubkey) }
+                            else -> { actorPubkey = null; actorFields = emptyMap() }   // anonymous aggregate
+                        }
+                    } else {
+                        actorPubkey = event.pubkey
+                        actorFields = cachedProfileFields(event.pubkey)
+                    }
+                    g.fold(actorPubkey, actorFields, event.createdAt, sats, reaction)
+                }
+            }
         }
-        return items
+
+        val rows = ArrayList<NotificationRow>(slots())
+        rows.addAll(singles)
+        groups.values.forEach { rows.add(it.toGrouped()) }
+        rows.sortByDescending { it.mostRecentAt }
+        return if (limit != null && rows.size > limit) rows.subList(0, limit).toList() else rows
     }
 
     /**
@@ -3664,109 +3719,100 @@ class MemoryEventStore @Inject constructor(
         recipientPubkey: String,
         followedOnly: Boolean = false,
         limit: Int? = null,
-    ): Flow<List<NotificationItem>> =
+    ): Flow<List<NotificationRow>> =
         notificationSignalFor(recipientPubkey)
             .map { getNotifications(recipientPubkey, followedOnly, limit) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
-    /**
-     * Build a NotificationItem from a notification-eligible event.
-     *
-     * [decryptedZap]/[zapDesc] are the caller's pre-resolved kind-9735 zap
-     * identity (see getNotifications) so the description JSON is parsed at
-     * most once per event per pass. Both are null for non-zap kinds, and
-     * [zapDesc] is null when [decryptedZap] is present (it would be unused).
-     */
-    private fun buildNotificationItem(
-        event: NostrEvent,
-        recipientPubkey: String,
-        decryptedZap: DecryptedPrivateZap?,
-        zapDesc: ZapDescription?,
-    ): NotificationItem? {
-        val notifType = deriveNotifType(event, recipientPubkey)
+    /** Defensive bound on raw events scanned per notification query (see getNotifications). */
+    private val NOTIF_RAW_SCAN_CAP = 1500
+
+    /** Target note id a grouped notification folds under (mirrors the old per-type logic). */
+    private fun notifTargetId(event: NostrEvent, notifType: String): String? = when (notifType) {
+        "reaction" -> event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+        "repost" -> event.rootId
+        "zap" -> event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: event.rootId
+        else -> null
+    }
+
+    /** Build a [NotificationRow.Single] for a reply/mention (kind-1/1111). */
+    private fun buildSingleNotification(event: NostrEvent, notifType: String): NotificationRow.Single {
         val fields = cachedProfileFields(event.pubkey)
-
-        val targetNoteId: String?
-        val targetNoteContent: String
-        val parentNoteContent: String
-
-        when (notifType) {
-            "reaction" -> {
-                val targetId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
-                targetNoteId = targetId
-                targetNoteContent = targetId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "reply" -> {
-                targetNoteId = event.id
-                targetNoteContent = event.content
-                parentNoteContent = event.replyToId?.let { eventsById[it]?.content } ?: ""
-            }
-            "repost" -> {
-                targetNoteId = event.rootId
-                targetNoteContent = event.rootId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "zap" -> {
-                val targetId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: event.rootId
-                targetNoteId = targetId
-                targetNoteContent = targetId?.let { eventsById[it]?.content } ?: ""
-                parentNoteContent = ""
-            }
-            "mention" -> {
-                targetNoteId = event.id
-                targetNoteContent = event.content
-                parentNoteContent = ""
-            }
-            else -> return null
-        }
-
-        // For kind-9735 zap receipts, event.pubkey is the LNURL service signer —
-        // resolve the real sender: decrypted private zap > description tag > anonymous.
-        val actorPubkey: String
-        val actorFields: Map<String, String?>
-        if (event.kind == 9735) {
-            when {
-                decryptedZap != null -> {
-                    // NIP-57 private zap successfully decrypted.
-                    actorPubkey = decryptedZap.senderPubkey
-                    actorFields = cachedProfileFields(decryptedZap.senderPubkey)
-                }
-                zapDesc != null -> {
-                    // Standard public zap — kind-9734 signed by real sender.
-                    actorPubkey = zapDesc.senderPubkey
-                    actorFields = cachedProfileFields(zapDesc.senderPubkey)
-                }
-                else -> {
-                    // Truly anonymous OR private-but-undecrypted. Show as "Anonymous"
-                    // — never the LNURL service profile. IdentIcon falls back from
-                    // event.pubkey so each LNURL still gets a distinct generic icon.
-                    actorPubkey = event.pubkey
-                    actorFields = mapOf(
-                        "name" to "Anonymous",
-                        "display_name" to null,
-                        "picture" to null,
-                    )
-                }
-            }
-        } else {
-            actorPubkey = event.pubkey
-            actorFields = fields
-        }
-
-        return NotificationItem(
+        return NotificationRow.Single(
             id = event.id,
             notifType = notifType,
-            actorPubkey = actorPubkey,
-            actorName = actorFields["name"],
-            actorDisplayName = actorFields["display_name"],
-            actorPicture = actorFields["picture"],
-            targetNoteId = targetNoteId,
-            targetNoteContent = targetNoteContent,
-            parentNoteContent = parentNoteContent,
+            actorPubkey = event.pubkey,
+            actorName = fields["name"],
+            actorDisplayName = fields["display_name"],
+            actorPicture = fields["picture"],
+            targetNoteId = event.id,
+            targetNoteContent = event.content,
+            parentNoteContent = if (notifType == "reply") event.replyToId?.let { eventsById[it]?.content } ?: "" else "",
             createdAt = event.createdAt,
         )
+    }
+
+    /**
+     * Accumulator that folds many contributing events into one
+     * [NotificationRow.Grouped]. Named actors dedup by pubkey (per-actor sats
+     * summed, most-recent timestamp kept); anonymous zaps collapse into a single
+     * count/sats aggregate; the dominant reaction is the modal emoji.
+     */
+    private class NotifGroupAcc(
+        private val notifType: String,
+        private val targetNoteId: String?,
+        private val targetNoteContent: String,
+    ) {
+        private val actorsByPubkey = LinkedHashMap<String, NotificationActor>()
+        private val reactionCounts = HashMap<ReactionContent, Int>()
+        private var anonymousCount = 0
+        private var anonymousSats = 0L
+        private var sumSats = 0L
+        private var mostRecentAt = 0L
+
+        fun fold(
+            actorPubkey: String?,
+            fields: Map<String, String?>,
+            createdAt: Long,
+            sats: Long,
+            reaction: ReactionContent?,
+        ) {
+            if (createdAt > mostRecentAt) mostRecentAt = createdAt
+            sumSats += sats
+            if (reaction != null) reactionCounts[reaction] = (reactionCounts[reaction] ?: 0) + 1
+            if (actorPubkey == null) {
+                anonymousCount++
+                anonymousSats += sats
+                return
+            }
+            val prev = actorsByPubkey[actorPubkey]
+            actorsByPubkey[actorPubkey] = NotificationActor(
+                pubkey = actorPubkey,
+                name = fields["name"] ?: prev?.name,
+                displayName = fields["display_name"] ?: prev?.displayName,
+                picture = fields["picture"] ?: prev?.picture,
+                sats = (prev?.sats ?: 0L) + sats,
+                reaction = reaction ?: prev?.reaction,
+                createdAt = maxOf(prev?.createdAt ?: 0L, createdAt),
+            )
+        }
+
+        fun toGrouped(): NotificationRow.Grouped {
+            val actors = actorsByPubkey.values.sortedByDescending { it.createdAt }
+            return NotificationRow.Grouped(
+                notifType = notifType,
+                targetNoteId = targetNoteId,
+                targetNoteContent = targetNoteContent,
+                actors = actors,
+                people = actors.size + anonymousCount,
+                sumSats = sumSats,
+                dominantReaction = reactionCounts.maxByOrNull { it.value }?.key,
+                anonymousCount = anonymousCount,
+                anonymousSats = anonymousSats,
+                mostRecentAt = mostRecentAt,
+            )
+        }
     }
 
     /**
