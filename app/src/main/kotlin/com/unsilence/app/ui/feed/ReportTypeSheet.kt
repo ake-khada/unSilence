@@ -16,7 +16,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -28,7 +27,6 @@ fun ReportTypeSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Surface1,
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
         Column(modifier = Modifier.padding(bottom = 24.dp)) {

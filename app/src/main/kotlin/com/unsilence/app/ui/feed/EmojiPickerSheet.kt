@@ -46,7 +46,6 @@ import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 
@@ -68,7 +67,6 @@ internal fun EmojiPickerSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Surface1,
     ) {
         Column(modifier = Modifier.padding(horizontal = Spacing.medium)) {
             // Header: title + settings overflow

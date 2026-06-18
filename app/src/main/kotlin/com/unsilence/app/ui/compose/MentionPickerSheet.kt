@@ -36,7 +36,6 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Spacing
-import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -51,7 +50,6 @@ fun MentionPickerSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Surface1,
     ) {
         Column(modifier = Modifier.padding(horizontal = Spacing.medium)) {
             OutlinedTextField(

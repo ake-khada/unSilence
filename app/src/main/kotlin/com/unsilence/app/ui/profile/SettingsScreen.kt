@@ -326,7 +326,6 @@ private fun SoonRow(icon: ImageVector, title: String) {
 private fun LogoutConfirmSheet(onConfirm: () -> Unit, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Surface1,
         sheetState = rememberModalBottomSheetState(),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.large, vertical = Spacing.small)) {

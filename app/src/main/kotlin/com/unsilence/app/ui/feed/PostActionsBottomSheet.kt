@@ -29,7 +29,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 
@@ -48,7 +47,6 @@ fun PostActionsBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Surface1,
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
         Column(modifier = Modifier.padding(bottom = 24.dp)) {

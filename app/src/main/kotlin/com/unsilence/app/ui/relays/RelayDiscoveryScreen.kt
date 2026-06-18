@@ -296,7 +296,7 @@ private fun AddTargetSheet(
     onSearch: () -> Unit,
     onFavorites: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Surface1) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = Spacing.medium)) {
             Text(
                 "Add $host to…",
