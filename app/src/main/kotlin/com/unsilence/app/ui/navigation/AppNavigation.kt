@@ -356,6 +356,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     }
                     2    -> NotificationsScreen(
                         onNoteClick      = { eventId -> threadEventId = eventId },
+                        onProfileClick   = onAuthorClick,
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )

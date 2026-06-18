@@ -38,6 +38,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun NotificationsScreen(
     onNoteClick: (String) -> Unit = {},
+    onProfileClick: (String) -> Unit = {},
     staticTopPadding: Dp = 0.dp,
     viewModel: NotificationsViewModel = hiltViewModel(),
 ) {
@@ -71,8 +72,9 @@ fun NotificationsScreen(
                 ) {
                     items(state.items, key = { it.key }) { row ->
                         NotificationEventRow(
-                            row         = row,
-                            onNoteClick = onNoteClick,
+                            row            = row,
+                            onNoteClick    = onNoteClick,
+                            onProfileClick = onProfileClick,
                         )
                         HorizontalDivider(
                             color     = MaterialTheme.colorScheme.surfaceVariant,

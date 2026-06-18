@@ -23,6 +23,10 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,10 +64,11 @@ import com.unsilence.app.ui.theme.Zap
 fun NotificationEventRow(
     row: NotificationRow,
     onNoteClick: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
 ) {
     when (row) {
-        is NotificationRow.Single -> SingleNotificationRow(row, onNoteClick)
-        is NotificationRow.Grouped -> GroupedNotificationRow(row, onNoteClick)
+        is NotificationRow.Single -> SingleNotificationRow(row, onNoteClick, onProfileClick)
+        is NotificationRow.Grouped -> GroupedNotificationRow(row, onNoteClick, onProfileClick)
     }
 }
 
@@ -145,6 +150,7 @@ private fun NotificationTimestamp(
 private fun SingleNotificationRow(
     row: NotificationRow.Single,
     onNoteClick: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
 ) {
     // Compact: 32dp avatar with a corner type badge, "Name action · time" on one
     // line, then the reply/mention text on a single dim line — no grey box.
@@ -165,8 +171,9 @@ private fun SingleNotificationRow(
             .padding(horizontal = Spacing.medium, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Avatar with a corner type badge.
-        Box(modifier = Modifier.size(Sizing.avatar)) {
+        // Avatar with a corner type badge — taps it open the actor's profile
+        // (the rest of the row opens the note).
+        Box(modifier = Modifier.size(Sizing.avatar).clickable { onProfileClick(row.actorPubkey) }) {
             Box(modifier = Modifier.fillMaxSize().clip(CircleShape)) {
                 IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
                 if (!row.actorPicture.isNullOrBlank()) {
@@ -232,8 +239,10 @@ private fun SingleNotificationRow(
 private fun GroupedNotificationRow(
     row: NotificationRow.Grouped,
     onNoteClick: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
 ) {
     val (icon, iconTint, verb) = notifMeta(row.notifType)
+    var showActors by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -252,7 +261,13 @@ private fun GroupedNotificationRow(
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(Spacing.small))
-                ActorStrip(actors = row.actors, people = row.people)
+                // Tapping the actor strip opens the actor sheet; the rest of the
+                // row opens the note.
+                ActorStrip(
+                    actors = row.actors,
+                    people = row.people,
+                    onClick = { showActors = true },
+                )
             }
 
             // Verb line: "N verb (· sats)".
@@ -286,6 +301,14 @@ private fun GroupedNotificationRow(
         Spacer(Modifier.width(Spacing.small))
         NotificationTimestamp(row.mostRecentAt, modifier = Modifier.align(Alignment.Top))
     }
+
+    if (showActors) {
+        NotificationActorSheet(
+            row = row,
+            onProfileClick = onProfileClick,
+            onDismiss = { showActors = false },
+        )
+    }
 }
 
 /**
@@ -297,11 +320,13 @@ private fun GroupedNotificationRow(
 private fun ActorStrip(
     actors: List<NotificationActor>,
     people: Int,
+    onClick: () -> Unit,
 ) {
     val shown = actors.take(5)
     Row(
         horizontalArrangement = Arrangement.spacedBy((-7).dp),
         verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.clickable(onClick = onClick),
     ) {
         shown.forEach { actor ->
             Box(
@@ -346,7 +371,7 @@ private fun ActorStrip(
     }
 }
 
-private fun formatSats(sats: Long): String = when {
+internal fun formatSats(sats: Long): String = when {
     sats >= 1_000_000 -> "%.1fM".format(sats / 1_000_000.0)
     sats >= 1_000 -> "%.1fk".format(sats / 1_000.0)
     else -> sats.toString()
@@ -354,13 +379,13 @@ private fun formatSats(sats: Long): String = when {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-private data class NotifMeta(
+internal data class NotifMeta(
     val icon: ImageVector,
     val tint: Color,
     val actionText: String,
 )
 
-private fun notifMeta(notifType: String): NotifMeta = when (notifType) {
+internal fun notifMeta(notifType: String): NotifMeta = when (notifType) {
     "reaction" -> NotifMeta(Icons.Filled.Favorite, Like, "liked your note")
     "reply" -> NotifMeta(Icons.AutoMirrored.Filled.Chat, Brand, "replied to your note")
     "repost" -> NotifMeta(Icons.Filled.Repeat, Brand, "boosted your note")
