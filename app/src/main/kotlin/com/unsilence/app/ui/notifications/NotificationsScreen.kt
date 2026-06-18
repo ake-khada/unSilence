@@ -69,7 +69,7 @@ fun NotificationsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(top = staticTopPadding),
                 ) {
-                    items(state.items, key = { it.id }) { row ->
+                    items(state.items, key = { it.key }) { row ->
                         NotificationEventRow(
                             row         = row,
                             onNoteClick = onNoteClick,

@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.memory.NotificationItem
+import com.unsilence.app.data.memory.NotificationRow
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class NotificationsUiState(
-    val items: List<NotificationItem> = emptyList(),
+    val items: List<NotificationRow> = emptyList(),
     val loading: Boolean = true,
 )
 
@@ -59,10 +59,10 @@ class NotificationsViewModel @Inject constructor(
             return
         }
         val pubkey = keyManager.getPublicKeyHex() ?: return
-        lastSeenCache.value = items.first().createdAt
+        lastSeenCache.value = items.first().mostRecentAt
         _hasNew.value = false
         viewModelScope.launch {
-            relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().createdAt)
+            relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().mostRecentAt)
         }
     }
 
@@ -99,13 +99,19 @@ class NotificationsViewModel @Inject constructor(
                     if (items.isNotEmpty()) {
                         // Read the in-memory mirror — markSeen() updates it
                         // immediately (stale capture caused dot reappearing).
-                        _hasNew.value = items.first().createdAt > lastSeenCache.value
+                        _hasNew.value = items.first().mostRecentAt > lastSeenCache.value
                     }
 
-                    val missingPubkeys = items
-                        .filter { it.actorPicture == null }
-                        .map { it.actorPubkey }
-                        .distinct()
+                    // Fetch missing profiles across ALL actors (singles + every
+                    // grouped actor), not just one actor per row.
+                    val missingPubkeys = items.flatMap { row ->
+                        when (row) {
+                            is NotificationRow.Single ->
+                                if (row.actorPicture == null) listOf(row.actorPubkey) else emptyList()
+                            is NotificationRow.Grouped ->
+                                row.actors.filter { it.picture == null && it.pubkey != null }.map { it.pubkey!! }
+                        }
+                    }.distinct()
                     if (missingPubkeys.isNotEmpty()) {
                         userRepository.fetchMissingProfiles(missingPubkeys)
                     }

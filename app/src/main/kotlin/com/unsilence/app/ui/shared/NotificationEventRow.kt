@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
-import com.unsilence.app.data.memory.NotificationItem
+import com.unsilence.app.data.memory.NotificationRow
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
@@ -58,7 +58,18 @@ import com.unsilence.app.ui.theme.Zap
  */
 @Composable
 fun NotificationEventRow(
-    row: NotificationItem,
+    row: NotificationRow,
+    onNoteClick: (String) -> Unit,
+) {
+    when (row) {
+        is NotificationRow.Single -> SingleNotificationRow(row, onNoteClick)
+        is NotificationRow.Grouped -> GroupedNotificationRow(row, onNoteClick)
+    }
+}
+
+@Composable
+private fun SingleNotificationRow(
+    row: NotificationRow.Single,
     onNoteClick: (String) -> Unit,
 ) {
     val (icon, iconTint, actionText) = notifMeta(row.notifType)
@@ -161,6 +172,88 @@ fun NotificationEventRow(
             fontSize = AppType.caption,
         )
     }
+}
+
+/**
+ * Grouped reactions/reposts/zaps. INTERIM Phase-1 visuals — first actor's avatar
+ * + count + verb (+ summed sats for zaps) + target preview. The overlapping actor
+ * strip and tap-to-open actor sheet land in later phases.
+ */
+@Composable
+private fun GroupedNotificationRow(
+    row: NotificationRow.Grouped,
+    onNoteClick: (String) -> Unit,
+) {
+    val (icon, iconTint, verb) = notifMeta(row.notifType)
+    val firstActor = row.actors.firstOrNull()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = row.targetNoteId != null) { row.targetNoteId?.let { onNoteClick(it) } }
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(modifier = Modifier.size(Sizing.avatar).clip(CircleShape)) {
+                val pk = firstActor?.pubkey
+                if (pk != null) {
+                    IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
+                    if (!firstActor.picture.isNullOrBlank()) {
+                        AsyncImage(
+                            model = rememberAvatarImageRequest(firstActor.picture, Sizing.avatar),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                } else {
+                    Box(modifier = Modifier.fillMaxSize().background(Surface2))
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Icon(imageVector = icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(14.dp))
+        }
+
+        Spacer(Modifier.width(Spacing.small))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.people.toString(),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = AppType.bodySmall,
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(text = verb, color = TextSecondary, fontSize = AppType.bodySmall)
+                if (row.notifType == "zap" && row.sumSats > 0) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "· ${formatSats(row.sumSats)} sats",
+                        color = Zap,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = AppType.bodySmall,
+                    )
+                }
+            }
+            if (row.targetNoteContent.isNotBlank()) {
+                CompactNotePreview(content = row.targetNoteContent, modifier = Modifier.padding(top = 4.dp))
+            }
+        }
+
+        Spacer(Modifier.width(Spacing.small))
+
+        Text(
+            text = relativeTime(row.mostRecentAt),
+            color = TextSecondary,
+            fontSize = AppType.caption,
+        )
+    }
+}
+
+private fun formatSats(sats: Long): String = when {
+    sats >= 1_000_000 -> "%.1fM".format(sats / 1_000_000.0)
+    sats >= 1_000 -> "%.1fk".format(sats / 1_000.0)
+    else -> sats.toString()
 }
 
 /**
