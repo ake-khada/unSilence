@@ -238,11 +238,10 @@ private fun DiscoveryCard(e: RelayDirectoryEntry, isAdded: Boolean, onAdd: () ->
                     latencyLabel(latency)?.let { FootStat(dot = latencyTier(latency), text = it, color = TextSecondary) }
                 }
                 if (e.followsUsing > 0) FootStat(dot = null, text = "${e.followsUsing} you follow", color = TextSecondary)
+                // Inline capability markers — same treatment as Search, color-coded.
+                // Paid renders after Search, or in its place when there's no Search.
                 if (e.supportedNips.contains(50) && !unreachable) Text("Search", color = Brand.copy(alpha = 0.7f), fontSize = 11.5f.sp, fontWeight = FontWeight.Medium)
-                if (e.payment) {
-                    Spacer(Modifier.weight(1f))
-                    PaidBadge(e.feeMsats)
-                }
+                if (e.payment && !unreachable) Text("Paid", color = Zap.copy(alpha = 0.7f), fontSize = 11.5f.sp, fontWeight = FontWeight.Medium)
             }
         }
         Spacer(Modifier.width(Spacing.medium))
@@ -258,14 +257,6 @@ private fun FootStat(dot: Color?, text: String, color: Color) {
             Spacer(Modifier.width(5.dp))
         }
         Text(text, color = color, fontSize = 11.5f.sp, maxLines = 1)
-    }
-}
-
-@Composable
-private fun PaidBadge(feeMsats: Long?) {
-    val label = feeMsats?.let { "PAID · ${it / 1000} sats" } ?: "PAID"
-    Box(modifier = Modifier.clip(RoundedCornerShape(5.dp)).background(Zap.copy(alpha = 0.16f)).padding(horizontal = 6.dp, vertical = 2.dp)) {
-        Text(label, color = Zap, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 }
 
