@@ -73,7 +73,7 @@ import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Mint
-import com.unsilence.app.ui.theme.Zap
+import com.unsilence.app.ui.theme.Warn
 
 @Composable
 fun CustomEmojisScreen(onDismiss: () -> Unit) {
@@ -410,12 +410,12 @@ private fun SubscribedSetCard(
                 ) {
                     Text(
                         text = "couldn't reach · ",
-                        color = Zap,
+                        color = Warn,
                         fontSize = AppType.caption,
                     )
                     Text(
                         text = "retry",
-                        color = Zap,
+                        color = Warn,
                         fontSize = AppType.caption,
                         fontWeight = FontWeight.Medium,
                     )
