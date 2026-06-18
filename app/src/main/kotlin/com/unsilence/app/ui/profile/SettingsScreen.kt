@@ -288,7 +288,7 @@ private fun SettingsRow(
             )
             Spacer(Modifier.width(Spacing.small))
         }
-        Icon(Icons.Filled.ChevronRight, null, tint = Text4, modifier = Modifier.size(15.dp))
+        Icon(Icons.Filled.ChevronRight, null, tint = TextSecondary, modifier = Modifier.size(15.dp))
     }
 }
 
