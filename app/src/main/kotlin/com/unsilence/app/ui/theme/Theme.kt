@@ -48,10 +48,20 @@ private val UnsilenceColorScheme = darkColorScheme(
     onSecondary      = Black,
     background       = Black,
     onBackground     = White,
-    surface          = Black,
+    surface          = Surface1,
     onSurface        = White,
     surfaceVariant   = SurfaceVariant,
     onSurfaceVariant = TextSecondary,
+    // Map M3 container roles to our depth tokens so stock components (dialogs,
+    // bottom sheets, menus, cards) render deliberate near-black depth instead of
+    // M3's default gray baseline — and aren't accidental pure black either.
+    surfaceContainerLowest  = Surface0,
+    surfaceContainerLow     = Surface1,
+    surfaceContainer        = Surface1,
+    surfaceContainerHigh    = Surface2,
+    surfaceContainerHighest = BgElev3,
+    surfaceDim              = Black,
+    surfaceBright           = Surface2,
     error            = Color(0xFFCF6679),
 )
 
