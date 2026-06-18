@@ -30,6 +30,8 @@ internal fun AnnotatedString.Builder.appendLinkSpan(url: String, text: String = 
             styles = TextLinkStyles(
                 style = SpanStyle(
                     color          = Brand,
+                    // Second, non-color affordance so links aren't color-only.
+                    fontWeight     = FontWeight.Medium,
                     textDecoration = TextDecoration.None,
                 ),
             ),
@@ -47,6 +49,8 @@ internal fun AnnotatedString.Builder.appendHashtagSpan(tag: String, onTap: (Stri
             styles = TextLinkStyles(
                 style = SpanStyle(
                     color          = BrandDeep,
+                    // Second, non-color affordance so hashtags aren't color-only.
+                    fontWeight     = FontWeight.Medium,
                     textDecoration = TextDecoration.None,
                 ),
             ),
