@@ -560,9 +560,9 @@ private fun SwipeToRemove(
  *  detail footer's R/W editor. */
 @Composable
 internal fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
-    // 22dp visual pill kept compact; full-height tap area but tighter width so
-    // the two adjacent R/W toggles don't drift apart.
-    com.unsilence.app.ui.common.TouchTarget(onClick = onClick, minWidth = 36.dp) {
+    // 22dp visual pill kept compact; square 36dp tap area (wider than the glyph
+    // but not so tall it dominates the row).
+    com.unsilence.app.ui.common.TouchTarget(onClick = onClick, minSize = 36.dp) {
         Box(
             modifier = Modifier
                 .size(22.dp)
