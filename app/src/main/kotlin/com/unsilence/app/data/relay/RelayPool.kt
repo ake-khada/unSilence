@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -2321,67 +2322,87 @@ class RelayPool @Inject constructor(
         _directoryBuilding.value = true
         val started = System.currentTimeMillis()
         try {
-            val perUrl = HashMap<String, MutableList<RelayDirectoryEntry>>()
-            var totalEvents = 0
-            var verifyFailed = 0
-            outer@ for (transport in DIRECTORY_TRANSPORT_RELAYS) {
-                val (events, failed) = collectDirectory30166(transport)
-                verifyFailed += failed
-                // Per-transport breakdown — proves the redundancy is actually multi-sourced
-                // (vs. one transport carrying everything). Permanent: it's the only field signal
-                // that a transport is silently rate-limited/empty.
-                Log.w(TAG, "DIRECTORY: transport $transport → ${events.size} events ($failed verify-failed)")
-                for (ev in events) {
-                    totalEvents++
-                    val entry = RelayDirectory.parseMonitorEvent(ev.tags, ev.content, ev.pubkey, ev.createdAt)
-                        ?: continue
-                    perUrl.getOrPut(entry.url) { mutableListOf() }.add(entry)
-                    if (perUrl.size >= RelayDirectory.MAX_DIRECTORY_ENTRIES) break@outer
-                }
-            }
+            // MES-derived enrichment inputs — computed ONCE up front (they don't depend
+            // on the fetch), so the progressive re-publishes below stay cheap.
             val mes = memoryEventStore.get()
-            val ownPkForFollows = keyManager.getPublicKeyHex()
+            val ownPk = keyManager.getPublicKeyHex()
             val trust = mes.getTrustScores()
             val popularity = computeDirectoryPopularity(mes)
-            val followsUsing = computeDirectoryFollowsUsing(mes, ownPkForFollows)
-            val built = perUrl.mapValues { (_, entries) ->
-                // Dedup per monitor (newest createdAt), then merge across monitors (median RTT).
-                val perMonitorNewest = entries.groupBy { it.monitorPubkeys.firstOrNull() }
-                    .values.map { grp -> grp.maxBy { it.monitorLastSeenAt } }
-                val merged = RelayDirectory.mergeMonitorEntries(perMonitorNewest)
-                enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0, followsUsing[merged.url] ?: 0)
-            }.toMutableMap()
-
-            // Seed the user's OWN configured relays (r/w, search, favorites, set members) that the
-            // monitor never reported, so relays you ALREADY use are always discoverable — e.g.
-            // perspective relays like subnet.relays.land the monitor can't enumerate. Enriched with
-            // our reachability/popularity; description/geo stay null until a detail-open device fetch.
-            if (ownPkForFollows != null) {
-                val configured = buildSet {
-                    addAll(mes.writeRelaysFor(ownPkForFollows))
-                    addAll(mes.readRelaysFor(ownPkForFollows))
-                    addAll(mes.getSearchRelayUrls(ownPkForFollows))
-                    mes.getFavoriteRelayConfigs(ownPkForFollows).forEach { it.url?.let(::add) }
-                    mes.getAllRelaySets(ownPkForFollows).forEach { addAll(it.members) }
-                }.mapNotNull { normalizeRelayUrl(it) }
-                var seeded = 0
-                for (u in configured) {
-                    if (u !in built) {
-                        built[u] = enrichDirectoryEntry(RelayDirectoryEntry(url = u), trust[u]?.score, popularity[u] ?: 0, followsUsing[u] ?: 0)
-                        seeded++
-                    }
-                }
-                if (seeded > 0) Log.w(TAG, "DIRECTORY: seeded $seeded own-configured relays not in monitor data")
-            }
-
-            // Bound: never evict the user's own-list relays.
-            val ownPk = keyManager.getPublicKeyHex()
+            val followsUsing = computeDirectoryFollowsUsing(mes, ownPk)
+            // The user's OWN configured relays (r/w, search, favorites, set members) —
+            // always seeded so relays you ALREADY use are discoverable even if the
+            // monitor never reported them (e.g. perspective relays like subnet.relays.land).
+            val configured = if (ownPk != null) buildSet {
+                addAll(mes.writeRelaysFor(ownPk))
+                addAll(mes.readRelaysFor(ownPk))
+                addAll(mes.getSearchRelayUrls(ownPk))
+                mes.getFavoriteRelayConfigs(ownPk).forEach { it.url?.let(::add) }
+                mes.getAllRelaySets(ownPk).forEach { addAll(it.members) }
+            }.mapNotNull { normalizeRelayUrl(it) } else emptyList()
+            // Bound never evicts the user's own r/w relays.
             val ownRelays = if (ownPk != null) {
                 (mes.writeRelaysFor(ownPk) + mes.readRelaysFor(ownPk)).mapNotNull { normalizeRelayUrl(it) }.toSet()
             } else emptySet()
-            val bounded = RelayDirectory.enforceBound(built, ownRelays)
-            relayDirectory.clear()
-            relayDirectory.putAll(bounded)
+
+            val perUrl = HashMap<String, MutableList<RelayDirectoryEntry>>()
+            var totalEvents = 0
+            var verifyFailed = 0
+            var capped = false
+
+            // Build the directory from accumulated perUrl + seed own relays + bound,
+            // then publish. Called PROGRESSIVELY after each transport returns so the
+            // screen populates from the fast transports (~2s) and fills to full
+            // coverage when the slow transport (relay.nostr.watch) completes (~15s).
+            fun rebuildAndPublish() {
+                val built = perUrl.mapValues { (_, entries) ->
+                    // Dedup per monitor (newest createdAt), then merge across monitors (median RTT).
+                    val perMonitorNewest = entries.groupBy { it.monitorPubkeys.firstOrNull() }
+                        .values.map { grp -> grp.maxBy { it.monitorLastSeenAt } }
+                    val merged = RelayDirectory.mergeMonitorEntries(perMonitorNewest)
+                    enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0, followsUsing[merged.url] ?: 0)
+                }.toMutableMap()
+                for (u in configured) {
+                    if (u !in built) built[u] = enrichDirectoryEntry(RelayDirectoryEntry(url = u), trust[u]?.score, popularity[u] ?: 0, followsUsing[u] ?: 0)
+                }
+                val bounded = RelayDirectory.enforceBound(built, ownRelays)
+                relayDirectory.clear()
+                relayDirectory.putAll(bounded)
+                _directoryFlow.value = relayDirectory.toMap()
+            }
+
+            // Fetch all transports CONCURRENTLY; consume results in COMPLETION order via
+            // a channel so the fast transports publish immediately (perceived load ≈ the
+            // fastest transport, not the slowest). Same total bandwidth as sequential;
+            // each collectDirectory30166 is failure-isolated (catches internally + closes
+            // its own ephemeral conn).
+            coroutineScope {
+                val results = Channel<Triple<String, List<NostrEvent>, Int>>(DIRECTORY_TRANSPORT_RELAYS.size)
+                for (transport in DIRECTORY_TRANSPORT_RELAYS) {
+                    launch {
+                        val (events, failed) = collectDirectory30166(transport)
+                        results.send(Triple(transport, events, failed))
+                    }
+                }
+                repeat(DIRECTORY_TRANSPORT_RELAYS.size) {
+                    val (transport, events, failed) = results.receive()
+                    verifyFailed += failed
+                    // Per-transport breakdown — proves the redundancy is actually multi-sourced
+                    // (the only field signal that a transport is silently rate-limited/empty).
+                    Log.w(TAG, "DIRECTORY: transport $transport → ${events.size} events ($failed verify-failed)")
+                    if (!capped) {
+                        for (ev in events) {
+                            totalEvents++
+                            val entry = RelayDirectory.parseMonitorEvent(ev.tags, ev.content, ev.pubkey, ev.createdAt)
+                                ?: continue
+                            perUrl.getOrPut(entry.url) { mutableListOf() }.add(entry)
+                            if (perUrl.size >= RelayDirectory.MAX_DIRECTORY_ENTRIES) { capped = true; break }
+                        }
+                    }
+                    rebuildAndPublish()   // progressive emit after each transport completes
+                }
+                results.close()
+            }
+
             lastDirectoryBuildAt = System.currentTimeMillis()
             val reachable = relayDirectory.values.count { it.reachability == Reachability.REACHABLE }
             val dnsBlocked = relayDirectory.values.count { it.reachability == Reachability.DNS_BLOCKED }
@@ -2390,7 +2411,6 @@ class RelayPool @Inject constructor(
                 "reachable=$reachable dnsBlocked=$dnsBlocked")
             val land = relayDirectory.keys.filter { it.contains("relays.land") }
             Log.w(TAG, "DIRECTORY: relays.land entries = $land")   // acceptance signal
-            _directoryFlow.value = relayDirectory.toMap()
         } catch (e: Exception) {
             Log.w(TAG, "DIRECTORY: build failed — ${e.message} (TTL not advanced, will retry)")
         } finally {
@@ -2545,6 +2565,10 @@ class RelayPool @Inject constructor(
             var pageOldest = Long.MAX_VALUE
             if (!conn.send(reqFor(subId, until))) return collected to verifyFailed
 
+            // 15s per-transport ceiling — full coverage (the richest transport dumps
+            // its bulk late). With the concurrent fetch + progressive publish in
+            // ensureDirectoryFresh, the SCREEN populates from the fast transports in
+            // ~2s; this ceiling only bounds the final fill-in, not perceived load.
             withTimeoutOrNull(15_000) {
                 conn.messages.consumeEach { raw ->
                     when {
