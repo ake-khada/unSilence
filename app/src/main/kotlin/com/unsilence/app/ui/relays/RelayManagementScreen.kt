@@ -895,7 +895,7 @@ private fun RowChevron() {
     Icon(
         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
         contentDescription = null,
-        tint = Text4,
+        tint = TextSecondary,
         modifier = Modifier.padding(start = 2.dp).size(18.dp),
     )
 }
