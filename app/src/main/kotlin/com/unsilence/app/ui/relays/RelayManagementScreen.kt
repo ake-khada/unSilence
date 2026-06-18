@@ -560,16 +560,19 @@ private fun SwipeToRemove(
  *  detail footer's R/W editor. */
 @Composable
 internal fun RwPill(label: String, on: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(22.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (on) BrandSoft else Color.Transparent)
-            .border(1.dp, if (on) Brand.copy(alpha = 0.4f) else BorderDefault, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = if (on) Brand else Text3, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    // 22dp visual pill kept compact; full-height tap area but tighter width so
+    // the two adjacent R/W toggles don't drift apart.
+    com.unsilence.app.ui.common.TouchTarget(onClick = onClick, minWidth = 36.dp) {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (on) BrandSoft else Color.Transparent)
+                .border(1.dp, if (on) Brand.copy(alpha = 0.4f) else BorderDefault, RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(label, color = if (on) Brand else Text3, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        }
     }
 }
 

@@ -277,8 +277,11 @@ private fun AddIconButton(isAdded: Boolean, onAdd: () -> Unit) {
             Icon(Icons.Filled.Check, contentDescription = "Added", tint = Mint, modifier = Modifier.size(18.dp))
         }
     } else {
-        Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(BrandSoft).clickable(onClick = onAdd), contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand, modifier = Modifier.size(18.dp))
+        // 34dp visual button kept; 48dp touch target (a11y).
+        com.unsilence.app.ui.common.TouchTarget(onClick = onAdd) {
+            Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(BrandSoft), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Add, contentDescription = "Add", tint = Brand, modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
@@ -346,7 +349,9 @@ private fun DiscoverySearchField(query: String, onQuery: (String) -> Unit) {
             )
         }
         if (query.isNotEmpty()) {
-            Icon(Icons.Filled.Close, contentDescription = "Clear", tint = Text3, modifier = Modifier.size(16.dp).clickable { onQuery("") })
+            com.unsilence.app.ui.common.TouchTarget(onClick = { onQuery("") }) {
+                Icon(Icons.Filled.Close, contentDescription = "Clear", tint = Text3, modifier = Modifier.size(16.dp))
+            }
         }
     }
 }

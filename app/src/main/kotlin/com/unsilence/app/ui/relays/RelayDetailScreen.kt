@@ -238,12 +238,14 @@ private fun RelayDetailHero(url: String, e: RelayDirectoryEntry?, loading: Boole
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 Spacer(Modifier.width(6.dp))
-                Icon(
-                    Icons.Filled.ContentCopy,
-                    contentDescription = "Copy URL",
-                    tint = Text3,
-                    modifier = Modifier.size(15.dp).clickable(onClick = onCopy),
-                )
+                com.unsilence.app.ui.common.TouchTarget(onClick = onCopy) {
+                    Icon(
+                        Icons.Filled.ContentCopy,
+                        contentDescription = "Copy URL",
+                        tint = Text3,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
             }
         }
     }
