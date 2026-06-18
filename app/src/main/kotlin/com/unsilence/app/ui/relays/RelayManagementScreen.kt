@@ -850,16 +850,7 @@ private fun SummarySeg(color: Color, text: String) {
 
 // ── Relay health components ─────────────────────────────────────────────────
 
-private val HealthGreen  = Mint
-private val HealthYellow = Color(0xFFFFC107)
-private val HealthRed    = Color(0xFFFF5252)
 private val HealthGray   = Text3
-
-private fun pingColor(ms: Int): Color = when {
-    ms <= 200  -> HealthGreen
-    ms <= 500  -> HealthYellow
-    else       -> HealthRed
-}
 
 // §02/§03 latency tiers: mint <150 (fast) · zap 150–500 (slow) · like >500 or offline.
 // ms == null → no data (neutral "—"); ms < 0 → tested-and-offline. Trust score is NO LONGER
