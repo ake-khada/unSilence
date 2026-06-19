@@ -423,6 +423,10 @@ fun EventCard(
         var drawerOpen by remember { mutableStateOf(false) }
         EventActionBar(
             noteId          = row.id,
+            // Zap state is written under engagementId (inner note for reposts);
+            // key flash/loading/optimistic sats off it so reposts animate + show
+            // the optimistic amount, not just flip the bolt amber via hasZapped.
+            zapTargetId     = model.engagementId,
             replyCount      = liveReplyCount,
             repostCount     = liveRepostCount,
             reactionCount   = liveReactionCount,
@@ -431,8 +435,8 @@ fun EventCard(
             hasReposted     = model.engagementId in engagement.repostedIds,
             hasZapped       = model.engagementId in engagement.zappedIds,
             isNwcConfigured = engagement.isNwcConfigured,
-            isZapLoading    = row.id in engagement.zapLoadingIds,
-            extraZapSats    = engagement.optimisticZapSats[row.id] ?: 0L,
+            isZapLoading    = model.engagementId in engagement.zapLoadingIds,
+            extraZapSats    = engagement.optimisticZapSats[model.engagementId] ?: 0L,
             zapFlash        = engagement.zapFlash,
             zapEnabled      = zapEnabled,
             drawerOpen      = drawerOpen,
@@ -607,6 +611,7 @@ private fun ArticleLayout(
                 // navigateId targets the article itself (inner event for a repost);
                 // EventActionBar keys the Quote action off noteId.
                 noteId          = model.navigateId,
+                zapTargetId     = model.engagementId,
                 replyCount      = replyCount,
                 repostCount     = repostCount,
                 reactionCount   = reactionCount,
