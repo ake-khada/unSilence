@@ -185,14 +185,19 @@ fun SearchScreen(
                 singleLine    = true,
                 modifier      = Modifier.weight(1f).focusRequester(focusRequester),
                 decorationBox = { inner ->
-                    if (state.query.isEmpty()) {
-                        Text(
-                            text     = "Search voices, notes, npubs\u2026",
-                            color    = Text3,
-                            fontSize = AppType.bodySmall,
-                        )
+                    // Box centers the placeholder and the text/cursor on the same
+                    // vertical axis \u2014 without it they stack at the top, so the
+                    // cursor sits higher than the placeholder text.
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (state.query.isEmpty()) {
+                            Text(
+                                text     = "Search voices, notes, npubs\u2026",
+                                color    = Text3,
+                                fontSize = AppType.bodySmall,
+                            )
+                        }
+                        inner()
                     }
-                    inner()
                 },
             )
             if (state.query.isNotEmpty()) {
