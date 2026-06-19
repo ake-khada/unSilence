@@ -50,6 +50,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -133,6 +134,22 @@ fun SearchScreen(
 
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // Tapping a result navigates away from search — drop IME focus first so the
+    // keyboard doesn't linger over the destination (profile / note / article).
+    // clearFocus() (not just hide()) ensures the text field releases focus so the
+    // IME stays down instead of popping back.
+    val onAuthorClickDismiss: (String) -> Unit = { pubkey ->
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        onAuthorClick(pubkey)
+    }
+    val onNoteClickDismiss: (String) -> Unit = { id ->
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        onNoteClick(id)
+    }
     var pendingSearch by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
@@ -294,7 +311,7 @@ fun SearchScreen(
                             pendingSearch = true
                             selectedTab = 3
                         },
-                        onUserClick = onAuthorClick,
+                        onUserClick = onAuthorClickDismiss,
                     )
                 }
 
@@ -335,14 +352,15 @@ fun SearchScreen(
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
                         val callbacks = rememberCallbacks(
-                            onNoteClick, onComment, onAuthorClick, onHashtagClick,
-                            onQuote, actionsViewModel, { articleRow = it },
+                            onNoteClickDismiss, onComment, onAuthorClickDismiss, onHashtagClick,
+                            onQuote, actionsViewModel,
+                            { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                         )
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             if (state.peopleResults.isNotEmpty()) {
                                 items(state.peopleResults.take(3), key = { it.pubkey }) { user ->
-                                    ProfileCard(user = user, onClick = { onAuthorClick(user.pubkey) })
+                                    ProfileCard(user = user, onClick = { onAuthorClickDismiss(user.pubkey) })
                                     HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
                                 }
                             }
@@ -371,7 +389,7 @@ fun SearchScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.peopleResults, key = { it.pubkey }) { user ->
-                                ProfileCard(user = user, onClick = { onAuthorClick(user.pubkey) })
+                                ProfileCard(user = user, onClick = { onAuthorClickDismiss(user.pubkey) })
                                 HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
                             }
                         }
@@ -391,8 +409,9 @@ fun SearchScreen(
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
                         val callbacks = rememberCallbacks(
-                            onNoteClick, onComment, onAuthorClick, onHashtagClick,
-                            onQuote, actionsViewModel, { articleRow = it },
+                            onNoteClickDismiss, onComment, onAuthorClickDismiss, onHashtagClick,
+                            onQuote, actionsViewModel,
+                            { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                         )
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -420,7 +439,7 @@ fun SearchScreen(
         ArticleReaderScreen(
             row             = row,
             onDismiss       = { articleRow = null },
-            onNoteClick     = onNoteClick,
+            onNoteClick     = onNoteClickDismiss,
             onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
             onReactLongPress = {
                 emojiReactTarget = model.engagementId to model.pubkey
@@ -441,7 +460,7 @@ fun SearchScreen(
             isZapLoading    = model.engagementId in zapLoadingIds,
             extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
             zapFlash        = zapFlash,
-            onAuthorClick   = onAuthorClick,
+            onAuthorClick   = onAuthorClickDismiss,
             onHashtagClick  = onHashtagClick,
             lookupProfile   = actionsViewModel::lookupProfile,
             // SearchScreen has no per-event aggregation flows → reader falls back to
