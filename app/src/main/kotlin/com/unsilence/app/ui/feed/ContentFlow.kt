@@ -33,6 +33,9 @@ import com.unsilence.app.ui.theme.TextSecondary
 
 /** Maximum number of OG preview cards rendered per note. */
 private const val MAX_OG_CARDS = 1
+private const val COLLAPSED_CARD_SCREEN_FRACTION = 0.80f
+private const val CONTENT_LINE_HEIGHT_DP = 22f
+private const val COLLAPSED_CARD_CHROME_DP = 104f
 
 /**
  * Walks the segment list from an [EventModel] and renders each content section
@@ -77,13 +80,16 @@ internal fun ContentFlow(
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
 
-    // Viewport-relative line budget: ~95% of screen in text lines (lineHeight=22sp≈22dp)
+    // Collapsed long-note budget: keep the whole card close to 80% of the
+    // viewport, not just the text run. Reserve rough chrome for author header,
+    // Show more, and action bar; the remaining height becomes text lines.
     val screenHeightDp = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
     val lineBudget = remember(screenHeightDp) {
-        ((screenHeightDp * 0.95f) / 22f).toInt().coerceIn(15, 50)
+        (((screenHeightDp * COLLAPSED_CARD_SCREEN_FRACTION) - COLLAPSED_CARD_CHROME_DP) /
+            CONTENT_LINE_HEIGHT_DP).toInt().coerceIn(12, 32)
     }
     var hasTextOverflow by remember(model.segments) { mutableStateOf(false) }
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by remember(model.navigateId) { mutableStateOf(false) }
     val maxLines = when {
         isEmbedded -> 6
         !expanded -> lineBudget
@@ -96,7 +102,7 @@ internal fun ContentFlow(
     Column(modifier = modifier) {
         var i = 0
         var ogCardsRendered = 0
-        while (i < model.segments.size) {
+        segmentLoop@ while (i < model.segments.size) {
             when (model.segments[i]) {
                 is Segment.Text, is Segment.MentionPubkey, is Segment.Link, is Segment.Hashtag -> {
                     // Collect consecutive text/mention/link/hashtag run
@@ -156,6 +162,15 @@ internal fun ContentFlow(
                             .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
                     )
+
+                    // Once a top-level text run exceeds the collapsed viewport
+                    // budget, stop rendering the remaining source-order content
+                    // (OG cards, images, later text) until expanded. Otherwise a
+                    // long post can still exceed the screen because the capped
+                    // text is followed by a link preview or media card.
+                    if (!isEmbedded && !expanded && hasTextOverflow) {
+                        break@segmentLoop
+                    }
 
                     // Render OG preview cards for the links we removed from
                     // inline text. showMinimalFallback=true so a failed OG
