@@ -66,6 +66,11 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun EventActionBar(
     noteId: String,
+    // Id the zap optimistic state / flash are keyed under — model.engagementId,
+    // which differs from noteId for reposts (engagementId = inner note). Defaults
+    // to noteId so non-repost callers are unaffected. Keep noteId for the Quote
+    // action; only the zap-flash match uses this.
+    zapTargetId: String = noteId,
     replyCount: Int,
     repostCount: Int,
     reactionCount: Int,
@@ -104,7 +109,7 @@ internal fun EventActionBar(
 
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
     LaunchedEffect(zapFlash) {
-        if (zapFlash != null && zapFlash.noteId == noteId && zapFlash.success) {
+        if (zapFlash != null && zapFlash.noteId == zapTargetId && zapFlash.success) {
             zapFlashTrigger++
         }
     }

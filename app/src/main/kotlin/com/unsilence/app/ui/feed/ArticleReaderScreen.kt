@@ -456,6 +456,7 @@ fun ArticleReaderScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                             EventActionBar(
                                 noteId           = model.navigateId,
+                                zapTargetId      = model.engagementId,
                                 replyCount       = replyCount,
                                 repostCount      = repostCount,
                                 reactionCount    = reactionCount,
