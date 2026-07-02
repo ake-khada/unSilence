@@ -1,21 +1,28 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import android.content.Context
 import com.unsilence.app.data.BROWSER_USER_AGENT
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
+import okhttp3.Cache
 import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -31,48 +38,99 @@ data class OgMetadata(
 
 @Singleton
 class OgFetcher @Inject constructor(
+    @ApplicationContext context: Context,
     baseClient: OkHttpClient,
 ) {
     private val client = baseClient.newBuilder()
+        .cache(Cache(File(context.cacheDir, "og_http"), 8L * 1024 * 1024))
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
     private val cache = ConcurrentHashMap<String, OgMetadata>()
-    private val attempted = ConcurrentHashMap<String, Boolean>()
+    private val cacheOrder = ConcurrentLinkedQueue<String>()
+    private val failedAt = ConcurrentHashMap<String, Long>()
+    private val failureOrder = ConcurrentLinkedQueue<String>()
     private val inFlight = ConcurrentHashMap<String, CompletableDeferred<OgMetadata?>>()
 
-    /** True if the URL has already been fetched (or attempted). */
-    fun hasCached(url: String): Boolean = cache.containsKey(url) || attempted.containsKey(url)
+    /** True if the URL is cached or has a still-live negative-cache entry. */
+    fun hasCached(url: String): Boolean {
+        val key = cacheKey(url)
+        return cache.containsKey(key) || isRecentFailure(key)
+    }
 
     suspend fun fetch(url: String): OgMetadata? {
-        cache[url]?.let { return it }
-        if (attempted.containsKey(url)) return null
+        val key = cacheKey(url)
+        cache[key]?.let { return it }
+        if (isRecentFailure(key)) return null
 
         val deferred = CompletableDeferred<OgMetadata?>()
-        val existing = inFlight.putIfAbsent(url, deferred)
-        if (existing != null) return existing.await()
+        val existing = inFlight.putIfAbsent(key, deferred)
+        if (existing != null) {
+            return try {
+                existing.await()
+            } catch (e: CancellationException) {
+                currentCoroutineContext().ensureActive()
+                if (!existing.isCancelled) throw e
+                inFlight.remove(key, existing)
+                fetch(url)
+            }
+        }
 
-        val result = try {
-            withContext(Dispatchers.IO) {
+        try {
+            val result = withContext(Dispatchers.IO) {
                 try {
-                    doFetch(url)
+                    doFetch(key)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.d(TAG, "og fetch: exception for $url: ${e.javaClass.simpleName}: ${e.message}")
+                    Log.d(TAG, "og fetch: exception for $key: ${e.javaClass.simpleName}: ${e.message}")
                     null
                 }
             }
+            if (result != null) {
+                putCached(key, result)
+                failedAt.remove(key)
+            } else {
+                recordFailure(key)
+            }
+            deferred.complete(result)
+            return result
+        } catch (e: CancellationException) {
+            // Other callers may be awaiting the shared deferred. Propagate
+            // cancellation instead of leaving them suspended indefinitely.
+            deferred.cancel(e)
+            throw e
         } finally {
-            inFlight.remove(url)
+            inFlight.remove(key, deferred)
         }
-        attempted[url] = true
-        if (result != null) cache[url] = result
-        deferred.complete(result)
-        return result
     }
+
+    private fun isRecentFailure(key: String): Boolean {
+        val failed = failedAt[key] ?: return false
+        if (System.currentTimeMillis() - failed < NEGATIVE_CACHE_TTL_MS) return true
+        failedAt.remove(key, failed)
+        return false
+    }
+
+    private fun putCached(key: String, value: OgMetadata) {
+        if (cache.put(key, value) == null) cacheOrder.add(key)
+        while (cache.size > MAX_CACHE_ENTRIES) {
+            val oldest = cacheOrder.poll() ?: break
+            cache.remove(oldest)
+        }
+    }
+
+    private fun recordFailure(key: String) {
+        if (failedAt.put(key, System.currentTimeMillis()) == null) failureOrder.add(key)
+        while (failedAt.size > MAX_FAILURE_ENTRIES) {
+            val oldest = failureOrder.poll() ?: break
+            failedAt.remove(oldest)
+        }
+    }
+
+    private fun cacheKey(url: String): String = url.substringBefore('#')
 
     /**
      * Execute [call] asynchronously and parse the response inside the OkHttp
@@ -131,7 +189,6 @@ class OgFetcher @Inject constructor(
             .header("sec-ch-ua", "\"Google Chrome\";v=\"130\", \"Chromium\";v=\"130\", \"Not?A_Brand\";v=\"99\"")
             .header("sec-ch-ua-mobile", "?1")
             .header("sec-ch-ua-platform", "\"Android\"")
-            .header("Cache-Control", "max-age=0")
             .build()
         return executeAndParse(client.newCall(request)) { response ->
             if (!response.isSuccessful) {
@@ -163,6 +220,9 @@ class OgFetcher @Inject constructor(
         private const val TAG = "OgFetcher"
         private const val UA = BROWSER_USER_AGENT
         private const val MAX_BODY_SIZE = 50_000L
+        private const val MAX_CACHE_ENTRIES = 256
+        private const val MAX_FAILURE_ENTRIES = 512
+        private const val NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000L
 
         // Matches property= or name= with og: prefix, in either order with content=.
         // Handles both quoted (content="val") and unquoted (content=val) attributes

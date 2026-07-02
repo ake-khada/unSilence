@@ -330,6 +330,9 @@ class ComposeViewModel @Inject constructor(
     suspend fun fetchOgMetadata(url: String): com.unsilence.app.data.relay.OgMetadata? =
         ogFetcher.fetch(url)
 
+    fun hasCachedOgMetadata(url: String): Boolean =
+        ogFetcher.hasCached(url)
+
     fun updateTextBlock(id: String, text: String) {
         _blocks.update { blocks ->
             blocks.map { block ->

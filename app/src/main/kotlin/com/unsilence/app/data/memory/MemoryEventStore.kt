@@ -1,6 +1,5 @@
 package com.unsilence.app.data.memory
 
-import android.os.Trace
 import android.util.Log
 // FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
 import com.unsilence.app.data.relay.NostrJson
@@ -465,10 +464,13 @@ class MemoryEventStore @Inject constructor(
      * Cache-first: survives eviction if model was already parsed.
      */
     fun getOrParseEventModel(eventId: String): com.unsilence.app.data.model.EventModel? {
-        eventModelsByEventId[eventId]?.let { return it }
+        eventModelsByEventId[eventId]?.let {
+            putVideoRenderModels(eventId, it.media.videos.map { video -> video.model })
+            return it
+        }
         val event = eventsById[eventId] ?: return null
         return eventModelsByEventId.computeIfAbsent(eventId) {
-            com.unsilence.app.data.model.ContentParser.parse(
+            val model = com.unsilence.app.data.model.ContentParser.parse(
                 id = event.id,
                 pubkey = event.pubkey,
                 kind = event.kind,
@@ -481,11 +483,14 @@ class MemoryEventStore @Inject constructor(
                 hasContentWarning = event.hasContentWarning,
                 contentWarningReason = event.contentWarningReason,
             )
+            putVideoRenderModels(eventId, model.media.videos.map { video -> video.model })
+            model
         }
     }
 
     fun putEventModel(eventId: String, model: com.unsilence.app.data.model.EventModel) {
         eventModelsByEventId[eventId] = model
+        putVideoRenderModels(eventId, model.media.videos.map { video -> video.model })
     }
 
     // ─── Reactive signals ───────────────────────────────────────────────────
@@ -2005,34 +2010,27 @@ class MemoryEventStore @Inject constructor(
     // ─── Query API ──────────────────────────────────────────────────────────
 
     fun feedEvents(filter: FeedFilter, limit: Int = 300): List<NostrEvent> {
-        Trace.beginSection("MemoryEventStore.feedEvents")
-        var scanned = 0
-        try {
-            val result = mutableListOf<NostrEvent>()
-            for (entry in recentByCreatedAt) {
-                scanned++
-                if (result.size >= limit) break
-                val event = eventsById[entry.id] ?: continue
-                if (event.kind !in filter.kinds) continue
-                if (filter.followedPubkeys != null && event.pubkey !in filter.followedPubkeys) continue
-                // Content filter: 1 = notes only, 2 = replies only.
-                // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and
-                // must NOT be treated as replies — admit them to notes, exclude from replies.
-                val isRepostKind = event.kind == 6 || event.kind == 16
-                if (filter.contentFilter == 1 && !isRepostKind) {
-                    if (event.replyToId != null || event.rootId != null) continue
-                }
-                if (filter.contentFilter == 2) {
-                    if ((event.replyToId == null && event.rootId == null) || isRepostKind) continue
-                }
-                // Relay URL scoping — null or empty means no relay filter (all relays pass)
-                if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
-                result.add(event)
+        val result = mutableListOf<NostrEvent>()
+        for (entry in recentByCreatedAt) {
+            if (result.size >= limit) break
+            val event = eventsById[entry.id] ?: continue
+            if (event.kind !in filter.kinds) continue
+            if (filter.followedPubkeys != null && event.pubkey !in filter.followedPubkeys) continue
+            // Content filter: 1 = notes only, 2 = replies only.
+            // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and
+            // must NOT be treated as replies — admit them to notes, exclude from replies.
+            val isRepostKind = event.kind == 6 || event.kind == 16
+            if (filter.contentFilter == 1 && !isRepostKind) {
+                if (event.replyToId != null || event.rootId != null) continue
             }
-            return result
-        } finally {
-            Trace.endSection()
+            if (filter.contentFilter == 2) {
+                if ((event.replyToId == null && event.rootId == null) || isRepostKind) continue
+            }
+            // Relay URL scoping — null or empty means no relay filter (all relays pass)
+            if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
+            result.add(event)
         }
+        return result
     }
 
     fun userEvents(pubkey: String, kinds: Set<Int>, limit: Int = 200): List<NostrEvent> {

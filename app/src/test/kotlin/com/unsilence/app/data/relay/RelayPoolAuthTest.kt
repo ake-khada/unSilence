@@ -21,6 +21,8 @@ class RelayPoolAuthTest {
     private val authInFlight = ConcurrentHashMap.newKeySet<String>()
     private val authRejectionStreak = ConcurrentHashMap<String, Int>()
     private val authUnavailableRelays = ConcurrentHashMap.newKeySet<String>()
+    private val optimisticAuthUsed = ConcurrentHashMap.newKeySet<String>()
+    private val pendingChallenges = ConcurrentHashMap<String, String>()
     private var lastCompleteAuthReal: Boolean? = null
     private var authSent = false
     private var reconnectEmitted = false
@@ -31,6 +33,8 @@ class RelayPoolAuthTest {
         authInFlight.clear()
         authRejectionStreak.clear()
         authUnavailableRelays.clear()
+        optimisticAuthUsed.clear()
+        pendingChallenges.clear()
         lastCompleteAuthReal = null
         authSent = false
         reconnectEmitted = false
@@ -39,9 +43,14 @@ class RelayPoolAuthTest {
     // ── Simulated handlers (logic extracted from RelayPool) ─────────────
 
     /** Models handleAuthChallenge decision logic. */
-    private fun simulateAuthChallenge(url: String): String {
+    private fun simulateAuthChallenge(url: String, challenge: String = "challenge"): String {
+        val previous = pendingChallenges.put(url, challenge)
         if (url in authUnavailableRelays) return "unavailable-skip"
+        if (previous == challenge && url in authenticatedRelays) return "duplicate-skip"
         if (url in authenticatedRelays) {
+            if (optimisticAuthUsed.remove(url)) {
+                authRejectionStreak.merge(url, 1, Int::plus)
+            }
             authenticatedRelays.remove(url)
             // falls through to re-auth
         }
@@ -56,6 +65,9 @@ class RelayPoolAuthTest {
         authInFlight.remove(url)
         if (real) {
             authRejectionStreak.remove(url)
+            optimisticAuthUsed.remove(url)
+        } else {
+            optimisticAuthUsed.add(url)
         }
         lastCompleteAuthReal = real
         reconnectEmitted = true
@@ -66,6 +78,7 @@ class RelayPoolAuthTest {
         if (url in authUnavailableRelays) return "ignored-unavailable"
         val streak = authRejectionStreak.merge(url, 1, Int::plus) ?: 1
         authenticatedRelays.remove(url)
+        optimisticAuthUsed.remove(url)
         return if (streak >= RelayPool.MAX_AUTH_REJECTIONS) {
             authUnavailableRelays.add(url)
             authInFlight.remove(url)
@@ -78,6 +91,16 @@ class RelayPoolAuthTest {
     /** Models optimistic fallback decision. */
     private fun shouldFireOptimistic(url: String): Boolean =
         (authRejectionStreak[url] ?: 0) == 0
+
+    /** Models a second no-OK timeout after optimism has already failed. */
+    private fun simulateNoOkTimeout(url: String): String {
+        authInFlight.remove(url)
+        val streak = authRejectionStreak.merge(url, 1, Int::plus) ?: 1
+        return if (streak >= RelayPool.MAX_AUTH_NO_OK_STREAK) {
+            authUnavailableRelays.add(url)
+            "give-up"
+        } else "no-ok-$streak"
+    }
 
     // ── Tests ───────────────────────────────────────────────────────────
 
@@ -92,6 +115,35 @@ class RelayPoolAuthTest {
         assertEquals("sent", result)
         assertFalse("stale auth should be cleared", url in authenticatedRelays)
         assertTrue(authSent)
+    }
+
+    @Test
+    fun `duplicate completed challenge is ignored`() {
+        val url = "wss://relay.example"
+        pendingChallenges[url] = "same"
+        authenticatedRelays.add(url)
+
+        assertEquals("duplicate-skip", simulateAuthChallenge(url, "same"))
+        assertTrue(url in authenticatedRelays)
+        assertFalse(authSent)
+    }
+
+    @Test
+    fun `rechallenge after optimistic completion consumes optimism and raises streak`() {
+        val url = "wss://relay.example"
+        simulateCompleteAuth(url, real = false)
+
+        assertEquals("sent", simulateAuthChallenge(url, "new-challenge"))
+        assertEquals(1, authRejectionStreak[url])
+        assertFalse(shouldFireOptimistic(url))
+    }
+
+    @Test
+    fun `repeated no OK timeouts eventually quarantine relay`() {
+        val url = "wss://relay.example"
+        authRejectionStreak[url] = 1
+        assertEquals("give-up", simulateNoOkTimeout(url))
+        assertTrue(url in authUnavailableRelays)
     }
 
     @Test
@@ -209,6 +261,8 @@ class RelayPoolAuthTest {
         authUnavailableRelays.clear()
         authenticatedRelays.clear()
         authInFlight.clear()
+        optimisticAuthUsed.clear()
+        pendingChallenges.clear()
 
         assertFalse(authRejectionStreak.containsKey(url))
         assertFalse(url in authUnavailableRelays)

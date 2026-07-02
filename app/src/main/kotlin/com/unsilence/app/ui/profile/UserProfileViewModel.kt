@@ -5,10 +5,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
@@ -17,7 +22,11 @@ import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.repository.MuteResult
+import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.ui.feed.FeedContentFilter
+import com.unsilence.app.ui.shared.TimelineCardData
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
@@ -41,7 +50,6 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 private const val TAG = "UserProfileVM"
@@ -56,6 +64,9 @@ class UserProfileViewModel @Inject constructor(
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineService: TimelineService,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
+    private val timelineCardData: TimelineCardData,
+    private val muteListRepository: MuteListRepository,
+    private val reportRepository: ReportRepository,
 ) : ViewModel() {
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
@@ -114,29 +125,20 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ───────────────────────
 
-    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        profileCache.getOrPut(pubkey) {
-            memoryEventStore.userEntityFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-        }
+        timelineCardData.profileFlow(pubkey, viewModelScope)
 
     // ── Per-event stats (matches FeedViewModel.statsFlow) ────────────────
-    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
 
-    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
-        statsCache.getOrPut(eventId) {
-            memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
-        }
+    fun statsFlow(eventId: String): StateFlow<EventStats> =
+        timelineCardData.statsFlow(eventId, viewModelScope)
 
-    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
-        memoryEventStore.zapDetailsForEvent(eventId)
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        timelineCardData.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> =
-        memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
-        memoryEventStore.reactionsForEvent(eventId)
+        timelineCardData.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
+        timelineCardData.reactionsForEvent(eventId)
 
     /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
     val followerCount = MutableStateFlow<Long?>(null)
@@ -144,6 +146,17 @@ class UserProfileViewModel @Inject constructor(
     val followingCount = MutableStateFlow<Long?>(null)
 
     private val myPubkey: String? = keyManager.getPublicKeyHex()
+
+    val isOwnProfile: StateFlow<Boolean> = _pubkeyHex
+        .map { target -> target != null && target == myPubkey }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val isMuted: StateFlow<Boolean> = combine(
+        _pubkeyHex,
+        memoryEventStore.ownMuteListFlow(),
+    ) { target, muteList ->
+        target != null && muteList.mutesPubkey(target)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** Whether the logged-in user follows the viewed pubkey. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -217,6 +230,24 @@ class UserProfileViewModel @Inject constructor(
     }
 
     // ── User actions ─────────────────────────────────────────────────────
+
+    fun muteUser(): MuteResult? {
+        val targetPubkey = _pubkeyHex.value ?: return null
+        if (targetPubkey == myPubkey) return null
+        return muteListRepository.muteUser(targetPubkey)
+    }
+
+    fun unmuteUser(): MuteResult? {
+        val targetPubkey = _pubkeyHex.value ?: return null
+        if (targetPubkey == myPubkey) return null
+        return muteListRepository.unmuteUser(targetPubkey)
+    }
+
+    fun reportProfile(type: ReportType) {
+        val targetPubkey = _pubkeyHex.value ?: return
+        if (targetPubkey == myPubkey) return
+        reportRepository.reportProfile(targetPubkey, type)
+    }
 
     fun onViewportChanged(first: Int, last: Int, isScrolling: Boolean = false) {
         val atTop = first <= 0
@@ -365,6 +396,9 @@ class UserProfileViewModel @Inject constructor(
                 !isRepostKind && (evt.replyToId != null || evt.rootId != null)
         }
     }
+
+    private fun MuteList?.mutesPubkey(pubkey: String): Boolean =
+        this != null && (pubkey in pubkeys || pubkey in privatePubkeys)
 
     override fun onCleared() {
         currentHandle?.close()

@@ -125,6 +125,22 @@ class ContentParserTest {
         assertEquals(16f / 9f, video.model.aspectRatio, 0.01f)
     }
 
+    @Test
+    fun `video URL with query and trailing punctuation keeps imeta poster and dimensions`() {
+        val tagsJson = """
+            [["imeta","url https://video.host/clip.mp4","dim 720x1280","image https://video.host/poster.jpg"]]
+        """.trimIndent()
+        val model = parse("https://video.host/clip.mp4?download=1.", tagsJson = tagsJson)
+
+        assertEquals(1, model.segments.size)
+        val video = model.segments[0] as Segment.Video
+        assertEquals("https://video.host/clip.mp4?download=1", video.model.videoUrl)
+        assertEquals(720f / 1280f, video.model.aspectRatio, 0.01f)
+        assertEquals("https://video.host/poster.jpg", video.model.posterUrl)
+        assertEquals(720, video.model.widthPx)
+        assertEquals(1280, video.model.heightPx)
+    }
+
     // ── YouTube URLs ────────────────────────────────────────────────────────
 
     @Test
@@ -452,6 +468,17 @@ class ContentParserTest {
         val model = parse("", kind = 21, tagsJson = tags)
         assertEquals(1, model.segments.size)
         assertTrue(model.segments[0] is Segment.Video)
+    }
+
+    @Test
+    fun `kind 21 prepends extensionless imeta video when mime is video`() {
+        val mediaUrl = "https://cdn.example/${"b".repeat(64)}"
+        val tags = """[["imeta","url $mediaUrl","m video/mp4","dim 1920x1080"]]"""
+        val model = parse("", kind = 21, tagsJson = tags)
+        val video = model.segments.filterIsInstance<Segment.Video>().singleOrNull()
+        assertNotNull(video)
+        assertEquals(mediaUrl, video!!.model.videoUrl)
+        assertEquals(1920f / 1080f, video.model.aspectRatio, 0.01f)
     }
 
     // ── Reposted NIP-68: imeta prepend must key off effectiveKind, not raw kind ─

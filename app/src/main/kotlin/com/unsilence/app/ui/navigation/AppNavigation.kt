@@ -85,6 +85,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -235,7 +236,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     // Build the ordered feed list for the carousel
     val feedList = remember(hasFollows, pinnedRelays, userSets, feedType) {
         buildList {
-            if (hasFollows) add(FeedType.Following to "Following")
+            if (hasFollows || feedType is FeedType.Following) add(FeedType.Following to "Following")
             add(FeedType.Global to "Global")
             add(FeedType.Popular to "Popular")
             for (relay in pinnedRelays) {
@@ -369,7 +370,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .offset(y = topBarOffset)
+                    .offset { IntOffset(0, topBarOffset.roundToPx()) }
                     .fillMaxWidth()
                     .background(Black)
                     .statusBarsPadding()
@@ -461,7 +462,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .offset(y = bottomBarOffset)
+                    .offset { IntOffset(0, bottomBarOffset.roundToPx()) }
                     .fillMaxWidth()
                     .background(Black)
                     .navigationBarsPadding()
@@ -709,12 +710,12 @@ private fun FeedCarousel(
     }
 
     val currentIdx = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-        .coerceAtLeast(0)
+    val currentFeedInList = currentIdx >= 0
 
     // Infinite scroll via large virtual page count centered at the current feed
     val virtualCount = realCount * 10_000
     val middleBase = (virtualCount / 2 / realCount) * realCount
-    val initialPage = middleBase + currentIdx
+    val initialPage = middleBase + currentIdx.coerceAtLeast(0)
 
     val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
 
@@ -722,13 +723,14 @@ private fun FeedCarousel(
     // to prevent mod(realCount) pointing to the wrong feed after virtualCount changes.
     LaunchedEffect(realCount) {
         val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-            .coerceAtLeast(0)
+        if (targetReal < 0) return@LaunchedEffect
         val newMiddle = (virtualCount / 2 / realCount) * realCount
         pagerState.scrollToPage(newMiddle + targetReal)
     }
 
     // Pager settled on a new page → update the ViewModel
-    LaunchedEffect(pagerState.settledPage) {
+    LaunchedEffect(pagerState.settledPage, currentFeedInList) {
+        if (!currentFeedInList) return@LaunchedEffect
         val realIdx = pagerState.settledPage.mod(realCount)
         val settled = feedList.getOrNull(realIdx)?.first ?: return@LaunchedEffect
         if (!feedTypeMatches(settled, currentFeedType)) {
@@ -737,9 +739,10 @@ private fun FeedCarousel(
     }
 
     // External change (sheet selection) → scroll pager to match
-    LaunchedEffect(currentFeedType) {
+    LaunchedEffect(currentFeedType, currentFeedInList) {
+        if (!currentFeedInList) return@LaunchedEffect
         val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-            .coerceAtLeast(0)
+        if (targetReal < 0) return@LaunchedEffect
         val currentReal = pagerState.currentPage.mod(realCount)
         if (targetReal != currentReal) {
             pagerState.animateScrollToPage(pagerState.currentPage + (targetReal - currentReal))
@@ -813,14 +816,14 @@ private fun FeedCarousel(
                 .fillMaxWidth(),
         ) { page ->
             val realIdx = page.mod(realCount)
-            val pageOffset = ((pagerState.currentPage - page) +
-                pagerState.currentPageOffsetFraction).absoluteValue
 
             Box(
                 modifier = Modifier
                     .height(pageHeightDp)
                     .fillMaxWidth()
                     .graphicsLayer {
+                        val pageOffset = ((pagerState.currentPage - page) +
+                            pagerState.currentPageOffsetFraction).absoluteValue
                         alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
                         val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
                         scaleX = scale
@@ -833,7 +836,7 @@ private fun FeedCarousel(
                     horizontalArrangement = Arrangement.Center,
                 ) {
                     // Health dot — only for the active relay feed page
-                    if (activeHealth != null && pageOffset < 0.5f) {
+                    if (activeHealth != null && feedTypeMatches(feedList[realIdx].first, currentFeedType)) {
                         val dotColor = when {
                             activeHealth.score == null -> Text3
                             activeHealth.score!! >= 70 -> Mint
@@ -942,14 +945,14 @@ private fun NotifFilterCarousel(
                 .fillMaxWidth(),
         ) { page ->
             val realIdx = page.mod(realCount)
-            val pageOffset = ((pagerState.currentPage - page) +
-                pagerState.currentPageOffsetFraction).absoluteValue
 
             Box(
                 modifier = Modifier
                     .height(pageHeightDp)
                     .fillMaxWidth()
                     .graphicsLayer {
+                        val pageOffset = ((pagerState.currentPage - page) +
+                            pagerState.currentPageOffsetFraction).absoluteValue
                         alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
                         val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
                         scaleX = scale
@@ -1052,7 +1055,7 @@ private fun FeedSelectorSheet(
         Column(modifier = Modifier.padding(bottom = 28.dp)) {
             // ── Core feeds ──
             SectionLabel("Feeds")
-            if (hasFollows) SheetItem("Following", FeedType.Following)
+            if (hasFollows || feedType is FeedType.Following) SheetItem("Following", FeedType.Following)
             SheetItem("Global", FeedType.Global)
             SheetItem("Popular", FeedType.Popular)
 

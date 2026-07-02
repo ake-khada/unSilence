@@ -4,13 +4,17 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.EventStats
+import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
@@ -27,6 +31,7 @@ import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -53,16 +58,29 @@ import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 private const val TAG = "FeedVM"
+private const val TRACE_FEED_VM = false
+
+private inline fun feedTrace(message: () -> String) {
+    if (TRACE_FEED_VM) Log.d(TAG, message())
+}
 
 sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
-    data class  SingleRelay private constructor(val url: String, val label: String) : FeedType() {
+    class SingleRelay private constructor(val url: String, val label: String) : FeedType() {
         val displayLabel: String get() = when {
             url.contains("antiprimal.net/hot") -> "Popular"
             else -> label
         }
+
+        override fun equals(other: Any?): Boolean =
+            other is SingleRelay && url == other.url && label == other.label
+
+        override fun hashCode(): Int = 31 * url.hashCode() + label.hashCode()
+
+        override fun toString(): String = "SingleRelay(url=$url, label=$label)"
+
         companion object {
             // Single choke point: every SingleRelay url is canonicalized (normalizeRelayUrl strips
             // the trailing slash + scheme). Without this, a favorited relay (MES-normalized, no
@@ -104,7 +122,9 @@ class FeedViewModel @Inject constructor(
     private val timelineService: TimelineService,
     private val outboxResolver: OutboxRelayResolver,
     private val userRepository: UserRepository,
+    private val timelineCardData: TimelineCardData,
     private val relayPreferencesStore: RelayPreferencesStore,
+    private val initGate: InitGate,
     private val cardHydrator: CardHydrator,
     private val relayPool: RelayPool,
     private val muteListRepository: MuteListRepository,
@@ -205,7 +225,7 @@ class FeedViewModel @Inject constructor(
 
             val missingIds = displayedIds.filter { feedRowCache.get(it) == null }
             val hitCount = displayedIds.size - missingIds.size
-            Log.d(TAG, "feedRowCache hit=${hitCount} miss=${missingIds.size}")
+            feedTrace { "feedRowCache hit=${hitCount} miss=${missingIds.size}" }
 
             // Fetch only missing rows from MES
             if (missingIds.isNotEmpty()) {
@@ -267,11 +287,13 @@ class FeedViewModel @Inject constructor(
 
     // -- Feed type -------------------------------------------------------------
 
-    private val _feedType = MutableStateFlow<FeedType>(FeedType.Global)
+    private val _feedType = MutableStateFlow<FeedType>(
+        if (keyManager.getPublicKeyHex() != null) FeedType.Following else FeedType.Global,
+    )
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
     fun setFeedType(type: FeedType) {
-        Log.w(TAG, "setFeedType: ${_feedType.value} → $type")
+        feedTrace { "setFeedType: ${_feedType.value} → $type" }
         _authUnavailableRelay.value = null
         _feedType.value = type
         if (_coldStartState.value == ColdStartState.LOADING) {
@@ -284,7 +306,7 @@ class FeedViewModel @Inject constructor(
 
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
-        Log.w(TAG, "setContentFilter: ${_contentFilter.value} → $f")
+        feedTrace { "setContentFilter: ${_contentFilter.value} → $f" }
         _contentFilter.value = f
         // Pure client-side projection — feedRows recomposes via its own
         // combine on _contentFilter. NO subscription restart. See CG-R1.
@@ -311,6 +333,7 @@ class FeedViewModel @Inject constructor(
 
     private val _hasFollows = MutableStateFlow(false)
     val hasFollows: StateFlow<Boolean> = _hasFollows.asStateFlow()
+    private val _followsVersion = MutableStateFlow(0L)
 
     // -- User avatar -----------------------------------------------------------
 
@@ -322,36 +345,24 @@ class FeedViewModel @Inject constructor(
 
     // -- Profile lookup for repost original authors ----------------------------
 
-    private val profileCache = androidx.collection.LruCache<String, StateFlow<UserEntity?>>(500)
-
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        synchronized(profileCache) {
-            profileCache.get(pubkey) ?: userRepository.userFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-                .also { profileCache.put(pubkey, it) }
-        }
+        timelineCardData.profileFlow(pubkey, viewModelScope)
 
     // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
 
-    private val statsCache = androidx.collection.LruCache<String, StateFlow<com.unsilence.app.data.memory.EventStats>>(500)
-
-    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
-        synchronized(statsCache) {
-            statsCache.get(eventId) ?: memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
-                .also { statsCache.put(eventId, it) }
-        }
+    fun statsFlow(eventId: String): StateFlow<EventStats> =
+        timelineCardData.statsFlow(eventId, viewModelScope)
 
     // -- Engagement contributor accessors (delegates to MES indexes) ------------
 
-    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
-        memoryEventStore.zapDetailsForEvent(eventId)
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        timelineCardData.zapDetailsForEvent(eventId)
 
     fun repostPubkeysForEvent(eventId: String): List<String> =
-        memoryEventStore.repostPubkeysForEvent(eventId)
+        timelineCardData.repostPubkeysForEvent(eventId)
 
-    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
-        memoryEventStore.reactionsForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
+        timelineCardData.reactionsForEvent(eventId)
 
     // -- User relay sets (kind-30002) ------------------------------------------
 
@@ -402,38 +413,68 @@ class FeedViewModel @Inject constructor(
 
     // -- Warm-zone hydration ---------------------------------------------------
 
-    private val _viewportFirstVisible = MutableStateFlow(0)
+    private data class HydrationViewport(
+        val first: Int,
+        val last: Int,
+        val cardWidthPx: Int,
+    )
+
+    private val _hydrationViewport = MutableStateFlow(HydrationViewport(0, 0, 0))
 
     init {
+        viewModelScope.launch(Dispatchers.Default) {
+            combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
+                .conflate()
+                .collect { (rows, viewport) ->
+                    if (rows.isEmpty() || viewport.cardWidthPx <= 0) return@collect
+                    val first = viewport.first.coerceIn(0, rows.lastIndex)
+                    val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
+                    val lookahead = if (_feedType.value is FeedType.Following) {
+                        ASSET_WARM_LOOKAHEAD
+                    } else {
+                        ASSET_WARM_LOOKAHEAD_CHURNY
+                    }
+                    val start = (first - ASSET_WARM_ABOVE).coerceAtLeast(0)
+                    val end = (last + 1 + lookahead).coerceAtMost(rows.size)
+                    if (start >= end) return@collect
+
+                    val visibleEnd = (last + 1).coerceAtMost(end)
+                    val warmRows = buildList {
+                        addAll(rows.subList(first, visibleEnd))
+                        if (start < first) addAll(rows.subList(start, first))
+                        if (visibleEnd < end) addAll(rows.subList(visibleEnd, end))
+                    }
+                    cardHydrator.warmUpcomingAssets(
+                        events = warmRows,
+                        cardWidthPx = viewport.cardWidthPx,
+                        maxRows = ASSET_WARM_MAX_ROWS,
+                        maxImagePrefetches = ASSET_WARM_IMAGE_CAP,
+                        maxOgFetches = ASSET_WARM_OG_CAP,
+                    )
+                }
+        }
+
         @OptIn(FlowPreview::class)
         viewModelScope.launch(Dispatchers.Default) {
-            combine(events, _viewportFirstVisible) { events, first -> events to first }
+            combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
                 .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
-                .collectLatest { (events, first) ->
-                    if (events.isEmpty()) return@collectLatest
+                .collectLatest { (rows, viewport) ->
+                    if (rows.isEmpty()) return@collectLatest
+                    val first = viewport.first.coerceIn(0, rows.lastIndex)
+                    val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
                     val warmBelow = if (_feedType.value is FeedType.Following) WARM_ZONE_BELOW else WARM_ZONE_BELOW_CHURNY
                     val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
-                    val zoneEnd = (first + warmBelow).coerceAtMost(events.size)
+                    val zoneEnd = (first + warmBelow).coerceAtMost(rows.size)
                     if (zoneStart >= zoneEnd) return@collectLatest
-                    val warmEvents = events.subList(zoneStart, zoneEnd)
+                    val warmRows = rows.subList(zoneStart, zoneEnd)
                     val vpStart = (first - zoneStart).coerceAtLeast(0)
-                    val vpEnd = (vpStart + VIEWPORT_SIZE).coerceAtMost(warmEvents.size)
+                    val actualVpEnd = (last - zoneStart + 1).coerceAtLeast(vpStart + VIEWPORT_SIZE)
+                    val vpEnd = actualVpEnd.coerceAtMost(warmRows.size)
                     val lookahead = if (_feedType.value is FeedType.Following) ENGAGEMENT_LOOKAHEAD else ENGAGEMENT_LOOKAHEAD_CHURNY
-                    val engEnd = (vpEnd + lookahead).coerceAtMost(warmEvents.size)
-                    val viewportIds = warmEvents.subList(vpStart, engEnd).map { it.id }.toSet()
-                    // Reuse rows the feedRows pipeline already derived (feedRowCache
-                    // backs feedRows) instead of a redundant MES feedRowsByIds scan.
-                    // Warm-zone events filtered out of the display list (mute /
-                    // contentFilter / sensitive) miss the cache — synthesize those so
-                    // hydration coverage is unchanged. The hydrator only reads
-                    // immutable event fields (id/kind/content/createdAt/rootId),
-                    // never author/stat columns, so row staleness is irrelevant.
-                    val rows = warmEvents.map { evt ->
-                        feedRowCache.get(evt.id) ?: memoryEventStore.synthesizeFeedRow(evt)
-                    }
-                    if (rows.isNotEmpty()) {
-                        val feedRelay = (_feedType.value as? FeedType.SingleRelay)?.url
-                        cardHydrator.hydrateVisibleCards(rows, feedRelay = feedRelay, viewportIds = viewportIds)
+                    val engEnd = (vpEnd + lookahead).coerceAtMost(warmRows.size)
+                    val viewportIds = warmRows.subList(vpStart, engEnd).map { it.id }.toSet()
+                    if (warmRows.isNotEmpty()) {
+                        cardHydrator.hydrateVisibleCards(warmRows, viewportIds = viewportIds)
                     }
                 }
         }
@@ -467,9 +508,10 @@ class FeedViewModel @Inject constructor(
 
         relayPool.activeSingleRelayFeedUrl = newSingleRelayUrl
 
-        Log.w(TAG, "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}")
+        feedTrace { "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}" }
 
         // Close previous handle (= useEffect cleanup)
+        val hadActiveHandle = currentHandle != null
         currentHandle?.close()
         currentHandle = null
 
@@ -490,11 +532,13 @@ class FeedViewModel @Inject constructor(
         val subRequests = buildSubRequests(key.type)
         if (subRequests.isEmpty()) {
             _isLoading.value = false
-            Log.d(TAG, "setupSubscription: no subRequests, idle")
+            feedTrace { "setupSubscription: no subRequests, idle" }
             return
         }
 
-        _isLoading.value = resetView && cachedEvents.isEmpty()
+        _isLoading.value = (resetView || !hadActiveHandle) &&
+            cachedEvents.isEmpty() &&
+            _events.value.isEmpty()
 
         // Admission gate for relay batches arriving after subscription starts.
         // resetView=true (user-initiated switch): null → TimelineMerge.merge handles
@@ -516,7 +560,7 @@ class FeedViewModel @Inject constructor(
             },
             onNew    = { event -> handleNew(event) },
         )
-        Log.w(TAG, "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}")
+        feedTrace { "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}" }
 
         if (_isRefreshing.value) {
             refreshTimeoutJob = viewModelScope.launch {
@@ -535,7 +579,7 @@ class FeedViewModel @Inject constructor(
      *   if (eosed)    setInitialLoading(false)
      */
     private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
-        Log.w(TAG, "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_events.value.size}")
+        feedTrace { "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_events.value.size}" }
         if (batch.isNotEmpty()) {
             if (since == null) {
                 _events.update { current -> TimelineMerge.merge(current, batch) }
@@ -581,7 +625,15 @@ class FeedViewModel @Inject constructor(
     // ── User actions ──────────────────────────────────────────────────────────
 
     fun onViewportChanged(idx: Int) {
-        _viewportFirstVisible.value = idx
+        _hydrationViewport.value = HydrationViewport(idx, idx, 0)
+    }
+
+    fun onViewportChanged(first: Int, last: Int, cardWidthPx: Int) {
+        _hydrationViewport.value = HydrationViewport(
+            first = first.coerceAtLeast(0),
+            last = last.coerceAtLeast(first),
+            cardWidthPx = cardWidthPx.coerceAtLeast(0),
+        )
     }
 
     /** Intent-based at-top setter — called from FeedScreen's gesture-driven
@@ -644,7 +696,7 @@ class FeedViewModel @Inject constructor(
     // -- Init: cold-start + feedType subscription ------------------------------
 
     init {
-        Log.d(TAG, "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}")
+        feedTrace { "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}" }
 
         // Surface auth-unavailable for SingleRelay feeds
         viewModelScope.launch {
@@ -669,18 +721,22 @@ class FeedViewModel @Inject constructor(
                     _hasFollows.value = true
                     _feedType.value = FeedType.Following
                     _coldStartState.value = ColdStartState.READY_FOLLOWING
-                    Log.d(TAG, "cold-start: ${snapshotFollows.size} follows in snapshot -> Following")
+                    feedTrace { "cold-start: ${snapshotFollows.size} follows in snapshot -> Following" }
                 } else {
-                    // Slow path: wait briefly for relay-fetched follows
-                    val follows = withTimeoutOrNull(3_000L) {
-                        memoryEventStore.followsFlow(ownPubkey)
-                            .filter { it.isNotEmpty() }
-                            .first()
-                    }
-                    if (follows == null || follows.isEmpty()) {
+                    // Slow path: wait for bootstrap's authoritative kind-3 attempt.
+                    // Do not flash Global while follows are still unknown; keep the
+                    // user's intent on Following and let the existing feed hydrate
+                    // when the contact list arrives.
+                    initGate.awaitFollows()
+                    val follows = memoryEventStore.getFollows(ownPubkey)
+                    if (follows == null) {
+                        _feedType.value = FeedType.Following
+                        _coldStartState.value = ColdStartState.READY_FOLLOWING
+                        feedTrace { "cold-start: follows unresolved after bootstrap -> Following" }
+                    } else if (follows.isEmpty()) {
                         _feedType.value = FeedType.Global
                         _coldStartState.value = ColdStartState.READY_GLOBAL
-                        Log.d(TAG, "cold-start: no follows -> Global")
+                        feedTrace { "cold-start: no follows -> Global" }
                     } else {
                         _hasFollows.value = true
                         // Wait briefly for own kind-10002 (best-effort, optional)
@@ -691,7 +747,7 @@ class FeedViewModel @Inject constructor(
                         }
                         _feedType.value = FeedType.Following
                         _coldStartState.value = ColdStartState.READY_FOLLOWING
-                        Log.d(TAG, "cold-start: ${follows.size} follows from relay -> Following")
+                        feedTrace { "cold-start: ${follows.size} follows from relay -> Following" }
                     }
                 }
             } else {
@@ -699,11 +755,16 @@ class FeedViewModel @Inject constructor(
             }
         }
 
-        // Track follows count reactively (orthogonal to cold-start)
+        // Track follows reactively without changing the visible feed. If Following is
+        // active, the subscription collector uses _followsVersion to resubscribe as
+        // the contact list is resolved or edited. Feed-type switching remains driven
+        // by startup default resolution or explicit user actions.
         if (ownPubkey != null) {
             viewModelScope.launch {
-                memoryEventStore.followsFlow(ownPubkey).map { it.size }.collect { count ->
-                    _hasFollows.value = count > 0
+                memoryEventStore.followsFlow(ownPubkey).distinctUntilChanged().collect { follows ->
+                    val hasFollows = follows.isNotEmpty()
+                    _hasFollows.value = hasFollows
+                    _followsVersion.value = _followsVersion.value + 1
                 }
             }
         }
@@ -716,16 +777,21 @@ class FeedViewModel @Inject constructor(
         // explicit refresh mechanism.
         viewModelScope.launch {
             var prevKey: ResubKey? = null
+            val feedSelection = combine(_feedType, _followsVersion) { type, followsVersion ->
+                type to if (type is FeedType.Following) followsVersion else 0L
+            }
             combine(
                 _coldStartState,
-                _feedType,
+                feedSelection,
                 relayMetadataVersion,
                 _refreshCounter,
                 _filter,
-            ) { state, type, ver, refresh, filter ->
+            ) { state, selection, ver, refresh, filter ->
+                val (type, followsVersion) = selection
                 ResubKey(
                     state = state,
                     type = type,
+                    followsVersion = followsVersion,
                     ver = ver,
                     refresh = refresh,
                     filter = filter,
@@ -733,7 +799,7 @@ class FeedViewModel @Inject constructor(
             }
                 .filter { it.state != ColdStartState.LOADING }
                 .distinctUntilChangedBy {
-                    Triple(it.type, it.ver to it.refresh, it.filter)
+                    it.subscriptionIdentity
                 }
                 .collectLatest { key ->
                     val userInitiated = prevKey?.let {
@@ -749,7 +815,7 @@ class FeedViewModel @Inject constructor(
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
             val cached = loadCachedEvents(_feedType.value)
             if (cached.isNotEmpty() && _events.value.size < SNAPSHOT_MERGE_CEILING) {
-                Log.w(TAG, "snapshot restored: merging ${cached.size} cached events into ${_events.value.size} current")
+                feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_events.value.size} current" }
                 _events.update { current -> TimelineMerge.merge(current, cached) }
             }
         }
@@ -905,6 +971,18 @@ class FeedViewModel @Inject constructor(
     private data class ResubKey(
         val state: ColdStartState,
         val type: FeedType,
+        val followsVersion: Long,
+        val ver: Int,
+        val refresh: Int,
+        val filter: com.unsilence.app.domain.model.FeedFilter,
+    ) {
+        val subscriptionIdentity: SubscriptionIdentity
+            get() = SubscriptionIdentity(type, followsVersion, ver, refresh, filter)
+    }
+
+    private data class SubscriptionIdentity(
+        val type: FeedType,
+        val followsVersion: Long,
         val ver: Int,
         val refresh: Int,
         val filter: com.unsilence.app.domain.model.FeedFilter,
@@ -915,6 +993,12 @@ class FeedViewModel @Inject constructor(
         const val WARM_ZONE_BELOW = 50
         /** Churny feeds (Global, SingleRelay) — narrower warm zone to reduce speculative fetches. */
         const val WARM_ZONE_BELOW_CHURNY = 30
+        const val ASSET_WARM_ABOVE = 2
+        const val ASSET_WARM_LOOKAHEAD = 12
+        const val ASSET_WARM_LOOKAHEAD_CHURNY = 8
+        const val ASSET_WARM_MAX_ROWS = 16
+        const val ASSET_WARM_IMAGE_CAP = 4
+        const val ASSET_WARM_OG_CAP = 4
         /** Approximate on-screen post count — engagement fetch scoped to this. */
         const val VIEWPORT_SIZE = 8
         const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6

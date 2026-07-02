@@ -245,6 +245,11 @@ class RelayPool @Inject constructor(
      *  Reset on real OK. */
     private val authRejectionStreak = ConcurrentHashMap<String, Int>()
 
+    /** Relays granted the one-time no-OK optimistic fallback on this connection.
+     *  A subsequent challenge proves that optimism did not establish a stable
+     *  authenticated session and must not start another replay loop. */
+    private val optimisticAuthUsed = ConcurrentHashMap.newKeySet<String>()
+
     /** Relays whose auth repeatedly failed — excluded from fan-out.
      *  Session-scoped (in-memory). Cleared on logout via disconnectAll(). */
     private val authUnavailableRelays = ConcurrentHashMap.newKeySet<String>()
@@ -371,6 +376,9 @@ class RelayPool @Inject constructor(
         const val RELAY_MONITOR_PUBKEY =
             "9bbbb845e5b6c831c29789900769843ab43bb5047abe697870cb50b6fc9bf923"
         const val MAX_AUTH_REJECTIONS = 3
+        /** One optimistic attempt plus one re-challenge without an OK is enough
+         *  to prove the relay cannot establish a stable authenticated session. */
+        const val MAX_AUTH_NO_OK_STREAK = 2
     }
 
     /** Active one-shot sub count per relay URL. */
@@ -1201,6 +1209,7 @@ class RelayPool @Inject constructor(
                                 else -> {
                                     val streak = authRejectionStreak.merge(conn.url, 1, Int::plus) ?: 1
                                     authenticatedRelays.remove(conn.url)
+                                    optimisticAuthUsed.remove(conn.url)
                                     if (streak >= MAX_AUTH_REJECTIONS) {
                                         authUnavailableRelays.add(conn.url)
                                         authInFlight.remove(conn.url)
@@ -2117,12 +2126,12 @@ class RelayPool @Inject constructor(
      * Uses #d filter so the relay returns only the requested entries.
      * Each relay URL is a d-tag in kind 30385 replaceable events.
      */
-    suspend fun fetchTrustScores(providerPubkeyHex: String, relayUrls: List<String>) {
-        if (relayUrls.isEmpty()) return
+    suspend fun fetchTrustScores(providerPubkeyHex: String, relayUrls: List<String>): Boolean {
+        if (relayUrls.isEmpty()) return false
 
         // Normalize relay URLs for consistent #d matching with trust score d-tags
         val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-        if (normalizedUrls.isEmpty()) return
+        if (normalizedUrls.isEmpty()) return false
 
         // Resolve provider's write relays to know where to fetch from
         fetchRelayLists(listOf(providerPubkeyHex))
@@ -2153,6 +2162,7 @@ class RelayPool @Inject constructor(
 
         // Try each source relay until we get results
         var fetched = 0
+        var completed = false
         for (url in sourceUrls) {
             val conn = getOrCreateConnection(url) ?: continue
             try {
@@ -2172,7 +2182,8 @@ class RelayPool @Inject constructor(
                 }
 
                 // With #d filter, result set is small — 15s is plenty
-                withTimeoutOrNull(15_000) { pageState.eoseReceived.await() }
+                val eosed = withTimeoutOrNull(15_000) { pageState.eoseReceived.await() } != null
+                if (eosed) completed = true
                 val count = pageState.eventCount.get()
 
                 conn.send(buildJsonArray {
@@ -2193,6 +2204,9 @@ class RelayPool @Inject constructor(
 
         val mesCount = mes.getTrustScores().size
         Log.d(TAG, "Trust scores: $mesCount in MES ($fetched fetched for ${normalizedUrls.size} requested)")
+        // A real EOSE with zero events is still a successful, authoritative
+        // fetch for the requested #d set and should advance the staleness gate.
+        return completed
     }
 
     /**
@@ -3591,6 +3605,7 @@ class RelayPool @Inject constructor(
                 val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
                 val old = connections.put(url, conn)
                 authenticatedRelays.remove(url)
+                optimisticAuthUsed.remove(url)
                 pendingChallenges.remove(url)
                 authFailedRelays.remove(url)
                 authRejectionStreak.remove(url)
@@ -3646,15 +3661,27 @@ class RelayPool @Inject constructor(
      */
     private fun handleAuthChallenge(conn: RelayConnection, challenge: String) {
         val url = conn.url
-        pendingChallenges[url] = challenge
+        val previousChallenge = pendingChallenges.put(url, challenge)
 
         if (url in authUnavailableRelays) {
             Log.d(TAG, "AUTH: $url marked unavailable, not retrying")
             return
         }
 
+        // Some relays repeat the same connection-scoped challenge for every
+        // REQ. Once that exact challenge has completed, signing it again adds
+        // no authority and only burns signer/CPU/radio work.
+        if (previousChallenge == challenge && url in authenticatedRelays) {
+            Log.d(TAG, "AUTH: duplicate completed challenge from $url — ignoring")
+            return
+        }
+
         // A fresh challenge supersedes any prior (possibly optimistic) auth.
         if (url in authenticatedRelays) {
+            if (optimisticAuthUsed.remove(url)) {
+                val streak = authRejectionStreak.merge(url, 1, Int::plus) ?: 1
+                Log.w(TAG, "AUTH: $url re-challenged after optimistic completion (streak=$streak)")
+            }
             Log.w(TAG, "AUTH: re-challenged by $url — clearing stale auth, re-authenticating")
             authenticatedRelays.remove(url)
         }
@@ -3694,6 +3721,7 @@ class RelayPool @Inject constructor(
                             delay(10_000)
                             if (pendingAuthEventIds.remove(signed.id) != null) {
                                 Log.w(TAG, "AUTH: OK timeout for $url — optimistic auth (clean record)")
+                                optimisticAuthUsed.add(url)
                                 completeAuth(conn, url, real = false)
                             }
                         }
@@ -3703,7 +3731,14 @@ class RelayPool @Inject constructor(
                             delay(10_000)
                             if (pendingAuthEventIds.remove(signed.id) != null) {
                                 authInFlight.remove(url)
-                                Log.w(TAG, "AUTH: no OK for $url (streak=$streak), not optimistic")
+                                val newStreak = authRejectionStreak.merge(url, 1, Int::plus) ?: 1
+                                if (newStreak >= MAX_AUTH_NO_OK_STREAK) {
+                                    authUnavailableRelays.add(url)
+                                    _relayAuthUnavailable.tryEmit(url)
+                                    Log.w(TAG, "AUTH: no OK for $url (streak=$newStreak) — marking unavailable")
+                                } else {
+                                    Log.w(TAG, "AUTH: no OK for $url (streak=$newStreak), not optimistic")
+                                }
                             }
                         }
                     }
@@ -3756,6 +3791,7 @@ class RelayPool @Inject constructor(
         authInFlight.remove(url)
         if (real) {
             authRejectionStreak.remove(url)
+            optimisticAuthUsed.remove(url)
         }
         _onRelayReconnected.tryEmit(url)
         Log.w(TAG, "AUTH: completed for $url (real=$real) — notified subscribers")
@@ -3811,6 +3847,7 @@ class RelayPool @Inject constructor(
         authFailedRelays.clear()
         pendingAuthEventIds.clear()
         authRejectionStreak.clear()
+        optimisticAuthUsed.clear()
         authUnavailableRelays.clear()
         relayOneShotCount.clear()
         relayReqQueue.clear()

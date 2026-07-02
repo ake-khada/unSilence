@@ -23,28 +23,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
-import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
-import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
 
 private val MediaPlaceholder = Surface1
-
-private fun isDirectVideoUrl(url: String): Boolean =
-    url.contains(".mp4", ignoreCase = true) ||
-    url.contains(".mov", ignoreCase = true) ||
-    url.contains(".webm", ignoreCase = true) ||
-    url.contains(".m3u8", ignoreCase = true) ||
-    url.contains(".m4v", ignoreCase = true) ||
-    url.contains(".avi", ignoreCase = true)
 
 /**
  * Video grid for pre-parsed [Segment.Video] list from [EventModel.media.videos].
@@ -73,13 +61,7 @@ internal fun EventVideoGrid(
 ) {
     if (videos.isEmpty()) return
 
-    val uriHandler = LocalUriHandler.current
     val count = videos.size
-
-    fun openVideo(url: String) {
-        if (isDirectVideoUrl(url)) onOpenFullscreen()
-        else runCatching { uriHandler.openUri(url) }
-    }
 
     @Composable
     fun PrimaryVideoCell(video: Segment.Video, cellModifier: Modifier = Modifier, forceSquare: Boolean = false) {
@@ -87,35 +69,25 @@ internal fun EventVideoGrid(
         // Attach the shared player only when this cell's video is the one bound
         // to the active URL (or when no URL was supplied — legacy fallback).
         val urlMatchesActive = activeVideoUrl == null || model.videoUrl == activeVideoUrl
-        if (isDirectVideoUrl(model.videoUrl)) {
-            if (isActiveVideo && urlMatchesActive && exoPlayer != null) {
-                InlineVideoPlayer(
-                    model            = model,
-                    exoPlayer        = exoPlayer,
-                    isMuted          = isMuted,
-                    onToggleMute     = onToggleMute,
-                    onOpenFullscreen = onOpenFullscreen,
-                    forceSquare      = forceSquare,
-                    thumbnailCache   = thumbnailCache,
-                    isFullscreen     = isFullscreen,
-                    modifier         = cellModifier,
-                )
-            } else {
-                VideoPreviewCard(
-                    model            = model,
-                    onOpenFullscreen = onOpenFullscreen,
-                    forceSquare      = forceSquare,
-                    thumbnailCache   = thumbnailCache,
-                    modifier         = cellModifier,
-                )
-            }
+        if (isActiveVideo && urlMatchesActive && exoPlayer != null) {
+            InlineVideoPlayer(
+                model            = model,
+                exoPlayer        = exoPlayer,
+                isMuted          = isMuted,
+                onToggleMute     = onToggleMute,
+                onOpenFullscreen = onOpenFullscreen,
+                forceSquare      = forceSquare,
+                thumbnailCache   = thumbnailCache,
+                isFullscreen     = isFullscreen,
+                modifier         = cellModifier,
+            )
         } else {
-            EventVideoThumbnailCell(
-                model          = model,
-                thumbnailCache = thumbnailCache,
-                onPlay         = { openVideo(model.videoUrl) },
-                modifier       = cellModifier,
-                forceSquare    = forceSquare,
+            VideoPreviewCard(
+                model            = model,
+                onOpenFullscreen = onOpenFullscreen,
+                forceSquare      = forceSquare,
+                thumbnailCache   = thumbnailCache,
+                modifier         = cellModifier,
             )
         }
     }
@@ -125,7 +97,7 @@ internal fun EventVideoGrid(
         EventVideoThumbnailCell(
             model          = video.model,
             thumbnailCache = thumbnailCache,
-            onPlay         = { openVideo(video.model.videoUrl) },
+            onPlay         = onOpenFullscreen,
             modifier       = cellModifier,
             forceSquare    = forceSquare,
         )
@@ -220,7 +192,7 @@ internal fun EventVideoGrid(
                                 modifier = Modifier
                                     .matchParentSize()
                                     .background(Color.Black.copy(alpha = 0.5f))
-                                    .clickable { openVideo(videos[4].model.videoUrl) },
+                                    .clickable { onOpenFullscreen() },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
@@ -250,16 +222,16 @@ private fun EventVideoThumbnailCell(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
 ) {
-    val imetaKnown = model.widthPx != null && model.heightPx != null && model.heightPx > 0
+    val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaKnown -> feedVideoAspectRatio(model.widthPx.toFloat() / model.heightPx, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
         !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
         else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
     var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
     var hasBeenResolved by remember(model.videoUrl, forceSquare) {
-        mutableStateOf(imetaKnown || cachedRatio != null)
+        mutableStateOf(imetaAspect != null || cachedRatio != null)
     }
 
     Box(
@@ -271,26 +243,18 @@ private fun EventVideoThumbnailCell(
             .clickable { onPlay() },
         contentAlignment = Alignment.Center,
     ) {
-        if (!model.posterUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = displayAspect),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.matchParentSize(),
-            )
-        } else if (thumbnailCache != null) {
-            VideoThumbnailImage(
-                model = model,
-                thumbnailCache = thumbnailCache,
-                modifier = Modifier.matchParentSize(),
-                onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
-                    { ratio ->
-                        displayAspect = feedVideoAspectRatio(ratio, false)
-                        hasBeenResolved = true
-                    }
-                } else null,
-            )
-        }
+        VideoThumbnailImage(
+            model = model,
+            thumbnailCache = thumbnailCache,
+            modifier = Modifier.matchParentSize(),
+            requestAspectRatio = displayAspect,
+            onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
+                { ratio ->
+                    displayAspect = feedVideoAspectRatio(ratio, false)
+                    hasBeenResolved = true
+                }
+            } else null,
+        )
         Icon(
             imageVector        = Icons.Filled.PlayArrow,
             contentDescription = "Play video",

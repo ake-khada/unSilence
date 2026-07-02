@@ -10,7 +10,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventEngagementSnapshot
 
 /**
  * Renders a quoted/embedded long-form article (`naddr` or an `nevent` that
@@ -69,7 +69,7 @@ internal fun EmbeddedArticleCard(
         model                 = model,
         row                   = r,
         role                  = CardRole.Article,
-        engagement            = EngagementSnapshot(isNwcConfigured = actionsVm.isNwcConfigured),
+        engagement            = EventEngagementSnapshot(isNwcConfigured = actionsVm.isNwcConfigured),
         onNoteClick           = onNoteClick,
         onComment             = { onNoteClick(model.navigateId) },
         onAuthorClick         = onAuthorClick,
@@ -86,6 +86,7 @@ internal fun EmbeddedArticleCard(
         lookupEventWithAuthor = { id, h, pk -> actionsVm.lookupEvent(id, h, pk) },
         lookupModel           = actionsVm::getEventModel,
         fetchOgMetadata       = actionsVm::fetchOgMetadata,
+        hasCachedOgMetadata   = actionsVm::hasCachedOgMetadata,
         profileFlow           = providerVm::profileFlow,
         statsFlow             = providerVm::statsFlow,
         zapDetailsForEvent    = providerVm::zapDetailsForEvent,

@@ -48,7 +48,9 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.IntOffset
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
@@ -64,6 +66,7 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
@@ -88,6 +91,14 @@ import androidx.compose.foundation.lazy.items
  *  before the user reaches the bottom, near enough not to over-fetch
  *  while the user is mid-feed. */
 private const val AUTO_PAGE_TRIGGER_DISTANCE = 5
+
+private data class FeedViewport(
+    val firstVisible: Int,
+    val lastVisible: Int,
+    val totalItems: Int,
+    val loadingMore: Boolean,
+    val cardWidthPx: Int,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -121,6 +132,7 @@ fun FeedScreen(
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
 
@@ -137,9 +149,9 @@ fun FeedScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
-    // Resolved once per screen recomposition — getPinnedEmojis() allocates a
-    // fresh list per call, which defeats Compose skipping when called per card.
-    val pinnedEmojis = actionsViewModel.getPinnedEmojis()
+    // Keep one immutable list instance until the pin set actually changes.
+    // A fresh list on unrelated screen recompositions invalidates every card.
+    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -154,6 +166,7 @@ fun FeedScreen(
     // ── New-post flash — only live-tail arrivals, not batch/snapshot/Load More ──
     val events = feedEvents
     val liveArrivalIds by viewModel.liveArrivalIds.collectAsStateWithLifecycle()
+    val showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY
 
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
@@ -163,6 +176,9 @@ fun FeedScreen(
         listState = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
         cachedModelProvider = actionsViewModel::getCachedEventModel,
+        additionalVideoSourceCandidateIds = if (showThreadParents) {
+            ::threadParentVideoSourceCandidateIds
+        } else null,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -177,7 +193,7 @@ fun FeedScreen(
             zapFlash = zapFlash,
         )
     }
-    val callbacks = remember(viewModel, actionsViewModel) {
+    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
             onComment = onComment,
@@ -190,7 +206,7 @@ fun FeedScreen(
                 emojiReactTarget = id to pk
                 showFullEmojiPicker = true
             },
-            pinnedEmojis = actionsViewModel::getPinnedEmojis,
+            pinnedEmojis = { pinnedEmojis },
             repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
             zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
             saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -198,6 +214,7 @@ fun FeedScreen(
             lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
             lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+            hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
             zapDetailsForEvent = viewModel::zapDetailsForEvent,
@@ -360,7 +377,7 @@ fun FeedScreen(
                         onNewPostAnimated = { viewModel.clearLiveArrival(it) },
                         thumbnailCache = actionsViewModel.videoThumbnailCache,
                         imageDimensionCache = actionsViewModel.imageDimensionCache,
-                        showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY,
+                        showThreadParents = showThreadParents,
                         eventModelProvider = actionsViewModel::getEventModel,
                         sensitiveMode = sensitiveMode,
                     )
@@ -407,6 +424,21 @@ fun FeedScreen(
                 // Viewport tracking — warm-zone hydration + auto-paging.
                 // _isAtTop is driven by the gesture-based snapshotFlow above,
                 // NOT from this sampled index (which drifts on prepends).
+                LaunchedEffect(events, cardWidthPx, contentFilter) {
+                    if (events.isNotEmpty() && cardWidthPx > 0) {
+                        val info = listState.layoutInfo
+                        val first = info.visibleItemsInfo.firstOrNull()?.index
+                            ?: listState.firstVisibleItemIndex
+                        val last = info.visibleItemsInfo.lastOrNull()?.index
+                            ?: (first + 8).coerceAtMost(events.lastIndex)
+                        viewModel.onViewportChanged(
+                            first = first,
+                            last = last,
+                            cardWidthPx = cardWidthPx,
+                        )
+                    }
+                }
+
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
                 LaunchedEffect(Unit) {
                     snapshotFlow {
@@ -414,14 +446,18 @@ fun FeedScreen(
                         val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
                         val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
                         val total = info.totalItemsCount
-                        Triple(first, last, total)
-                    }.sample(100).collect { (first, last, total) ->
-                        viewModel.onViewportChanged(first)
+                        FeedViewport(first, last, total, isLoadingMore, cardWidthPx)
+                    }.sample(100).collect { viewport ->
+                        viewModel.onViewportChanged(
+                            first = viewport.firstVisible,
+                            last = viewport.lastVisible,
+                            cardWidthPx = viewport.cardWidthPx,
+                        )
                         // total includes the "load-more" sentinel item when
                         // events.isNotEmpty(). last >= total - 1 - trigger
                         // means the user is within `trigger` rows of the bottom.
-                        if (!isLoadingMore && total > 0 &&
-                            last >= total - 1 - AUTO_PAGE_TRIGGER_DISTANCE
+                        if (!viewport.loadingMore && viewport.totalItems > 0 &&
+                            viewport.lastVisible >= viewport.totalItems - 1 - AUTO_PAGE_TRIGGER_DISTANCE
                         ) {
                             viewModel.loadMore()
                         }
@@ -435,7 +471,7 @@ fun FeedScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .offset(y = staticTopPadding + tabRowOffset)
+                .offset { IntOffset(0, (staticTopPadding + tabRowOffset).roundToPx()) }
                 .fillMaxWidth()
                 .height(tabRowHeight)
                 .background(Black),

@@ -15,6 +15,7 @@ import javax.inject.Singleton
 private const val TAG = "SharedPlayerHolder"
 
 @Singleton
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class SharedPlayerHolder @Inject constructor(
     @ApplicationContext private val context: Context,
     @MediaClient private val mediaClient: OkHttpClient,

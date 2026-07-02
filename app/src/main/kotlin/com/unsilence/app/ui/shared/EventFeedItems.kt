@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.SensitiveContentMode
@@ -34,6 +35,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
@@ -72,6 +74,7 @@ data class EventActionCallbacks(
     val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    val hasCachedOgMetadata: ((String) -> Boolean)? = null,
     val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     /** Per-event stats observation. Cards collect this so engagement counts
      *  update reactively without going through a list-wide signal trigger.
@@ -96,6 +99,31 @@ data class EngagementSnapshot(
     val optimisticZapSats: Map<String, Long> = emptyMap(),
     val zapFlash: NoteActionsViewModel.ZapFlashState? = null,
 )
+
+/** Engagement state narrowed to one card. Keeping the large ID sets outside
+ *  EventCard lets Compose skip every unaffected card when one reaction, repost,
+ *  zap, or loading flag changes. */
+@androidx.compose.runtime.Immutable
+data class EventEngagementSnapshot(
+    val hasReacted: Boolean = false,
+    val hasReposted: Boolean = false,
+    val hasZapped: Boolean = false,
+    val isNwcConfigured: Boolean = false,
+    val isZapLoading: Boolean = false,
+    val extraZapSats: Long = 0L,
+    val zapFlash: NoteActionsViewModel.ZapFlashState? = null,
+)
+
+internal fun EngagementSnapshot.forEvent(eventId: String): EventEngagementSnapshot =
+    EventEngagementSnapshot(
+        hasReacted = eventId in reactedIds,
+        hasReposted = eventId in repostedIds,
+        hasZapped = eventId in zappedIds,
+        isNwcConfigured = isNwcConfigured,
+        isZapLoading = eventId in zapLoadingIds,
+        extraZapSats = optimisticZapSats[eventId] ?: 0L,
+        zapFlash = zapFlash?.takeIf { it.noteId == eventId },
+    )
 
 /**
  * Shared LazyListScope extension that renders a list of FeedRow items
@@ -252,6 +280,15 @@ internal fun ThreadParentCard(
     onAuthorClick: (String) -> Unit = {},
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
+    thumbnailCache: VideoThumbnailCache? = null,
+    exoPlayer: ExoPlayer? = null,
+    isActiveVideo: Boolean = false,
+    activeVideoUrl: String? = null,
+    isFullscreen: Boolean = false,
+    onOpenFullscreen: () -> Unit = {},
+    isMuted: Boolean = true,
+    onToggleMute: () -> Unit = {},
+    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
     modifier: Modifier = Modifier,
 ) {
@@ -327,6 +364,15 @@ internal fun ThreadParentCard(
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,
                     imageDimensionCache = imageDimensionCache,
+                    thumbnailCache      = thumbnailCache,
+                    exoPlayer           = exoPlayer,
+                    isActiveVideo       = isActiveVideo,
+                    activeVideoUrl      = activeVideoUrl,
+                    isFullscreen        = isFullscreen,
+                    onOpenFullscreen    = onOpenFullscreen,
+                    isMuted             = isMuted,
+                    onToggleMute        = onToggleMute,
+                    onVideoModelsResolved = onVideoModelsResolved,
                     nestDepth           = 1,
                 )
             }
@@ -353,6 +399,9 @@ private fun EventFeedItem(
 ) {
     val model = remember(row.id) {
         eventModelProvider?.invoke(row.id) ?: row.toEventModel()
+    }
+    val eventEngagement = remember(model.engagementId, engagement) {
+        engagement.forEvent(model.engagementId)
     }
 
     // ── Remembered lambdas — stable across recompositions ─────────────────
@@ -391,7 +440,7 @@ private fun EventFeedItem(
         model               = model,
         row                 = row,
         role                = role,
-        engagement          = engagement,
+        engagement          = eventEngagement,
         onNoteClick         = callbacks.onNoteClick,
         onComment           = onComment,
         onAuthorClick       = callbacks.onAuthorClick,
@@ -410,6 +459,7 @@ private fun EventFeedItem(
         lookupEventWithAuthor = callbacks.lookupEventWithAuthor,
         lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
+        hasCachedOgMetadata = callbacks.hasCachedOgMetadata,
         profileFlow         = callbacks.profileFlow,
         statsFlow           = callbacks.statsFlow,
         zapDetailsForEvent  = callbacks.zapDetailsForEvent,
@@ -424,6 +474,7 @@ private fun EventFeedItem(
         activeVideoUrl      = videoScope?.activeVideoUrl,
         isFullscreen        = videoScope?.showFullscreenVideo ?: false,
         onOpenFullscreen    = onOpenFullscreen,
+        onVideoModelsResolved = { models -> videoScope?.registerVideoModels(row.id, models) },
         isNewPost           = isNewPost,
         onNewPostAnimated   = onNewPostAnimatedCb,
         parentEvent         = parentEvent,

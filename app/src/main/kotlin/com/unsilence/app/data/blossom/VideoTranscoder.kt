@@ -25,6 +25,7 @@ import kotlin.coroutines.resumeWithException
 private const val TAG = "VideoTranscoder"
 
 @Singleton
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class VideoTranscoder @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {

@@ -6,8 +6,14 @@ import android.os.Build
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -16,6 +22,7 @@ private const val TAG = "VideoThumbCache"
 private const val MAX_ENTRIES = 30
 private const val MAX_BITMAP_BYTES = 48L * 1024 * 1024 // 48MB
 private const val DOWNSAMPLE = 2 // dst-dimension divisor — halves each dimension → ~4x fewer pixels
+private const val REMOTE_MMR_CONCURRENCY = 3
 
 /**
  * First-frame thumbnail with its native aspect ratio.
@@ -46,9 +53,10 @@ class VideoThumbnailCache @Inject constructor(
 ) {
     private val cache = ConcurrentHashMap<String, VideoThumbnail?>()
     private val failedUrls = ConcurrentHashMap.newKeySet<String>() // negative cache — skip re-stall
-    private val inFlight = ConcurrentHashMap<String, Boolean>()
+    private val extractionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val inFlight = ConcurrentHashMap<String, Deferred<VideoThumbnail?>>()
     private val lastAccessedAt = ConcurrentHashMap<String, Long>()
-    private val remoteMmrSemaphore = kotlinx.coroutines.sync.Semaphore(1) // max 1 concurrent remote MMR
+    private val remoteMmrSemaphore = kotlinx.coroutines.sync.Semaphore(REMOTE_MMR_CONCURRENCY)
 
     /**
      * URLs currently bound to a visible video cell. Protected from eviction.
@@ -85,8 +93,8 @@ class VideoThumbnailCache @Inject constructor(
      * Called by TimelineConsumer's warm-zone hydration before the card is visible.
      */
     suspend fun warmThumbnail(url: String) {
-        if (cache.containsKey(url) || inFlight.containsKey(url)) return
-        getThumbnail(url)
+        if (cache.containsKey(url) || url in failedUrls) return
+        thumbnailJob(url).await()
     }
 
     /** Return a cached thumbnail immediately, or null if not yet fetched. No I/O. */
@@ -98,42 +106,73 @@ class VideoThumbnailCache @Inject constructor(
 
     /**
      * Return a cached first-frame thumbnail for [videoUrl], or fetch it on [Dispatchers.IO].
-     * Returns null immediately if another coroutine is already fetching this URL,
-     * or if extraction fails.
+     * If another coroutine is already fetching this URL, await that shared job
+     * so visible cards repaint when a pre-viewport warm completes.
      */
     suspend fun getThumbnail(videoUrl: String): VideoThumbnail? {
         cache[videoUrl]?.let {
             lastAccessedAt[videoUrl] = System.nanoTime()
             return it
         }
-        if (inFlight.putIfAbsent(videoUrl, true) != null) return null
         // Negative cache: skip URLs that already failed (DNS-blocked, timeout)
-        if (videoUrl in failedUrls) { inFlight.remove(videoUrl); return null }
+        if (videoUrl in failedUrls) {
+            return null
+        }
+
+        return thumbnailJob(videoUrl).await()?.also {
+            lastAccessedAt[videoUrl] = System.nanoTime()
+        }
+    }
+
+    private fun thumbnailJob(videoUrl: String): Deferred<VideoThumbnail?> {
+        val existing = inFlight[videoUrl]
+        if (existing != null) {
+            return existing
+        }
+
+        val deferred = extractionScope.async(start = CoroutineStart.LAZY) {
+            extractThumbnail(videoUrl)
+        }
+        val raced = inFlight.putIfAbsent(videoUrl, deferred)
+        if (raced != null) {
+            deferred.cancel()
+            return raced
+        }
+        deferred.start()
+        deferred.invokeOnCompletion {
+            inFlight.remove(videoUrl, deferred)
+        }
+        return deferred
+    }
+
+    private suspend fun extractThumbnail(videoUrl: String): VideoThumbnail? {
+        cache[videoUrl]?.let { return it }
+        if (videoUrl in failedUrls) return null
 
         val isRemote = !videoUrl.startsWith("file://") && !videoUrl.startsWith("/")
 
         return withContext(Dispatchers.IO) {
             try {
                 if (isRemote) {
-                    // Remote MMR: serialize (max 1 concurrent) + 8s timeout
-                    val result = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
-                        remoteMmrSemaphore.acquire()
-                        try { extractFrame(videoUrl) } finally { remoteMmrSemaphore.release() }
+                    // Remote MMR: bound parallel extraction. The timeout
+                    // applies to extraction, not time spent queued behind an
+                    // earlier prewarm, so look-ahead jobs do not poison the
+                    // negative cache before they get a turn.
+                    remoteMmrSemaphore.acquire()
+                    val result = try {
+                        withTimeoutOrNull(8_000L) { extractFrame(videoUrl) }
+                    } finally {
+                        remoteMmrSemaphore.release()
                     }
-                    inFlight.remove(videoUrl)
                     if (result == null) { failedUrls.add(videoUrl) }
                     result
                 } else {
                     // Local file: no concurrency limit, no timeout
-                    val result = extractFrame(videoUrl)
-                    inFlight.remove(videoUrl)
-                    result
+                    extractFrame(videoUrl)
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                inFlight.remove(videoUrl)
                 throw e
             } catch (_: Exception) {
-                inFlight.remove(videoUrl)
                 if (isRemote) failedUrls.add(videoUrl)
                 null
             }

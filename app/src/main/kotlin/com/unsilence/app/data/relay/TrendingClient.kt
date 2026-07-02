@@ -116,12 +116,12 @@ class TrendingClient @Inject constructor(
 
         val topHashtags = tagCounts.entries
             .sortedByDescending { it.value }
-            .take(8)
+            .take(TRENDING_CANDIDATE_LIMIT)
             .map { TrendingHashtag(it.key, it.value.toDouble()) }
 
         val topAuthorPubkeys = authorCounts.entries
             .sortedByDescending { it.value }
-            .take(8)
+            .take(TRENDING_CANDIDATE_LIMIT)
             .map { it.key }
 
         val profiles = enrichProfiles(topAuthorPubkeys)
@@ -226,6 +226,7 @@ class TrendingClient @Inject constructor(
 
     companion object {
         private const val STALENESS_MS = 30 * 60 * 1000L // 30 minutes
+        private const val TRENDING_CANDIDATE_LIMIT = 32
         private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
     }
 }

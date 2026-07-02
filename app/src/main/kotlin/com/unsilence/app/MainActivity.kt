@@ -18,8 +18,6 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.MuteListRepository
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.unsilence.app.ui.onboarding.RootScreen
 import com.unsilence.app.ui.theme.UnsilenceTheme
@@ -77,7 +75,7 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra("sensitive_mode")?.let { mode ->
             val scm = SensitiveContentMode.entries.firstOrNull { it.name.equals(mode, ignoreCase = true) }
             if (scm != null) {
-                CoroutineScope(Dispatchers.IO).launch { relayPreferencesStore.setSensitiveContentMode(scm) }
+                lifecycleScope.launch { relayPreferencesStore.setSensitiveContentMode(scm) }
             }
         }
 

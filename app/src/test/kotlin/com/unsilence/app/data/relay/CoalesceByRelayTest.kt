@@ -21,7 +21,7 @@ class CoalesceByRelayTest {
     }
 
     @Test
-    fun `ranks relays by coverage and caps at maxRelays`() {
+    fun `greedy selection covers all items within relay budget`() {
         val items = mapOf(
             "id1" to listOf("wss://a/", "wss://b/", "wss://c/"),
             "id2" to listOf("wss://a/", "wss://b/"),
@@ -30,10 +30,10 @@ class CoalesceByRelayTest {
         )
         val result = coalesceByRelay(items, maxRelays = 2, chunkSize = 50)
 
-        // a covers 3 items, b covers 2 — those are the top 2
+        // a covers id1-id3; e then covers the only remaining item.
         val relays = result.map { it.first }
         assertTrue("wss://a/" in relays)
-        assertTrue("wss://b/" in relays)
+        assertTrue("wss://e/" in relays)
         assertEquals(2, relays.size)
     }
 
@@ -80,5 +80,19 @@ class CoalesceByRelayTest {
 
         assertEquals(1, result.size)
         assertEquals(1, result[0].second.size)
+    }
+
+    @Test
+    fun `soft overflow preserves at least one relay per item`() {
+        val items = mapOf(
+            "id1" to listOf("wss://one/"),
+            "id2" to listOf("wss://two/"),
+            "id3" to listOf("wss://three/"),
+        )
+
+        val result = coalesceByRelay(items, maxRelays = 2, chunkSize = 50)
+        val covered = result.flatMap { it.second }.toSet()
+        assertEquals(items.keys, covered)
+        assertEquals(3, result.map { it.first }.distinct().size)
     }
 }

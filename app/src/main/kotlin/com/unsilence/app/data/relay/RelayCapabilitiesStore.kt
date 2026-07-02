@@ -6,8 +6,10 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.MapSerializer
@@ -108,6 +110,22 @@ class RelayCapabilitiesStore @Inject constructor(
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = MapSerializer(String.serializer(), RelayCapabilities.serializer())
 
+    // Transport callbacks can arrive in bursts across many relays. Persisting from
+    // every callback creates redundant DataStore edits and unstructured GlobalScope
+    // work. A conflated process-lifetime writer preserves the latest snapshot while
+    // bounding pending disk work to one follow-up write.
+    private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val persistRequests = Channel<Unit>(capacity = Channel.CONFLATED)
+
+    init {
+        persistenceScope.launch {
+            for (ignored in persistRequests) {
+                runCatching { persist() }
+                    .onFailure { Log.w(TAG, "Failed to persist relay capabilities", it) }
+            }
+        }
+    }
+
     private val caps = ConcurrentHashMap<String, RelayCapabilities>()
 
     /** URLs of integral relays (indexer / own read / own write / search). These heal on
@@ -191,9 +209,9 @@ class RelayCapabilitiesStore @Inject constructor(
         if (healed.isNotEmpty()) {
             Log.w(TAG, "DNS-degraded cleared — healing ${healed.size} relay(s) struck during outage")
             for (url in healed) {
-                clearTransportStrikesInternal(url)
+                clearTransportStrikesInternal(url, scheduleWrite = false)
             }
-            GlobalScope.launch(Dispatchers.IO) { persist() }
+            schedulePersist()
         }
     }
 
@@ -244,7 +262,7 @@ class RelayCapabilitiesStore @Inject constructor(
                     fresh.any { (k, v) -> map[k]?.authRequired == true ||
                         (v.deadFailCount > 0 && v.lastReason != SkipReason.DNS_RESOLUTION.name) }
                 if (needsPersist) {
-                    GlobalScope.launch(Dispatchers.IO) { persist() }
+                    schedulePersist()
                 }
             }
             .onFailure { Log.w(TAG, "Failed to parse relay capabilities: ${it.message}") }
@@ -359,8 +377,9 @@ class RelayCapabilitiesStore @Inject constructor(
         } else {
             Log.d(TAG, "Transport strike: $key ($reason, $newStrikes/$MAX_CAPABILITY_STRIKES, dead=$newDeadCount/$DEAD_RELAY_THRESHOLD)")
         }
-        // Fire-and-forget persist — don't block onFailure callback thread
-        GlobalScope.launch(Dispatchers.IO) { persist() }
+        // Fire-and-forget persist — don't block onFailure callback thread.
+        // Bursts are conflated into the latest complete snapshot.
+        schedulePersist()
     }
 
     /**
@@ -411,6 +430,10 @@ class RelayCapabilitiesStore @Inject constructor(
         context.relayCapsDataStore.edit { it[CAPS_KEY] = encoded }
     }
 
+    private fun schedulePersist() {
+        persistRequests.trySend(Unit)
+    }
+
     /**
      * Permanently mark [url] as structurally invalid (malformed URL that will never
      * resolve). Uses `restricted = true` so [shouldSkip] returns true immediately
@@ -428,7 +451,7 @@ class RelayCapabilitiesStore @Inject constructor(
         )
         caps[key] = updated
         Log.w(TAG, "Marked structurally invalid: ${key.take(80)}")
-        GlobalScope.launch(Dispatchers.IO) { persist() }
+        schedulePersist()
     }
 
     /**
@@ -469,12 +492,12 @@ class RelayCapabilitiesStore @Inject constructor(
         }
         if (cleared > 0) {
             Log.w(TAG, "Network change: cleared DNS-dead state for $cleared relay(s)")
-            GlobalScope.launch(Dispatchers.IO) { persist() }
+            schedulePersist()
         }
     }
 
     /** Internal strike-clear without the degraded-heal trigger (avoids recursion). */
-    private fun clearTransportStrikesInternal(key: String) {
+    private fun clearTransportStrikesInternal(key: String, scheduleWrite: Boolean = true) {
         val existing = caps[key] ?: return
         if (existing.restricted) return  // policy rejections are permanent
         if (existing.strikes == 0 && existing.deadFailCount == 0 && existing.consecutiveFailures == 0) return // nothing to clear
@@ -485,7 +508,7 @@ class RelayCapabilitiesStore @Inject constructor(
         } else if (existing.strikes > 0) {
             Log.w(TAG, "Cleared transport strikes for $key (was ${existing.strikes}, reason='${existing.lastReason}')")
         }
-        GlobalScope.launch(Dispatchers.IO) { persist() }
+        if (scheduleWrite) schedulePersist()
     }
 
     /** Current strike count for [url], or 0 if no entry. For diagnostics only. */

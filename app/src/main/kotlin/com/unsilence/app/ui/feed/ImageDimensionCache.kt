@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,6 +37,7 @@ class ImageDimensionCache @Inject constructor(
 ) {
     /** url → width/height aspect ratio */
     private val cache = ConcurrentHashMap<String, Float>()
+    private val insertionOrder = ConcurrentLinkedQueue<String>()
     private val inFlight = ConcurrentHashMap<String, Boolean>()
 
     private val client = baseClient.newBuilder()
@@ -47,11 +49,11 @@ class ImageDimensionCache @Inject constructor(
     val entryCount: Int get() = cache.size
 
     /** Return cached aspect ratio, or null if not yet resolved. No I/O. */
-    fun getCached(url: String): Float? = cache[url]
+    fun getCached(url: String): Float? = cache[cacheKey(url)]
 
     /** Store a known aspect ratio (e.g. from Coil's decoded bitmap). Clamped to [0.2, 5.0]. */
     fun put(url: String, aspectRatio: Float) {
-        if (aspectRatio > 0f) cache[url] = aspectRatio.coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
+        if (aspectRatio > 0f) putBounded(cacheKey(url), aspectRatio.coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO))
     }
 
     /**
@@ -61,19 +63,19 @@ class ImageDimensionCache @Inject constructor(
      */
     suspend fun resolve(url: String): Float? {
         if (!isResolvableUrl(url)) return null
-        cache[url]?.let { return it }
-        if (inFlight.putIfAbsent(url, true) != null) return null
+        val key = cacheKey(url)
+        cache[key]?.let { return it }
+        if (inFlight.putIfAbsent(key, true) != null) return null
 
         return withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
-                    .url(url)
+                    .url(key)
                     .header("Range", "bytes=0-32767")
                     .header("User-Agent", com.unsilence.app.data.BROWSER_USER_AGENT)
                     .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful && response.code != 206) {
-                        inFlight.remove(url)
                         return@withContext null
                     }
                     val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -83,20 +85,19 @@ class ImageDimensionCache @Inject constructor(
                     if (options.outWidth > 0 && options.outHeight > 0) {
                         val ratio = (options.outWidth.toFloat() / options.outHeight)
                             .coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
-                        cache[url] = ratio
+                        putBounded(key, ratio)
                         ratio
                     } else {
-                        inFlight.remove(url)
                         null
                     }
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                inFlight.remove(url)
                 throw e
             } catch (e: Exception) {
                 Log.d(TAG, "Resolve failed: ${url.take(60)} — ${e.message}")
-                inFlight.remove(url)
                 null
+            } finally {
+                inFlight.remove(key)
             }
         }
     }
@@ -106,15 +107,27 @@ class ImageDimensionCache @Inject constructor(
      * or in-flight. Capped at [maxBatch] concurrent resolves to limit hydration cost.
      */
     suspend fun resolveAll(urls: List<String>, maxBatch: Int = 6) {
-        val missing = urls.filter { cache[it] == null }.take(maxBatch)
+        val missing = urls.distinctBy(::cacheKey).filter { getCached(it) == null }.take(maxBatch)
         if (missing.isEmpty()) return
         for (url in missing) {
             resolve(url)
         }
         if (missing.isNotEmpty()) {
-            Log.d(TAG, "Batch resolved: ${missing.size} URLs, ${missing.count { cache[it] != null }} success")
+            Log.d(TAG, "Batch resolved: ${missing.size} URLs, ${missing.count { getCached(it) != null }} success")
         }
     }
+
+    private fun putBounded(key: String, value: Float) {
+        if (cache.put(key, value) == null) insertionOrder.add(key)
+        while (cache.size > MAX_ENTRIES) {
+            val oldest = insertionOrder.poll() ?: break
+            cache.remove(oldest)
+        }
+    }
+
+    /** URL fragments never reach the HTTP server; removing them deduplicates
+     *  equivalent image references without collapsing meaningful query params. */
+    private fun cacheKey(url: String): String = url.substringBefore('#')
 
     /** Reject non-HTTP URLs and NIP-19 tokens that leaked through content regex matching. */
     private fun isResolvableUrl(url: String): Boolean {
@@ -132,5 +145,9 @@ class ImageDimensionCache @Inject constructor(
             return false
         }
         return true
+    }
+
+    private companion object {
+        const val MAX_ENTRIES = 512
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -40,6 +41,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +54,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -89,6 +92,8 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.sample
 
 private val TAB_LABELS = listOf("All", "People", "Notes", "Tags")
 
@@ -119,12 +124,15 @@ fun SearchScreen(
     val showSnackbar = LocalShowSnackbar.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    val noteListState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
     var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
+    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -151,6 +159,42 @@ fun SearchScreen(
         onNoteClick(id)
     }
     var pendingSearch by remember { mutableStateOf(false) }
+
+    @OptIn(FlowPreview::class)
+    LaunchedEffect(state.noteResults, state.peopleResults, selectedTab, cardWidthPx) {
+        if (state.noteResults.isEmpty()) return@LaunchedEffect
+        fun warmVisibleRange(first: Int, last: Int) {
+            val noteOffset = if (selectedTab == 0) state.peopleResults.size.coerceAtMost(3) else 0
+            val dataFirst = (first - noteOffset).coerceAtLeast(0)
+            val dataLast = (last - noteOffset).coerceAtMost(state.noteResults.lastIndex)
+            if (dataFirst <= dataLast) {
+                actionsViewModel.warmCardWindow(
+                    rows = state.noteResults,
+                    first = dataFirst,
+                    last = dataLast,
+                    cardWidthPx = cardWidthPx,
+                    hydrateEngagement = true,
+                )
+            }
+        }
+
+        if (cardWidthPx > 0) {
+            val info = noteListState.layoutInfo
+            val noteOffset = if (selectedTab == 0) state.peopleResults.size.coerceAtMost(3) else 0
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: noteOffset
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: (noteOffset + 8)
+            warmVisibleRange(first, last)
+        }
+
+        snapshotFlow {
+            val info = noteListState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            first to last
+        }.sample(100).collect { (first, last) ->
+            warmVisibleRange(first, last)
+        }
+    }
 
     DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
     LaunchedEffect(Unit) {
@@ -332,7 +376,7 @@ fun SearchScreen(
                         }
                     } else {
                         // Notes/Tags/All tab loading
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             items(3) { ShimmerNoteCard(showMedia = it == 0) }
                         }
                     }
@@ -356,8 +400,9 @@ fun SearchScreen(
                             onQuote, actionsViewModel,
                             { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
+                            pinnedEmojis,
                         )
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             if (state.peopleResults.isNotEmpty()) {
                                 items(state.peopleResults.take(3), key = { it.pubkey }) { user ->
                                     ProfileCard(user = user, onClick = { onAuthorClickDismiss(user.pubkey) })
@@ -413,8 +458,9 @@ fun SearchScreen(
                             onQuote, actionsViewModel,
                             { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
+                            pinnedEmojis,
                         )
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             eventFeedItems(
                                 events = state.noteResults,
                                 engagement = engagement,
@@ -445,7 +491,7 @@ fun SearchScreen(
                 emojiReactTarget = model.engagementId to model.pubkey
                 showFullEmojiPicker = true
             },
-            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
                 actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
@@ -580,7 +626,8 @@ private fun rememberCallbacks(
     actionsViewModel: NoteActionsViewModel,
     onArticleClick: (FeedRow) -> Unit,
     onReactLongPress: (String, String) -> Unit,
-): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote) {
+    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
+): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis) {
     EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,
@@ -590,7 +637,7 @@ private fun rememberCallbacks(
         onArticleClick = onArticleClick,
         react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
         onReactLongPress = { id, pk -> onReactLongPress(id, pk) },
-        pinnedEmojis = actionsViewModel::getPinnedEmojis,
+        pinnedEmojis = { pinnedEmojis },
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
         zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -598,6 +645,7 @@ private fun rememberCallbacks(
         lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
         lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
     )
 }
 

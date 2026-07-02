@@ -13,6 +13,10 @@ import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.memory.EventStats
+import com.unsilence.app.data.memory.ReactionInfo
+import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.ui.shared.TimelineCardData
 import java.util.concurrent.ConcurrentHashMap
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +55,7 @@ class ThreadViewModel @Inject constructor(
     private val outboxResolver: OutboxRelayResolver,
     private val cardHydrator: CardHydrator,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
+    private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
@@ -140,30 +145,21 @@ class ThreadViewModel @Inject constructor(
     }
 
     // ── Per-event stats (reactive counts for thread cards) ─────────────
-    private val statsCache = ConcurrentHashMap<String, StateFlow<EventStats>>()
-
     fun statsFlow(eventId: String): StateFlow<EventStats> =
-        statsCache.getOrPut(eventId) {
-            memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
-        }
+        timelineCardData.statsFlow(eventId, viewModelScope)
 
     // ── Engagement drawer data (contributor indexes) ─────────────────────
-    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
-        memoryEventStore.zapDetailsForEvent(eventId)
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        timelineCardData.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> =
-        memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
-        memoryEventStore.reactionsForEvent(eventId)
+        timelineCardData.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
+        timelineCardData.reactionsForEvent(eventId)
 
     // ── Profile flow (reactive avatar/name for drawer chips) ─────────────
-    private val profileCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.UserEntity?>>()
 
-    fun profileFlow(pubkey: String): StateFlow<com.unsilence.app.data.memory.UserEntity?> =
-        profileCache.getOrPut(pubkey) {
-            userRepository.userFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-        }
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey, viewModelScope)
 
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {

@@ -90,4 +90,19 @@ class ImageDimensionCacheTest {
         cache.put("https://example.com/negative.jpg", -1.0f)
         assertNull(cache.getCached("https://example.com/negative.jpg"))
     }
+
+    @Test
+    fun `URL fragments share one dimension entry`() {
+        cache.put("https://example.com/image.jpg#first", 1.5f)
+        assertEquals(1.5f, cache.getCached("https://example.com/image.jpg#second")!!, 0.001f)
+        assertEquals(1, cache.entryCount)
+    }
+
+    @Test
+    fun `dimension cache stays bounded`() {
+        repeat(513) { index -> cache.put("https://example.com/$index.jpg", 1f) }
+        assertEquals(512, cache.entryCount)
+        assertNull(cache.getCached("https://example.com/0.jpg"))
+        assertEquals(1f, cache.getCached("https://example.com/512.jpg")!!, 0.001f)
+    }
 }

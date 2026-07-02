@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.net.toUri
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
@@ -39,7 +40,7 @@ internal fun YouTubeCard(
             .clickable {
                 val intent = android.content.Intent(
                     android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse(segment.url),
+                    segment.url.toUri(),
                 )
                 runCatching { context.startActivity(intent) }
             },

@@ -1,14 +1,23 @@
 package com.unsilence.app.data.relay
 
+import android.content.Context
 import android.util.Log
+import coil3.SingletonImageLoader
+import coil3.request.ImageRequest
+import coil3.size.Dimension
+import coil3.size.Size
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.buildVideoRenderModels
+import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.VideoThumbnailCache
+import dagger.hilt.android.qualifiers.ApplicationContext
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
@@ -18,8 +27,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -29,6 +41,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -39,10 +52,12 @@ private const val TAG = "CardHydrator"
  *  headroom; oldest IDs evict FIFO when the set exceeds this. */
 private const val HYDRATED_CAP = 500
 
-/** Max distinct hint relays a single hydration pass will fan out to. The broadcast
- *  (fetchEventsByIds → 6 relays) covers the common case; this bounds the supplementary
- *  hint loop. Long-tail single-ref relays retry next pass. */
+/** Bound supplementary hint-relay fan-out in ProfilePipeline. Kept here as
+ *  the shared fetch budget used by the hydration/profile coordination layer. */
 internal const val MAX_HINT_RELAYS_PER_PASS = 12
+private const val PREFETCH_KEY_CAP = 768
+private const val MAX_PREFETCH_WIDTH_PX = 1600
+private const val MAX_MEDIA_PER_CARD = 4
 
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
@@ -65,22 +80,29 @@ object Nip19FailureCache {
 }
 
 /**
- * Unified card hydration: resolves ALL missing data for visible cards.
+ * Bounded card hydration for the viewport and immediate look-ahead.
  *
  * Handles:
- *  - Author profiles (kind 0)
- *  - Repost original-author profiles (NIP-18 p-tag)
- *  - Referenced events for reposts (kind 6 e-tag) and quotes (nostr:nevent/note)
- *  - Referenced event author profiles
+ *  - Image dimensions needed for stable media layout
+ *  - The signed-in user's reaction/repost state
+ *  - Public engagement counts with age-based freshness
+ *
+ * Profiles and referenced events self-resolve in their card composables through
+ * shared batched resolvers; duplicating them here previously amplified fetches.
  */
 @Singleton
 class CardHydrator @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
+    private val userRepository: UserRepository,
     private val thumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
+    private val ogFetcher: OgFetcher,
     private val outboxResolver: OutboxRelayResolver,
 ) {
+    private val imageLoader by lazy { SingletonImageLoader.get(context) }
+
     // ── Per-phase hydrated-id memo ───────────────────────────────────────
     // hydrateVisibleCards re-fires on every viewport change (debounce 300ms).
     // During a slow scroll the warm zone overlaps the previous pass by 30+
@@ -92,6 +114,14 @@ class CardHydrator @Inject constructor(
     // skip the upstream orchestration cost only.
     private val mediaHydrated = LinkedHashSet<String>()
     private val hydratedLock = Any()
+
+    private val imagePrefetched: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val imagePrefetchOrder = ConcurrentLinkedQueue<String>()
+    private val imageDimensionWarmed: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val imageDimensionWarmOrder = ConcurrentLinkedQueue<String>()
+    private val ogWarmed: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val ogWarmOrder = ConcurrentLinkedQueue<String>()
+    private val ogWarmSemaphore = kotlinx.coroutines.sync.Semaphore(2)
 
     private fun filterAndMarkNovel(
         events: List<FeedRow>,
@@ -117,6 +147,12 @@ class CardHydrator @Inject constructor(
         synchronized(hydratedLock) {
             mediaHydrated.clear()
         }
+        imagePrefetched.clear()
+        imagePrefetchOrder.clear()
+        imageDimensionWarmed.clear()
+        imageDimensionWarmOrder.clear()
+        ogWarmed.clear()
+        ogWarmOrder.clear()
         backfillScope.coroutineContext.cancelChildren()
         pendingBackfillTargets.clear()
         ownEngagementInFlight.clear()
@@ -188,6 +224,420 @@ class CardHydrator @Inject constructor(
      *   (REST-only — 300ms/video codec work). When false, only image dimensions are
      *   resolved (IDLE-safe — BitmapFactory header-only, ~50ms each).
      */
+    fun warmUpcomingAssets(
+        events: List<FeedRow>,
+        cardWidthPx: Int,
+        maxRows: Int = 12,
+        maxImagePrefetches: Int = 4,
+        maxOgFetches: Int = 2,
+        maxVideoThumbnails: Int = 8,
+        maxProfileFetches: Int = 16,
+        maxReferenceFetches: Int = 4,
+        maxArticleFetches: Int = 2,
+    ) {
+        if (events.isEmpty() || cardWidthPx <= 0) return
+
+        var imagePrefetches = 0
+        var ogFetches = 0
+        var videoThumbnails = 0
+        var referenceFetches = 0
+        var articleFetches = 0
+        val profileCandidates = LinkedHashSet<String>()
+        val referenceCandidates = ArrayList<ReferenceCandidate>()
+        val articleCandidates = ArrayList<ArticleCandidate>()
+        val warmedCachedRefs = HashSet<String>()
+
+        // Do not memoize at row granularity here. Per-asset bounded sets below
+        // already dedupe real work, while row-level marking can starve assets:
+        // a row may be marked "warmed" in a pass where another asset cap was
+        // spent before its primary image or OG preview was attempted.
+        for (row in events.take(maxRows)) {
+            val model = memoryEventStore.getOrParseEventModel(row.id) ?: row.toEventModel()
+            collectProfileCandidates(row, model, profileCandidates)
+            val referenceStart = referenceCandidates.size
+            collectReferenceCandidates(model, row, referenceCandidates, articleCandidates)
+
+            if (imagePrefetches < maxImagePrefetches) {
+                for (candidate in imageCandidates(model)) {
+                    if (imagePrefetches >= maxImagePrefetches) break
+                    warmImageDimensions(candidate.url)
+                    if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
+                        imagePrefetches++
+                    }
+                }
+            }
+
+            if (ogFetches < maxOgFetches) {
+                val url = model.media.ogCandidate?.url
+                if (!url.isNullOrBlank()) {
+                    val countedAsFetch = warmOgMetadata(
+                        url = url,
+                        cardWidthPx = cardWidthPx,
+                    )
+                    if (countedAsFetch) ogFetches++
+                }
+            }
+
+            videoThumbnails += warmVideoThumbnails(
+                model = model,
+                remaining = maxVideoThumbnails - videoThumbnails,
+            )
+
+            // If a referenced event is already cached, warm its nested assets now.
+            // If not cached, collect it below for a bounded relay prefetch.
+            if (maxReferenceFetches > 0 && warmedCachedRefs.size < maxReferenceFetches) {
+                val newReferences = referenceCandidates.subList(referenceStart, referenceCandidates.size)
+                for (ref in newReferences) {
+                    if (warmedCachedRefs.size >= maxReferenceFetches) break
+                    if (!warmedCachedRefs.add(ref.eventId)) continue
+                    val warmed = warmCachedReferenceAssets(
+                        eventId = ref.eventId,
+                        cardWidthPx = cardWidthPx,
+                        remainingVideoThumbnails = maxVideoThumbnails - videoThumbnails,
+                        remainingImagePrefetches = maxImagePrefetches - imagePrefetches,
+                        profileCandidates = profileCandidates,
+                    )
+                    videoThumbnails += warmed.videoThumbnails
+                    imagePrefetches += warmed.imagePrefetches
+                }
+            }
+
+            if (imagePrefetches >= maxImagePrefetches &&
+                ogFetches >= maxOgFetches &&
+                videoThumbnails >= maxVideoThumbnails &&
+                profileCandidates.size >= maxProfileFetches &&
+                referenceCandidates.size >= maxReferenceFetches &&
+                articleCandidates.size >= maxArticleFetches
+            ) break
+        }
+
+        if (profileCandidates.isNotEmpty() && maxProfileFetches > 0) {
+            val batch = profileCandidates.take(maxProfileFetches)
+            backfillScope.launch { userRepository.fetchMissingProfiles(batch) }
+        }
+
+        if (maxReferenceFetches > 0) {
+            val missingRefs = referenceCandidates
+                .asSequence()
+                .filter { memoryEventStore.getEventEntity(it.eventId) == null }
+                .distinctBy { it.eventId }
+                .take(maxReferenceFetches)
+                .toList()
+            if (missingRefs.isNotEmpty()) {
+                backfillScope.launch { warmReferencedEvents(missingRefs, cardWidthPx) }
+            }
+        }
+
+        if (maxArticleFetches > 0) {
+            val missingArticles = articleCandidates
+                .asSequence()
+                .filter { memoryEventStore.articleRowByCoord(it.coord) == null }
+                .distinctBy { it.coord }
+                .take(maxArticleFetches)
+                .toList()
+            for (article in missingArticles) {
+                articleFetches++
+                backfillScope.launch {
+                    val relays = (article.hints + memoryEventStore.writeRelaysFor(article.author))
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                    relayPool.fetchArticleByCoord(relays, article.author, article.dTag)
+                }
+                if (articleFetches >= maxArticleFetches) break
+            }
+        }
+    }
+
+    private data class ImageCandidate(
+        val url: String,
+        val aspectRatio: Float,
+    )
+
+    private data class ReferenceCandidate(
+        val eventId: String,
+        val hints: List<String>,
+        val authorPubkey: String?,
+    )
+
+    private data class ArticleCandidate(
+        val coord: String,
+        val author: String,
+        val dTag: String,
+        val hints: List<String>,
+    )
+
+    private data class WarmedReferenceAssets(
+        val imagePrefetches: Int,
+        val videoThumbnails: Int,
+    )
+
+    private fun imageCandidates(model: EventModel): List<ImageCandidate> = buildList {
+        val articleImage = model.article?.image
+        if (!articleImage.isNullOrBlank()) add(ImageCandidate(articleImage, 16f / 9f))
+
+        for (image in model.media.images.take(MAX_MEDIA_PER_CARD)) {
+            add(ImageCandidate(image.url, feedSafeAspect(image.imetaAspect)))
+        }
+
+        for (video in model.media.videos.take(MAX_MEDIA_PER_CARD).map { it.model }) {
+            val poster = video.posterUrl
+            if (!poster.isNullOrBlank()) {
+                add(ImageCandidate(poster, feedSafeAspect(video.aspectRatio)))
+            }
+        }
+
+        for (youtube in model.media.youtubes.take(MAX_MEDIA_PER_CARD)) {
+            add(ImageCandidate("https://img.youtube.com/vi/${youtube.videoId}/hqdefault.jpg", 16f / 9f))
+        }
+    }
+
+    private fun warmVideoThumbnails(model: EventModel, remaining: Int): Int {
+        if (remaining <= 0) return 0
+        var warmed = 0
+        for (video in model.media.videos.map { it.model }) {
+            if (warmed >= remaining) break
+            if (thumbnailCache.getCached(video.videoUrl) != null) continue
+            warmed++
+            backfillScope.launch { thumbnailCache.warmThumbnail(video.videoUrl) }
+        }
+        return warmed
+    }
+
+    private fun collectProfileCandidates(
+        row: FeedRow,
+        model: EventModel,
+        out: MutableSet<String>,
+    ) {
+        out.add(row.pubkey)
+        out.add(model.pubkey)
+        out.add(model.sourcePubkey)
+        model.repost?.targetAuthorPubkey?.let(out::add)
+        extractPTagPubkeys(row.tags).forEach(out::add)
+        for (segment in model.segments) {
+            when (segment) {
+                is Segment.MentionPubkey -> out.add(segment.pubkeyHex)
+                is Segment.QuoteEvent -> segment.author?.let(out::add)
+                is Segment.QuoteAddress -> out.add(segment.author)
+                else -> Unit
+            }
+        }
+        out.remove("")
+    }
+
+    private fun collectReferenceCandidates(
+        model: EventModel,
+        row: FeedRow,
+        refs: MutableList<ReferenceCandidate>,
+        articles: MutableList<ArticleCandidate>,
+    ) {
+        if (row.kind == 1) {
+            val parentId = row.replyToId ?: row.rootId
+            if (!parentId.isNullOrBlank() && parentId != row.id) {
+                refs.add(
+                    ReferenceCandidate(
+                        eventId = parentId,
+                        hints = listOf(row.relayUrl).filter { it.isNotBlank() },
+                        authorPubkey = null,
+                    ),
+                )
+            }
+        }
+        model.repost?.targetId?.let { id ->
+            refs.add(
+                ReferenceCandidate(
+                    eventId = id,
+                    hints = listOfNotNull(model.repost.relayHint, row.relayUrl.takeIf { it.isNotBlank() }),
+                    authorPubkey = model.repost.targetAuthorPubkey,
+                ),
+            )
+        }
+        for (segment in model.segments) {
+            when (segment) {
+                is Segment.QuoteEvent -> refs.add(
+                    ReferenceCandidate(
+                        eventId = segment.eventId,
+                        hints = segment.hints,
+                        authorPubkey = segment.author,
+                    ),
+                )
+                is Segment.QuoteAddress -> {
+                    if (segment.kind == 30023) {
+                        val coord = "30023:${segment.author}:${segment.dTag}"
+                        articles.add(
+                            ArticleCandidate(
+                                coord = coord,
+                                author = segment.author,
+                                dTag = segment.dTag,
+                                hints = segment.hints,
+                            ),
+                        )
+                    }
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    private fun warmCachedReferenceAssets(
+        eventId: String,
+        cardWidthPx: Int,
+        remainingVideoThumbnails: Int,
+        remainingImagePrefetches: Int,
+        profileCandidates: MutableSet<String>? = null,
+    ): WarmedReferenceAssets {
+        val refEvent = memoryEventStore.getNostrEvent(eventId) ?: return WarmedReferenceAssets(0, 0)
+        val refRow = memoryEventStore.synthesizeFeedRow(refEvent)
+        val refModel = memoryEventStore.getOrParseEventModel(eventId)
+            ?: refRow.toEventModel()
+        profileCandidates?.let { collectProfileCandidates(refRow, refModel, it) }
+
+        val videoThumbnails = warmVideoThumbnails(
+            model = refModel,
+            remaining = remainingVideoThumbnails,
+        )
+
+        var imagePrefetches = 0
+        if (remainingImagePrefetches > 0) {
+            for (candidate in imageCandidates(refModel)) {
+                if (imagePrefetches >= remainingImagePrefetches) break
+                warmImageDimensions(candidate.url)
+                if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
+                    imagePrefetches++
+                }
+            }
+        }
+
+        return WarmedReferenceAssets(
+            imagePrefetches = imagePrefetches,
+            videoThumbnails = videoThumbnails,
+        )
+    }
+
+    private suspend fun warmReferencedEvents(refs: List<ReferenceCandidate>, cardWidthPx: Int) {
+        val noHintIds = mutableListOf<String>()
+        val awaitingIds = LinkedHashSet<String>()
+        for (ref in refs) {
+            if (memoryEventStore.getEventEntity(ref.eventId) != null) {
+                warmCachedReferenceAssets(
+                    eventId = ref.eventId,
+                    cardWidthPx = cardWidthPx,
+                    remainingVideoThumbnails = MAX_MEDIA_PER_CARD,
+                    remainingImagePrefetches = MAX_MEDIA_PER_CARD,
+                )
+                continue
+            }
+            if (relayPool.isEventUnresolved(ref.eventId)) continue
+            awaitingIds.add(ref.eventId)
+            val authorHints = ref.authorPubkey?.let { memoryEventStore.writeRelaysFor(it) }.orEmpty()
+            val hints = (ref.hints + authorHints).filter { it.isNotBlank() }.distinct()
+            if (hints.isNotEmpty()) {
+                relayPool.fetchEventById(
+                    eventId = ref.eventId,
+                    relayHints = hints,
+                    bypassDedup = authorHints.isNotEmpty(),
+                )
+            } else {
+                noHintIds.add(ref.eventId)
+            }
+        }
+        if (noHintIds.isNotEmpty()) relayPool.fetchEventsByIds(noHintIds.distinct())
+
+        coroutineScope {
+            for (eventId in awaitingIds) {
+                launch {
+                    val entity = memoryEventStore.getEventEntity(eventId)
+                        ?: withTimeoutOrNull(5_000L) {
+                            memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
+                        }
+                    if (entity != null) {
+                        warmCachedReferenceAssets(
+                            eventId = eventId,
+                            cardWidthPx = cardWidthPx,
+                            remainingVideoThumbnails = MAX_MEDIA_PER_CARD,
+                            remainingImagePrefetches = MAX_MEDIA_PER_CARD,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun feedSafeAspect(aspectRatio: Float?): Float {
+        val ratio = aspectRatio?.takeIf { it > 0f } ?: (16f / 9f)
+        return ratio.coerceIn(0.2f, 5f)
+    }
+
+    private fun warmImageDimensions(url: String) {
+        val key = url.substringBefore('#')
+        if (!markBounded(key, imageDimensionWarmed, imageDimensionWarmOrder, PREFETCH_KEY_CAP)) return
+        if (imageDimensionCache.getCached(url) != null) return
+        backfillScope.launch {
+            runCatching { imageDimensionCache.resolve(url) }
+        }
+    }
+
+    /**
+     * @return true if this call consumed one image-prefetch budget slot.
+     */
+    private fun prefetchSizedImage(url: String?, widthPx: Int, aspectRatio: Float): Boolean {
+        if (url.isNullOrBlank()) return false
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+        val safeWidth = widthPx.coerceIn(1, MAX_PREFETCH_WIDTH_PX)
+        val safeAspect = feedSafeAspect(aspectRatio)
+        val heightPx = (safeWidth / safeAspect).toInt().coerceIn(100, 4000)
+        val key = "${url.substringBefore('#')}@$safeWidth:$heightPx"
+        if (!markBounded(key, imagePrefetched, imagePrefetchOrder, PREFETCH_KEY_CAP)) return false
+
+        val request = ImageRequest.Builder(context)
+            .data(url)
+            .size(Size(Dimension.Pixels(safeWidth), Dimension.Pixels(heightPx)))
+            .build()
+        imageLoader.enqueue(request)
+        return true
+    }
+
+    /**
+     * @return true if this call started a new OG fetch, false for already-warmed
+     * or already-cached URLs. Cached positive entries still get their image
+     * opportunistically prefetched without consuming the OG network budget.
+     */
+    private fun warmOgMetadata(
+        url: String,
+        cardWidthPx: Int,
+    ): Boolean {
+        val key = url.substringBefore('#')
+        val cached = ogFetcher.hasCached(url)
+        val isNewWarm = markBounded(key, ogWarmed, ogWarmOrder, PREFETCH_KEY_CAP)
+        if (!isNewWarm) return false
+
+        backfillScope.launch {
+            ogWarmSemaphore.acquire()
+            try {
+                val metadata = ogFetcher.fetch(url)
+                val imageUrl = metadata?.imageUrl
+                if (!imageUrl.isNullOrBlank()) prefetchSizedImage(imageUrl, cardWidthPx, 16f / 9f)
+            } finally {
+                ogWarmSemaphore.release()
+            }
+        }
+        return !cached && isNewWarm
+    }
+
+    private fun markBounded(
+        key: String,
+        set: MutableSet<String>,
+        order: ConcurrentLinkedQueue<String>,
+        maxEntries: Int,
+    ): Boolean {
+        if (!set.add(key)) return false
+        order.add(key)
+        while (set.size > maxEntries) {
+            val oldest = order.poll() ?: break
+            set.remove(oldest)
+        }
+        return true
+    }
+
     suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
         if (events.isEmpty()) return
         val novelEvents = filterAndMarkNovel(events, mediaHydrated)
@@ -207,7 +657,7 @@ class CardHydrator @Inject constructor(
             Log.d(TAG, "Media: resolved ${uniqueImageUrls.size} image dims")
         }
 
-        // Video thumbnails via MediaMetadataRetriever (REST-only, capped at 3)
+        // Video thumbnails via MediaMetadataRetriever (REST-only, capped)
         if (mmrAllowed) {
             var thumbnailCount = 0
             for (event in novelEvents) {
@@ -216,10 +666,10 @@ class CardHydrator @Inject constructor(
                 val models = buildVideoRenderModels(event)
                 for (model in models) {
                     if (thumbnailCount >= mmrCap) break
-                    // Skip if poster URL exists (Coil handles it) or dims already resolved
-                    if (!model.posterUrl.isNullOrBlank()) continue
-                    if (model.widthPx != null && model.heightPx != null) continue
-                    if (thumbnailCache.resolvedAspectRatios.containsKey(model.videoUrl)) continue
+                    // A known poster or dimensions do not make the first frame
+                    // ready for initial paint. Skip only if the bitmap itself is
+                    // already cached.
+                    if (thumbnailCache.getCached(model.videoUrl) != null) continue
                     try {
                         withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
                         thumbnailCount++
@@ -235,47 +685,38 @@ class CardHydrator @Inject constructor(
     }
 
     /**
-     * Full hydration: profiles + refs + media. Used by IDLE state where
-     * there's no urgency to split phases.
-     *
-     * Coalescing: when a previous pass fired <COALESCE_COOLDOWN_MS ago AND
-     * the current warm zone has only ≤COALESCE_NOVEL_THRESHOLD novel cards,
-     * skip this pass entirely. Field logs showed sustained 7+ hydrator
-     * firings per minute where each pass had only 1-2 novel events; each
-     * tiny pass still amplified into per-event relay fetches at the source-
-     * relay + hint-relay level. Holding a pass means those 1-2 events stay
-     * "novel" and merge into the next pass — same coverage, fewer one-shots,
-     * less radio churn. Cap is 2s so worst-case profile/ref delay is
-     * bounded; per-card avatar autofetch covers visible-but-unhydrated rows
-     * in the meantime.
-     *
-     * Bypass on big novel batches (cold start, fast scroll, feed swap):
-     * fires immediately so the first paint isn't delayed.
-     */
-    @Volatile private var lastFullHydrationAt = 0L
-
-    /**
      * @param viewportIds Event IDs for engagement fetch (viewport + look-ahead).
      *   Computed by the caller from the correctly-ordered event list so that
-     *   feedRowsByIds re-sort cannot misalign indices. Warm-zone events still
-     *   get media + own-engagement hydration.
+     *   feedRowsByIds re-sort cannot misalign indices. The larger warm zone is
+     *   retained in memory but intentionally does not trigger network hydration.
      */
-    suspend fun hydrateVisibleCards(events: List<FeedRow>, feedRelay: String? = null, viewportIds: Set<String> = emptySet()) {
+    suspend fun hydrateVisibleCards(events: List<FeedRow>, viewportIds: Set<String> = emptySet()) {
         if (events.isEmpty()) return
+
+        // Hydrate only the viewport plus its bounded look-ahead. The caller's
+        // warm zone is intentionally much larger for event retention, but doing
+        // image-header probes, model parsing, and engagement routing for that
+        // entire zone spends radio/CPU on cards a fast fling may never display.
+        // An empty viewport set is retained as a safe fallback for non-feed callers.
+        val priorityEvents = if (viewportIds.isEmpty()) events
+            else events.filter { it.id in viewportIds }
 
         // Profile + ref hydration removed — per-card self-fetch paths handle
         // these (AvatarImage 800ms autofetch for profiles, QuoteCard/EmptyRepostBody
         // produceState for refs). Warm-zone batch dispatch was the burst source
         // causing Choreographer frame skips (30-69 frames) on relay-heavy feeds.
         // hydrateMedia remains load-bearing for layout stability (image dims).
-        hydrateMedia(events, mmrAllowed = false)
+        // Keep video MMR on the visible composable path only. A settled-scroll
+        // background extraction can race the player/poster path and was one of
+        // the regressions behind dark video cards during fast scrolling.
+        hydrateMedia(priorityEvents, mmrAllowed = false)
 
         // Own-engagement backfill: accumulate novel targets (id+coord+author),
         // dispatch after 250ms debounce so hydrateVisibleCards returns immediately.
-        accumulateOwnEngagement(events)
+        accumulateOwnEngagement(priorityEvents)
 
         // Engagement counts: viewport + forward look-ahead (IDs from caller).
-        accumulateEngagement(events.filter { it.id in viewportIds })
+        accumulateEngagement(priorityEvents)
     }
 
     /**
@@ -298,7 +739,7 @@ class CardHydrator @Inject constructor(
     /** Engagement target ID: for kind-6 reposts use the original event (rootId),
      *  for everything else use the event's own ID. Matches FeedRow.engagementId. */
     private fun engagementIdFor(row: FeedRow): String =
-        if ((row.kind == 6 || row.kind == 16) && row.rootId != null) row.rootId!! else row.id
+        if (row.kind == 6 || row.kind == 16) row.rootId ?: row.id else row.id
 
     /**
      * Everything the engagement pipeline needs, captured from the rendered row
@@ -352,6 +793,13 @@ class CardHydrator @Inject constructor(
 
         var added = false
         for (row in rows) {
+            // Fast reject before engagementTargetFor() parses/caches the full
+            // EventModel. Overlapping viewport passes mostly hit this path.
+            val quickId = engagementIdFor(row)
+            if (memoryEventStore.isOwnEngaged(quickId)) continue
+            if (quickId in ownEngagementChecked || quickId in ownEngagementInFlight ||
+                pendingBackfillTargets.containsKey(quickId)) continue
+
             val t = engagementTargetFor(row)
             if (memoryEventStore.isOwnEngaged(t.id)) continue
             if (t.id in ownEngagementChecked || t.id in ownEngagementInFlight ||
@@ -446,6 +894,16 @@ class CardHydrator @Inject constructor(
 
         var added = false
         for (row in events) {
+            // Most feed rows are ordinary kind-1 notes, whose engagement target
+            // is known without parsing. Reject fresh/in-flight rows before the
+            // more expensive EventModel + relay-hint derivation. Reposts and
+            // articles still take the full path because they may need #a/#A.
+            val quickId = engagementIdFor(row)
+            if (quickId in engagementInFlight || pendingEngagementTargets.containsKey(quickId)) continue
+            if (row.kind != 6 && row.kind != 16 && row.kind != 30023 &&
+                !isEngagementStale(quickId, row.createdAt, hasCoord = false, nowMs, nowSec)
+            ) continue
+
             val t = engagementTargetFor(row)
             if (t.id in engagementInFlight || pendingEngagementTargets.containsKey(t.id)) continue
             if (!isEngagementStale(t.id, t.createdAt, t.coord != null, nowMs, nowSec)) continue
@@ -651,10 +1109,11 @@ internal fun buildOwnEngagementReq(
 internal const val ENGAGEMENT_LIMIT = 100
 
 /** Number of posts BEYOND the viewport to prefetch engagement for.
- *  Covers ~2 screenfuls of scroll — by the time a post becomes visible,
+ *  Covers roughly one screenful of scroll — by the time a post becomes visible,
  *  its reaction/zap counts are already in MES.  Bounded by the debounce
- *  and freshness tiers, so fling-through doesn't fan out wastefully. */
-const val ENGAGEMENT_LOOKAHEAD = 12
+ *  and freshness tiers, while avoiding relay fan-out for cards skipped by
+ *  a fast fling. */
+const val ENGAGEMENT_LOOKAHEAD = 6
 
 /**
  * Freshness interval in seconds based on post age. Returns how long to wait
@@ -676,17 +1135,7 @@ internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
     else                      -> Long.MAX_VALUE // ≥7d → fetch once
 }
 
-/** Min interval between full hydration passes when novel count is small.
- *  Picked so worst-case profile/ref latency on a slow trickle of new events
- *  stays under ~2s — within the per-card avatar autofetch debounce window. */
-private const val COALESCE_COOLDOWN_MS = 2_000L
-
-/** Novel-event threshold below which a pass within COALESCE_COOLDOWN_MS is
- *  deferred. 3 lets tiny live-tail batches (1-2 events) coalesce while still
- *  firing immediately for fast scrolls / feed swaps where ≥4 cards are new. */
-private const val COALESCE_NOVEL_THRESHOLD = 3
-
-private const val MAX_ENGAGEMENT_RELAYS = 25
+private const val MAX_ENGAGEMENT_RELAYS = 12
 // per-post engagement budget = ENGAGEMENT_BATCH_LIMIT / ENGAGEMENT_BATCH_CHUNK.
 // 500 / 5 = 100 events/post/relay — identical to the pre-Sprint-C per-post limit.
 // DO NOT raise this without raising the limit proportionally, or posts in a chunk
@@ -700,10 +1149,10 @@ private const val ENGAGEMENT_BATCH_TIMEOUT_MS = 10_000L
 
 /**
  * Invert a per-item → relays map into a minimal set of per-relay REQ batches.
- * Ranks relays by coverage (how many items list them) desc, keeps the top
- * [maxRelays], chunks each kept relay's id list into [chunkSize]. High-coverage
- * relays (own read relays appear for every item) sort first and are always kept,
- * so capping only trims long-tail single-item relays.
+ * Uses greedy set-cover first (each selected relay covers the most still-uncovered
+ * posts), then fills remaining slots by total coverage for redundancy. If a hard
+ * cap would leave a post with zero queried relays, the result soft-overflows by
+ * the minimum number of relays needed to retain complete item coverage.
  *
  * @return (relayUrl, idsChunk) pairs — one REQ per element. Order: high-coverage first.
  */
@@ -717,10 +1166,48 @@ internal fun coalesceByRelay(
     for ((id, relays) in itemToRelays) {
         for (r in relays.distinct()) relayToIds.getOrPut(r) { mutableListOf() }.add(id)
     }
-    return relayToIds.entries
-        .sortedByDescending { it.value.size }
-        .take(maxRelays)
-        .flatMap { (relay, ids) -> ids.chunked(chunkSize).map { relay to it } }
+
+    val selected = LinkedHashSet<String>()
+    val uncovered = itemToRelays.keys.toMutableSet()
+
+    // Coverage phase: prefer relays that add the most new posts.
+    while (selected.size < maxRelays && uncovered.isNotEmpty()) {
+        val best = relayToIds.entries
+            .asSequence()
+            .filter { it.key !in selected }
+            .map { entry -> Triple(entry.key, entry.value.count { it in uncovered }, entry.value.size) }
+            .filter { it.second > 0 }
+            .sortedWith(compareByDescending<Triple<String, Int, Int>> { it.second }
+                .thenByDescending { it.third }
+                .thenBy { it.first })
+            .firstOrNull()
+            ?: break
+        selected.add(best.first)
+        uncovered.removeAll(relayToIds[best.first].orEmpty().toSet())
+    }
+
+    // Redundancy phase: spend unused budget on the broadest remaining relays.
+    relayToIds.entries
+        .asSequence()
+        .filter { it.key !in selected }
+        .sortedWith(compareByDescending<Map.Entry<String, MutableList<String>>> { it.value.size }
+            .thenBy { it.key })
+        .take((maxRelays - selected.size).coerceAtLeast(0))
+        .forEach { selected.add(it.key) }
+
+    // Coverage is non-negotiable: add one preferred relay for any item a very
+    // small cap could not cover. This is bounded by the item count.
+    if (uncovered.isNotEmpty()) {
+        for (id in uncovered.toList()) {
+            val fallback = itemToRelays[id].orEmpty().firstOrNull() ?: continue
+            selected.add(fallback)
+            uncovered.removeAll(relayToIds[fallback].orEmpty().toSet())
+        }
+    }
+
+    return selected.flatMap { relay ->
+        relayToIds[relay].orEmpty().chunked(chunkSize).map { relay to it }
+    }
 }
 
 /**
@@ -811,4 +1298,3 @@ fun extractPTagPubkeys(tagsJson: String): List<String> {
             .mapNotNull { it.jsonArray.getOrNull(1)?.jsonPrimitive?.content }
     } catch (_: Exception) { emptyList() }
 }
-

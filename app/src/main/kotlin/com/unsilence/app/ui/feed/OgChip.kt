@@ -3,12 +3,11 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -23,16 +22,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.OgMetadata
-import com.unsilence.app.ui.common.rememberSizedImageRequest
+import com.unsilence.app.ui.common.rememberWidthImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -40,6 +37,7 @@ import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
 
 /**
  * OpenGraph link preview card. Fetches OG metadata and renders a rich card
@@ -53,6 +51,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 internal fun OgPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    hasCachedOgMetadata: ((String) -> Boolean)? = null,
     showMinimalFallback: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
@@ -64,6 +63,13 @@ internal fun OgPreviewCard(
     var ogLoaded by remember(url) { mutableStateOf(fetchOgMetadata == null) }
     val og by produceState<OgMetadata?>(null, url) {
         if (fetchOgMetadata != null) {
+            // Avoid starting HTML requests for cards that only flash through
+            // composition during a fling. If the warm lane already fetched or
+            // negative-cached this URL, skip the dwell so viewport entry is a
+            // cache read instead of a guaranteed 250ms placeholder.
+            if (hasCachedOgMetadata?.invoke(url) != true) {
+                delay(250)
+            }
             value = fetchOgMetadata(url)
             ogLoaded = true
         }
@@ -81,16 +87,8 @@ internal fun OgPreviewCard(
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
-                val density = LocalDensity.current
-                val config = LocalConfiguration.current
-                val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
-                val heightPx = (widthPx * 9) / 16
-                SubcomposeAsyncImage(
-                    model              = rememberSizedImageRequest(loadedOg.imageUrl, widthPx, heightPx),
-                    contentDescription = null,
-                    contentScale       = ContentScale.Crop,
-                    error              = { imageLoadFailed = true },
-                    modifier           = Modifier
+                BoxWithConstraints(
+                    modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(16f / 9f)
                         .clip(RoundedCornerShape(
@@ -98,7 +96,15 @@ internal fun OgPreviewCard(
                             topEnd = Sizing.mediaCornerRadius,
                         ))
                         .background(Surface1),
-                )
+                ) {
+                    AsyncImage(
+                        model              = rememberWidthImageRequest(loadedOg.imageUrl, maxWidth, 16f / 9f),
+                        contentDescription = null,
+                        contentScale       = ContentScale.Crop,
+                        onError            = { imageLoadFailed = true },
+                        modifier           = Modifier.fillMaxSize(),
+                    )
+                }
             }
             Column(modifier = Modifier.padding(Spacing.small)) {
                 if (!loadedOg.title.isNullOrBlank()) {
@@ -133,23 +139,17 @@ internal fun OgPreviewCard(
                 )
             }
         }
-    } else if (!ogLoaded) {
-        // Loading state — fixed height placeholder matching rich preview card
-        Column(
-            modifier = modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
-                .background(SurfaceVariant)
-                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
-                .clickable { runCatching { uriHandler.openUri(url) } },
-        ) {
-            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Surface1))
-            Column(modifier = Modifier.padding(Spacing.small)) {
-                Box(Modifier.fillMaxWidth(0.8f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
-                Spacer(Modifier.height(4.dp))
-                Box(Modifier.fillMaxWidth(0.5f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
-            }
-        }
+    } else if (!ogLoaded && showMinimalFallback) {
+        // Cold OG fetch: keep the card useful and compact instead of reserving
+        // a viewport-visible 16:9 blank skeleton. The warm lane should make
+        // most viewport entries rich; when it misses, this fallback avoids the
+        // dark "loading card" regression and avoids an extra favicon request.
+        MinimalLinkCard(
+            url = url,
+            onClick = { runCatching { uriHandler.openUri(url) } },
+            loadFavicon = false,
+            modifier = modifier,
+        )
     } else if (showMinimalFallback) {
         // OG fetch returned nothing useful — minimal link card with favicon + domain
         MinimalLinkCard(

@@ -10,10 +10,13 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.ImageCompressor
+import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
@@ -22,6 +25,7 @@ import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.ui.feed.FeedContentFilter
+import com.unsilence.app.ui.shared.TimelineCardData
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -63,6 +67,7 @@ class ProfileViewModel @Inject constructor(
     private val imageCompressor: ImageCompressor,
     private val blossomServersStore: BlossomServersStore,
     private val contentResolver: ContentResolver,
+    private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -184,29 +189,20 @@ class ProfileViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ───────────────────────
 
-    private val profileCache = ConcurrentHashMap<String, StateFlow<UserEntity?>>()
-
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        profileCache.getOrPut(pubkey) {
-            memoryEventStore.userEntityFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-        }
+        timelineCardData.profileFlow(pubkey, viewModelScope)
 
     // ── Per-event stats (matches FeedViewModel.statsFlow) ────────────────
-    private val statsCache = ConcurrentHashMap<String, StateFlow<com.unsilence.app.data.memory.EventStats>>()
 
-    fun statsFlow(eventId: String): StateFlow<com.unsilence.app.data.memory.EventStats> =
-        statsCache.getOrPut(eventId) {
-            memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
-        }
+    fun statsFlow(eventId: String): StateFlow<EventStats> =
+        timelineCardData.statsFlow(eventId, viewModelScope)
 
-    fun zapDetailsForEvent(eventId: String): List<com.unsilence.app.data.memory.ZapDetail> =
-        memoryEventStore.zapDetailsForEvent(eventId)
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        timelineCardData.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> =
-        memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<com.unsilence.app.data.memory.ReactionInfo> =
-        memoryEventStore.reactionsForEvent(eventId)
+        timelineCardData.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
+        timelineCardData.reactionsForEvent(eventId)
 
     /** Live following count from MES follows index. */
     val followingCount: StateFlow<Int> = pubkeyHex?.let { pk ->

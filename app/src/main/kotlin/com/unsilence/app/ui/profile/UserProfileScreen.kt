@@ -24,11 +24,16 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -50,8 +55,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -61,6 +66,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
@@ -73,12 +79,14 @@ import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
+import com.unsilence.app.ui.feed.ReportTypeSheet
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Chat
@@ -90,6 +98,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.sample
@@ -131,9 +140,14 @@ fun UserProfileScreen(
     val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
     val followerCount  by viewModel.followerCount.collectAsStateWithLifecycle()
     val followingCount by viewModel.followingCount.collectAsStateWithLifecycle()
+    val isMuted        by viewModel.isMuted.collectAsStateWithLifecycle()
+    val isOwnProfile   by viewModel.isOwnProfile.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var showProfileActions by remember { mutableStateOf(false) }
+    var showReportSheet by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
@@ -160,6 +174,7 @@ fun UserProfileScreen(
             onAuthorClick(tappedPubkey)
         }
     }
+    val showThreadParents = selectedTab == ProfileTab.REPLIES
 
     // ── Shared video playback — replaces ~80 lines of duplicated state ────────
     val videoScope = rememberVideoPlaybackScope(
@@ -169,6 +184,9 @@ fun UserProfileScreen(
         listState = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
         cachedModelProvider = actionsViewModel::getCachedEventModel,
+        additionalVideoSourceCandidateIds = if (showThreadParents) {
+            ::threadParentVideoSourceCandidateIds
+        } else null,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
@@ -183,7 +201,8 @@ fun UserProfileScreen(
             zapFlash = zapFlash,
         )
     }
-    val callbacks = remember(viewModel, actionsViewModel, pubkey) {
+    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
+    val callbacks = remember(viewModel, actionsViewModel, pubkey, pinnedEmojis) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
             onComment = onComment,
@@ -194,7 +213,7 @@ fun UserProfileScreen(
                 emojiReactTarget = id to pk
                 showFullEmojiPicker = true
             },
-            pinnedEmojis = actionsViewModel::getPinnedEmojis,
+            pinnedEmojis = { pinnedEmojis },
             repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
             zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
             saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -202,6 +221,7 @@ fun UserProfileScreen(
             lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
             lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+            hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
             zapDetailsForEvent = viewModel::zapDetailsForEvent,
@@ -220,12 +240,13 @@ fun UserProfileScreen(
     }
 
     LaunchedEffect(Unit) {
-        snapshotFlow { shouldLoadMore.value }
+        snapshotFlow {
+            if (shouldLoadMore.value) posts.lastOrNull()?.createdAt else null
+        }
             .distinctUntilChanged()
-            .collect { shouldLoad ->
-                if (shouldLoad && posts.isNotEmpty()) {
-                    val oldest = posts.last().createdAt
-                    viewModel.loadMore(oldest)
+            .collect { oldestVisiblePageCursor ->
+                if (oldestVisiblePageCursor != null) {
+                    viewModel.loadMore(oldestVisiblePageCursor)
                 }
             }
     }
@@ -240,6 +261,40 @@ fun UserProfileScreen(
             Triple(first, last, listState.isScrollInProgress)
         }.sample(100).collect { (first, last, isScrolling) ->
             viewModel.onViewportChanged(first, last, isScrolling)
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    LaunchedEffect(posts, cardWidthPx) {
+        val eventOffset = 3
+        fun warmVisibleRange(first: Int, last: Int) {
+            val dataFirst = (first - eventOffset).coerceAtLeast(0)
+            val dataLast = (last - eventOffset).coerceAtMost(posts.lastIndex)
+            if (dataFirst <= dataLast) {
+                actionsViewModel.warmCardWindow(
+                    rows = posts,
+                    first = dataFirst,
+                    last = dataLast,
+                    cardWidthPx = cardWidthPx,
+                    hydrateEngagement = false,
+                )
+            }
+        }
+
+        if (posts.isNotEmpty() && cardWidthPx > 0) {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: eventOffset
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: (eventOffset + 8)
+            warmVisibleRange(first, last)
+        }
+
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            first to last
+        }.sample(100).collect { (first, last) ->
+            warmVisibleRange(first, last)
         }
     }
 
@@ -303,8 +358,7 @@ fun UserProfileScreen(
                         val bannerUrl = user?.banner
                         if (!bannerUrl.isNullOrBlank()) {
                             val bannerDensity = LocalDensity.current
-                            val bannerConfig = LocalConfiguration.current
-                            val bannerWidthPx = with(bannerDensity) { bannerConfig.screenWidthDp.dp.roundToPx() }
+                            val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
                             val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
                             AsyncImage(
                                 model              = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
@@ -519,7 +573,7 @@ fun UserProfileScreen(
                     role = CardRole.Profile,
                     thumbnailCache = actionsViewModel.videoThumbnailCache,
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
-                    showThreadParents = selectedTab == ProfileTab.REPLIES,
+                    showThreadParents = showThreadParents,
                     eventModelProvider = actionsViewModel::getEventModel,
                     sensitiveMode = sensitiveMode,
                 )
@@ -542,7 +596,7 @@ fun UserProfileScreen(
                     .height(Sizing.topBarHeight)
                     .padding(horizontal = Spacing.medium),
                 verticalAlignment     = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Start,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     text       = "Profile",
@@ -550,6 +604,79 @@ fun UserProfileScreen(
                     fontSize   = AppType.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (!isOwnProfile) {
+                    Box {
+                        IconButton(onClick = { showProfileActions = true }) {
+                            Icon(
+                                imageVector        = Icons.Filled.MoreVert,
+                                contentDescription = "Profile actions",
+                                tint               = Color.White,
+                                modifier           = Modifier.size(22.dp),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded         = showProfileActions,
+                            onDismissRequest = { showProfileActions = false },
+                            modifier         = Modifier.background(Black),
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text     = if (isMuted) "Unmute user" else "Mute user",
+                                        color    = Color.White,
+                                        fontSize = AppType.body,
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector        = Icons.AutoMirrored.Filled.VolumeOff,
+                                        contentDescription = null,
+                                        tint               = Zap,
+                                        modifier           = Modifier.size(20.dp),
+                                    )
+                                },
+                                onClick = {
+                                    showProfileActions = false
+                                    val wasMuted = isMuted
+                                    when (if (wasMuted) viewModel.unmuteUser() else viewModel.muteUser()) {
+                                        MuteResult.Queued ->
+                                            showSnackbar(if (wasMuted) "Unmuted" else "Muted")
+                                        MuteResult.LocalOnly ->
+                                            showSnackbar(
+                                                if (wasMuted) {
+                                                    "Unmuted locally — grant NIP-44 decrypt in Amber to sync"
+                                                } else {
+                                                    "Muted locally — grant NIP-44 decrypt in Amber to sync"
+                                                },
+                                            )
+                                        null -> showSnackbar("Action unavailable")
+                                    }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text     = "Report profile",
+                                        color    = Color.White,
+                                        fontSize = AppType.body,
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector        = Icons.Filled.Flag,
+                                        contentDescription = null,
+                                        tint               = Zap,
+                                        modifier           = Modifier.size(20.dp),
+                                    )
+                                },
+                                onClick = {
+                                    showProfileActions = false
+                                    showReportSheet = true
+                                },
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -566,7 +693,7 @@ fun UserProfileScreen(
                 emojiReactTarget = model.engagementId to model.pubkey
                 showFullEmojiPicker = true
             },
-            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
                 actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
             },
@@ -595,6 +722,16 @@ fun UserProfileScreen(
         FullScreenVideoDialog(
             exoPlayer = videoScope.exoPlayer,
             onDismiss = { videoScope.dismissFullscreen() },
+        )
+    }
+
+    if (showReportSheet) {
+        ReportTypeSheet(
+            onDismiss = { showReportSheet = false },
+            onTypeSelected = { type ->
+                viewModel.reportProfile(type)
+                showSnackbar("Profile reported")
+            },
         )
     }
 

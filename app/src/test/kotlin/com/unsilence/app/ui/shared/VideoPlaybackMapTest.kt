@@ -119,6 +119,19 @@ class VideoPlaybackMapTest {
     }
 
     @Test
+    fun `thread parent source prefers direct reply parent`() {
+        val row = repostRow(1, "", "root-id").copy(replyToId = "parent-id")
+        val ids = threadParentVideoSourceCandidateIds(row, cachedModel = null)
+        assertEquals(listOf("parent-id"), ids)
+    }
+
+    @Test
+    fun `thread parent source falls back to root for direct replies`() {
+        val ids = threadParentVideoSourceCandidateIds(repostRow(1, "", "root-id"), cachedModel = null)
+        assertEquals(listOf("root-id"), ids)
+    }
+
+    @Test
     fun `embedded repost (non-blank content) contributes no rootId candidate`() {
         // Embedded-JSON reposts render their target inline; their own models are
         // built from the embedded content, so they must not borrow via rootId.

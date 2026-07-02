@@ -11,11 +11,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
@@ -24,6 +27,7 @@ import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
@@ -63,6 +67,7 @@ internal fun ContentFlow(
     lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
+    hasCachedOgMetadata: ((String) -> Boolean)? = null,
     imageDimensionCache: ImageDimensionCache?,
     isActiveVideo: Boolean = false,
     activeVideoUrl: String? = null,
@@ -72,6 +77,7 @@ internal fun ContentFlow(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
     nestDepth: Int = 0,
     modifier: Modifier = Modifier,
@@ -79,11 +85,18 @@ internal fun ContentFlow(
     val navigateId = model.navigateId
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
+    val videoModels = remember(model.media.videos) { model.media.videos.map { it.model } }
+
+    LaunchedEffect(model.id, videoModels) {
+        if (videoModels.isNotEmpty()) onVideoModelsResolved?.invoke(videoModels)
+    }
 
     // Collapsed long-note budget: keep the whole card close to 80% of the
     // viewport, not just the text run. Reserve rough chrome for author header,
     // Show more, and action bar; the remaining height becomes text lines.
-    val screenHeightDp = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
+    val density = LocalDensity.current
+    val windowHeightPx = LocalWindowInfo.current.containerSize.height
+    val screenHeightDp = windowHeightPx / density.density
     val lineBudget = remember(screenHeightDp) {
         (((screenHeightDp * COLLAPSED_CARD_SCREEN_FRACTION) - COLLAPSED_CARD_CHROME_DP) /
             CONTENT_LINE_HEIGHT_DP).toInt().coerceIn(12, 32)
@@ -179,6 +192,7 @@ internal fun ContentFlow(
                         OgPreviewCard(
                             url               = link.url,
                             fetchOgMetadata   = fetchOgMetadata,
+                            hasCachedOgMetadata = hasCachedOgMetadata,
                             showMinimalFallback = true,
                             modifier          = Modifier
                                 .padding(horizontal = hPad)
@@ -245,6 +259,7 @@ internal fun ContentFlow(
                         lookupProfile   = lookupProfile,
                         lookupModel     = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,
+                        hasCachedOgMetadata = hasCachedOgMetadata,
                         imageDimensionCache = imageDimensionCache,
                         exoPlayer       = if (showVideo) exoPlayer else null,
                         isActiveVideo   = if (showVideo) isActiveVideo else false,
@@ -252,6 +267,7 @@ internal fun ContentFlow(
                         isMuted         = isMuted,
                         onToggleMute    = onToggleMute,
                         thumbnailCache  = thumbnailCache,
+                        onVideoModelsResolved = onVideoModelsResolved,
                         sensitiveMode   = sensitiveMode,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
@@ -373,7 +389,7 @@ private fun trimTextRunEdges(run: MutableList<Segment>) {
     while (run.isNotEmpty() && run.first() is Segment.Text) {
         val first = run.first() as Segment.Text
         val trimmed = first.text.trimStart('\n')
-        if (trimmed.isEmpty()) { run.removeFirst(); continue }
+        if (trimmed.isEmpty()) { run.removeAt(0); continue }
         if (trimmed != first.text) run[0] = Segment.Text(trimmed)
         break
     }
@@ -381,7 +397,7 @@ private fun trimTextRunEdges(run: MutableList<Segment>) {
     while (run.isNotEmpty() && run.last() is Segment.Text) {
         val last = run.last() as Segment.Text
         val trimmed = last.text.trimEnd('\n')
-        if (trimmed.isEmpty()) { run.removeLast(); continue }
+        if (trimmed.isEmpty()) { run.removeAt(run.lastIndex); continue }
         if (trimmed != last.text) run[run.lastIndex] = Segment.Text(trimmed)
         break
     }

@@ -606,6 +606,7 @@ fun ComposeScreen(
                                 lookupEvent = { id, _ -> viewModel.lookupEvent(id) },
                                 lookupModel = { viewModel.lookupModel(it) },
                                 fetchOgMetadata = { viewModel.fetchOgMetadata(it) },
+                                hasCachedOgMetadata = { viewModel.hasCachedOgMetadata(it) },
                                 imageDimensionCache = viewModel.imageDimensionCache,
                                 thumbnailCache = viewModel.videoThumbnailCache,
                             )
