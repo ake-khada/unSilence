@@ -10,12 +10,14 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.OgFetcher
@@ -34,6 +36,7 @@ import com.vitorpamplona.quartz.nip25Reactions.ReactionEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +54,18 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import javax.inject.Inject
 
+private const val CARD_WINDOW_WARM_ABOVE = 2
+private const val CARD_WINDOW_WARM_LOOKAHEAD = 12
+private const val CARD_WINDOW_WARM_MAX_ROWS = 18
+private const val CARD_WINDOW_IMAGE_CAP = 4
+private const val CARD_WINDOW_OG_CAP = 4
+private const val CARD_WINDOW_VIDEO_THUMB_CAP = 8
+private const val CARD_WINDOW_PROFILE_CAP = 16
+private const val CARD_WINDOW_REFERENCE_CAP = 4
+private const val CARD_WINDOW_ARTICLE_CAP = 2
+private const val CARD_WINDOW_ENGAGEMENT_LOOKAHEAD = 6
+private const val CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS = 250L
+
 /**
  * Shared ViewModel for note actions (react, repost) that works across FeedScreen and ThreadScreen.
  * Scoped to the Activity, so a single instance is shared by all NoteCard composables.
@@ -62,6 +77,7 @@ class NoteActionsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
+    private val cardHydrator: CardHydrator,
     private val snapshotScheduler: SnapshotScheduler,
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
@@ -102,6 +118,86 @@ class NoteActionsViewModel @Inject constructor(
      * Used by VideoPlaybackScope to discover quote-only video rows.
      */
     fun getCachedEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
+
+    /**
+     * Shared pre-viewport card warm path for non-feed surfaces that still render
+     * through EventCard/eventFeedItems: profile timelines, search results,
+     * threads, article comments, nested reposts/quotes, and longform embeds.
+     *
+     * The feed ViewModel has its own high-frequency lane because it owns the
+     * subscription window. Other screens call this from LazyList viewport samples.
+     */
+    fun warmCardWindow(
+        rows: List<FeedRow>,
+        first: Int,
+        last: Int,
+        cardWidthPx: Int,
+        hydrateEngagement: Boolean = true,
+        maxRows: Int = CARD_WINDOW_WARM_MAX_ROWS,
+    ) {
+        if (rows.isEmpty() || cardWidthPx <= 0) return
+        val safeFirst = first.coerceIn(0, rows.lastIndex)
+        val safeLast = last.coerceAtLeast(safeFirst).coerceAtMost(rows.lastIndex)
+        val warmStart = (safeFirst - CARD_WINDOW_WARM_ABOVE).coerceAtLeast(0)
+        val warmEnd = (safeLast + 1 + CARD_WINDOW_WARM_LOOKAHEAD).coerceAtMost(rows.size)
+        if (warmStart >= warmEnd) return
+
+        val key = CardWindowWarmKey(
+            rowCount = rows.size,
+            first = warmStart,
+            last = warmEnd - 1,
+            firstId = rows[warmStart].id,
+            lastId = rows[warmEnd - 1].id,
+            cardWidthPx = cardWidthPx,
+            hydrateEngagement = hydrateEngagement,
+        )
+        if (key == lastCardWindowWarmKey) return
+        lastCardWindowWarmKey = key
+
+        val visibleEnd = (safeLast + 1).coerceAtMost(warmEnd)
+        val warmRows = buildList {
+            addAll(rows.subList(safeFirst, visibleEnd))
+            if (warmStart < safeFirst) addAll(rows.subList(warmStart, safeFirst))
+            if (visibleEnd < warmEnd) addAll(rows.subList(visibleEnd, warmEnd))
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            cardHydrator.warmUpcomingAssets(
+                events = warmRows,
+                cardWidthPx = cardWidthPx,
+                maxRows = maxRows,
+                maxImagePrefetches = CARD_WINDOW_IMAGE_CAP,
+                maxOgFetches = CARD_WINDOW_OG_CAP,
+                maxVideoThumbnails = CARD_WINDOW_VIDEO_THUMB_CAP,
+                maxProfileFetches = CARD_WINDOW_PROFILE_CAP,
+                maxReferenceFetches = CARD_WINDOW_REFERENCE_CAP,
+                maxArticleFetches = CARD_WINDOW_ARTICLE_CAP,
+            )
+        }
+
+        if (!hydrateEngagement) return
+        val engagementEnd = (safeLast + 1 + CARD_WINDOW_ENGAGEMENT_LOOKAHEAD).coerceAtMost(rows.size)
+        if (safeFirst >= engagementEnd) return
+        val engagementRows = rows.subList(safeFirst, engagementEnd).toList()
+        val viewportIds = engagementRows.map { it.id }.toSet()
+        cardWindowHydrationJob?.cancel()
+        cardWindowHydrationJob = viewModelScope.launch(Dispatchers.Default) {
+            delay(CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS)
+            cardHydrator.hydrateVisibleCards(engagementRows, viewportIds = viewportIds)
+        }
+    }
+
+    private data class CardWindowWarmKey(
+        val rowCount: Int,
+        val first: Int,
+        val last: Int,
+        val firstId: String,
+        val lastId: String,
+        val cardWidthPx: Int,
+        val hydrateEngagement: Boolean,
+    )
+
+    private var lastCardWindowWarmKey: CardWindowWarmKey? = null
+    private var cardWindowHydrationJob: Job? = null
 
     // ── Custom emoji picker data ─────────────────────────────────────────────
 
@@ -511,6 +607,9 @@ class NoteActionsViewModel @Inject constructor(
 
     suspend fun fetchOgMetadata(url: String): OgMetadata? =
         ogFetcher.fetch(url)
+
+    fun hasCachedOgMetadata(url: String): Boolean =
+        ogFetcher.hasCached(url)
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

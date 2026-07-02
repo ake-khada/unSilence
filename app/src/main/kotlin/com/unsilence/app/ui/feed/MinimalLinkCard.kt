@@ -37,18 +37,23 @@ fun MinimalLinkCard(
     url: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    loadFavicon: Boolean = true,
 ) {
     val host = remember(url) {
         runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
     }
     // 0 = Google favicon API (bypasses WAF), 1 = direct apple-touch-icon, 2 = direct favicon, 3 = generic icon
     var iconStage by remember(url) { mutableIntStateOf(0) }
-    val iconUrl = remember(host, iconStage) {
-        when (iconStage) {
-            0 -> "https://www.google.com/s2/favicons?domain=$host&sz=128"
-            1 -> "https://$host/apple-touch-icon.png"
-            2 -> "https://$host/favicon.ico"
-            else -> null
+    val iconUrl = remember(host, iconStage, loadFavicon) {
+        if (!loadFavicon) {
+            null
+        } else {
+            when (iconStage) {
+                0 -> "https://www.google.com/s2/favicons?domain=$host&sz=128"
+                1 -> "https://$host/apple-touch-icon.png"
+                2 -> "https://$host/favicon.ico"
+                else -> null
+            }
         }
     }
 

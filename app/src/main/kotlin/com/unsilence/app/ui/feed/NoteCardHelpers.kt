@@ -89,6 +89,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -144,8 +145,16 @@ internal fun parseNip05(nip05: String): Pair<String, String>? {
 /** True if [s] is a 64-char hex string (i.e. a raw pubkey, not a human name). */
 internal fun looksLikeHexPubkey(s: String): Boolean = HEX_PUBKEY_REGEX.matches(s)
 
-// Immutable + thread-safe (unlike SimpleDateFormat) — safe to share across calls.
-private val MONTH_DAY_FORMAT = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+// Formatters are immutable and thread-safe. Cache one per locale so a runtime
+// locale change does not leave feed timestamps stuck in the process-start locale.
+private val MONTH_DAY_FORMATS = ConcurrentHashMap<Locale, DateTimeFormatter>()
+
+private fun monthDayFormat(): DateTimeFormatter {
+    val locale = Locale.getDefault()
+    return MONTH_DAY_FORMATS.computeIfAbsent(locale) {
+        DateTimeFormatter.ofPattern("MMM d", it)
+    }
+}
 
 internal fun relativeTime(createdAtSeconds: Long): String {
     val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
@@ -154,7 +163,7 @@ internal fun relativeTime(createdAtSeconds: Long): String {
         diffMs < TimeUnit.HOURS.toMillis(1)   -> "${TimeUnit.MILLISECONDS.toMinutes(diffMs)}m"
         diffMs < TimeUnit.DAYS.toMillis(1)    -> "${TimeUnit.MILLISECONDS.toHours(diffMs)}h"
         diffMs < TimeUnit.DAYS.toMillis(7)    -> "${TimeUnit.MILLISECONDS.toDays(diffMs)}d"
-        else -> MONTH_DAY_FORMAT.format(
+        else -> monthDayFormat().format(
             Instant.ofEpochMilli(createdAtSeconds * 1000L).atZone(ZoneId.systemDefault()),
         )
     }

@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +47,14 @@ import com.unsilence.app.ui.theme.Surface1
 
 private val MediaPlaceholder = Surface1
 
+internal val VideoRenderModel.imetaAspectRatio: Float?
+    get() {
+        val width = widthPx ?: return null
+        val height = heightPx ?: return null
+        if (height <= 0) return null
+        return width.toFloat() / height
+    }
+
 /**
  * Composable that shows a video thumbnail: imeta poster if available,
  * otherwise fetches the first frame via [VideoThumbnailCache] (MediaMetadataRetriever
@@ -61,12 +70,44 @@ internal fun VideoThumbnailImage(
     thumbnailCache: VideoThumbnailCache?,
     modifier: Modifier = Modifier,
     onAspectRatioResolved: ((Float) -> Unit)? = null,
+    requestAspectRatio: Float = model.aspectRatio,
 ) {
+    val currentOnAspectRatioResolved by rememberUpdatedState(onAspectRatioResolved)
+    var thumbnail by remember(model.videoUrl, thumbnailCache) {
+        mutableStateOf(thumbnailCache?.getCached(model.videoUrl))
+    }
+
+    if (thumbnailCache != null) {
+        // Track visibility for LRU eviction protection, including videos that
+        // also have a poster. The first-frame cache is the reliable fallback
+        // when the poster is cold or unavailable at first paint.
+        DisposableEffect(model.videoUrl, thumbnailCache) {
+            thumbnailCache.markVisible(model.videoUrl)
+            onDispose { thumbnailCache.markNotVisible(model.videoUrl) }
+        }
+        LaunchedEffect(model.videoUrl, thumbnailCache) {
+            val resolved = thumbnail ?: thumbnailCache.getThumbnail(model.videoUrl)
+            if (resolved != null) {
+                thumbnail = resolved
+                currentOnAspectRatioResolved?.invoke(resolved.aspectRatio)
+            }
+        }
+    }
+
+    if (thumbnail != null) {
+        Image(
+            bitmap = thumbnail!!.bitmap.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+    }
+
     if (!model.posterUrl.isNullOrBlank()) {
         AsyncImage(
-            model = rememberFullWidthImageRequest(model.posterUrl),
+            model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = requestAspectRatio),
             contentDescription = null,
-            contentScale = ContentScale.Fit,
+            contentScale = ContentScale.Crop,
             modifier = modifier,
             onSuccess = { state ->
                 val w = state.result.image.width
@@ -76,33 +117,8 @@ internal fun VideoThumbnailImage(
                 }
             },
         )
-    } else if (thumbnailCache != null) {
-        // Track visibility for LRU eviction protection
-        DisposableEffect(model.videoUrl) {
-            thumbnailCache.markVisible(model.videoUrl)
-            onDispose { thumbnailCache.markNotVisible(model.videoUrl) }
-        }
-        // Seed from cache synchronously — no blank frame on recomposition
-        var thumbnail by remember(model.videoUrl) {
-            mutableStateOf(thumbnailCache.getCached(model.videoUrl))
-        }
-        LaunchedEffect(model.videoUrl) {
-            if (thumbnail != null) return@LaunchedEffect // already have it
-            thumbnailCache.getThumbnail(model.videoUrl)?.let {
-                thumbnail = it
-                onAspectRatioResolved?.invoke(it.aspectRatio)
-            }
-        }
-        if (thumbnail != null) {
-            Image(
-                bitmap = thumbnail!!.bitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = modifier,
-            )
-        }
-        // While loading (thumbnail == null): dark placeholder shows through from parent Box
     }
+    // While loading (thumbnail == null and poster not ready): dark placeholder shows through from parent Box
 }
 
 /**
@@ -123,10 +139,10 @@ fun VideoPreviewCard(
 ) {
     // Use imeta dimensions as authoritative aspect ratio when available.
     // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
-    val imetaKnown = model.widthPx != null && model.heightPx != null && model.heightPx > 0
+    val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaKnown -> feedVideoAspectRatio(model.widthPx!!.toFloat() / model.heightPx!!, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
         !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
         else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
@@ -134,7 +150,7 @@ fun VideoPreviewCard(
     // Track whether ratio has been resolved from a real source (imeta or MMR).
     // Allow ONE update from default → resolved, then lock permanently.
     var hasBeenResolved by remember(model.videoUrl, forceSquare) {
-        mutableStateOf(imetaKnown || cachedRatio != null)
+        mutableStateOf(imetaAspect != null || cachedRatio != null)
     }
 
     Box(
@@ -201,10 +217,10 @@ fun InlineVideoPlayer(
 ) {
     // Use imeta dimensions as authoritative aspect ratio when available.
     // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
-    val imetaKnown = model.widthPx != null && model.heightPx != null && model.heightPx > 0
+    val imetaAspect = model.imetaAspectRatio
     val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val baseAspect = when {
-        imetaKnown -> feedVideoAspectRatio(model.widthPx!!.toFloat() / model.heightPx!!, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
         !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio, false)
         else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
@@ -212,24 +228,36 @@ fun InlineVideoPlayer(
     // Track whether ratio has been resolved from a real source (imeta or MMR).
     // Allow ONE update from default → resolved, then lock permanently.
     var hasBeenResolved by remember(model.videoUrl, forceSquare) {
-        mutableStateOf(imetaKnown || resolvedRatio != null)
+        mutableStateOf(imetaAspect != null || resolvedRatio != null)
     }
 
-    var isFirstFrameRendered by remember { mutableStateOf(false) }
+    var isFirstFrameRendered by remember(model.videoUrl) {
+        mutableStateOf(exoPlayer.hasRenderableFrameFor(model.videoUrl))
+    }
 
     // Reset first-frame flag when the video URL changes
-    LaunchedEffect(model.videoUrl) { isFirstFrameRendered = false }
+    LaunchedEffect(model.videoUrl, exoPlayer) {
+        isFirstFrameRendered = exoPlayer.hasRenderableFrameFor(model.videoUrl)
+    }
 
     // Listen for first rendered frame + actual video dimensions
-    DisposableEffect(exoPlayer) {
+    DisposableEffect(exoPlayer, model.videoUrl, forceSquare) {
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 isFirstFrameRendered = true
+            }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY && exoPlayer.hasRenderableFrameFor(model.videoUrl)) {
+                    isFirstFrameRendered = true
+                }
             }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     val ratio = videoSize.width.toFloat() / videoSize.height
                     thumbnailCache?.resolvedAspectRatios?.put(model.videoUrl, ratio)
+                    if (exoPlayer.hasRenderableFrameFor(model.videoUrl)) {
+                        isFirstFrameRendered = true
+                    }
                     // Allow ONE update from default → resolved for unresolved videos
                     if (!hasBeenResolved && !forceSquare) {
                         displayAspect = feedVideoAspectRatio(ratio, false)
@@ -271,12 +299,12 @@ fun InlineVideoPlayer(
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 }
             },
             update = { view ->
                 view.player = if (!isFullscreen) exoPlayer else null
-                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
             modifier = Modifier
@@ -302,4 +330,13 @@ fun InlineVideoPlayer(
             )
         }
     }
+}
+
+private fun Player.hasRenderableFrameFor(videoUrl: String): Boolean {
+    val currentUrl = currentMediaItem?.localConfiguration?.uri?.toString()
+    val size = videoSize
+    return currentUrl == videoUrl &&
+        playbackState == Player.STATE_READY &&
+        size.width > 0 &&
+        size.height > 0
 }

@@ -30,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -127,7 +128,7 @@ fun ZapAmountDialog(
     val prefs = LocalZapPreferences.current
     val presetAmounts = prefs.presets.map { it.amountSats }
     // Pre-select the first preset's stored message (if any).
-    var selected by remember { mutableStateOf(presetAmounts.firstOrNull() ?: 21L) }
+    var selected by remember { mutableLongStateOf(presetAmounts.firstOrNull() ?: 21L) }
     var message by remember {
         mutableStateOf(prefs.presets.firstOrNull()?.message ?: "")
     }

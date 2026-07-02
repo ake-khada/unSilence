@@ -9,7 +9,6 @@ import com.unsilence.app.work.BackgroundSyncWorker
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
-import com.unsilence.app.data.media.MediaPreconnect
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
@@ -41,7 +40,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -81,7 +79,6 @@ class AppBootstrapper @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val relayCapabilitiesStore: com.unsilence.app.data.relay.RelayCapabilitiesStore,
     private val profileResolver: ProfileResolver,
-    private val okHttpClient: OkHttpClient,
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
     private val initGate: InitGate,
@@ -472,7 +469,7 @@ class AppBootstrapper @Inject constructor(
         memoryEventStore.rescanPendingPrivateZapDecrypts()
 
         // ═══════════════════════════════════════════════════════════════════
-        // Phase 3 (2500ms): Maintenance + media preconnect
+        // Phase 3 (2500ms): Maintenance
         // ═══════════════════════════════════════════════════════════════════
         delay(1500L)
 
@@ -484,7 +481,7 @@ class AppBootstrapper @Inject constructor(
             addAll(memoryEventStore.getFavoriteRelayConfigs(pubkeyHex).mapNotNull { it.url })
             addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
             addAll(GLOBAL_RELAY_URLS)
-        }.toList()
+        }.mapNotNull(::normalizeRelayUrl).toSet()
         Log.d(TAG, "Phase3: fetching relay health for ${userRelayUrls.size} configured relays")
 
         // Wire the integral relay set for half-open circuit breaker recovery.
@@ -501,11 +498,26 @@ class AppBootstrapper @Inject constructor(
 
         // Fetch trust scores + relay monitors concurrently, targeted to user's relays only.
         // Snapshot-persisted so data is available immediately on next restart.
-        val trustJob = scope.launch { relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls) }
-        val monitorStalenessMs = 12L * 60 * 60 * 1000 // 12 hours
+        val maintenanceStalenessMs = 12L * 60 * 60 * 1000 // 12 hours
+        val lastTrustUrls = relayPreferencesStore.lastTrustRelayUrls()
+        val trustAge = System.currentTimeMillis() - relayPreferencesStore.lastTrustFetchAt()
+        val hasTrustScores = memoryEventStore.getTrustScores().isNotEmpty()
+        val trustJob = if (hasTrustScores && trustAge < maintenanceStalenessMs && lastTrustUrls == userRelayUrls) {
+            Log.d(TAG, "Phase3: trust scores fresh for unchanged relay set; skipping fetch")
+            null
+        } else {
+            scope.launch {
+                val ok = relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls.toList())
+                if (ok) {
+                    relayPreferencesStore.setLastTrustFetch(System.currentTimeMillis(), userRelayUrls)
+                } else {
+                    Log.w(TAG, "Phase3: trust fetch failed — not advancing 12h gate")
+                }
+            }
+        }
         val monitorAge = System.currentTimeMillis() - relayPreferencesStore.lastMonitorFetchAt()
         val hasMonitors = memoryEventStore.relayMonitorCount() > 0
-        val monitorJob = if (hasMonitors && monitorAge < monitorStalenessMs) {
+        val monitorJob = if (hasMonitors && monitorAge < maintenanceStalenessMs) {
             Log.d(TAG, "Phase3: relay monitors fresh (age=${monitorAge / 60_000}min, count=${memoryEventStore.relayMonitorCount()}), skipping fetch")
             null
         } else {
@@ -522,13 +534,8 @@ class AppBootstrapper @Inject constructor(
                 }
             }
         }
-        trustJob.join()
+        trustJob?.join()
         monitorJob?.join()
-
-        // Media preconnect is fire-and-forget — never block the bootstrap mutex.
-        // supervisorScope inside warmUp waits for all HEAD requests; if one hangs
-        // the entire bootstrap stalls (measured: 2m27s in production).
-        scope.launch { MediaPreconnect.warmUp(okHttpClient) }
 
         // Retire the old local pinned-relay store (one-time, idempotent) — the feed carousel
         // now sources kind-10012 favorites. No auto-publish from old pins.

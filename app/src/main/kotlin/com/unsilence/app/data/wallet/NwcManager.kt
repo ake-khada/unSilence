@@ -1,8 +1,8 @@
 package com.unsilence.app.data.wallet
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
+import androidx.core.net.toUri
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.unsilence.app.data.relay.NostrJson
@@ -415,7 +415,7 @@ class NwcManager @Inject constructor(
         val normalised = raw
             .replace("nostr+walletconnect://", "nwc://")
             .replace("nostrwalletconnect://",  "nwc://")
-        val uri    = Uri.parse(normalised)
+        val uri    = normalised.toUri()
         val pubkey = uri.host?.takeIf { it.length == 64 } ?: return null
         val relay  = uri.getQueryParameter("relay")?.takeIf { it.isNotBlank() } ?: return null
         val secret = uri.getQueryParameter("secret")?.takeIf { it.length == 64 } ?: return null

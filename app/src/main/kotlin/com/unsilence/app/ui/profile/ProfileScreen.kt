@@ -50,8 +50,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -79,6 +79,7 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Chat
@@ -143,6 +144,7 @@ fun ProfileScreen(
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
     val listState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
     val scope = rememberCoroutineScope()
 
     // Intercept avatar tap: own pubkey → scroll to top, other → navigate
@@ -153,6 +155,7 @@ fun ProfileScreen(
             onAuthorClick(tappedPubkey)
         }
     }
+    val showThreadParents = selectedTab == ProfileTab.REPLIES
 
     // ── Shared video playback — replaces ~80 lines of duplicated state ────────
     val videoScope = rememberVideoPlaybackScope(
@@ -162,19 +165,25 @@ fun ProfileScreen(
         listState = listState,
         videoModelProvider = actionsViewModel::getVideoRenderModels,
         cachedModelProvider = actionsViewModel::getCachedEventModel,
+        additionalVideoSourceCandidateIds = if (showThreadParents) {
+            ::threadParentVideoSourceCandidateIds
+        } else null,
     )
 
     // ── Shared callbacks + engagement snapshot ────────────────────────────────
-    val engagement = EngagementSnapshot(
-        reactedIds = reactedIds,
-        repostedIds = repostedIds,
-        zappedIds = zappedIds,
-        isNwcConfigured = isNwcConfigured,
-        zapLoadingIds = zapLoadingIds,
-        optimisticZapSats = optimisticSats,
-        zapFlash = zapFlash,
-    )
-    val callbacks = EventActionCallbacks(
+    val engagement = remember(reactedIds, repostedIds, zappedIds, isNwcConfigured, zapLoadingIds, optimisticSats, zapFlash) {
+        EngagementSnapshot(
+            reactedIds = reactedIds,
+            repostedIds = repostedIds,
+            zappedIds = zappedIds,
+            isNwcConfigured = isNwcConfigured,
+            zapLoadingIds = zapLoadingIds,
+            optimisticZapSats = optimisticSats,
+            zapFlash = zapFlash,
+        )
+    }
+    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
+    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis) { EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,
         onAuthorClick = interceptedAuthorClick,
@@ -184,7 +193,7 @@ fun ProfileScreen(
             emojiReactTarget = id to pk
             showFullEmojiPicker = true
         },
-        pinnedEmojis = actionsViewModel::getPinnedEmojis,
+        pinnedEmojis = { pinnedEmojis },
         repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
         zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
@@ -192,12 +201,13 @@ fun ProfileScreen(
         lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
         lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
+        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
         profileFlow = viewModel::profileFlow,
         statsFlow = viewModel::statsFlow,
         zapDetailsForEvent = viewModel::zapDetailsForEvent,
         repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
         reactionsForEvent = viewModel::reactionsForEvent,
-    )
+    ) }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
@@ -266,8 +276,7 @@ fun ProfileScreen(
                         val bannerUrl = user?.banner
                         if (!bannerUrl.isNullOrBlank()) {
                             val bannerDensity = LocalDensity.current
-                            val bannerConfig = LocalConfiguration.current
-                            val bannerWidthPx = with(bannerDensity) { bannerConfig.screenWidthDp.dp.roundToPx() }
+                            val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
                             val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
                             AsyncImage(
                                 model              = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
@@ -438,7 +447,7 @@ fun ProfileScreen(
                     role = CardRole.Profile,
                     thumbnailCache = actionsViewModel.videoThumbnailCache,
                     imageDimensionCache = actionsViewModel.imageDimensionCache,
-                    showThreadParents = selectedTab == ProfileTab.REPLIES,
+                    showThreadParents = showThreadParents,
                     eventModelProvider = actionsViewModel::getEventModel,
                     sensitiveMode = sensitiveMode,
                 )
@@ -456,11 +465,13 @@ fun ProfileScreen(
             }
         }
         LaunchedEffect(Unit) {
-            snapshotFlow { shouldLoadMore.value }
+            snapshotFlow {
+                if (shouldLoadMore.value) posts.lastOrNull()?.createdAt else null
+            }
                 .distinctUntilChanged()
-                .collect { shouldLoad ->
-                    if (shouldLoad && posts.isNotEmpty()) {
-                        viewModel.loadMore(posts.last().createdAt)
+                .collect { oldestVisiblePageCursor ->
+                    if (oldestVisiblePageCursor != null) {
+                        viewModel.loadMore(oldestVisiblePageCursor)
                     }
                 }
         }
@@ -475,6 +486,40 @@ fun ProfileScreen(
                 Triple(first, last, listState.isScrollInProgress)
             }.sample(100).collect { (first, last, isScrolling) ->
                 viewModel.onViewportChanged(first, last, isScrolling)
+            }
+        }
+
+        @OptIn(FlowPreview::class)
+        LaunchedEffect(posts, cardWidthPx) {
+            val eventOffset = 3
+            fun warmVisibleRange(first: Int, last: Int) {
+                val dataFirst = (first - eventOffset).coerceAtLeast(0)
+                val dataLast = (last - eventOffset).coerceAtMost(posts.lastIndex)
+                if (dataFirst <= dataLast) {
+                    actionsViewModel.warmCardWindow(
+                        rows = posts,
+                        first = dataFirst,
+                        last = dataLast,
+                        cardWidthPx = cardWidthPx,
+                        hydrateEngagement = false,
+                    )
+                }
+            }
+
+            if (posts.isNotEmpty() && cardWidthPx > 0) {
+                val info = listState.layoutInfo
+                val first = info.visibleItemsInfo.firstOrNull()?.index ?: eventOffset
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: (eventOffset + 8)
+                warmVisibleRange(first, last)
+            }
+
+            snapshotFlow {
+                val info = listState.layoutInfo
+                val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                first to last
+            }.sample(100).collect { (first, last) ->
+                warmVisibleRange(first, last)
             }
         }
 
@@ -542,7 +587,7 @@ fun ProfileScreen(
                 emojiReactTarget = model.engagementId to model.pubkey
                 showFullEmojiPicker = true
             },
-            pinnedEmojis    = actionsViewModel.getPinnedEmojis(),
+            pinnedEmojis    = pinnedEmojis,
             onReactWithEmoji = { emoji ->
                 actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
             },

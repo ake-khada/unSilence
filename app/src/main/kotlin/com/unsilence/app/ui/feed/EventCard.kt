@@ -8,9 +8,11 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -43,16 +45,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.OgMetadata
-import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.ui.common.rememberWidthImageRequest
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
 import com.unsilence.app.ui.shared.ThreadParentCard
 import com.unsilence.app.ui.theme.AppType
@@ -76,7 +79,7 @@ fun EventCard(
     model: EventModel,
     row: FeedRow,
     role: CardRole,
-    engagement: EngagementSnapshot,
+    engagement: EventEngagementSnapshot,
     onNoteClick: (String) -> Unit,
     onComment: () -> Unit = {},
     onAuthorClick: (String) -> Unit,
@@ -95,6 +98,7 @@ fun EventCard(
     lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
+    hasCachedOgMetadata: ((String) -> Boolean)? = null,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
     statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
@@ -110,6 +114,7 @@ fun EventCard(
     activeVideoUrl: String? = null,
     isFullscreen: Boolean = false,
     onOpenFullscreen: () -> Unit = {},
+    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     // New-post animation
     isNewPost: Boolean = false,
     onNewPostAnimated: () -> Unit = {},
@@ -316,6 +321,15 @@ fun EventCard(
                 onAuthorClick       = onAuthorClick,
                 fetchOgMetadata     = fetchOgMetadata,
                 imageDimensionCache = imageDimensionCache,
+                thumbnailCache      = thumbnailCache,
+                exoPlayer           = exoPlayer,
+                isActiveVideo       = isActiveVideo,
+                activeVideoUrl      = activeVideoUrl,
+                isFullscreen        = isFullscreen,
+                onOpenFullscreen    = onOpenFullscreen,
+                isMuted             = isMuted,
+                onToggleMute        = onToggleMute,
+                onVideoModelsResolved = onVideoModelsResolved,
                 sensitiveMode       = sensitiveMode,
                 modifier            = Modifier.padding(bottom = Spacing.small),
             )
@@ -344,6 +358,7 @@ fun EventCard(
                     lookupEventWithAuthor = lookupEventWithAuthor,
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,
+                    hasCachedOgMetadata = hasCachedOgMetadata,
                     imageDimensionCache = imageDimensionCache,
                     isActiveVideo       = isActiveVideo,
                     activeVideoUrl      = activeVideoUrl,
@@ -353,6 +368,7 @@ fun EventCard(
                     isMuted             = isMuted,
                     onToggleMute        = onToggleMute,
                     thumbnailCache      = thumbnailCache,
+                    onVideoModelsResolved = onVideoModelsResolved,
                     sensitiveMode       = sensitiveMode,
                 )
 
@@ -372,6 +388,7 @@ fun EventCard(
                         lookupProfile = lookupProfile,
                         lookupModel = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,
+                        hasCachedOgMetadata = hasCachedOgMetadata,
                         imageDimensionCache = imageDimensionCache,
                         onNoteClick = onNoteClick,
                         onAuthorClick = onAuthorClick,
@@ -383,6 +400,7 @@ fun EventCard(
                         onOpenFullscreen = onOpenFullscreen,
                         isMuted = isMuted,
                         onToggleMute = onToggleMute,
+                        onVideoModelsResolved = onVideoModelsResolved,
                         sensitiveMode = sensitiveMode,
                     )
                 }
@@ -431,12 +449,12 @@ fun EventCard(
             repostCount     = liveRepostCount,
             reactionCount   = liveReactionCount,
             zapTotalSats    = liveZapTotalSats,
-            hasReacted      = model.engagementId in engagement.reactedIds,
-            hasReposted     = model.engagementId in engagement.repostedIds,
-            hasZapped       = model.engagementId in engagement.zappedIds,
+            hasReacted      = engagement.hasReacted,
+            hasReposted     = engagement.hasReposted,
+            hasZapped       = engagement.hasZapped,
             isNwcConfigured = engagement.isNwcConfigured,
-            isZapLoading    = model.engagementId in engagement.zapLoadingIds,
-            extraZapSats    = engagement.optimisticZapSats[model.engagementId] ?: 0L,
+            isZapLoading    = engagement.isZapLoading,
+            extraZapSats    = engagement.extraZapSats,
             zapFlash        = engagement.zapFlash,
             zapEnabled      = zapEnabled,
             drawerOpen      = drawerOpen,
@@ -482,7 +500,7 @@ fun EventCard(
 private fun ArticleLayout(
     model: EventModel,
     row: FeedRow,
-    engagement: EngagementSnapshot,
+    engagement: EventEngagementSnapshot,
     replyCount: Int,
     repostCount: Int,
     reactionCount: Int,
@@ -561,14 +579,18 @@ private fun ArticleLayout(
         ) {
             // Banner image (16:9)
             if (!article?.image.isNullOrBlank()) {
-                SubcomposeAsyncImage(
-                    model              = rememberFullWidthImageRequest(article.image, aspectRatio = 16f / 9f),
-                    contentDescription = null,
-                    contentScale       = ContentScale.Crop,
-                    modifier           = Modifier
+                BoxWithConstraints(
+                    modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(16f / 9f),
-                )
+                ) {
+                    AsyncImage(
+                        model              = rememberWidthImageRequest(article.image, maxWidth, aspectRatio = 16f / 9f),
+                        contentDescription = null,
+                        contentScale       = ContentScale.Crop,
+                        modifier           = Modifier.fillMaxSize(),
+                    )
+                }
             }
 
             // Title
@@ -616,12 +638,12 @@ private fun ArticleLayout(
                 repostCount     = repostCount,
                 reactionCount   = reactionCount,
                 zapTotalSats    = zapTotalSats,
-                hasReacted      = model.engagementId in engagement.reactedIds,
-                hasReposted     = model.engagementId in engagement.repostedIds,
-                hasZapped       = model.engagementId in engagement.zappedIds,
+                hasReacted      = engagement.hasReacted,
+                hasReposted     = engagement.hasReposted,
+                hasZapped       = engagement.hasZapped,
                 isNwcConfigured = engagement.isNwcConfigured,
-                isZapLoading    = model.engagementId in engagement.zapLoadingIds,
-                extraZapSats    = engagement.optimisticZapSats[model.engagementId] ?: 0L,
+                isZapLoading    = engagement.isZapLoading,
+                extraZapSats    = engagement.extraZapSats,
                 zapFlash        = engagement.zapFlash,
                 drawerOpen      = drawerOpen,
                 onChevronTap    = { drawerOpen = !drawerOpen },

@@ -38,6 +38,9 @@ class ProfileResolver @Inject constructor(
 
     /** In-flight guard: pubkey → timestamp of last request dispatch. */
     private val inFlight = ConcurrentHashMap<String, Long>()
+    /** Pubkeys already waiting in the batch channel. Prevents repeated card
+     *  recompositions from filling the queue with duplicate work. */
+    private val queued: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private var requestChannel = Channel<String>(capacity = Channel.UNLIMITED)
 
@@ -77,7 +80,8 @@ class ProfileResolver @Inject constructor(
     fun request(pubkeys: List<String>) {
         startInternal()
         for (pk in pubkeys) {
-            requestChannel.trySend(pk)
+            if (!queued.add(pk)) continue
+            if (requestChannel.trySend(pk).isFailure) queued.remove(pk)
         }
     }
 
@@ -129,6 +133,7 @@ class ProfileResolver @Inject constructor(
         requestChannel.close()
         requestChannel = Channel(capacity = Channel.UNLIMITED)
         inFlight.clear()
+        queued.clear()
         Log.d(TAG, "Cleared: jobs cancelled, channel reset, in-flight cleared")
     }
 
@@ -151,7 +156,11 @@ class ProfileResolver @Inject constructor(
             }
 
             val windowMs = (System.nanoTime() - startNs) / 1_000_000L
-            processBatch(batch.toList(), windowMs = windowMs)
+            try {
+                processBatch(batch.toList(), windowMs = windowMs)
+            } finally {
+                batch.forEach(queued::remove)
+            }
         }
     }
 

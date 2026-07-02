@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
 
 private val MediaPlaceholder = Surface1
 
@@ -81,13 +83,18 @@ internal fun EventMediaGrid(
         val firstImeta = firstImage.imetaAspect
         val firstCached = imageDimensionCache?.getCached(firstImage.url)
         var frameAspect by remember(images) {
-            mutableStateOf(feedImageAspectRatio(firstImeta ?: firstCached))
+            mutableFloatStateOf(feedImageAspectRatio(firstImeta ?: firstCached))
         }
         var frameResolved by remember(images) {
             mutableStateOf(firstImeta != null || firstCached != null)
         }
 
         LaunchedEffect(firstImage.url) {
+            if (frameResolved) return@LaunchedEffect
+            // Do not issue a separate range request for images merely passing
+            // through composition during a fling. Coil may also finish during
+            // this dwell and make the probe unnecessary.
+            delay(200)
             if (frameResolved) return@LaunchedEffect
             val ratio = imageDimensionCache?.resolve(firstImage.url) ?: return@LaunchedEffect
             if (!frameResolved) {
@@ -197,7 +204,7 @@ internal fun EventMediaImage(
     val cachedRatio = imageDimensionCache?.getCached(image.url)
     val initialAspect = image.imetaAspect ?: cachedRatio
     var displayAspect by remember(image.url) {
-        mutableStateOf(feedImageAspectRatio(initialAspect))
+        mutableFloatStateOf(feedImageAspectRatio(initialAspect))
     }
     var hasBeenResolved by remember(image.url) {
         mutableStateOf(imetaKnown || cachedRatio != null)
@@ -206,6 +213,8 @@ internal fun EventMediaImage(
     // Active resolution: lightweight header fetch (~100-300ms) settles the container
     // while shimmer is still showing — far faster than waiting for the full bitmap decode.
     LaunchedEffect(image.url) {
+        if (hasBeenResolved) return@LaunchedEffect
+        delay(200)
         if (hasBeenResolved) return@LaunchedEffect
         val ratio = imageDimensionCache?.resolve(image.url) ?: return@LaunchedEffect
         if (!hasBeenResolved) {

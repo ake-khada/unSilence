@@ -38,6 +38,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
@@ -78,6 +79,7 @@ internal fun QuoteCard(
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
+    hasCachedOgMetadata: ((String) -> Boolean)? = null,
     imageDimensionCache: ImageDimensionCache? = null,
     exoPlayer: ExoPlayer? = null,
     isActiveVideo: Boolean = false,
@@ -85,6 +87,7 @@ internal fun QuoteCard(
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
     thumbnailCache: VideoThumbnailCache? = null,
+    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
         com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
     modifier: Modifier = Modifier,
@@ -209,6 +212,7 @@ internal fun QuoteCard(
                         lookupEvent         = lookupEvent,
                         lookupModel         = lookupModel,
                         fetchOgMetadata     = fetchOgMetadata,
+                        hasCachedOgMetadata = hasCachedOgMetadata,
                         imageDimensionCache = imageDimensionCache,
                         exoPlayer           = exoPlayer,
                         isActiveVideo       = isActiveVideo,
@@ -221,6 +225,7 @@ internal fun QuoteCard(
                         isMuted             = isMuted,
                         onToggleMute        = onToggleMute,
                         thumbnailCache      = thumbnailCache,
+                        onVideoModelsResolved = onVideoModelsResolved,
                         nestDepth           = nestDepth + 1,
                     )
                 } else if (eventModel != null) {

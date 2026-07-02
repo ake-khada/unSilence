@@ -2,11 +2,10 @@ package com.unsilence.app.ui.common
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import coil3.request.ImageRequest
 import coil3.size.Dimension
 import coil3.size.Size
@@ -35,6 +34,25 @@ fun rememberSizedImageRequest(
 }
 
 /**
+ * Image request sized from an actual layout width. Prefer this over
+ * [rememberFullWidthImageRequest] when the image is in a weighted/grid cell;
+ * using the full window width for a half-width cell decodes ~4x the pixels
+ * needed and keeps those hardware buffers resident while scrolling.
+ */
+@Composable
+fun rememberWidthImageRequest(
+    url: String?,
+    widthDp: Dp,
+    aspectRatio: Float = 16f / 9f,
+): ImageRequest {
+    val density = LocalDensity.current
+    val widthPx = with(density) { widthDp.roundToPx() }.coerceAtLeast(1)
+    val safeAspect = if (aspectRatio > 0f) aspectRatio else (16f / 9f)
+    val heightPx = (widthPx / safeAspect).toInt().coerceIn(100, 4000)
+    return rememberSizedImageRequest(url, widthPx, heightPx)
+}
+
+/**
  * Square image request sized from a Dp value (typically for avatars).
  * Converts dp to pixels using the current LocalDensity.
  */
@@ -58,9 +76,7 @@ fun rememberFullWidthImageRequest(
     url: String?,
     aspectRatio: Float = 16f / 9f,
 ): ImageRequest {
-    val config = LocalConfiguration.current
-    val density = LocalDensity.current
-    val widthPx = with(density) { config.screenWidthDp.dp.roundToPx() }
+    val widthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
     val safeAspect = if (aspectRatio > 0f) aspectRatio else (16f / 9f)
     val heightPx = (widthPx / safeAspect).toInt().coerceIn(100, 4000)
     return rememberSizedImageRequest(url, widthPx, heightPx)

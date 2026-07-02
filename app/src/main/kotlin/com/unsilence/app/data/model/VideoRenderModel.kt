@@ -32,14 +32,48 @@ private val VIDEO_EXT_REGEX = Regex(
 )
 
 private fun isDirectVideoUrl(url: String): Boolean =
-    url.contains(".mp4", ignoreCase = true) ||
-        url.contains(".mov", ignoreCase = true) ||
-        url.contains(".webm", ignoreCase = true) ||
-        url.contains(".m3u8", ignoreCase = true) ||
-        url.contains(".m4v", ignoreCase = true) ||
-        url.contains(".avi", ignoreCase = true)
+    cleanMediaUrl(url).let { clean ->
+        clean.contains(".mp4", ignoreCase = true) ||
+            clean.contains(".mov", ignoreCase = true) ||
+            clean.contains(".webm", ignoreCase = true) ||
+            clean.contains(".m3u8", ignoreCase = true) ||
+            clean.contains(".m4v", ignoreCase = true) ||
+            clean.contains(".avi", ignoreCase = true)
+    }
+
+private fun isVideoImeta(media: ImetaMedia): Boolean =
+    media.mimeType?.startsWith("video/") == true || isDirectVideoUrl(media.url)
 
 private const val DEFAULT_ASPECT_RATIO = 16f / 9f
+
+private val MEDIA_TRAILING_PUNCTUATION = charArrayOf('.', ',', ';', ':', '!', ')', ']', '}', '"', '\'')
+
+internal fun cleanMediaUrl(url: String): String =
+    url.trim().trimEnd(*MEDIA_TRAILING_PUNCTUATION)
+
+internal fun mediaUrlMatches(left: String, right: String): Boolean {
+    val cleanLeft = cleanMediaUrl(left).substringBefore('#')
+    val cleanRight = cleanMediaUrl(right).substringBefore('#')
+    if (cleanLeft == cleanRight) return true
+
+    val leftWithoutQuery = cleanLeft.substringBefore('?')
+    val rightWithoutQuery = cleanRight.substringBefore('?')
+    return leftWithoutQuery == rightWithoutQuery &&
+        leftWithoutQuery.substringAfterLast('/').contains('.')
+}
+
+private fun List<ImetaMedia>.firstMatchingMedia(url: String): ImetaMedia? =
+    firstOrNull { mediaUrlMatches(it.url, url) }
+
+private fun Iterable<String>.distinctMediaUrls(): List<String> {
+    val result = mutableListOf<String>()
+    for (url in this) {
+        if (result.none { existing -> mediaUrlMatches(existing, url) }) {
+            result.add(url)
+        }
+    }
+    return result
+}
 
 /**
  * Build [VideoRenderModel]s for a single feed row by combining imeta tags
@@ -67,11 +101,12 @@ fun buildVideoRenderModels(
     }
 
     val youtubeStripped = YOUTUBE_REGEX.replace(effectiveContent, "")
-    val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped).map { it.value }.toList()
+    val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped).map { cleanMediaUrl(it.value) }.toList()
     val imetaVideoUrls = imetaMedia
-        .filter { it.mimeType?.startsWith("video/") == true && isDirectVideoUrl(it.url) }
-        .map { it.url }
-    val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinct().filter(::isDirectVideoUrl)
+        .filter(::isVideoImeta)
+        .map { cleanMediaUrl(it.url) }
+        .filter { it.isNotBlank() }
+    val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinctMediaUrls()
     if (allVideoUrls.isEmpty()) return emptyList()
     return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia) }
 }
@@ -96,17 +131,17 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
 
     // Collect video URLs from regex
     val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped)
-        .map { it.value }
+        .map { cleanMediaUrl(it.value) }
         .toList()
 
     // Collect video URLs from imeta (MIME-based)
     val imetaVideoUrls = imetaMedia
-        .filter { it.mimeType?.startsWith("video/") == true && isDirectVideoUrl(it.url) }
-        .map { it.url }
+        .filter(::isVideoImeta)
+        .map { cleanMediaUrl(it.url) }
+        .filter { it.isNotBlank() }
 
     val allVideoUrls = (regexVideoUrls + imetaVideoUrls)
-        .distinct()
-        .filter(::isDirectVideoUrl)
+        .distinctMediaUrls()
 
     if (allVideoUrls.isEmpty()) return emptyList()
 
@@ -116,13 +151,16 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
 }
 
 private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRenderModel {
-    val meta = imetaMedia.firstOrNull { it.url == url && it.width != null && it.height != null && it.height != 0 }
+    val cleanUrl = cleanMediaUrl(url)
+    val meta = imetaMedia.firstOrNull {
+        mediaUrlMatches(it.url, cleanUrl) && it.width != null && it.height != null && it.height != 0
+    }
     val aspect = meta?.let { it.width!!.toFloat() / it.height!! } ?: DEFAULT_ASPECT_RATIO
-    val imetaForUrl = imetaMedia.firstOrNull { it.url == url }
+    val imetaForUrl = imetaMedia.firstMatchingMedia(cleanUrl)
     val poster = imetaForUrl?.thumb ?: imetaForUrl?.image
 
     return VideoRenderModel(
-        videoUrl = url,
+        videoUrl = cleanUrl,
         aspectRatio = aspect,
         posterUrl = poster,
         widthPx = meta?.width,

@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalWindowInfo
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
@@ -59,6 +61,7 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -67,6 +70,8 @@ import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.sample
 
 @Composable
 fun ThreadScreen(
@@ -103,6 +108,7 @@ fun ThreadScreen(
     // fresh list per call, which defeats Compose skipping when called per card.
     val pinnedEmojis = actionsViewModel.getPinnedEmojis()
     val listState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var didScrollToFocus by remember { mutableStateOf(false) }
 
     // Single engagement snapshot for ALL cards in the thread — same remember
@@ -131,6 +137,48 @@ fun ThreadScreen(
         videoModelProvider = actionsViewModel::getVideoRenderModels,
         cachedModelProvider = actionsViewModel::getCachedEventModel,
     )
+
+    @OptIn(FlowPreview::class)
+    LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx) {
+        if (allThreadRows.isEmpty()) return@LaunchedEffect
+        val hasFocused = state.focusedNote != null
+        val replyStartIndex = if (hasFocused) 2 else 1
+        val replyDataOffset = if (hasFocused) 1 else 0
+        fun visibleRowsFromLayout(): List<Int> =
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                val lazyIndex = item.index
+                when {
+                    hasFocused && lazyIndex == 0 -> 0
+                    lazyIndex >= replyStartIndex -> replyDataOffset + lazyIndex - replyStartIndex
+                    else -> null
+                }?.takeIf { it in allThreadRows.indices }
+            }
+
+        fun warmVisibleRows(visibleRows: List<Int>) {
+            val first = visibleRows.minOrNull() ?: return
+            val last = visibleRows.maxOrNull() ?: first
+            actionsViewModel.warmCardWindow(
+                rows = allThreadRows,
+                first = first,
+                last = last,
+                cardWidthPx = cardWidthPx,
+                hydrateEngagement = true,
+            )
+        }
+
+        if (cardWidthPx > 0) {
+            val initialRows = visibleRowsFromLayout().ifEmpty {
+                listOf(0, allThreadRows.lastIndex.coerceAtMost(8))
+            }
+            warmVisibleRows(initialRows)
+        }
+
+        snapshotFlow {
+            visibleRowsFromLayout()
+        }.sample(100).collect { visibleRows ->
+            warmVisibleRows(visibleRows)
+        }
+    }
 
     // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
     LaunchedEffect(zapFlash) {
@@ -208,7 +256,7 @@ fun ThreadScreen(
                                     model               = focusedModel,
                                     row                 = note,
                                     role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
-                                    engagement          = engagement,
+                                    engagement          = engagement.forEvent(focusedModel.engagementId),
                                     isFocused           = state.focusedReplyId == null,
                                     onNoteClick         = { /* already on thread */ },
                                     onComment           = { onComment(note.id) },
@@ -232,6 +280,7 @@ fun ThreadScreen(
                                     lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
                                     lookupModel         = actionsViewModel::getEventModel,
                                     fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                    hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
                                     profileFlow         = viewModel::profileFlow,
                                     statsFlow           = viewModel::statsFlow,
                                     zapDetailsForEvent  = viewModel::zapDetailsForEvent,
@@ -246,6 +295,9 @@ fun ThreadScreen(
                                     activeVideoUrl      = videoScope.activeVideoUrl,
                                     isFullscreen        = videoScope.showFullscreenVideo,
                                     onOpenFullscreen    = { videoScope.openFullscreen(note.id) },
+                                    onVideoModelsResolved = { models ->
+                                        videoScope.registerVideoModels(note.id, models)
+                                    },
                                     sensitiveMode       = sensitiveMode,
                                     isSensitive         = note.hasContentWarning,
                                     contentWarningReason = note.contentWarningReason,
@@ -299,7 +351,7 @@ fun ThreadScreen(
                                         model               = replyModel,
                                         row                 = reply,
                                         role                = CardRole.Reply,
-                                        engagement          = engagement,
+                                        engagement          = engagement.forEvent(replyModel.engagementId),
                                         isFocused           = reply.id == state.focusedReplyId,
                                         onNoteClick         = { /* already viewing thread */ },
                                         onComment           = { onComment(reply.id) },
@@ -323,6 +375,7 @@ fun ThreadScreen(
                                         lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
                                         lookupModel         = actionsViewModel::getEventModel,
                                         fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
                                         profileFlow         = viewModel::profileFlow,
                                         statsFlow           = viewModel::statsFlow,
                                         zapDetailsForEvent  = viewModel::zapDetailsForEvent,
@@ -337,6 +390,9 @@ fun ThreadScreen(
                                         activeVideoUrl      = videoScope.activeVideoUrl,
                                         isFullscreen        = videoScope.showFullscreenVideo,
                                         onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
+                                        onVideoModelsResolved = { models ->
+                                            videoScope.registerVideoModels(reply.id, models)
+                                        },
                                         sensitiveMode       = sensitiveMode,
                                         isSensitive         = reply.hasContentWarning,
                                         contentWarningReason = reply.contentWarningReason,

@@ -32,6 +32,8 @@ private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
 private const val LAST_SEEN_PREFIX = "notif_last_seen_"
 private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
+private val KEY_LAST_TRUST_FETCH = longPreferencesKey("last_trust_fetch_at")
+private val KEY_LAST_TRUST_RELAY_URLS = stringSetPreferencesKey("last_trust_relay_urls")
 private val KEY_SENSITIVE_CONTENT_MODE = stringPreferencesKey("sensitive_content_mode")
 
 @Singleton
@@ -88,6 +90,22 @@ class RelayPreferencesStore @Inject constructor(
 
     suspend fun setLastMonitorFetchAt(timestamp: Long) {
         dataStore.edit { prefs -> prefs[KEY_LAST_MONITOR_FETCH] = timestamp }
+    }
+
+    // ─── Trust Score Staleness ────────────────────────────────────────────
+
+    suspend fun lastTrustFetchAt(): Long =
+        dataStore.data.first()[KEY_LAST_TRUST_FETCH] ?: 0L
+
+    suspend fun lastTrustRelayUrls(): Set<String> =
+        dataStore.data.first()[KEY_LAST_TRUST_RELAY_URLS] ?: emptySet()
+
+    /** Advance timestamp and covered relay set atomically after a successful fetch. */
+    suspend fun setLastTrustFetch(timestamp: Long, relayUrls: Set<String>) {
+        dataStore.edit { prefs ->
+            prefs[KEY_LAST_TRUST_FETCH] = timestamp
+            prefs[KEY_LAST_TRUST_RELAY_URLS] = relayUrls
+        }
     }
 
     // ─── Pinned Relays ──────────────────────────────────────────────────────

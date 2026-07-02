@@ -88,6 +88,12 @@ class VideoPlaybackScope(
 
     fun toggleMute() { isMuted = !isMuted }
 
+    fun registerVideoModels(noteId: String, models: List<VideoRenderModel>) {
+        if (models.isEmpty()) return
+        if (videoRenderModels[noteId] == models) return
+        videoRenderModels = videoRenderModels + (noteId to models)
+    }
+
     fun openFullscreen(noteId: String) {
         // Only claim fullscreen when the row resolves to a bound video URL.
         // A cold empty-repost target may render its preview before the model map
@@ -160,6 +166,11 @@ internal fun videoSourceCandidateIds(row: FeedRow, cachedModel: EventModel?): Li
     return ids
 }
 
+internal fun threadParentVideoSourceCandidateIds(row: FeedRow, cachedModel: EventModel?): List<String> {
+    if (cachedModel != null && cachedModel.repost != null) return emptyList()
+    return listOfNotNull(row.replyToId ?: row.rootId)
+}
+
 /**
  * Creates and wires a [VideoPlaybackScope] with lifecycle, mute sync,
  * playback transitions, and active-video detection — all the plumbing
@@ -178,6 +189,7 @@ fun rememberVideoPlaybackScope(
     listState: LazyListState,
     videoModelProvider: ((String) -> List<VideoRenderModel>)? = null,
     cachedModelProvider: ((String) -> EventModel?)? = null,
+    additionalVideoSourceCandidateIds: ((FeedRow, EventModel?) -> List<String>)? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
@@ -213,14 +225,17 @@ fun rememberVideoPlaybackScope(
     // is the MES sidecar lookup. Such a row becomes eligible once the target's
     // video sidecar exists; the map recomputes on the next `events` change
     // (frequent on a live feed) — see openFullscreen's guard for the cold case.
-    val renderModelsMap = remember(events) {
+    val visibleEventIds = remember(events) { events.mapTo(HashSet()) { it.id } }
+    val renderModelsMap = remember(events, additionalVideoSourceCandidateIds) {
         events
             .filter { it.kind != 30023 }
             .mapNotNull { row ->
                 val own = videoModelProvider?.invoke(row.id)?.takeIf { it.isNotEmpty() }
                     ?: buildVideoRenderModels(row)
+                val cachedModel = cachedModelProvider?.invoke(row.id)
                 val candidateIds = if (own.isEmpty())
-                    videoSourceCandidateIds(row, cachedModelProvider?.invoke(row.id))
+                    videoSourceCandidateIds(row, cachedModel) +
+                        additionalVideoSourceCandidateIds?.invoke(row, cachedModel).orEmpty()
                 else emptyList()
                 val models = resolveRowVideoModels(own, candidateIds) { id ->
                     videoModelProvider?.invoke(id) ?: emptyList()
@@ -229,18 +244,26 @@ fun rememberVideoPlaybackScope(
             }
             .toMap()
     }
-    scope.videoRenderModels = renderModelsMap
+    LaunchedEffect(renderModelsMap, visibleEventIds) {
+        val retainedLateModels = scope.videoRenderModels.filterKeys { id ->
+            id in visibleEventIds && id !in renderModelsMap
+        }
+        val combined = retainedLateModels + renderModelsMap
+        if (scope.videoRenderModels != combined) {
+            scope.videoRenderModels = combined
+        }
+    }
 
-    val noteIdsWithVideo = remember(renderModelsMap) { renderModelsMap.keys }
+    val noteIdsWithVideo = remember(scope.videoRenderModels) { scope.videoRenderModels.keys }
 
     // Playback transitions: swap media source on active note change.
     // B2 contract:
     //   Deactivation: playWhenReady=false (retain codec+media). No stop(), no clearMediaItems().
     //   Reactivation same URL: playWhenReady=true. No prepare(), no codec realloc.
     //   Reactivation different URL: stop()+clearMediaItems(), then setMediaItem()+prepare().
-    val activeVideoUrl = remember(scope.activeVideoNoteId, renderModelsMap) {
+    val activeVideoUrl = remember(scope.activeVideoNoteId, scope.videoRenderModels) {
         scope.activeVideoNoteId?.let { noteId ->
-            renderModelsMap[noteId]?.firstOrNull()?.videoUrl
+            scope.videoRenderModels[noteId]?.firstOrNull()?.videoUrl
         }
     }
 
@@ -284,16 +307,16 @@ fun rememberVideoPlaybackScope(
     //      transitions within OSCILLATION_BLOCK_MS. Targets the specific
     //      pathology (13 alternating transitions in 12s) without suppressing
     //      normal sequential transitions A→B→C.
-    val noteIdsRef = rememberUpdatedState(noteIdsWithVideo)
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
     LaunchedEffect(Unit) {
-        // Reading scope.videoRenderModels inside the producer registers it as a
-        // snapshot dependency, so the detector re-evaluates when a late-resolved
-        // quote-only row enters the map (otherwise a static list would not pick
-        // up newly-eligible videos until the next scroll).
-        snapshotFlow { scope.videoRenderModels; listState.layoutInfo }
-            .map { layoutInfo ->
+        // Include the video row ids in the emitted value. snapshotFlow observes
+        // every state read, but it only emits when the block's returned value
+        // changes. Returning layoutInfo alone means a late-resolved nested video
+        // can be observed but suppressed until the user scrolls and layoutInfo
+        // changes. That is exactly the "video appears after sliding" failure.
+        snapshotFlow { scope.videoRenderModels.keys to listState.layoutInfo }
+            .map { (currentIds, layoutInfo) ->
                 // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value
 
@@ -317,21 +340,19 @@ fun rememberVideoPlaybackScope(
                 }
                 scope.lastVisibleItemCount = visibleCount
 
-                val currentIds = noteIdsRef.value
                 val viewportStart = layoutInfo.viewportStartOffset
                 val viewportEnd = layoutInfo.viewportEndOffset
                 val viewportCenter = (viewportStart + viewportEnd) / 2
 
                 val videoItems = layoutInfo.visibleItemsInfo
                     .filter { (it.key as? String) in currentIds }
+                val currentActive = activeRef.value
 
                 fun visibilityFraction(item: androidx.compose.foundation.lazy.LazyListItemInfo): Float {
                     val visibleTop = maxOf(item.offset, viewportStart)
                     val visibleBottom = minOf(item.offset + item.size, viewportEnd)
                     return if (item.size > 0) maxOf(0, visibleBottom - visibleTop).toFloat() / item.size else 0f
                 }
-
-                val currentActive = activeRef.value
 
                 // Check if current active video is still above deactivation threshold (35%)
                 val currentActiveItem = videoItems.firstOrNull { (it.key as? String) == currentActive }
@@ -364,6 +385,15 @@ fun rememberVideoPlaybackScope(
                     // confirmation period. If a different candidate arrives,
                     // flatMapLatest cancels this coroutine automatically.
                     delay(VideoPlaybackScope.ACTIVATION_CONFIRMATION_MS)
+
+                    // Initial activation should not wait for scroll settle. On
+                    // first paint of a tab/profile/thread, LazyColumn can still
+                    // report transient scroll/layout motion; waiting for settle
+                    // keeps autoplay dark until the user nudges the list.
+                    if (activeRef.value == null) {
+                        emit(candidate)
+                        return@flow
+                    }
 
                     // Wait for scroll to fully settle — don't activate during
                     // momentary scroll pauses. The user must be stationary for

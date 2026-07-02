@@ -26,6 +26,7 @@ import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
@@ -49,6 +50,7 @@ fun EmptyRepostBody(
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupModel: ((String) -> EventModel?)?,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
+    hasCachedOgMetadata: ((String) -> Boolean)? = null,
     imageDimensionCache: ImageDimensionCache?,
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit,
@@ -63,6 +65,7 @@ fun EmptyRepostBody(
     onOpenFullscreen: () -> Unit = {},
     isMuted: Boolean = true,
     onToggleMute: () -> Unit = {},
+    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
         com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
 ) {
@@ -114,6 +117,7 @@ fun EmptyRepostBody(
                     lookupEvent         = { id, h -> lookupEventWithAuthor(id, h, null) },
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,
+                    hasCachedOgMetadata = hasCachedOgMetadata,
                     imageDimensionCache = imageDimensionCache,
                     thumbnailCache      = thumbnailCache,
                     exoPlayer           = exoPlayer,
@@ -123,6 +127,7 @@ fun EmptyRepostBody(
                     onOpenFullscreen    = onOpenFullscreen,
                     isMuted             = isMuted,
                     onToggleMute        = onToggleMute,
+                    onVideoModelsResolved = onVideoModelsResolved,
                     nestDepth           = 0,
                 )
             }

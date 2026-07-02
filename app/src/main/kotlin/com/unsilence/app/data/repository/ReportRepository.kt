@@ -53,4 +53,29 @@ class ReportRepository @Inject constructor(
             Log.i(TAG, "Reported ${eventId.take(8)}… type=${type.tagValue}")
         }
     }
+
+    /** Fire-and-forget NIP-56 profile report. Returns immediately; publish happens in background. */
+    fun reportProfile(
+        pubkey: String,
+        type: ReportType,
+        reason: String = "",
+    ) {
+        scope.launch {
+            val ownPubkey = keyManager.getPublicKeyHex() ?: return@launch
+            val template = EventTemplate<Event>(
+                createdAt = System.currentTimeMillis() / 1000L,
+                kind = 1984,
+                tags = arrayOf(
+                    arrayOf("p", pubkey, type.tagValue),
+                ),
+                content = reason,
+            )
+            val signed = signingManager.sign(template) ?: run {
+                Log.w(TAG, "Sign failed for profile report ${pubkey.take(8)}…"); return@launch
+            }
+            val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
+            relayPool.publishToRelays(toEventJson(signed), writeRelays)
+            Log.i(TAG, "Reported profile ${pubkey.take(8)}… type=${type.tagValue}")
+        }
+    }
 }

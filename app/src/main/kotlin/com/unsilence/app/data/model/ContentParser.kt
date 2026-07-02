@@ -334,17 +334,21 @@ object ContentParser {
                 val mime = m.mimeType?.lowercase() ?: ""
                 when {
                     kind == 20 || mime.startsWith("image/") -> {
-                        if (out.none { it is Segment.Image && it.url == m.url }) {
+                        if (out.none { it is Segment.Image && mediaUrlMatches(it.url, m.url) }) {
                             out.add(Segment.Image(
-                                url = m.url,
+                                url = cleanMediaUrl(m.url),
                                 imetaAspect = if (m.width != null && m.height != null && m.height > 0)
                                     m.width.toFloat() / m.height else null,
                             ))
                         }
                     }
                     kind == 21 || mime.startsWith("video/") -> {
-                        val model = buildVideoRenderModelForUrl(m.url, imeta)
-                        if (model != null && out.none { it is Segment.Video && it.model.videoUrl == m.url }) {
+                        val model = buildVideoRenderModelForUrl(
+                            url = m.url,
+                            imeta = imeta,
+                            allowImetaVideo = true,
+                        )
+                        if (model != null && out.none { it is Segment.Video && mediaUrlMatches(it.model.videoUrl, m.url) }) {
                             out.add(Segment.Video(model))
                         }
                     }
@@ -381,12 +385,13 @@ object ContentParser {
         // Precedence 4: images
         for (m in IMAGE_URL_REGEX.findAll(content)) {
             matches.add(Match(m.range.first, m.range.last + 1, 4) {
-                val imetaAspect = imeta.firstOrNull { it.url == m.value }
+                val cleanUrl = cleanMediaUrl(m.value)
+                val imetaAspect = imeta.firstOrNull { mediaUrlMatches(it.url, cleanUrl) }
                     ?.let { im ->
                         if (im.width != null && im.height != null && im.height > 0)
                             im.width.toFloat() / im.height else null
                     }
-                Segment.Image(m.value, imetaAspect)
+                Segment.Image(cleanUrl, imetaAspect)
             })
         }
         // Precedence 5: generic URLs
@@ -590,17 +595,25 @@ object ContentParser {
     }
 
     /**
-     * Build a VideoRenderModel for [url] using [imeta]. Returns null if not a
-     * direct video URL.
+     * Build a VideoRenderModel for [url] using [imeta]. Returns null if the URL
+     * is neither a direct video URL nor an imeta-proven video.
      */
-    private fun buildVideoRenderModelForUrl(url: String, imeta: List<ImetaMedia>): VideoRenderModel? {
-        if (!isDirectVideoUrl(url)) return null
-        val meta = imeta.firstOrNull { it.url == url }
+    private fun buildVideoRenderModelForUrl(
+        url: String,
+        imeta: List<ImetaMedia>,
+        allowImetaVideo: Boolean = false,
+    ): VideoRenderModel? {
+        val cleanUrl = cleanMediaUrl(url)
+        if (cleanUrl.isBlank()) return null
+        val meta = imeta.firstOrNull { mediaUrlMatches(it.url, cleanUrl) }
+        if (!isDirectVideoUrl(cleanUrl) && !allowImetaVideo && meta?.mimeType?.startsWith("video/") != true) {
+            return null
+        }
         val aspect = if (meta?.width != null && meta.height != null && meta.height > 0)
             meta.width.toFloat() / meta.height
         else 16f / 9f
         return VideoRenderModel(
-            videoUrl = url,
+            videoUrl = cleanUrl,
             aspectRatio = aspect,
             posterUrl = meta?.thumb ?: meta?.image,
             widthPx = meta?.width,
@@ -609,12 +622,14 @@ object ContentParser {
     }
 
     private fun isDirectVideoUrl(url: String): Boolean =
-        url.contains(".mp4", ignoreCase = true) ||
-            url.contains(".mov", ignoreCase = true) ||
-            url.contains(".webm", ignoreCase = true) ||
-            url.contains(".m3u8", ignoreCase = true) ||
-            url.contains(".m4v", ignoreCase = true) ||
-            url.contains(".avi", ignoreCase = true)
+        cleanMediaUrl(url).let { clean ->
+            clean.contains(".mp4", ignoreCase = true) ||
+                clean.contains(".mov", ignoreCase = true) ||
+                clean.contains(".webm", ignoreCase = true) ||
+                clean.contains(".m3u8", ignoreCase = true) ||
+                clean.contains(".m4v", ignoreCase = true) ||
+                clean.contains(".avi", ignoreCase = true)
+        }
 
     // ── Manifest grouping ────────────────────────────────────────────────
 

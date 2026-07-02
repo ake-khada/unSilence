@@ -200,7 +200,7 @@ class TimelineService @Inject constructor(
                         delay(SLOW_TIER_POLL_MS)
                     }
                 }
-                Log.w(TAG, "lazy outbox: launching ${slowIndices.size} SLOW-tier sub(s) " +
+                Log.d(TAG, "lazy outbox: launching ${slowIndices.size} SLOW-tier sub(s) " +
                     "(fastEosed=${fastEosedCount.get()}/${fastIndices.size})")
                 for (index in slowIndices) launchSingle(index)
             }
@@ -268,7 +268,7 @@ class TimelineService @Inject constructor(
         var eosed = false
 
         val effectiveFilter = if (since != null) subRequest.filter.copy(since = since) else subRequest.filter
-        Log.w(TAG, "subscribeSingle[$index]: key=${key.take(16)} urls=${subRequest.urls.size} tier=${subRequest.tier} since=$since cachedEvents=${cachedEvents.size}")
+        Log.d(TAG, "subscribeSingle[$index]: key=${key.take(16)} urls=${subRequest.urls.size} tier=${subRequest.tier} since=$since cachedEvents=${cachedEvents.size}")
 
         val handle = subscription.subscribe(
             urls = subRequest.urls,

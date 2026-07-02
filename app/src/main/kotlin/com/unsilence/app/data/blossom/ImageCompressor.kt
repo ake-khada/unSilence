@@ -3,7 +3,8 @@ package com.unsilence.app.data.blossom
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.media.ExifInterface
+import androidx.core.graphics.scale
+import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
@@ -51,7 +52,7 @@ class ImageCompressor @Inject constructor() {
                 val scale = maxDimension.toFloat() / longest
                 val newW = (w * scale).toInt().coerceAtLeast(1)
                 val newH = (h * scale).toInt().coerceAtLeast(1)
-                val scaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+                val scaled = bitmap.scale(newW, newH, true)
                 if (scaled !== bitmap) bitmap.recycle()
                 bitmap = scaled
             }

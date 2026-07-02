@@ -32,6 +32,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
+/** Bound background profile hydration for mention-heavy/spam notes. Every
+ *  mention still renders and remains tappable; unresolved names use npub. */
+private const val MAX_INLINE_MENTION_PREFETCH = 8
+
 /**
  * Renders pre-parsed segments as rich text with inline @mention links,
  * clickable URLs, and tappable #hashtag pills.
@@ -105,7 +109,7 @@ internal fun InlineText(
     LaunchedEffect(mentionPubkeys) {
         if (lookupProfile != null && mentionPubkeys.isNotEmpty()) {
             profileMap = coroutineScope {
-                mentionPubkeys.map { hex ->
+                mentionPubkeys.take(MAX_INLINE_MENTION_PREFETCH).map { hex ->
                     async { hex to lookupProfile(hex) }
                 }.awaitAll().toMap()
             }

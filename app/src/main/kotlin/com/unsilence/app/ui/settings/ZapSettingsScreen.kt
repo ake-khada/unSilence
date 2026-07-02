@@ -34,7 +34,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.wallet.ZapPreferences
 import com.unsilence.app.data.wallet.ZapPreset
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -61,14 +61,17 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
+import kotlinx.coroutines.delay
+
+private const val PRESET_SAVE_DEBOUNCE_MS = 350L
 
 @Composable
 fun ZapSettingsScreen(onDismiss: () -> Unit) {
     BackHandler(onBack = onDismiss)
     val vm: ZapSettingsViewModel = hiltViewModel()
     val showSnackbar = LocalShowSnackbar.current
-    val state by vm.preferences.collectAsState()
-    val balanceSats by vm.balanceSats.collectAsState()
+    val state by vm.preferences.collectAsStateWithLifecycle()
+    val balanceSats by vm.balanceSats.collectAsStateWithLifecycle()
     var showConnectWallet by remember { mutableStateOf(false) }
     var showConfirmDisconnect by remember { mutableStateOf(false) }
 
@@ -273,6 +276,22 @@ private fun PresetRow(
 ) {
     var amountText by remember(preset.amountSats) { mutableStateOf(preset.amountSats.toString()) }
     var messageText by remember(preset.message) { mutableStateOf(preset.message ?: "") }
+    var amountDirty by remember { mutableStateOf(false) }
+    var messageDirty by remember { mutableStateOf(false) }
+
+    // Keep typing entirely local and collapse a burst of keystrokes into one
+    // DataStore edit. This also prevents older write coroutines from racing a
+    // newer character and briefly snapping the field back.
+    LaunchedEffect(amountText, messageText, amountDirty, messageDirty) {
+        if (!amountDirty && !messageDirty) return@LaunchedEffect
+        delay(PRESET_SAVE_DEBOUNCE_MS)
+
+        val amount = if (amountDirty) amountText.toLongOrNull()?.takeIf { it > 0 } else null
+        val message = if (messageDirty) messageText else null
+        if (amount != null || message != null) onUpdate(amount, message)
+        amountDirty = false
+        messageDirty = false
+    }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -293,7 +312,7 @@ private fun PresetRow(
             value = amountText,
             onValueChange = { v ->
                 amountText = v.filter { it.isDigit() }.take(9)
-                amountText.toLongOrNull()?.takeIf { it > 0 }?.let { onUpdate(it, null) }
+                amountDirty = true
             },
             textStyle = TextStyle(
                 color = Zap,
@@ -310,7 +329,7 @@ private fun PresetRow(
             value = messageText,
             onValueChange = { v ->
                 messageText = v.take(140)
-                onUpdate(null, messageText)
+                messageDirty = true
             },
             textStyle = TextStyle(color = Color.White.copy(alpha = 0.78f), fontSize = AppType.bodySmall),
             cursorBrush = SolidColor(Brand),

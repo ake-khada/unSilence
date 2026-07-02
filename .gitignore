@@ -11,10 +11,12 @@ commonMain/
 *.iml
 /local.properties
 local.properties
+gradlew-local
 node_modules/
 /build
 /app/build
 .kotlin/
+.toolchains/
 
 # Internal working files
 .claude/

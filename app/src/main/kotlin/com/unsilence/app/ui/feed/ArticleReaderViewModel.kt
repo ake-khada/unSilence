@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import androidx.collection.LruCache
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.memory.EventStats
@@ -12,7 +11,7 @@ import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
-import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
@@ -33,10 +32,10 @@ import javax.inject.Inject
 @HiltViewModel
 class ArticleReaderViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
-    private val userRepository: UserRepository,
     private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
+    private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
@@ -125,24 +124,13 @@ class ArticleReaderViewModel @Inject constructor(
 
     // ── Display providers for comment EventCards (MES-backed, cached) ──────────
 
-    private val profileCache = LruCache<String, StateFlow<UserEntity?>>(300)
-    private val statsCache = LruCache<String, StateFlow<EventStats>>(300)
-
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        synchronized(profileCache) {
-            profileCache.get(pubkey) ?: userRepository.userFlow(pubkey)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-                .also { profileCache.put(pubkey, it) }
-        }
+        timelineCardData.profileFlow(pubkey, viewModelScope)
 
     fun statsFlow(eventId: String): StateFlow<EventStats> =
-        synchronized(statsCache) {
-            statsCache.get(eventId) ?: memoryEventStore.statsFlow(eventId)
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), memoryEventStore.currentStatsSnapshot(eventId))
-                .also { statsCache.put(eventId, it) }
-        }
+        timelineCardData.statsFlow(eventId, viewModelScope)
 
-    fun zapDetailsForEvent(eventId: String): List<ZapDetail> = memoryEventStore.zapDetailsForEvent(eventId)
-    fun repostPubkeysForEvent(eventId: String): List<String> = memoryEventStore.repostPubkeysForEvent(eventId)
-    fun reactionsForEvent(eventId: String): List<ReactionInfo> = memoryEventStore.reactionsForEvent(eventId)
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> = timelineCardData.zapDetailsForEvent(eventId)
+    fun repostPubkeysForEvent(eventId: String): List<String> = timelineCardData.repostPubkeysForEvent(eventId)
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> = timelineCardData.reactionsForEvent(eventId)
 }

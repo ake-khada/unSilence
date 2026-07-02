@@ -41,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -57,7 +59,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.DialogProperties
@@ -68,7 +72,8 @@ import com.unsilence.app.ui.compose.ArticleCommentTarget
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.EventEngagementSnapshot
+import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.markdown.MarkdownDocument
@@ -169,6 +174,7 @@ fun ArticleReaderScreen(
     // Depth-ordered for display: replies nest under their parent (header count
     // stays comments.size). Same flat list drives count/contributors in MES.
     val depthComments = remember(comments) { flattenArticleComments(comments) }
+    val commentRows = remember(depthComments) { depthComments.map { it.row } }
 
     // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
     // threading through the 5 reader call sites; reader stays behind the compose.
@@ -244,6 +250,15 @@ fun ArticleReaderScreen(
 
     var drawerOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val cardWidthPx = LocalWindowInfo.current.containerSize.width
+    val commentVideoScope = rememberVideoPlaybackScope(
+        ownerId = "article-comments-${model.engagementId}",
+        holder = commentActionsVm.sharedPlayerHolder,
+        events = commentRows,
+        listState = listState,
+        videoModelProvider = commentActionsVm::getVideoRenderModels,
+        cachedModelProvider = commentActionsVm::getCachedEventModel,
+    )
     // Auto-reveal the engagement drawer when the chevron opens it: it sits at the
     // bottom of the article item, so without this it expands off-screen. Wait for the
     // expand to lay out, then scroll it into view (slides up under the bar).
@@ -252,6 +267,33 @@ fun ArticleReaderScreen(
         if (drawerOpen) {
             delay(220)
             runCatching { drawerReveal.bringIntoView() }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    LaunchedEffect(commentRows, cardWidthPx) {
+        if (commentRows.isEmpty()) return@LaunchedEffect
+        commentActionsVm.warmCardWindow(
+            rows = commentRows,
+            first = 0,
+            last = commentRows.lastIndex.coerceAtMost(8),
+            cardWidthPx = cardWidthPx,
+            hydrateEngagement = false,
+        )
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                (item.index - 2).takeIf { it in commentRows.indices }
+            }
+        }.sample(100).collect { visibleRows ->
+            val first = visibleRows.minOrNull() ?: return@collect
+            val last = visibleRows.maxOrNull() ?: first
+            commentActionsVm.warmCardWindow(
+                rows = commentRows,
+                first = first,
+                last = last,
+                cardWidthPx = cardWidthPx,
+                hydrateEngagement = false,
+            )
         }
     }
 
@@ -538,7 +580,7 @@ fun ArticleReaderScreen(
                                 model                 = cModel,
                                 row                   = comment,
                                 role                  = CardRole.Reply,
-                                engagement            = EngagementSnapshot(isNwcConfigured = isNwcConfigured),
+                                engagement            = EventEngagementSnapshot(isNwcConfigured = isNwcConfigured),
                                 onNoteClick           = onNoteTap,
                                 onComment             = {
                                     // kind-1111 comment → NIP-22 reply (kind-1111).
@@ -576,6 +618,7 @@ fun ArticleReaderScreen(
                                 lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
                                 lookupModel           = commentActionsVm::getEventModel,
                                 fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
+                                hasCachedOgMetadata   = commentActionsVm::hasCachedOgMetadata,
                                 profileFlow           = articleReaderVm::profileFlow,
                                 statsFlow             = articleReaderVm::statsFlow,
                                 zapDetailsForEvent    = articleReaderVm::zapDetailsForEvent,
@@ -583,6 +626,16 @@ fun ArticleReaderScreen(
                                 reactionsForEvent     = articleReaderVm::reactionsForEvent,
                                 imageDimensionCache   = commentActionsVm.imageDimensionCache,
                                 thumbnailCache        = commentActionsVm.videoThumbnailCache,
+                                exoPlayer             = commentVideoScope.exoPlayer,
+                                isMuted               = commentVideoScope.isMuted,
+                                onToggleMute          = { commentVideoScope.toggleMute() },
+                                isActiveVideo         = commentVideoScope.isActiveVideo(comment.id),
+                                activeVideoUrl        = commentVideoScope.activeVideoUrl,
+                                isFullscreen          = commentVideoScope.showFullscreenVideo,
+                                onOpenFullscreen      = { commentVideoScope.openFullscreen(comment.id) },
+                                onVideoModelsResolved = { models ->
+                                    commentVideoScope.registerVideoModels(comment.id, models)
+                                },
                                 sensitiveMode         = sensitiveMode,
                                 isSensitive           = comment.hasContentWarning,
                                 contentWarningReason  = comment.contentWarningReason,
@@ -610,6 +663,13 @@ fun ArticleReaderScreen(
                 )
             }
         }
+    }
+
+    if (commentVideoScope.showFullscreenVideo) {
+        FullScreenVideoDialog(
+            exoPlayer = commentVideoScope.exoPlayer,
+            onDismiss = { commentVideoScope.dismissFullscreen() },
+        )
     }
 }
 

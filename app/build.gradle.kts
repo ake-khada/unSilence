@@ -17,10 +17,21 @@ android {
         targetSdk     = 36
         versionCode   = 1
         versionName   = "0.1.0"
+        manifestPlaceholders["appLabel"] = "unSilence"
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["appLabel"] = "unSilence Dev"
+        }
         release {
+            // Local optimized build that can coexist with the store/production
+            // package and update the side-by-side dev installation in place.
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["appLabel"] = "unSilence Dev"
             isMinifyEnabled   = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -89,6 +100,7 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil.video)
+    implementation(libs.exifinterface)
 
     // Markdown → HTML for NIP-23 long-form articles (rendered in WebView)
     implementation(libs.jetbrains.markdown)

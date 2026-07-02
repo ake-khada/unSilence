@@ -36,8 +36,8 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
@@ -56,6 +57,17 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlin.math.roundToInt
+
+private val IMAGE_DIM_STEPS = listOf(1024, 1600, 2048, 0)
+private val IMAGE_DIM_LABELS = listOf(
+    "Small — fast uploads, chat",
+    "Standard — sharp on any phone",
+    "High — tablets & desktop",
+    "Original — no resize",
+)
+private val IMAGE_QUALITY_STEPS = listOf(70, 85, 100)
+private val IMAGE_QUALITY_LABELS = listOf("70 — smaller files", "85 — balanced", "100 — best quality")
 
 @Composable
 fun MediaUploadSettingsScreen(
@@ -64,10 +76,10 @@ fun MediaUploadSettingsScreen(
 ) {
     BackHandler(onBack = onDismiss)
 
-    val servers by viewModel.servers.collectAsState()
-    val imageMaxDim by viewModel.imageMaxDim.collectAsState()
-    val imageQuality by viewModel.imageQuality.collectAsState()
-    val videoQuality by viewModel.videoQuality.collectAsState()
+    val servers by viewModel.servers.collectAsStateWithLifecycle()
+    val imageMaxDim by viewModel.imageMaxDim.collectAsStateWithLifecycle()
+    val imageQuality by viewModel.imageQuality.collectAsStateWithLifecycle()
+    val videoQuality by viewModel.videoQuality.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
 
     Box(
@@ -164,24 +176,24 @@ fun MediaUploadSettingsScreen(
                 )
                 Spacer(Modifier.height(Spacing.medium))
 
-                val dimSteps = listOf(1024, 1600, 2048, 0)
-                val dimLabels = listOf(
-                    "Small — fast uploads, chat",
-                    "Standard — sharp on any phone",
-                    "High — tablets & desktop",
-                    "Original — no resize",
-                )
-                val dimIndex = dimSteps.indexOf(imageMaxDim).takeIf { it >= 0 } ?: 1
+                val dimIndex = IMAGE_DIM_STEPS.indexOf(imageMaxDim).takeIf { it >= 0 } ?: 1
+                var dimSliderIndex by remember(imageMaxDim) {
+                    mutableFloatStateOf(dimIndex.toFloat())
+                }
+                val displayedDimIndex = dimSliderIndex.roundToInt().coerceIn(IMAGE_DIM_STEPS.indices)
 
                 Text(
-                    text = "Max size: ${dimLabels[dimIndex]}",
+                    text = "Max size: ${IMAGE_DIM_LABELS[displayedDimIndex]}",
                     color = TextSecondary,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
-                    value = dimIndex.toFloat(),
-                    onValueChange = { viewModel.setImageMaxDim(dimSteps[it.toInt()]) },
+                    value = dimSliderIndex,
+                    onValueChange = { dimSliderIndex = it },
+                    onValueChangeFinished = {
+                        viewModel.setImageMaxDim(IMAGE_DIM_STEPS[displayedDimIndex])
+                    },
                     valueRange = 0f..3f,
                     steps = 2,
                     colors = SliderDefaults.colors(
@@ -193,19 +205,24 @@ fun MediaUploadSettingsScreen(
 
                 Spacer(Modifier.height(Spacing.medium))
 
-                val qualitySteps = listOf(70, 85, 100)
-                val qualityLabels = listOf("70 — smaller files", "85 — balanced", "100 — best quality")
-                val qualityIndex = qualitySteps.indexOf(imageQuality).takeIf { it >= 0 } ?: 1
+                val qualityIndex = IMAGE_QUALITY_STEPS.indexOf(imageQuality).takeIf { it >= 0 } ?: 1
+                var qualitySliderIndex by remember(imageQuality) {
+                    mutableFloatStateOf(qualityIndex.toFloat())
+                }
+                val displayedQualityIndex = qualitySliderIndex.roundToInt().coerceIn(IMAGE_QUALITY_STEPS.indices)
 
                 Text(
-                    text = "Quality: ${qualityLabels[qualityIndex]}",
+                    text = "Quality: ${IMAGE_QUALITY_LABELS[displayedQualityIndex]}",
                     color = TextSecondary,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
-                    value = qualityIndex.toFloat(),
-                    onValueChange = { viewModel.setImageQuality(qualitySteps[it.toInt()]) },
+                    value = qualitySliderIndex,
+                    onValueChange = { qualitySliderIndex = it },
+                    onValueChangeFinished = {
+                        viewModel.setImageQuality(IMAGE_QUALITY_STEPS[displayedQualityIndex])
+                    },
                     valueRange = 0f..2f,
                     steps = 1,
                     colors = SliderDefaults.colors(
@@ -230,16 +247,23 @@ fun MediaUploadSettingsScreen(
 
                 val videoSteps = VideoTranscoder.Quality.entries
                 val videoIndex = videoSteps.indexOf(videoQuality).takeIf { it >= 0 } ?: 0
+                var videoSliderIndex by remember(videoQuality) {
+                    mutableFloatStateOf(videoIndex.toFloat())
+                }
+                val displayedVideoIndex = videoSliderIndex.roundToInt().coerceIn(videoSteps.indices)
 
                 Text(
-                    text = "Quality: ${videoSteps[videoIndex].label}",
+                    text = "Quality: ${videoSteps[displayedVideoIndex].label}",
                     color = TextSecondary,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
-                    value = videoIndex.toFloat(),
-                    onValueChange = { viewModel.setVideoQuality(videoSteps[it.toInt()]) },
+                    value = videoSliderIndex,
+                    onValueChange = { videoSliderIndex = it },
+                    onValueChangeFinished = {
+                        viewModel.setVideoQuality(videoSteps[displayedVideoIndex])
+                    },
                     valueRange = 0f..(videoSteps.size - 1).toFloat(),
                     steps = videoSteps.size - 2,
                     colors = SliderDefaults.colors(

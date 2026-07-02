@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
@@ -30,12 +31,20 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
+private const val TRENDING_DISPLAY_LIMIT = 8
+private const val TRENDING_CANDIDATE_LIMIT = 32
+
 data class SearchUiState(
     val query: String           = "",
     val peopleResults: List<UserEntity> = emptyList(),
     val noteResults: List<FeedRow>      = emptyList(),
     val loading: Boolean        = false,
     val hasSearched: Boolean    = false,
+)
+
+private data class TrendingCandidates(
+    val hashtags: List<Pair<String, Int>> = emptyList(),
+    val users: List<UserEntity> = emptyList(),
 )
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
@@ -57,13 +66,15 @@ class SearchViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly,
                 com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
 
-    /** Trending hashtags from client-side t-tag frequency scan (top 8). */
+    /** Visible trending hashtags after account-level mute filtering. */
     private val _trendingHashtags = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
     val trendingHashtags: StateFlow<List<Pair<String, Int>>> = _trendingHashtags.asStateFlow()
 
-    /** Trending users ranked by cached follower count (top 8). */
+    /** Visible trending users after account-level mute filtering. */
     private val _trendingUsers = MutableStateFlow<List<UserEntity>>(emptyList())
     val trendingUsers: StateFlow<List<UserEntity>> = _trendingUsers.asStateFlow()
+
+    private val trendingCandidates = MutableStateFlow(TrendingCandidates())
 
     private val _queryFlow = MutableStateFlow("")
 
@@ -84,23 +95,47 @@ class SearchViewModel @Inject constructor(
         // Fetch trending data from antiprimal (network), fall back to local MES scan
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
             val networkData = trendingClient.fetch()
-            if (networkData != null && networkData.hashtags.isNotEmpty()) {
-                _trendingHashtags.value = networkData.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) }
-                _trendingUsers.value = networkData.profiles.map { profile ->
-                    UserEntity(
-                        pubkey = profile.pubkey,
-                        name = profile.name,
-                        displayName = profile.displayName,
-                        picture = profile.picture,
-                        about = profile.about,
-                        nip05 = profile.nip05,
-                        followerCount = profile.followerCount,
-                    )
-                }
+            trendingCandidates.value = if (networkData != null && networkData.hashtags.isNotEmpty()) {
+                TrendingCandidates(
+                    hashtags = networkData.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) },
+                    users = networkData.profiles.map { profile ->
+                        UserEntity(
+                            pubkey = profile.pubkey,
+                            name = profile.name,
+                            displayName = profile.displayName,
+                            picture = profile.picture,
+                            about = profile.about,
+                            nip05 = profile.nip05,
+                            followerCount = profile.followerCount,
+                        )
+                    },
+                )
             } else {
                 // Fallback: local MES scan
-                _trendingHashtags.value = memoryEventStore.trendingHashtags()
-                _trendingUsers.value = memoryEventStore.trendingUsers()
+                TrendingCandidates(
+                    hashtags = memoryEventStore.trendingHashtags(TRENDING_CANDIDATE_LIMIT),
+                    users = memoryEventStore.trendingUsers(TRENDING_CANDIDATE_LIMIT),
+                )
+            }
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            combine(
+                trendingCandidates,
+                memoryEventStore.ownMuteListFlow(),
+            ) { candidates, muteList ->
+                val mutedHashtags = muteList.normalizedMutedHashtags()
+                val mutedPubkeys = muteList.mutedPubkeys()
+                val hashtags = candidates.hashtags
+                    .filterNot { (tag, _) -> normalizeHashtag(tag) in mutedHashtags }
+                    .take(TRENDING_DISPLAY_LIMIT)
+                val users = candidates.users
+                    .filterNot { it.pubkey in mutedPubkeys }
+                    .take(TRENDING_DISPLAY_LIMIT)
+                hashtags to users
+            }.collect { (hashtags, users) ->
+                _trendingHashtags.value = hashtags
+                _trendingUsers.value = users
             }
         }
 
@@ -264,3 +299,17 @@ class SearchViewModel @Inject constructor(
         }
     }
 }
+
+private fun MuteList?.normalizedMutedHashtags(): Set<String> {
+    if (this == null) return emptySet()
+    return (hashtags.asSequence() + privateHashtags.asSequence())
+        .map(::normalizeHashtag)
+        .filter { it.isNotEmpty() }
+        .toSet()
+}
+
+private fun MuteList?.mutedPubkeys(): Set<String> =
+    this?.let { it.pubkeys + it.privatePubkeys }.orEmpty()
+
+private fun normalizeHashtag(tag: String): String =
+    tag.trim().trimStart('#').lowercase()
