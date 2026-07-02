@@ -27,11 +27,7 @@ android {
             manifestPlaceholders["appLabel"] = "unSilence Dev"
         }
         release {
-            // Local optimized build that can coexist with the store/production
-            // package and update the side-by-side dev installation in place.
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
-            manifestPlaceholders["appLabel"] = "unSilence Dev"
+            manifestPlaceholders["appLabel"] = "unSilence"
             isMinifyEnabled   = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
