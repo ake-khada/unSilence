@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.BuildConfig
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.relays.RelayDetailScreen
@@ -81,7 +82,9 @@ fun SettingsScreen(
     onEditProfile: () -> Unit = {},
     onOpenProfile: (pubkeyHex: String) -> Unit = {},
     onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
-    viewModel: SettingsViewModel = hiltViewModel(),
+    viewModel: SettingsViewModel = hiltViewModel(
+        key = "settings-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
@@ -94,8 +97,8 @@ fun SettingsScreen(
     val openZapSettings = LocalOpenZapSettings.current
 
     // One-shot snapshots, read on open (lean — no ticker).
-    val profile = remember { viewModel.ownProfile() }
-    val onlineCount = remember { viewModel.onlineRelayCount() }
+    val profile = remember(viewModel) { viewModel.ownProfile() }
+    val onlineCount = remember(viewModel) { viewModel.onlineRelayCount() }
 
     Box(modifier = Modifier.fillMaxSize().background(Black)) {
         Column(modifier = Modifier.fillMaxSize()) {

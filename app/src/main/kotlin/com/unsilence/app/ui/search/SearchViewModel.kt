@@ -12,6 +12,7 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
+import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
@@ -55,6 +57,7 @@ class SearchViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val trendingClient: TrendingClient,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
+    private val userRepository: UserRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
@@ -75,6 +78,7 @@ class SearchViewModel @Inject constructor(
     val trendingUsers: StateFlow<List<UserEntity>> = _trendingUsers.asStateFlow()
 
     private val trendingCandidates = MutableStateFlow(TrendingCandidates())
+    private val requestedTrendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
 
     private val _queryFlow = MutableStateFlow("")
 
@@ -123,19 +127,22 @@ class SearchViewModel @Inject constructor(
             combine(
                 trendingCandidates,
                 memoryEventStore.ownMuteListFlow(),
-            ) { candidates, muteList ->
+                memoryEventStore.profileSignalFlow,
+            ) { candidates, muteList, _ ->
                 val mutedHashtags = muteList.normalizedMutedHashtags()
                 val mutedPubkeys = muteList.mutedPubkeys()
                 val hashtags = candidates.hashtags
                     .filterNot { (tag, _) -> normalizeHashtag(tag) in mutedHashtags }
                     .take(TRENDING_DISPLAY_LIMIT)
                 val users = candidates.users
+                    .map { it.withLatestProfile() }
                     .filterNot { it.pubkey in mutedPubkeys }
                     .take(TRENDING_DISPLAY_LIMIT)
                 hashtags to users
             }.collect { (hashtags, users) ->
                 _trendingHashtags.value = hashtags
                 _trendingUsers.value = users
+                hydrateIncompleteTrendingProfiles(users)
             }
         }
 
@@ -270,6 +277,29 @@ class SearchViewModel @Inject constructor(
         super.onCleared()
         currentSearchToken.get().let { token ->
             if (token != 0L) relayPool.closeSearch(token)
+        }
+    }
+
+    private fun UserEntity.withLatestProfile(): UserEntity {
+        val latest = memoryEventStore.getUserEntity(pubkey) ?: return this
+        return latest.copy(
+            followerCount = followerCount ?: latest.followerCount,
+            followerCountUpdatedAt = followerCountUpdatedAt ?: latest.followerCountUpdatedAt,
+        )
+    }
+
+    private fun hydrateIncompleteTrendingProfiles(users: List<UserEntity>) {
+        val missing = users
+            .asSequence()
+            .filter { it.displayName.isNullOrBlank() && it.name.isNullOrBlank() || it.picture.isNullOrBlank() }
+            .map { it.pubkey }
+            .distinct()
+            .filter { requestedTrendingProfilePubkeys.add(it) }
+            .toList()
+        if (missing.isEmpty()) return
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            userRepository.fetchProfilesWithFanout(missing, maxRelays = 4)
         }
     }
 

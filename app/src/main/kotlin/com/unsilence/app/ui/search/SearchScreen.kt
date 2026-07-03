@@ -24,6 +24,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.SearchOff
 import com.unsilence.app.ui.common.EmptyState
@@ -69,6 +71,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.data.memory.FeedRow
@@ -92,6 +95,7 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.sample
 
@@ -106,8 +110,12 @@ fun SearchScreen(
     onQuote: (String) -> Unit = {},
     initialQuery: String? = null,
     onInitialQueryConsumed: () -> Unit = {},
-    viewModel: SearchViewModel = hiltViewModel(),
-    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
+    viewModel: SearchViewModel = hiltViewModel(
+        key = "search-${LocalAppSessionKey.current}",
+    ),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
@@ -665,18 +673,20 @@ private fun TrendingDiscovery(
     ) {
         if (hashtags.isNotEmpty()) {
             item {
-                // Section header: ⚡ TRENDING TONIGHT
+                // Section header: TRENDING TONIGHT
                 Row(
                     modifier = Modifier.padding(
                         start = Spacing.medium, end = Spacing.medium,
                         top = Spacing.medium, bottom = Spacing.small,
                     ),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.micro),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.small),
                 ) {
-                    Text(
-                        text       = "\u26A1",
-                        fontSize   = 10.sp,
+                    Icon(
+                        imageVector = Icons.Filled.ElectricBolt,
+                        contentDescription = null,
+                        tint = Zap,
+                        modifier = Modifier.size(13.dp),
                     )
                     Text(
                         text           = "TRENDING TONIGHT",
@@ -709,18 +719,29 @@ private fun TrendingDiscovery(
         if (users.isNotEmpty()) {
             item {
                 // Section header: VOICES TO FOLLOW
-                Text(
-                    text           = "VOICES TO FOLLOW",
-                    color          = Text3,
-                    fontSize       = AppType.caption,
-                    fontWeight     = FontWeight.Medium,
-                    fontFamily     = FontFamily.Monospace,
-                    letterSpacing  = 1.5.sp,
-                    modifier       = Modifier.padding(
+                Row(
+                    modifier = Modifier.padding(
                         start = Spacing.medium, end = Spacing.medium,
                         top = Spacing.large, bottom = Spacing.small,
                     ),
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Mic,
+                        contentDescription = null,
+                        tint = Zap,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        text           = "VOICES TO FOLLOW",
+                        color          = Text3,
+                        fontSize       = AppType.caption,
+                        fontWeight     = FontWeight.Medium,
+                        fontFamily     = FontFamily.Monospace,
+                        letterSpacing  = 1.5.sp,
+                    )
+                }
             }
             items(users.size) { index ->
                 val user = users[index]

@@ -89,6 +89,7 @@ import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.RelaySet
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Like
@@ -198,7 +199,9 @@ fun RelayManagementScreen(
     onDismiss: () -> Unit,
     onOpenDetail: (url: String) -> Unit = {},
     onOpenDiscovery: () -> Unit = {},
-    viewModel: RelayManagementViewModel = hiltViewModel(),
+    viewModel: RelayManagementViewModel = hiltViewModel(
+        key = "relay-management-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
 

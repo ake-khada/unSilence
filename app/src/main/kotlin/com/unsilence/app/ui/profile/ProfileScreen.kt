@@ -66,6 +66,7 @@ import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
@@ -104,8 +105,12 @@ fun ProfileScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
-    viewModel: ProfileViewModel = hiltViewModel(),
-    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
+    viewModel: ProfileViewModel = hiltViewModel(
+        key = "profile-${LocalAppSessionKey.current}",
+    ),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())

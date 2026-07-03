@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.blossom.VideoTranscoder
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
@@ -72,7 +73,9 @@ private val IMAGE_QUALITY_LABELS = listOf("70 — smaller files", "85 — balanc
 @Composable
 fun MediaUploadSettingsScreen(
     onDismiss: () -> Unit,
-    viewModel: MediaUploadSettingsViewModel = hiltViewModel(),
+    viewModel: MediaUploadSettingsViewModel = hiltViewModel(
+        key = "media-upload-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
 

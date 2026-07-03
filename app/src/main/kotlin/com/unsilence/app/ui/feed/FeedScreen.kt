@@ -59,6 +59,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -111,8 +112,12 @@ fun FeedScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onQuote: (String) -> Unit = {},
-    viewModel: FeedViewModel = hiltViewModel(),
-    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
+    viewModel: FeedViewModel = hiltViewModel(
+        key = "feed-${LocalAppSessionKey.current}",
+    ),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()

@@ -65,6 +65,7 @@ import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandSoft
 import com.unsilence.app.ui.theme.Like
@@ -93,7 +94,9 @@ enum class DiscoveryFacet(val label: String) {
 fun RelayDiscoveryScreen(
     onDismiss: () -> Unit,
     onOpenDetail: (url: String) -> Unit,
-    viewModel: RelayManagementViewModel = hiltViewModel(),
+    viewModel: RelayManagementViewModel = hiltViewModel(
+        key = "relay-management-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     LaunchedEffect(Unit) { viewModel.ensureDirectory() }   // firehose runs ONLY here

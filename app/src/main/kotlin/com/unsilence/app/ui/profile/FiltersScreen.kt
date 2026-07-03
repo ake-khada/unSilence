@@ -53,6 +53,7 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.feed.AvatarImage
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
@@ -68,7 +69,9 @@ private enum class MuteTab { USERS, WORDS, HASHTAGS }
 @Composable
 fun FiltersScreen(
     onDismiss: () -> Unit,
-    viewModel: FiltersViewModel = hiltViewModel(),
+    viewModel: FiltersViewModel = hiltViewModel(
+        key = "filters-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()

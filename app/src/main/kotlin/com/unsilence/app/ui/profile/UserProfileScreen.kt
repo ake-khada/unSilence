@@ -72,6 +72,7 @@ import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.toCompactSats
@@ -115,8 +116,12 @@ fun UserProfileScreen(
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
-    viewModel: UserProfileViewModel = hiltViewModel(),
-    actionsViewModel: NoteActionsViewModel = hiltViewModel(),
+    viewModel: UserProfileViewModel = hiltViewModel(
+        key = "user-profile-${LocalAppSessionKey.current}-$pubkey",
+    ),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     LaunchedEffect(pubkey) { viewModel.loadProfile(pubkey) }

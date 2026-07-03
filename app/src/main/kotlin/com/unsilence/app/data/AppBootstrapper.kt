@@ -3,6 +3,7 @@ package com.unsilence.app.data
 import android.content.Context
 import android.util.Log
 import androidx.work.WorkManager
+import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.work.BackgroundSyncWorker
@@ -17,10 +18,13 @@ import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.settings.SettingsStore
+import com.unsilence.app.data.wallet.ZapPreferencesStore
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +92,10 @@ class AppBootstrapper @Inject constructor(
     private val privateZapRepository: com.unsilence.app.data.repository.PrivateZapRepository,
     private val outboxRelayResolver: com.unsilence.app.data.relay.OutboxRelayResolver,
     private val feedRelayWarmer: com.unsilence.app.data.relay.FeedRelayWarmer,
+    private val trendingClient: TrendingClient,
+    private val zapPreferencesStore: ZapPreferencesStore,
+    private val blossomServersStore: BlossomServersStore,
+    private val settingsStore: SettingsStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Guards both doBootstrap and teardown so they never interleave on the shared
@@ -157,6 +165,9 @@ class AppBootstrapper @Inject constructor(
         val prevOwner = memoryEventStore.ownPubkey
         if (prevOwner != null && prevOwner != pubkeyHex) memoryEventStore.clear()
         memoryEventStore.ownPubkey = pubkeyHex
+        zapPreferencesStore.selectOwner(pubkeyHex)
+        blossomServersStore.selectOwner(pubkeyHex)
+        settingsStore.selectOwner(pubkeyHex)
         eventProcessor.start()
 
         // Once per login: clear ProfilePipeline session state so the own-post
@@ -544,6 +555,7 @@ class AppBootstrapper @Inject constructor(
         // Pre-warm feed-switcher relays (favorites + read relays). Fire-and-forget —
         // reactive flow recomputes when favorites change.
         feedRelayWarmer.start()
+        scope.launch { trendingClient.fetch() }
 
         cancelLegacyBackgroundSync()
 
@@ -591,6 +603,7 @@ class AppBootstrapper @Inject constructor(
             relayPool.closeLiveMuteSub()
             relayPool.closeLiveNotifSub()
             relayPool.clearCaches()
+            privateZapRepository.stop()
 
             // 2. Disconnect all WebSockets
             relayPool.disconnectAll()
@@ -604,7 +617,10 @@ class AppBootstrapper @Inject constructor(
             //     old user's events into MES on next bootstrap.
             snapshotScheduler.deleteSnapshot()
 
-            // 4. Clear credentials and cached signer
+            // 4. Clear credentials, cached signer, and account-scoped local preferences
+            zapPreferencesStore.clearActiveOwner()
+            blossomServersStore.clearActiveOwner()
+            settingsStore.clearActiveOwner()
             keyManager.clear()
             signingManager.clear()
             nwcManager.clear()
