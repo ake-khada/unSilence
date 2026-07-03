@@ -51,6 +51,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.wallet.ZapPreferences
 import com.unsilence.app.data.wallet.ZapPreset
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.feed.ConnectWalletDialog
 import com.unsilence.app.ui.theme.AppType
@@ -66,9 +67,11 @@ import kotlinx.coroutines.delay
 private const val PRESET_SAVE_DEBOUNCE_MS = 350L
 
 @Composable
-fun ZapSettingsScreen(onDismiss: () -> Unit) {
+fun ZapSettingsScreen(
+    onDismiss: () -> Unit,
+    vm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-${LocalAppSessionKey.current}"),
+) {
     BackHandler(onBack = onDismiss)
-    val vm: ZapSettingsViewModel = hiltViewModel()
     val showSnackbar = LocalShowSnackbar.current
     val state by vm.preferences.collectAsStateWithLifecycle()
     val balanceSats by vm.balanceSats.collectAsStateWithLifecycle()

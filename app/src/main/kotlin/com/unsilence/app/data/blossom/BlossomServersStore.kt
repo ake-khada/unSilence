@@ -40,8 +40,6 @@ private const val PUBLISH_DEBOUNCE_MS = 500L
 
 private val Context.blossomPrefs: DataStore<Preferences> by preferencesDataStore(name = "blossom_prefs")
 
-private val KEY_SELECTED_SERVER = stringPreferencesKey("selected_server")
-private val KEY_SERVERS = stringSetPreferencesKey("servers")
 private val KEY_IMAGE_MAX_DIM = intPreferencesKey("image_max_dim")
 private val KEY_IMAGE_QUALITY = intPreferencesKey("image_quality")
 private val KEY_VIDEO_QUALITY = stringPreferencesKey("video_quality")
@@ -57,6 +55,7 @@ class BlossomServersStore @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val dataStore get() = context.blossomPrefs
     private val editMutex = Mutex()
+    @Volatile private var activeOwner: String? = null
 
     private val _selectedServer = MutableStateFlow("")
     val selectedServer: StateFlow<String> = _selectedServer.asStateFlow()
@@ -77,6 +76,26 @@ class BlossomServersStore @Inject constructor(
     private val initMutex = Mutex()
     @Volatile private var initialized = false
 
+    fun selectOwner(pubkeyHex: String) {
+        val normalized = pubkeyHex.lowercase()
+        if (activeOwner == normalized) return
+        activeOwner = normalized
+        initialized = false
+        publishJob?.cancel()
+        publishJob = null
+        _configuredServers.value = emptyList()
+        _selectedServer.value = ""
+    }
+
+    fun clearActiveOwner() {
+        activeOwner = null
+        initialized = false
+        publishJob?.cancel()
+        publishJob = null
+        _configuredServers.value = emptyList()
+        _selectedServer.value = ""
+    }
+
     /**
      * Hydrate from MES (kind-10063 from relay) or DataStore, or seed with defaults.
      * Called once by ViewModel on first access. Mutex-guarded — multiple ViewModels
@@ -92,14 +111,14 @@ class BlossomServersStore @Inject constructor(
     }
 
     private suspend fun doInitialize() {
+        val owner = activeOwner ?: keyManager.getPublicKeyHex()?.lowercase() ?: return
         // 1. Try MES (published kind-10063)
-        val pubkey = keyManager.getPublicKeyHex()
-        val mesServers = if (pubkey != null) memoryEventStore.blossomServersFor(pubkey) else emptyList()
+        val mesServers = memoryEventStore.blossomServersFor(owner)
 
         // 2. Try DataStore (local edits not yet published)
         val prefs = dataStore.data.first()
-        val dsServers = prefs[KEY_SERVERS]?.toList() ?: emptyList()
-        val dsSelected = prefs[KEY_SELECTED_SERVER] ?: ""
+        val dsServers = prefs[serversKey(owner)]?.toList() ?: emptyList()
+        val dsSelected = prefs[selectedServerKey(owner)] ?: ""
 
         val servers: List<String>
         val selected: String
@@ -127,14 +146,15 @@ class BlossomServersStore @Inject constructor(
             VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
         } ?: VideoTranscoder.Quality.STANDARD
         // Persist to DataStore
-        persistServers(servers, selected)
+        persistServers(owner, servers, selected)
     }
 
     suspend fun setSelected(url: String) {
         if (url !in _configuredServers.value) return
+        val owner = activeOwner ?: return
         _selectedServer.value = url
         editMutex.withLock {
-            dataStore.edit { it[KEY_SELECTED_SERVER] = url }
+            dataStore.edit { it[selectedServerKey(owner)] = url }
         }
         schedulePublish()
     }
@@ -144,11 +164,12 @@ class BlossomServersStore @Inject constructor(
         if (normalized in _configuredServers.value) return
         val updated = _configuredServers.value + normalized
         _configuredServers.value = updated
-        persistServers(updated, _selectedServer.value)
+        persistServers(activeOwner ?: return, updated, _selectedServer.value)
         schedulePublish()
     }
 
     suspend fun removeServer(url: String) {
+        val owner = activeOwner ?: return
         if (url == _selectedServer.value && _configuredServers.value.size <= 1) return
         val updated = _configuredServers.value - url
         _configuredServers.value = updated
@@ -156,7 +177,7 @@ class BlossomServersStore @Inject constructor(
             val newSelected = updated.firstOrNull() ?: return
             _selectedServer.value = newSelected
         }
-        persistServers(updated, _selectedServer.value)
+        persistServers(owner, updated, _selectedServer.value)
         schedulePublish()
     }
 
@@ -181,11 +202,11 @@ class BlossomServersStore @Inject constructor(
         }
     }
 
-    private suspend fun persistServers(servers: List<String>, selected: String) {
+    private suspend fun persistServers(owner: String, servers: List<String>, selected: String) {
         editMutex.withLock {
             dataStore.edit {
-                it[KEY_SERVERS] = servers.toSet()
-                it[KEY_SELECTED_SERVER] = selected
+                it[serversKey(owner)] = servers.toSet()
+                it[selectedServerKey(owner)] = selected
             }
         }
     }
@@ -253,4 +274,8 @@ class BlossomServersStore @Inject constructor(
         relayPool.get().publishToRelays(toEventJson(signed), writeRelays)
         Log.d(TAG, "publishKind10063: ${ordered.size} servers → ${writeRelays.size} relay(s)")
     }
+
+    private fun serversKey(owner: String) = stringSetPreferencesKey("${owner}_servers")
+
+    private fun selectedServerKey(owner: String) = stringPreferencesKey("${owner}_selected_server")
 }

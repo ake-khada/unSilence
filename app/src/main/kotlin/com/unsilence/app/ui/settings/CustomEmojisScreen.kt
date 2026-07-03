@@ -61,6 +61,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.theme.AppType
@@ -77,7 +78,9 @@ import com.unsilence.app.ui.theme.Warn
 
 @Composable
 fun CustomEmojisScreen(onDismiss: () -> Unit) {
-    val viewModel: CustomEmojiSettingsViewModel = hiltViewModel()
+    val viewModel: CustomEmojiSettingsViewModel = hiltViewModel(
+        key = "custom-emojis-${LocalAppSessionKey.current}",
+    )
     BackHandler(onBack = onDismiss)
 
     val pinnedEmojis    by viewModel.pinnedEmojis.collectAsStateWithLifecycle()

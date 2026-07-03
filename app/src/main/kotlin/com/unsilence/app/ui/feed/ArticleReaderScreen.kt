@@ -79,6 +79,7 @@ import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.markdown.MarkdownDocument
 import com.unsilence.app.data.model.markdown.NativeMarkdownParser
 import com.unsilence.app.data.wallet.ZapRequest
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -121,6 +122,12 @@ fun ArticleReaderScreen(
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
     reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
+    articleReaderVm: ArticleReaderViewModel = hiltViewModel(
+        key = "article-reader-${LocalAppSessionKey.current}",
+    ),
+    commentActionsVm: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     // Unwrap reposts: for a kind-6/16 wrapper the FeedRow's tags/content belong to
     // the wrapper (embedded JSON string + wrapper tags). Parse to the EventModel so
@@ -156,8 +163,6 @@ fun ArticleReaderScreen(
     val articleCoord = remember(model.engagementId, model.article?.dTag, model.pubkey) {
         model.article?.dTag?.takeIf { it.isNotBlank() }?.let { "30023:${model.pubkey}:$it" }
     }
-    val articleReaderVm: ArticleReaderViewModel = hiltViewModel()
-    val commentActionsVm: NoteActionsViewModel = hiltViewModel()
     val commentsFlow = remember(articleCoord) { articleReaderVm.commentsFlow(articleCoord ?: "") }
     val comments by commentsFlow.collectAsStateWithLifecycle(emptyList())
     LaunchedEffect(articleCoord) {

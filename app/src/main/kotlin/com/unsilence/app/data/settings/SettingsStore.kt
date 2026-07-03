@@ -18,8 +18,6 @@ import javax.inject.Singleton
 
 private val Context.settingsPrefs: DataStore<Preferences> by preferencesDataStore(name = "settings_prefs")
 
-private val KEY_PINNED_EMOJI = stringSetPreferencesKey("pinned_emoji_shortcodes")
-
 @Singleton
 class SettingsStore @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -27,18 +25,33 @@ class SettingsStore @Inject constructor(
     private val dataStore get() = context.settingsPrefs
     private val editMutex = Mutex()
 
+    private val _activeOwner = MutableStateFlow<String?>(null)
     private val _pinnedEmojiShortcodes = MutableStateFlow<Set<String>>(emptySet())
     val pinnedEmojiShortcodes: StateFlow<Set<String>> = _pinnedEmojiShortcodes.asStateFlow()
 
+    fun selectOwner(pubkeyHex: String) {
+        _activeOwner.value = pubkeyHex.lowercase()
+    }
+
+    fun clearActiveOwner() {
+        _activeOwner.value = null
+        _pinnedEmojiShortcodes.value = emptySet()
+    }
+
     suspend fun initialize() {
         val prefs = dataStore.data.first()
-        _pinnedEmojiShortcodes.value = prefs[KEY_PINNED_EMOJI] ?: emptySet()
+        val owner = _activeOwner.value ?: return
+        _pinnedEmojiShortcodes.value = prefs[pinnedEmojiKey(owner)] ?: emptySet()
     }
 
     suspend fun setPinnedEmojiShortcodes(shortcodes: Set<String>) {
+        val owner = _activeOwner.value ?: return
         _pinnedEmojiShortcodes.value = shortcodes
         editMutex.withLock {
-            dataStore.edit { it[KEY_PINNED_EMOJI] = shortcodes }
+            dataStore.edit { it[pinnedEmojiKey(owner)] = shortcodes }
         }
     }
+
+    private fun pinnedEmojiKey(owner: String) =
+        stringSetPreferencesKey("${owner}_pinned_emoji_shortcodes")
 }

@@ -69,6 +69,7 @@ import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.parseNip05
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandSoft
@@ -98,7 +99,9 @@ fun RelayDetailScreen(
     onDismiss: () -> Unit,
     onOpenProfile: (pubkeyHex: String) -> Unit = {},
     onBrowse: (url: String, label: String) -> Unit = { _, _ -> },
-    viewModel: RelayManagementViewModel = hiltViewModel(),
+    viewModel: RelayManagementViewModel = hiltViewModel(
+        key = "relay-management-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     val clipboard = LocalClipboardManager.current

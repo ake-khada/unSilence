@@ -76,6 +76,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.feed.ComposePreviewCard
 import com.unsilence.app.ui.theme.AppType
@@ -94,7 +95,9 @@ fun ComposeScreen(
     replyToEventId: String? = null,
     quoteEventId: String? = null,
     articleCommentTarget: ArticleCommentTarget? = null,
-    viewModel: ComposeViewModel = hiltViewModel(),
+    viewModel: ComposeViewModel = hiltViewModel(
+        key = "compose-${LocalAppSessionKey.current}",
+    ),
 ) {
     val pubkeyHex      = viewModel.pubkeyHex
     val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()

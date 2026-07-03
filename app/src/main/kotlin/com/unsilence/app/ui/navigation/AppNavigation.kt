@@ -123,6 +123,7 @@ import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.settings.ZapSettingsViewModel
@@ -218,8 +219,8 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
         selectedTab = 0
     }
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
-    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel()
-    val noteActionsVm: NoteActionsViewModel = hiltViewModel()
+    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$userPubkey")
+    val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$userPubkey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
@@ -312,6 +313,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     }
 
     CompositionLocalProvider(
+        LocalAppSessionKey provides userPubkey,
         LocalShowSnackbar provides showSnackbar,
         LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
@@ -343,6 +345,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onHashtagClick     = onHashtagClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
                         viewModel          = feedViewModel,
+                        actionsViewModel   = noteActionsVm,
                     )
                     1    -> Box(Modifier.padding(top = statusBarHeight)) {
                         SearchScreen(
@@ -353,6 +356,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             onQuote       = { noteId  -> quoteNoteId   = noteId  },
                             initialQuery  = hashtagSearchQuery,
                             onInitialQueryConsumed = { hashtagSearchQuery = null },
+                            actionsViewModel = noteActionsVm,
                         )
                     }
                     2    -> NotificationsScreen(
@@ -361,7 +365,17 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )
-                    3    -> ProfileScreen(onLogout = onLogout, onBack = { selectedTab = 0 }, onNoteClick = { eventId -> threadEventId = eventId }, onComment = { eventId -> replyToEventId = eventId }, onAuthorClick = onAuthorClick, onHashtagClick = onHashtagClick, onBrowseRelay = onBrowseRelayFeed, viewModel = hiltViewModel(key = "profile-$userPubkey"))
+                    3    -> ProfileScreen(
+                        onLogout = onLogout,
+                        onBack = { selectedTab = 0 },
+                        onNoteClick = { eventId -> threadEventId = eventId },
+                        onComment = { eventId -> replyToEventId = eventId },
+                        onAuthorClick = onAuthorClick,
+                        onHashtagClick = onHashtagClick,
+                        onBrowseRelay = onBrowseRelayFeed,
+                        viewModel = hiltViewModel(key = "profile-$userPubkey"),
+                        actionsViewModel = noteActionsVm,
+                    )
                     else -> PlaceholderScreen()
                 }
             }
@@ -566,7 +580,10 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
 
             // ── Create relay set overlay ──────────────────────────────────────
             if (showCreateRelaySet) {
-                CreateRelaySetScreen(onDismiss = { showCreateRelaySet = false })
+                CreateRelaySetScreen(
+                    onDismiss = { showCreateRelaySet = false },
+                    viewModel = relayManagementVm,
+                )
             }
 
             // ── Relay settings overlay ──────────────────────────────────────
@@ -575,6 +592,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onDismiss    = { showRelaySettings = false },
                     onOpenDetail = { url -> relayDetailUrl = url },
                     onOpenDiscovery = { showDiscovery = true },
+                    viewModel = relayManagementVm,
                 )
             }
 
@@ -583,6 +601,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                 RelayDiscoveryScreen(
                     onDismiss = { showDiscovery = false },
                     onOpenDetail = { url -> relayDetailUrl = url },
+                    viewModel = relayManagementVm,
                 )
             }
 
@@ -593,6 +612,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onDismiss = { relayDetailUrl = null },
                     onOpenProfile = onAuthorClick,
                     onBrowse = onBrowseRelayFeed,
+                    viewModel = relayManagementVm,
                 )
             }
 
@@ -610,6 +630,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
                     onHashtagClick = onHashtagClick,
+                    actionsViewModel = noteActionsVm,
                 )
             }
 
@@ -627,6 +648,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                             userProfilePubkey = pubkey
                         },
                         onHashtagClick = onHashtagClick,
+                        actionsViewModel = noteActionsVm,
                     )
                 }
             }
@@ -661,6 +683,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         showZapSettings = false
                         noteActionsVm.refreshNwcConfigured()
                     },
+                    vm = zapSettingsVm,
                 )
             }
 

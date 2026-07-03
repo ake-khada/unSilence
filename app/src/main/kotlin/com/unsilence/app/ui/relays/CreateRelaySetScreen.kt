@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -50,7 +51,9 @@ import com.unsilence.app.ui.theme.TextSecondary
 @Composable
 fun CreateRelaySetScreen(
     onDismiss: () -> Unit,
-    viewModel: RelayManagementViewModel = hiltViewModel(),
+    viewModel: RelayManagementViewModel = hiltViewModel(
+        key = "relay-management-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     var name by remember { mutableStateOf("") }

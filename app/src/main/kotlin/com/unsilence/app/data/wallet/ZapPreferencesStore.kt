@@ -15,7 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -50,13 +50,14 @@ class ZapPreferencesStore @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private val activeOwner = MutableStateFlow<String?>(null)
     private val _state = MutableStateFlow(ZapPreferences.DEFAULT)
     val state: StateFlow<ZapPreferences> = _state.asStateFlow()
 
     init {
         scope.launch {
             context.zapPrefsDataStore.data
-                .map { it.toZapPreferences() }
+                .combine(activeOwner) { prefs, owner -> prefs.toZapPreferences(owner) }
                 .collect { _state.value = it }
         }
     }
@@ -64,33 +65,54 @@ class ZapPreferencesStore @Inject constructor(
     /** Synchronous snapshot — safe to call from a Compose click handler. */
     fun current(): ZapPreferences = _state.value
 
+    fun selectOwner(pubkeyHex: String) {
+        activeOwner.value = pubkeyHex.lowercase()
+    }
+
+    fun clearActiveOwner() {
+        activeOwner.value = null
+        _state.value = ZapPreferences.DEFAULT
+    }
+
     suspend fun updatePreset(index: Int, amountSats: Long?, message: String?) {
         require(index in 0 until ZapPreferences.PRESET_COUNT)
+        val owner = activeOwner.value ?: return
         context.zapPrefsDataStore.edit { prefs ->
             if (amountSats != null) {
-                prefs[longPreferencesKey("preset_${index}_amount")] = amountSats
+                prefs[amountKey(owner, index)] = amountSats
             }
             if (message != null) {
-                prefs[stringPreferencesKey("preset_${index}_message")] = message
+                prefs[messageKey(owner, index)] = message
             }
         }
     }
 
     suspend fun setDefaultPrivate(value: Boolean) {
+        val owner = activeOwner.value ?: return
         context.zapPrefsDataStore.edit { prefs ->
-            prefs[booleanPreferencesKey("default_private")] = value
+            prefs[defaultPrivateKey(owner)] = value
         }
     }
 
-    private fun Preferences.toZapPreferences(): ZapPreferences {
+    private fun Preferences.toZapPreferences(owner: String?): ZapPreferences {
+        if (owner == null) return ZapPreferences.DEFAULT
         val presets = (0 until ZapPreferences.PRESET_COUNT).map { i ->
-            val amount = this[longPreferencesKey("preset_${i}_amount")]
+            val amount = this[amountKey(owner, i)]
                 ?: ZapPreferences.DEFAULT.presets[i].amountSats
-            val message = this[stringPreferencesKey("preset_${i}_message")]
+            val message = this[messageKey(owner, i)]
                 ?.takeIf { it.isNotBlank() }
             ZapPreset(amount, message)
         }
-        val privateMode = this[booleanPreferencesKey("default_private")] ?: false
+        val privateMode = this[defaultPrivateKey(owner)] ?: false
         return ZapPreferences(presets, privateMode)
     }
+
+    private fun amountKey(owner: String, index: Int) =
+        longPreferencesKey("${owner}_preset_${index}_amount")
+
+    private fun messageKey(owner: String, index: Int) =
+        stringPreferencesKey("${owner}_preset_${index}_message")
+
+    private fun defaultPrivateKey(owner: String) =
+        booleanPreferencesKey("${owner}_default_private")
 }

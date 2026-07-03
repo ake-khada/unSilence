@@ -9,6 +9,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 
@@ -47,8 +48,9 @@ internal fun EmbeddedArticleCard(
         return
     }
 
-    val actionsVm: NoteActionsViewModel = hiltViewModel()
-    val providerVm: ArticleReaderViewModel = hiltViewModel()
+    val sessionKey = LocalAppSessionKey.current
+    val actionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
+    val providerVm: ArticleReaderViewModel = hiltViewModel(key = "article-reader-$sessionKey")
     val row by providerVm.articleRowFlow(coord).collectAsStateWithLifecycle(initialValue = null)
     LaunchedEffect(coord) { providerVm.ensureArticle(coord, author, dTag, hints) }
 

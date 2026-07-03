@@ -8,6 +8,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.AppBootstrapper
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.blossom.BlossomServersStore
+import com.unsilence.app.data.settings.SettingsStore
+import com.unsilence.app.data.wallet.ZapPreferencesStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -18,9 +21,15 @@ import javax.inject.Inject
 class RootViewModel @Inject constructor(
     val keyManager: KeyManager,
     private val bootstrapper: AppBootstrapper,
+    private val zapPreferencesStore: ZapPreferencesStore,
+    private val blossomServersStore: BlossomServersStore,
+    private val settingsStore: SettingsStore,
 ) : ViewModel() {
 
     var isLoggedIn by mutableStateOf(keyManager.hasKey())
+        private set
+
+    var isLoggingOut by mutableStateOf(false)
         private set
 
     /** Incremented on each login — ensures hiltViewModel(key) creates fresh VMs
@@ -35,29 +44,47 @@ class RootViewModel @Inject constructor(
         if (isLoggedIn) {
             val pubkey = keyManager.getPublicKeyHex()
             if (pubkey != null) {
+                selectPreferenceOwner(pubkey)
                 viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
             }
         }
     }
 
     fun onOnboardingComplete() {
+        if (isLoggingOut) return
+        val pubkey = keyManager.getPublicKeyHex() ?: return
+        selectPreferenceOwner(pubkey)
         sessionId++
         isLoggedIn = true
-        val pubkey = keyManager.getPublicKeyHex() ?: return
         viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
     }
 
     fun logout() {
+        if (isLoggingOut) return
         viewModelScope.launch {
+            isLoggingOut = true
             // Set isLoggedIn false on Main FIRST — this triggers recomposition,
             // destroys AppNavigation and all nested ViewModels (FeedVM, etc.)
-            // BEFORE teardown clears keyManager/MES. Without this ordering,
+            // BEFORE teardown clears keyManager/MES. Keep onboarding hidden until
+            // teardown completes, or a fast re-login can supersede the teardown
+            // fence and keep account-scoped DataStore state from the old user.
+            // Without this ordering,
             // the Main-thread switch inside teardown (ExoPlayer release) lets
             // Compose see cleared keyManager + isLoggedIn=true → zombie FeedVM.
             isLoggedIn = false
-            withContext(Dispatchers.IO) {
-                bootstrapper.teardown()
+            try {
+                withContext(Dispatchers.IO) {
+                    bootstrapper.teardown()
+                }
+            } finally {
+                isLoggingOut = false
             }
         }
+    }
+
+    private fun selectPreferenceOwner(pubkey: String) {
+        zapPreferencesStore.selectOwner(pubkey)
+        blossomServersStore.selectOwner(pubkey)
+        settingsStore.selectOwner(pubkey)
     }
 }

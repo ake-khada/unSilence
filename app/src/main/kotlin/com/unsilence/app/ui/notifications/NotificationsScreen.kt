@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.shared.NotificationEventRow
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
@@ -40,7 +41,9 @@ fun NotificationsScreen(
     onNoteClick: (String) -> Unit = {},
     onProfileClick: (String) -> Unit = {},
     staticTopPadding: Dp = 0.dp,
-    viewModel: NotificationsViewModel = hiltViewModel(),
+    viewModel: NotificationsViewModel = hiltViewModel(
+        key = "notif-${LocalAppSessionKey.current}",
+    ),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 

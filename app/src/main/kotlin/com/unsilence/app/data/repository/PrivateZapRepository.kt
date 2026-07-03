@@ -7,6 +7,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonObject
@@ -22,13 +23,20 @@ class PrivateZapRepository @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var collectorJob: Job? = null
 
     fun start() {
-        scope.launch {
+        if (collectorJob?.isActive == true) return
+        collectorJob = scope.launch {
             memoryEventStore.pendingPrivateZapDecrypts.collect { pending ->
                 processOne(pending)
             }
         }
+    }
+
+    fun stop() {
+        collectorJob?.cancel()
+        collectorJob = null
     }
 
     private suspend fun processOne(pending: com.unsilence.app.data.memory.PendingPrivateZapDecrypt) {

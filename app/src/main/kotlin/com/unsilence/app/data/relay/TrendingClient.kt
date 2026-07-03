@@ -7,6 +7,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -57,6 +59,7 @@ class TrendingClient @Inject constructor(
     /** Staleness guard: don't fetch more than once per 30 minutes. */
     private val lastFetchMs = AtomicLong(0L)
     @Volatile private var cachedData: TrendingData? = null
+    private val fetchMutex = Mutex()
 
     /** Ping-free client for the short-lived trending WS — the base client's
      *  25s pingInterval would schedule keepalives on a ≤5s one-shot socket.
@@ -72,20 +75,28 @@ class TrendingClient @Inject constructor(
             return cached
         }
 
-        val result = withContext(Dispatchers.IO) {
-            try {
-                fetchFromTrendingRelay()
-            } catch (e: Exception) {
-                Log.w(TAG, "Trending fetch failed: ${e.message}")
-                null
+        return fetchMutex.withLock {
+            val lockedNow = System.currentTimeMillis()
+            val lockedCached = cachedData
+            if (!forceRefresh && lockedCached != null && lockedNow - lastFetchMs.get() < STALENESS_MS) {
+                return@withLock lockedCached
             }
-        }
 
-        if (result != null) {
-            cachedData = result
-            lastFetchMs.set(now)
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    fetchFromTrendingRelay()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Trending fetch failed: ${e.message}")
+                    null
+                }
+            }
+
+            if (result != null) {
+                cachedData = result
+                lastFetchMs.set(System.currentTimeMillis())
+            }
+            result ?: lockedCached
         }
-        return result ?: cached
     }
 
     /**
