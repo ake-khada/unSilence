@@ -35,6 +35,10 @@ class EventProcessorInvariantsTest {
         override fun verify(event: NostrEvent): Boolean = true
     }
 
+    private val failVerifier = object : SignatureVerifier() {
+        override fun verify(event: NostrEvent): Boolean = false
+    }
+
     @Before
     fun setUp() {
         store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
@@ -117,6 +121,21 @@ class EventProcessorInvariantsTest {
         // Exactly 1 event in store (seenIds prevented re-parse + re-insert)
         val events = store.eventsByIds(setOf(eventId(2)))
         assertEquals("Expected exactly 1 event in store", 1, events.size)
+    }
+
+    @Test
+    fun `bad signature copy does not poison seenIds before valid copy arrives`() = runTest {
+        val (raw, relay) = rawEvent(29)
+
+        processor.setTestVerifier(failVerifier)
+        processor.process(raw, relay)
+        processor.drainForTest()
+        assertTrue("Bad signature event must not be stored", store.eventsByIds(setOf(eventId(29))).isEmpty())
+
+        processor.setTestVerifier(passVerifier)
+        processor.process(raw, relay)
+        processor.drainForTest()
+        assertEquals("Valid copy with same id must still be accepted", 1, store.eventsByIds(setOf(eventId(29))).size)
     }
 
     // ── Test 3: trimDedupCache evicts when over 10000 ───────────────────────

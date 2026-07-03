@@ -273,7 +273,7 @@ class EventProcessor @Inject constructor(
      * Fast path order (each check is cheaper than the next):
      *   1. startsWith ["EVENT"  — rejects EOSE/OK/NOTICE with one call
      *   2. extractEventId       — substring scan, no JSON allocation
-     *   3. seenIds cache hit    — ConcurrentHashMap lookup, returns immediately for dups
+     *   3. seenIds cache hit    — ConcurrentHashMap lookup, returns immediately for verified dups
      *   4. Streaming JSON decode — only for novel EVENT messages
      */
     suspend fun process(raw: String, rawRelayUrl: String) {
@@ -296,14 +296,15 @@ class EventProcessor @Inject constructor(
         if (!raw.startsWith("[\"EVENT\"")) return
 
         // ── Dedup by event ID, extracted without JSON parsing ──────────────────
+        // This is a read-only fast path. The cache is claimed only after signature
+        // verification, so a bad-sig copy cannot suppress a genuine relay copy.
         val eventId = extractEventIdFromRaw(raw) ?: return
-        if (seenIds.putIfAbsent(eventId, Unit) != null) {
+        if (seenIds.containsKey(eventId)) {
             // Already processed — just record this relay as a source so
             // relay-specific feeds (browse mode) include the event.
             memoryEventStore.addRelaySeen(eventId, relayUrl)
             return
         }
-        trimDedupCacheIfNeeded()
 
         // Only novel EVENT messages reach here (~20 % of total messages).
         // Streaming decode bypasses the JsonElement tree: instead of allocating
@@ -433,10 +434,13 @@ class EventProcessor @Inject constructor(
         )
 
         // Signature verification — Schnorr sig + id-hash check.
-        // After seenIds dedup so we verify each unique event exactly once.
-        // Before tap fire / channel send so unverified events never reach
-        // subscriptions or MES.
+        // Before claiming seenIds, so an invalid copy cannot censor the valid one.
         if (!verifySig(nostrEvent)) return
+        if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
+            memoryEventStore.addRelaySeen(nostrEvent.id, relayUrl)
+            return
+        }
+        trimDedupCacheIfNeeded()
 
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES

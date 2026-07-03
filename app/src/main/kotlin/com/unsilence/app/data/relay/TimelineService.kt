@@ -88,6 +88,11 @@ class TimelineService @Inject constructor(
     private val multiKeys = ConcurrentHashMap<String, List<String>>()
     private val seqCounter = AtomicLong(0)
 
+    private fun snapshotTimelineKeys(timelineKey: String): List<String> {
+        val live = multiKeys[timelineKey] ?: return listOf(timelineKey)
+        return synchronized(live) { ArrayList(live) }
+    }
+
     interface TimelineHandle {
         val timelineKey: String
         fun close()
@@ -384,7 +389,7 @@ class TimelineService @Inject constructor(
         until: Long,
         limit: Int,
     ): List<NostrEvent> {
-        val keys = multiKeys[timelineKey] ?: listOf(timelineKey)
+        val keys = snapshotTimelineKeys(timelineKey)
         val gathered = mutableListOf<TimelineRef>()
         for (k in keys) {
             val tl = timelines[k] ?: continue
@@ -417,7 +422,7 @@ class TimelineService @Inject constructor(
         // with distinct filters (outbox per-relay author subsets) cannot
         // share a REQ without leaking authors to the wrong relays, so they
         // stay separate.
-        val keys = multiKeys[timelineKey] ?: listOf(timelineKey)
+        val keys = snapshotTimelineKeys(timelineKey)
         val allFetched = mutableListOf<NostrEvent>()
         val keyedTimelines = keys.mapNotNull { k -> timelines[k]?.let { k to it } }
         for ((filter, members) in keyedTimelines.groupBy { it.second.filter }) {

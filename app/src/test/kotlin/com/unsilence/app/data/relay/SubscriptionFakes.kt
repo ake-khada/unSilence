@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -40,6 +41,10 @@ class FakeRelayCapabilitiesStore : RelaySkipCheck {
     fun markSkipped(url: String) { skipped.add(url) }
 }
 
+class FakeSignatureVerifier(private val result: Boolean = true) : SignatureVerifier() {
+    override fun verify(event: NostrEvent): Boolean = result
+}
+
 /** No-op TimelineEventLoader for tests. */
 class StubEventLoader : TimelineEventLoader {
     override suspend fun getEvents(ids: List<String>): List<NostrEvent> = emptyList()
@@ -48,7 +53,13 @@ class StubEventLoader : TimelineEventLoader {
 /** Create a [javax.inject.Provider] of a no-op [TimelineService] for MES tests. */
 fun stubTimelineServiceProvider(): javax.inject.Provider<TimelineService> {
     val svc = TimelineService(
-        Subscription(FakeRelayTransport(), FakeTapRegistration(), FakeReconnectSource(), FakeRelayCapabilitiesStore()),
+        Subscription(
+            FakeRelayTransport(),
+            FakeTapRegistration(),
+            FakeReconnectSource(),
+            FakeRelayCapabilitiesStore(),
+            FakeSignatureVerifier(),
+        ),
         StubEventLoader(),
     )
     return javax.inject.Provider { svc }

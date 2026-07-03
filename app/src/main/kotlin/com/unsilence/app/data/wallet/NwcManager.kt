@@ -22,6 +22,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,6 +32,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -127,6 +129,7 @@ class NwcManager @Inject constructor(
         val nwcPubkeyHex: String,
         val nwcSigner: NostrSignerInternal,
         val walletPubkey: String,
+        val expectedRequestId: AtomicReference<String?>,
     )
 
     /** Crypto material derived from the stored connection — shared by [warmUp] and [getBalance]. */
@@ -165,6 +168,7 @@ class NwcManager @Inject constructor(
         val walletPubBytes  = creds.walletPubBytes
 
         val deferred = CompletableDeferred<Result<Unit>>()
+        val expectedRequestId = AtomicReference<String?>(null)
 
         val reqCmd = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -177,12 +181,12 @@ class NwcManager @Inject constructor(
         }.toString()
 
         val listener = object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                ws.send(reqCmd)
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                webSocket.send(reqCmd)
                 Log.d(TAG, "NWC WS pre-warmed, subscription sent")
             }
 
-            override fun onMessage(ws: WebSocket, text: String) {
+            override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val msg  = NostrJson.parseToJsonElement(text).jsonArray
                     val type = msg.getOrNull(0)?.jsonPrimitive?.content ?: return
@@ -191,6 +195,8 @@ class NwcManager @Inject constructor(
                     val obj  = msg[2].jsonObject
                     val kind = obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
                     if (kind != 23195) return
+                    val expected = expectedRequestId.get() ?: return
+                    if (responseRequestId(obj) != expected) return
 
                     val encContent = obj["content"]?.jsonPrimitive?.content ?: return
                     val decrypted  = runCatching {
@@ -221,7 +227,7 @@ class NwcManager @Inject constructor(
                         Log.d(TAG, "NWC payment success")
                         deferred.complete(Result.success(Unit))
                     }
-                    ws.close(1000, "done")
+                    webSocket.close(1000, "done")
                 } catch (e: Exception) {
                     Log.w(TAG, "NWC response parse error: ${e.message}")
                     if (!deferred.isCompleted) {
@@ -230,12 +236,12 @@ class NwcManager @Inject constructor(
                 }
             }
 
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "NWC WS failure: ${t.message}")
                 if (!deferred.isCompleted) deferred.complete(Result.failure(t))
             }
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (!deferred.isCompleted) deferred.complete(Result.failure(Exception("WS closed: $reason")))
             }
         }
@@ -243,7 +249,16 @@ class NwcManager @Inject constructor(
         val request = Request.Builder().url(creds.conn.relayUrl).build()
         val ws = okHttpClient.newWebSocket(request, listener)
 
-        return WarmSocket(ws, deferred, nwcPrivKeyBytes, walletPubBytes, nwcPubkeyHex, creds.nwcSigner, creds.conn.walletPubkey)
+        return WarmSocket(
+            ws,
+            deferred,
+            nwcPrivKeyBytes,
+            walletPubBytes,
+            nwcPubkeyHex,
+            creds.nwcSigner,
+            creds.conn.walletPubkey,
+            expectedRequestId,
+        )
     }
 
     /**
@@ -276,7 +291,11 @@ class NwcManager @Inject constructor(
             add(NostrJson.parseToJsonElement(toEventJson(signed)))
         }.toString()
 
-        warm.ws.send(eventCmd)
+        warm.expectedRequestId.set(signed.id)
+        if (!warm.ws.send(eventCmd)) {
+            warm.expectedRequestId.set(null)
+            return@withContext Result.failure(IllegalStateException("NWC socket closed before pay_invoice was sent"))
+        }
         Log.d(TAG, "NWC payment sent on warm WS")
 
         val result = runCatching {
@@ -357,18 +376,19 @@ class NwcManager @Inject constructor(
         }.toString()
 
         val listener = object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                ws.send(reqCmd)
-                ws.send(eventCmd)
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                webSocket.send(reqCmd)
+                webSocket.send(eventCmd)
                 Log.d(TAG, "NWC balance request sent")
             }
-            override fun onMessage(ws: WebSocket, text: String) {
+            override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val msg = NostrJson.parseToJsonElement(text).jsonArray
                     if (msg.getOrNull(0)?.jsonPrimitive?.content != "EVENT") return
                     if (msg.size < 3) return
                     val obj = msg[2].jsonObject
                     if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
+                    if (responseRequestId(obj) != signed.id) return
                     val encContent = obj["content"]?.jsonPrimitive?.content ?: return
                     val decrypted = runCatching {
                         Nip04.decrypt(encContent, nwcPrivKeyBytes, walletPubBytes)
@@ -382,16 +402,16 @@ class NwcManager @Inject constructor(
                             ?.jsonPrimitive?.content?.toLongOrNull()
                         deferred.complete(msats)
                     }
-                    ws.close(1000, "done")
+                    webSocket.close(1000, "done")
                 } catch (_: Exception) {
                     if (!deferred.isCompleted) deferred.complete(null)
                 }
             }
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "NWC balance WS failure: ${t.message}")
                 if (!deferred.isCompleted) deferred.complete(null)
             }
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (!deferred.isCompleted) deferred.complete(null)
             }
         }
@@ -421,5 +441,16 @@ class NwcManager @Inject constructor(
         val secret = uri.getQueryParameter("secret")?.takeIf { it.length == 64 } ?: return null
         NwcConnection(walletPubkey = pubkey, relayUrl = relay, secret = secret)
     }.getOrNull()
+
+    private fun responseRequestId(obj: JsonObject): String? {
+        val tags = obj["tags"]?.jsonArray ?: return null
+        for (tag in tags) {
+            val values = tag.jsonArray
+            if (values.getOrNull(0)?.jsonPrimitive?.content == "e") {
+                return values.getOrNull(1)?.jsonPrimitive?.content
+            }
+        }
+        return null
+    }
 
 }

@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import kotlinx.serialization.decodeFromString
@@ -68,6 +69,7 @@ class Subscription @Inject constructor(
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
     private val relayCapabilitiesStore: RelaySkipCheck,
+    private val signatureVerifier: SignatureVerifier,
 ) : ActiveSubsSource {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
@@ -334,10 +336,11 @@ class Subscription @Inject constructor(
         // lowercase hex right after the `"id":"` marker. Cross-relay dedup
         // before paying for the full streaming decode.
         val eventId = extractEventIdFromRaw(raw) ?: return
-        if (!state.knownIds.add(eventId)) return
-        state.lastEventAt = android.os.SystemClock.elapsedRealtime()
+        if (eventId in state.knownIds) return
 
         val event = parseEvent(raw, eventId, relayUrl) ?: return
+        if (!state.knownIds.add(event.id)) return
+        state.lastEventAt = android.os.SystemClock.elapsedRealtime()
         try {
             state.onevent(event)
         } catch (t: Throwable) {
@@ -409,7 +412,7 @@ class Subscription @Inject constructor(
         }
         val (hasCw, cwReason) = effectiveContentWarning(dto.kind, dto.content, dto.tags)
 
-        return NostrEvent(
+        val event = NostrEvent(
             id = dto.id,
             pubkey = dto.pubkey,
             kind = dto.kind,
@@ -426,6 +429,7 @@ class Subscription @Inject constructor(
             firstSeenAt = System.currentTimeMillis(),
             relaysSeen = ConcurrentHashMap.newKeySet<String>().also { it.add(relayUrl) },
         )
+        return if (signatureVerifier.verify(event)) event else null
     }
 
     private fun generateSubId(urls: List<String>): String {

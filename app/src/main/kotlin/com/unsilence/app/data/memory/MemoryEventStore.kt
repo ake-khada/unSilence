@@ -1223,17 +1223,22 @@ class MemoryEventStore @Inject constructor(
         val afterPrefix = lower.substring(idx + prefix.length)
         val numStr = afterPrefix.takeWhile { it.isDigit() }
         if (numStr.isEmpty()) return 0L
+        if (numStr.length > 18) return 0L
 
         val amount = numStr.toLongOrNull() ?: return 0L
         val multiplier = afterPrefix.getOrNull(numStr.length)
 
         // BTC multipliers → sats (1 BTC = 100_000_000 sats)
-        return when (multiplier) {
-            'm' -> amount * 100_000       // milli-BTC
-            'u' -> amount * 100           // micro-BTC
-            'n' -> amount / 10            // nano-BTC (1 nBTC = 0.1 sat)
-            'p' -> amount / 10_000        // pico-BTC
-            else -> amount                // no multiplier = BTC (rare for zaps)
+        return try {
+            when (multiplier) {
+                'm' -> Math.multiplyExact(amount, 100_000L)       // milli-BTC
+                'u' -> Math.multiplyExact(amount, 100L)           // micro-BTC
+                'n' -> amount / 10                                // nano-BTC (1 nBTC = 0.1 sat)
+                'p' -> amount / 10_000                            // pico-BTC
+                else -> Math.multiplyExact(amount, 100_000_000L)  // BTC
+            }
+        } catch (_: ArithmeticException) {
+            0L
         }
     }
 

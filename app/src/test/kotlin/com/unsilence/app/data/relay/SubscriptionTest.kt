@@ -28,7 +28,13 @@ class SubscriptionTest {
     fun setUp() {
         transport = FakeRelayTransport()
         tapRegistry = FakeTapRegistration()
-        subscription = Subscription(transport, tapRegistry, FakeReconnectSource(), FakeRelayCapabilitiesStore())
+        subscription = Subscription(
+            transport,
+            tapRegistry,
+            FakeReconnectSource(),
+            FakeRelayCapabilitiesStore(),
+            FakeSignatureVerifier(),
+        )
     }
 
     @Test
@@ -68,6 +74,27 @@ class SubscriptionTest {
         tapRegistry.fire("""["EVENT","$subId",$evtJson]""", "wss://a.example")
         assertEquals(1, received.size)
         assertEquals("a".repeat(64), received[0].id)
+    }
+
+    @Test
+    fun `onevent does not fire when signature verification fails`() = runTest {
+        subscription = Subscription(
+            transport,
+            tapRegistry,
+            FakeReconnectSource(),
+            FakeRelayCapabilitiesStore(),
+            FakeSignatureVerifier(result = false),
+        )
+        val received = CopyOnWriteArrayList<NostrEvent>()
+        subscription.subscribe(
+            urls = listOf("wss://a.example"),
+            filter = NostrFilter(kinds = listOf(1)),
+            onevent = { received.add(it) },
+        )
+        val subId = transport.sends.first().subId()
+        val evtJson = sampleEventJson(id = "a".repeat(64), kind = 1)
+        tapRegistry.fire("""["EVENT","$subId",$evtJson]""", "wss://a.example")
+        assertEquals(0, received.size)
     }
 
     @Test
