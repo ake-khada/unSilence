@@ -454,7 +454,10 @@ class RelayPool @Inject constructor(
             return
         }
         count.incrementAndGet()
-        conn.send(req)
+        if (!conn.send(req)) {
+            count.decrementAndGet()
+            Log.w(TAG, "One-shot send failed for ${conn.url}; slot released")
+        }
     }
 
     /**
@@ -501,8 +504,14 @@ class RelayPool @Inject constructor(
                isRelayOutOfCooldown(conn.url)) {
             val req = queue.poll() ?: break
             count.incrementAndGet()
-            conn.send(req)
-            Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+            if (conn.send(req)) {
+                Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+            } else {
+                count.decrementAndGet()
+                queue.add(req)
+                Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
+                break
+            }
         }
     }
 

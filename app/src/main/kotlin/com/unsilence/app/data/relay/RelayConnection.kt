@@ -16,6 +16,7 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "RelayConnection"
+private const val MAX_RELAY_MESSAGE_CHARS = 512 * 1024
 
 enum class RelayState { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
 
@@ -138,6 +139,11 @@ class RelayConnection(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (text.length > MAX_RELAY_MESSAGE_CHARS) {
+                Log.w(TAG, "Dropping oversized relay frame from $url (${text.length} chars)")
+                webSocket.close(1009, "Message too large")
+                return
+            }
             _messages.trySend(text)
         }
 

@@ -246,10 +246,11 @@ class VideoThumbnailCache @Inject constructor(
         var evicted = 0
         for (url in candidates) {
             if (cache.size <= MAX_ENTRIES * 4 / 5 && bitmapBytes <= MAX_BITMAP_BYTES * 4 / 5) break
-            val thumb = cache.remove(url)
+            cache.remove(url)
             lastAccessedAt.remove(url)
             // Don't remove from resolvedAspectRatios — lightweight floats, needed for layout stability
-            thumb?.bitmap?.recycle()
+            // Do not recycle here: Compose may still hold a reference to an evicted bitmap.
+            // Dropping the cache reference lets the bitmap be collected when UI releases it.
             evicted++
         }
         if (evicted > 0) {
