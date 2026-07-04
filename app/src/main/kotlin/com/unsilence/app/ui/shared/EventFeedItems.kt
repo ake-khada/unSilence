@@ -16,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -232,17 +231,6 @@ private fun ThreadedReplyItem(
         val pk = parentEvent?.pubkey
         if (pk != null && callbacks.lookupProfile != null) {
             value = callbacks.lookupProfile.invoke(pk)
-        }
-    }
-
-    // ── DIAGNOSTIC: log when thread parent doesn't resolve ───────────────
-    LaunchedEffect(parentId, parentEvent) {
-        if (parentEvent == null) {
-            kotlinx.coroutines.delay(6000) // Wait past lookupEvent's 5s timeout
-            android.util.Log.w("CardHydrator", "Outbox final: refId=${parentId.take(12)} exists=false " +
-                "kind=null author=null relayUrl=null contentLen=0 " +
-                "referencedBy=${replyRow.id.take(12)} referencedByKind=${replyRow.kind} " +
-                "phase=unresolved")
         }
     }
 

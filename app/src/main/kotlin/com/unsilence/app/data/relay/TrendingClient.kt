@@ -1,6 +1,5 @@
 package com.unsilence.app.data.relay
 
-import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import kotlinx.coroutines.CancellationException
@@ -38,7 +37,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
 
-private const val TAG = "TrendingClient"
 private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
 
 data class TrendingHashtag(val tag: String, val score: Double)
@@ -104,9 +102,7 @@ class TrendingClient internal constructor(
                 doRefresh()
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "Trending refresh failed: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -114,15 +110,12 @@ class TrendingClient internal constructor(
         _data.value != null && System.currentTimeMillis() - lastFetchMs.get() < STALENESS_MS
 
     private suspend fun doRefresh(): Unit = coroutineScope {
-        val startMs = System.currentTimeMillis()
         val warm = launch {
             try {
                 transport.warmCountRelay()
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "COUNT relay warm failed: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
 
         val events = transport.fetchTrendingEvents()
@@ -146,7 +139,6 @@ class TrendingClient internal constructor(
             },
         )
         lastFetchMs.set(System.currentTimeMillis())
-        val phase1Ms = System.currentTimeMillis() - startMs
 
         warm.join()
         val enriched = topAuthorPubkeys.map { pubkey ->
@@ -165,11 +157,6 @@ class TrendingClient internal constructor(
         }.awaitAll()
 
         _data.value = TrendingData(hashtags = topHashtags, profiles = enriched)
-        Log.w(
-            TAG,
-            "Trending: ${topHashtags.size} tags, ${enriched.size} profiles from ${events.size} " +
-                "events (phase1=${phase1Ms}ms total=${System.currentTimeMillis() - startMs}ms)",
-        )
     }
 
     private fun aggregate(events: List<JsonObject>): Pair<List<TrendingHashtag>, List<String>> {
@@ -247,7 +234,6 @@ private class NetworkTrendingTransport(
                 val request = Request.Builder().url(TRENDING_RELAY_URL).build()
                 val ws = wsClient.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
-                        Log.d(TAG, "Connected to $TRENDING_RELAY_URL")
                         webSocket.send(req)
                     }
 
@@ -265,19 +251,14 @@ private class NetworkTrendingTransport(
                                     if (cont.isActive) cont.resume(events)
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Parse error: ${e.message}")
-                        }
+                        } catch (_: Exception) {}
                     }
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                        Log.w(TAG, "WebSocket failure: ${t.message}")
                         if (cont.isActive) cont.resume(null)
                     }
 
-                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                        Log.d(TAG, "WebSocket closed: $code")
-                    }
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = Unit
                 })
 
                 cont.invokeOnCancellation { ws.cancel() }
