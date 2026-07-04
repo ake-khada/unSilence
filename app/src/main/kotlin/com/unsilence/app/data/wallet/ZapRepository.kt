@@ -12,15 +12,20 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip57Zaps.PrivateZapEncryption
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import javax.inject.Inject
 import javax.inject.Singleton
-import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 /**
  * Bundled zap parameters. [amountSats] is the only required value. [message]
@@ -35,6 +40,17 @@ data class ZapRequest(
 )
 
 private const val TAG = "ZapRepository"
+private const val LNURL_CACHE_TTL_MS = 5 * 60 * 1000L
+
+class ZapException(message: String) : Exception(message)
+
+private data class LnurlMeta(
+    val callback: String,
+    val minSendableMsat: Long,
+    val maxSendableMsat: Long,
+    val allowsNostr: Boolean,
+    val nostrPubkey: String?,
+)
 
 /**
  * Orchestrates the NIP-57 zap flow:
@@ -51,13 +67,21 @@ class ZapRepository @Inject constructor(
     private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
-    /** LNURL metadata cache: lud16 → (callbackUrl, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
-    private val lnurlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
-    private val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 minutes
+    /** LNURL metadata cache: lud16 → (metadata, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
+    private val lnurlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<LnurlMeta, Long>>()
 
-    private fun getCachedCallback(lud16: String): String? {
-        val (url, expiresAt) = lnurlCache[lud16] ?: return null
-        return if (System.currentTimeMillis() < expiresAt) url else { lnurlCache.remove(lud16); null }
+    /** Plain LNURL HTTP must not inherit the app's WebSocket-tuned readTimeout(0). */
+    private val lnurlClient by lazy {
+        okHttpClient.newBuilder()
+            .callTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .pingInterval(0, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun getCachedMeta(lud16: String): LnurlMeta? {
+        val (meta, expiresAt) = lnurlCache[lud16] ?: return null
+        return if (System.currentTimeMillis() < expiresAt) meta else { lnurlCache.remove(lud16); null }
     }
 
     /**
@@ -80,6 +104,8 @@ class ZapRepository @Inject constructor(
         val zapRelays = targetRelays.ifEmpty { listOf(relayUrl) }
         val t0 = System.currentTimeMillis()
         val amountSats = request.amountSats
+        val mode = if (request.isPrivate) "private" else "public"
+        Log.d(TAG, "Zap start: mode=$mode amount=$amountSats relays=${zapRelays.size}")
 
         // ── 1. Get lightning address from author's profile ────────────────────
         val lud16 = userRepository.getUserLud16(eventPubkey)
@@ -87,28 +113,31 @@ class ZapRepository @Inject constructor(
             return Result.failure(Exception("Author has no lightning address"))
         }
 
-        // ── 2. Resolve LNURL callback (cached for 5 min per lud16) ───────────
-        val callbackUrl = getCachedCallback(lud16) ?: run {
+        // ── 2. Resolve LNURL metadata (cached for 5 min per lud16) ───────────
+        val meta = getCachedMeta(lud16) ?: run {
             val lnurlEndpoint = lud16ToUrl(lud16)
-                ?: return Result.failure(Exception("Invalid lightning address"))
-            val lnurlMeta = fetchLnurlMeta(lnurlEndpoint)
-                ?: return Result.failure(Exception("Lightning service unreachable"))
-            val cb = lnurlMeta["callback"]?.jsonPrimitive?.content
-                ?: return Result.failure(Exception("Lightning service misconfigured"))
-            lnurlCache[lud16] = cb to (System.currentTimeMillis() + CACHE_TTL_MS)
-            cb
+                ?: return Result.failure(ZapException("Invalid lightning address"))
+            val fetched = fetchLnurlMeta(lnurlEndpoint).getOrElse {
+                return Result.failure(it)
+            }
+            lnurlCache[lud16] = fetched to (System.currentTimeMillis() + LNURL_CACHE_TTL_MS)
+            fetched
         }
         Log.d(TAG, "LNURL resolved in ${System.currentTimeMillis() - t0}ms")
 
         // ── 3. Build kind-9734 zap request event ─────────────────────────────
-        val msats      = amountSats * 1000L
+        val msats = runCatching { Math.multiplyExact(amountSats, 1000L) }
+            .getOrElse { return Result.failure(ZapException("Invalid zap amount")) }
+        validateZapMetadata(meta, msats)?.let { return Result.failure(it) }
         val nowSeconds = System.currentTimeMillis() / 1000L
 
         val zapRequest: Event = if (request.isPrivate) {
+            Log.d(TAG, "Building private zap request")
             buildPrivateZapRequest(
                 eventPubkey, eventId, zapRelays, msats, nowSeconds, request.message,
             ) ?: return Result.failure(Exception("Private zap signing failed"))
         } else {
+            Log.d(TAG, "Building public zap request")
             val template = EventTemplate<Event>(
                 createdAt = nowSeconds,
                 kind      = 9734,
@@ -134,19 +163,29 @@ class ZapRepository @Inject constructor(
             ?: return Result.failure(Exception("Wallet not configured"))
 
         val zapRequestJson = toEventJson(zapRequest)
-        val bolt11 = fetchBolt11(callbackUrl, msats, zapRequestJson)
-        if (bolt11 == null) {
-            warmSocket.ws.close(1000, "no invoice")
-            return Result.failure(Exception("Could not get invoice from lightning service"))
+        val bolt11 = fetchBolt11(meta.callback, msats, zapRequestJson).getOrElse { e ->
+            Log.w(TAG, "Zap invoice fetch failed: mode=$mode amount=$amountSats relays=${zapRelays.size} " +
+                "elapsed=${System.currentTimeMillis() - t0}ms reason=${e.message}")
+            return Result.failure(e)
         }
 
-        Log.d(TAG, "bolt11 obtained in ${System.currentTimeMillis() - t0}ms for $amountSats sats")
+        Log.d(TAG, "bolt11 obtained in ${System.currentTimeMillis() - t0}ms for $amountSats sats, mode=$mode")
+
+        // NWC amount is only needed for amountless invoices. Some wallets reject
+        // it when the BOLT-11 already carries its own amount.
+        val nwcAmountMsats = if (bolt11AmountMsats(bolt11) == null) msats else null
 
         // ── 5. Pay on the already-connected WebSocket ─────────────────────────
-        val payResult = nwcManager.sendPayment(warmSocket, bolt11)
-        Log.d(TAG, "Zap total: ${System.currentTimeMillis() - t0}ms, success=${payResult.isSuccess}, private=${request.isPrivate}")
-        return if (payResult.isSuccess) Result.success(zapRequest)
-               else Result.failure(payResult.exceptionOrNull() ?: Exception("Payment failed"))
+        val payResult = nwcManager.sendPayment(warmSocket, bolt11, nwcAmountMsats)
+        val elapsedMs = System.currentTimeMillis() - t0
+        if (payResult.isSuccess) {
+            Log.d(TAG, "Zap total: ${elapsedMs}ms, success=true, mode=$mode")
+            return Result.success(zapRequest)
+        }
+
+        val failure = payResult.exceptionOrNull() ?: Exception("Payment failed")
+        Log.w(TAG, "Zap payment failed: mode=$mode amount=$amountSats elapsed=${elapsedMs}ms reason=${failure.message}")
+        return Result.failure(failure)
     }
 
     /**
@@ -242,27 +281,161 @@ class ZapRepository @Inject constructor(
     }
 
     /** GET the LNURL metadata JSON (contains callback URL, min/maxSendable, etc.). */
-    private suspend fun fetchLnurlMeta(url: String) = withContext(Dispatchers.IO) {
-        runCatching {
-            val req  = Request.Builder().url(url).build()
-            val body = okHttpClient.newCall(req).execute().use { it.body?.string() }
-                ?: return@withContext null
-            NostrJson.parseToJsonElement(body).jsonObject
-        }.getOrNull()
+    private suspend fun fetchLnurlMeta(url: String): Result<LnurlMeta> = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(url).build()
+            lnurlClient.newCall(req).execute().use { resp ->
+                val body = resp.body.string()
+                if (!resp.isSuccessful) {
+                    return@withContext Result.failure(
+                        ZapException("Lightning service metadata failed: ${lnurlErrorReason(body, "HTTP ${resp.code}")}")
+                    )
+                }
+                if (body.isNullOrBlank()) {
+                    return@withContext Result.failure(ZapException("Empty response from lightning service"))
+                }
+                val obj = NostrJson.parseToJsonElement(body).jsonObject
+                lnurlProtocolError(obj)?.let { return@withContext Result.failure(ZapException("Lightning service: $it")) }
+                val callback = obj["callback"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: return@withContext Result.failure(ZapException("Lightning service missing callback"))
+                Result.success(
+                    LnurlMeta(
+                        callback = callback,
+                        minSendableMsat = obj["minSendable"]?.jsonPrimitive?.longOrNull ?: 1_000L,
+                        maxSendableMsat = obj["maxSendable"]?.jsonPrimitive?.longOrNull ?: Long.MAX_VALUE,
+                        allowsNostr = obj["allowsNostr"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        nostrPubkey = obj["nostrPubkey"]?.jsonPrimitive?.content?.trim()?.lowercase(),
+                    )
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(ZapException("Lightning service unreachable: ${e.message ?: e::class.java.simpleName}"))
+        }
     }
 
     /** GET the bolt11 invoice from the LNURL callback. */
-    private suspend fun fetchBolt11(callback: String, msats: Long, zapRequestJson: String): String? =
+    private suspend fun fetchBolt11(callback: String, msats: Long, zapRequestJson: String): Result<String> =
         withContext(Dispatchers.IO) {
-            runCatching {
-                val encoded  = URLEncoder.encode(zapRequestJson, "UTF-8")
-                val url      = "$callback?amount=$msats&nostr=$encoded"
-                val req      = Request.Builder().url(url).build()
-                val body     = okHttpClient.newCall(req).execute().use { it.body?.string() }
-                    ?: return@withContext null
-                val obj      = NostrJson.parseToJsonElement(body).jsonObject
-                obj["pr"]?.jsonPrimitive?.content
-            }.getOrNull()
+            try {
+                val url = callback.toHttpUrlOrNull()
+                    ?.newBuilder()
+                    ?.addQueryParameter("amount", msats.toString())
+                    ?.addQueryParameter("nostr", zapRequestJson)
+                    ?.build()
+                    ?: return@withContext Result.failure(ZapException("Lightning service callback is invalid"))
+                val req = Request.Builder().url(url).build()
+                lnurlClient.newCall(req).execute().use { resp ->
+                    val body = resp.body.string()
+                    if (!resp.isSuccessful) {
+                        val fallback = if (resp.code == 413 || resp.code == 414) {
+                            "zap request too large (HTTP ${resp.code})"
+                        } else {
+                            "HTTP ${resp.code}"
+                        }
+                        return@withContext Result.failure(
+                            ZapException("Lightning service rejected the zap: ${lnurlErrorReason(body, fallback)}")
+                        )
+                    }
+                    if (body.isNullOrBlank()) {
+                        return@withContext Result.failure(ZapException("Empty response from lightning service"))
+                    }
+                    val obj = NostrJson.parseToJsonElement(body).jsonObject
+                    lnurlProtocolError(obj)?.let {
+                        return@withContext Result.failure(ZapException("Lightning service: $it"))
+                    }
+                    val invoice = obj["pr"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                        ?: return@withContext Result.failure(ZapException("No invoice returned by lightning service"))
+                    validateInvoiceAmount(invoice, msats)?.let {
+                        return@withContext Result.failure(it)
+                    }
+                    Result.success(invoice)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(ZapException("Lightning service unreachable: ${e.message ?: e::class.java.simpleName}"))
+            }
         }
+
+    private fun validateZapMetadata(meta: LnurlMeta, msats: Long): ZapException? {
+        val zapServicePubkey = meta.nostrPubkey
+        if (!meta.allowsNostr || zapServicePubkey.isNullOrBlank()) {
+            return ZapException("Recipient's lightning address doesn't support zaps")
+        }
+        if (!isHexPubkey(zapServicePubkey)) {
+            return ZapException("Recipient's lightning address returned an invalid zap key")
+        }
+        if (msats < meta.minSendableMsat) {
+            return ZapException("Recipient requires at least ${satsCeil(meta.minSendableMsat)} sats")
+        }
+        if (msats > meta.maxSendableMsat) {
+            return ZapException("Recipient's maximum is ${meta.maxSendableMsat / 1000L} sats")
+        }
+        return null
+    }
+
+    private fun isHexPubkey(value: String): Boolean =
+        value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
+
+    private fun lnurlProtocolError(obj: JsonObject): String? {
+        val status = obj["status"]?.jsonPrimitive?.content
+        if (!status.equals("ERROR", ignoreCase = true)) return null
+        return obj["reason"]?.jsonPrimitive?.content?.take(160) ?: "unknown reason"
+    }
+
+    private fun lnurlErrorReason(body: String?, fallback: String): String {
+        if (body.isNullOrBlank()) return fallback
+        return runCatching {
+            val obj = NostrJson.parseToJsonElement(body).jsonObject
+            lnurlProtocolError(obj) ?: fallback
+        }.getOrDefault(fallback)
+    }
+
+    private fun satsCeil(msats: Long): Long = (msats + 999L) / 1000L
+
+    private fun validateInvoiceAmount(invoice: String, expectedMsats: Long): ZapException? {
+        val invoiceMsats = bolt11AmountMsats(invoice) ?: return null
+        return if (invoiceMsats == expectedMsats) {
+            null
+        } else {
+            ZapException(
+                "Lightning service returned invoice for ${satsCeil(invoiceMsats)} sats " +
+                    "instead of ${satsCeil(expectedMsats)} sats"
+            )
+        }
+    }
+
+    private fun bolt11AmountMsats(invoice: String): Long? {
+        val lower = invoice.trim().lowercase()
+        val separator = lower.lastIndexOf('1')
+        if (separator <= 0) return null
+        val hrp = lower.take(separator)
+        val amountPart = when {
+            hrp.startsWith("lnbcrt") -> hrp.removePrefix("lnbcrt")
+            hrp.startsWith("lnbc") -> hrp.removePrefix("lnbc")
+            hrp.startsWith("lntb") -> hrp.removePrefix("lntb")
+            else -> return null
+        }
+        if (amountPart.isEmpty()) return null
+
+        val suffix = amountPart.last()
+        val digits = if (suffix in setOf('m', 'u', 'n', 'p')) {
+            amountPart.dropLast(1)
+        } else {
+            amountPart
+        }
+        val amount = digits.toLongOrNull() ?: return null
+        return runCatching {
+            when (suffix) {
+                'm' -> Math.multiplyExact(amount, 100_000_000L)
+                'u' -> Math.multiplyExact(amount, 100_000L)
+                'n' -> Math.multiplyExact(amount, 100L)
+                'p' -> amount.takeIf { it % 10L == 0L }?.div(10L)
+                else -> Math.multiplyExact(amount, 100_000_000_000L)
+            }
+        }.getOrNull()
+    }
 
 }

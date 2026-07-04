@@ -53,9 +53,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.BuildConfig
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalOpenZapSettings
+import com.unsilence.app.ui.compose.ArticleCommentTarget
+import com.unsilence.app.ui.compose.ComposeScreen
+import com.unsilence.app.ui.drafts.DraftsScreen
+import com.unsilence.app.ui.drafts.DraftsViewModel
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayDiscoveryScreen
@@ -85,6 +92,9 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(
         key = "settings-${LocalAppSessionKey.current}",
     ),
+    draftsViewModel: DraftsViewModel = hiltViewModel(
+        key = "drafts-settings-${LocalAppSessionKey.current}",
+    ),
 ) {
     BackHandler(onBack = onDismiss)
     var showRelays by remember { mutableStateOf(false) }
@@ -93,8 +103,11 @@ fun SettingsScreen(
     var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
     var showCustomEmojis by remember { mutableStateOf(false) }
+    var showDrafts by remember { mutableStateOf(false) }
+    var draftToResume by remember { mutableStateOf<Draft?>(null) }
     var showLogoutConfirm by remember { mutableStateOf(false) }
     val openZapSettings = LocalOpenZapSettings.current
+    val drafts by draftsViewModel.drafts.collectAsStateWithLifecycle()
 
     // One-shot snapshots, read on open (lean — no ticker).
     val profile = remember(viewModel) { viewModel.ownProfile() }
@@ -178,6 +191,12 @@ fun SettingsScreen(
                 // ── CONTENT & SAFETY ───────────────────────────────────────────
                 GroupLabel("Content & safety")
                 SettingsRow(Icons.Filled.Security, "Filters", "Mute words, hide unwanted content") { showFilters = true }
+                SettingsRow(
+                    Icons.Filled.Drafts,
+                    "Drafts",
+                    "Saved notes for this account",
+                    badge = drafts.takeIf { it.isNotEmpty() }?.size?.toString(),
+                ) { showDrafts = true }
                 SettingsRow(Icons.Filled.EmojiEmotions, "Custom emojis", "Manage your emoji packs") { showCustomEmojis = true }
                 SoonRow(Icons.Filled.AccountTree, "Social graph")
 
@@ -185,7 +204,6 @@ fun SettingsScreen(
                 GroupLabel("Advanced")
                 SoonRow(Icons.Filled.Key, "Keys")
                 SoonRow(Icons.Filled.Code, "Console")
-                SoonRow(Icons.Filled.Drafts, "Drafts")
 
                 // ── Danger zone ────────────────────────────────────────────────
                 Column(modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = Spacing.large)) {
@@ -234,7 +252,38 @@ fun SettingsScreen(
     if (showMediaUpload) MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
     if (showFilters) FiltersScreen(onDismiss = { showFilters = false })
     if (showCustomEmojis) com.unsilence.app.ui.settings.CustomEmojisScreen(onDismiss = { showCustomEmojis = false })
+    if (showDrafts) {
+        DraftsScreen(
+            onDismiss = { showDrafts = false },
+            onResume = { draft ->
+                showDrafts = false
+                draftToResume = draft
+            },
+            viewModel = draftsViewModel,
+        )
+    }
+    draftToResume?.let { draft ->
+        ComposeScreen(
+            onDismiss = { draftToResume = null },
+            replyToEventId = (draft.context as? DraftContext.Reply)?.parentId,
+            quoteEventId = (draft.context as? DraftContext.Quote)?.eventId,
+            articleCommentTarget = (draft.context as? DraftContext.ArticleComment)?.toArticleCommentTarget(),
+            initialDraft = draft,
+        )
+    }
 }
+
+private fun DraftContext.ArticleComment.toArticleCommentTarget(): ArticleCommentTarget =
+    ArticleCommentTarget(
+        articleId = articleId,
+        articleCoord = articleCoord,
+        articlePubkey = articlePubkey,
+        articleRelayHint = articleRelayHint,
+        parentId = parentId,
+        parentKind = parentKind,
+        parentPubkey = parentPubkey,
+        parentRelayHint = parentRelayHint,
+    )
 
 @Composable
 private fun GroupLabel(text: String) {

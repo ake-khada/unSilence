@@ -147,6 +147,25 @@ private fun NotificationTimestamp(
 }
 
 @Composable
+private fun NotificationPreviewWithTimestamp(
+    text: String,
+    createdAt: Long,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NotificationPreviewText(
+            text = text,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(Spacing.small))
+        NotificationTimestamp(createdAt)
+    }
+}
+
+@Composable
 private fun SingleNotificationRow(
     row: NotificationRow.Single,
     onNoteClick: (String) -> Unit,
@@ -201,9 +220,7 @@ private fun SingleNotificationRow(
 
         // Natural-height text block, centered against the avatar by the Row's
         // CenterVertically + tight line heights → two lines land just inside the
-        // avatar height, aligned, without clipping. The timestamp lives OUTSIDE
-        // this column (below), so BOTH lines are width-bounded to its left — the
-        // content "…" ends just before the date, never under it.
+        // avatar height, aligned, without clipping.
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 NotificationPrimaryText(
@@ -214,16 +231,18 @@ private fun SingleNotificationRow(
                 )
                 Spacer(Modifier.width(4.dp))
                 NotificationPrimaryText(text = action, color = TextSecondary)
+                if (row.targetNoteContent.isBlank()) {
+                    Spacer(Modifier.width(Spacing.small))
+                    NotificationTimestamp(row.createdAt)
+                }
             }
             if (row.targetNoteContent.isNotBlank()) {
-                NotificationPreviewText(row.targetNoteContent.trim())
+                NotificationPreviewWithTimestamp(
+                    text = row.targetNoteContent.trim(),
+                    createdAt = row.createdAt,
+                )
             }
         }
-
-        // Top-aligned so it sits with the name line; natural width, so the text
-        // column above stops before it.
-        Spacer(Modifier.width(Spacing.small))
-        NotificationTimestamp(row.createdAt, modifier = Modifier.align(Alignment.Top))
     }
 }
 
@@ -249,8 +268,8 @@ private fun GroupedNotificationRow(
             .clickable(enabled = row.targetNoteId != null) { row.targetNoteId?.let { onNoteClick(it) } }
             .padding(horizontal = Spacing.medium, vertical = 9.dp),
     ) {
-        // Content column — width-bounded to the left of the timestamp (below), so
-        // the strip, verb, and preview lines all stop before the date.
+        // Content column: the timestamp lives on the note-preview line, so the
+        // date follows the text ellipsis instead of floating on the actor strip.
         Column(modifier = Modifier.weight(1f)) {
             // Strip line: type icon → overlapping avatars.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -286,20 +305,21 @@ private fun GroupedNotificationRow(
                         fontWeight = FontWeight.Medium,
                     )
                 }
+                if (row.targetNoteContent.isBlank()) {
+                    Spacer(Modifier.width(Spacing.small))
+                    NotificationTimestamp(row.mostRecentAt)
+                }
             }
 
             // Preview line: one dim line, same metrics as single rows.
             if (row.targetNoteContent.isNotBlank()) {
-                NotificationPreviewText(
+                NotificationPreviewWithTimestamp(
                     text = row.targetNoteContent.trim(),
+                    createdAt = row.mostRecentAt,
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
         }
-
-        // Top-aligned with the strip line; natural width, so the column stops before it.
-        Spacer(Modifier.width(Spacing.small))
-        NotificationTimestamp(row.mostRecentAt, modifier = Modifier.align(Alignment.Top))
     }
 
     if (showActors) {

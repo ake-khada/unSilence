@@ -27,6 +27,7 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.repository.UserRepository
 import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
+import com.unsilence.app.data.wallet.WalletPaymentPendingException
 import com.unsilence.app.data.wallet.ZapRepository
 import com.unsilence.app.data.wallet.ZapRequest
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -65,6 +66,11 @@ private const val CARD_WINDOW_REFERENCE_CAP = 4
 private const val CARD_WINDOW_ARTICLE_CAP = 2
 private const val CARD_WINDOW_ENGAGEMENT_LOOKAHEAD = 6
 private const val CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS = 250L
+private const val ZAP_REQUEST_MAX_RELAYS = 6
+private const val ZAP_REQUEST_MAX_AUTHOR_WRITE_RELAYS = 4
+private const val ZAP_REQUEST_MAX_OWN_READ_RELAYS = 2
+private const val ZAP_REQUEST_MAX_SOURCE_RELAYS = 2
+private const val ZAP_REQUEST_MAX_HINT_RELAYS = 1
 
 /**
  * Shared ViewModel for note actions (react, repost) that works across FeedScreen and ThreadScreen.
@@ -279,11 +285,20 @@ class NoteActionsViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             _zapResult.collect { (id, result) ->
-                _zapFlashState.value = ZapFlashState(
-                    noteId = id,
-                    success = result.isSuccess,
-                    message = result.exceptionOrNull()?.message,
-                )
+                if (result.isSuccess) {
+                    _zapFlashState.value = ZapFlashState(
+                        noteId = id,
+                        success = true,
+                    )
+                } else {
+                    val error = result.exceptionOrNull()
+                    val message = if (error is WalletPaymentPendingException) {
+                        error.message ?: "Wallet has not confirmed this zap yet"
+                    } else {
+                        "Zap failed: ${error?.message ?: "unknown error"}"
+                    }
+                    _actionError.emit(message)
+                }
             }
         }
     }
@@ -329,6 +344,11 @@ class NoteActionsViewModel @Inject constructor(
             relayHints        = memoryEventStore.relayHintsForEvent(targetId),
             fallbackHint      = fallbackHint,
             blocked           = own?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() } ?: emptySet(),
+            maxRelays         = ZAP_REQUEST_MAX_RELAYS,
+            maxAuthorWrite    = ZAP_REQUEST_MAX_AUTHOR_WRITE_RELAYS,
+            maxOwnRead        = ZAP_REQUEST_MAX_OWN_READ_RELAYS,
+            maxSourceRelays   = ZAP_REQUEST_MAX_SOURCE_RELAYS,
+            maxRelayHints     = ZAP_REQUEST_MAX_HINT_RELAYS,
         ).ifEmpty { GLOBAL_RELAY_URLS }
     }
 
@@ -422,6 +442,7 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     fun zap(eventId: String, eventPubkey: String, relayUrl: String, request: ZapRequest) {
+        if (eventId in _zapLoading.value) return
         val amountSats = request.amountSats
         _zapLoading.value = _zapLoading.value + eventId
         viewModelScope.launch(Dispatchers.IO) {
@@ -537,10 +558,12 @@ class NoteActionsViewModel @Inject constructor(
      * profiles resolve even when not pre-fetched by hydrateProfiles.
      */
     suspend fun lookupProfile(pubkey: String): UserEntity? {
-        memoryEventStore.getUserEntity(pubkey)?.let { return it }
+        val cached = memoryEventStore.getUserEntity(pubkey)
+        if (cached != null && !cached.picture.isNullOrBlank()) return cached
         // Trigger profile fetch — fetchMissingProfiles pre-filters via
         // profileResolver.filterUnresolved() and has in-flight guards.
         userRepository.fetchMissingProfiles(listOf(pubkey))
+        if (cached != null) return cached
         return withTimeoutOrNull(5_000L) {
             memoryEventStore.userEntityFlow(pubkey).filterNotNull().first()
         }
@@ -772,15 +795,32 @@ internal fun zapReceiptRelays(
     relayHints: Collection<String>,
     fallbackHint: String?,
     blocked: Set<String>,
+    maxRelays: Int = Int.MAX_VALUE,
+    maxAuthorWrite: Int = Int.MAX_VALUE,
+    maxOwnRead: Int = Int.MAX_VALUE,
+    maxSourceRelays: Int = Int.MAX_VALUE,
+    maxRelayHints: Int = Int.MAX_VALUE,
 ): List<String> {
     val blockedNorm = blocked.mapNotNull { normalizeRelayUrl(it) }.toSet()
-    return buildList {
-        addAll(targetAuthorWrite)
-        addAll(ownRead)
-        addAll(eventSeen)
-        addAll(relayHints)
-        fallbackHint?.takeIf { it.isNotBlank() }?.let { add(it) }
-    }.mapNotNull { normalizeRelayUrl(it) }
-        .filter { it !in blockedNorm }
-        .distinct()
+    if (maxRelays <= 0) return emptyList()
+    val result = ArrayList<String>(maxRelays.coerceAtMost(8))
+
+    fun append(urls: Iterable<String>, maxFromBucket: Int) {
+        if (maxFromBucket <= 0 || result.size >= maxRelays) return
+        var addedFromBucket = 0
+        for (raw in urls) {
+            if (addedFromBucket >= maxFromBucket || result.size >= maxRelays) break
+            val normalized = normalizeRelayUrl(raw) ?: continue
+            if (normalized in blockedNorm || normalized in result) continue
+            result.add(normalized)
+            addedFromBucket++
+        }
+    }
+
+    append(targetAuthorWrite, maxAuthorWrite)
+    append(ownRead, maxOwnRead)
+    append(eventSeen, maxSourceRelays)
+    append(relayHints, maxRelayHints)
+    fallbackHint?.takeIf { it.isNotBlank() }?.let { append(listOf(it), 1) }
+    return result
 }

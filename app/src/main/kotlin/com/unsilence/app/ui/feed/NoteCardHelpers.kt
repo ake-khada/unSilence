@@ -226,7 +226,8 @@ internal fun AvatarImage(
     val liveProfile = profileFlow?.invoke(pubkey)
         ?.collectAsStateWithLifecycle()?.value
 
-    val effectivePicture = liveProfile?.picture ?: picture
+    val effectivePicture = liveProfile?.picture?.takeIf { it.isNotBlank() }
+        ?: picture?.takeIf { it.isNotBlank() }
 
     // Trigger profile fetch when picture is missing — debounced to avoid
     // thundering-herd on initial feed render where many avatars are null.

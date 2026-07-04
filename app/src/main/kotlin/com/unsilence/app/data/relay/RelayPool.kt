@@ -1467,10 +1467,14 @@ class RelayPool @Inject constructor(
      * NIP-45 COUNT query: send a COUNT request to a single relay and wait for the response.
      * Returns the count, or null if the relay doesn't support NIP-45 or times out.
      */
-    suspend fun sendCount(relayUrl: String, filter: JsonObject): Long? =
+    suspend fun sendCount(
+        relayUrl: String,
+        filter: JsonObject,
+        timeoutMs: Long = 10_000L,
+    ): Long? =
         withContext(Dispatchers.IO) {
+            val subId = "count-${System.nanoTime()}"
             try {
-                val subId = "count-${System.nanoTime()}"
                 val countRequest = buildJsonArray {
                     add(JsonPrimitive("COUNT"))
                     add(JsonPrimitive(subId))
@@ -1484,9 +1488,14 @@ class RelayPool @Inject constructor(
 
                 conn.send(countRequest)
 
-                withTimeoutOrNull(10_000) { deferred.await() }
-                    .also { countCallbacks.remove(subId) }
-            } catch (_: Exception) { null }
+                withTimeoutOrNull(timeoutMs) { deferred.await() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            } finally {
+                countCallbacks.remove(subId)
+            }
         }
 
     /**

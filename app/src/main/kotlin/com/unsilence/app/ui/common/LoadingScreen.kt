@@ -9,6 +9,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.unsilence.app.ui.theme.Black
 
+/**
+ * Full-screen loading state: line-to-wave animation on true black.
+ *
+ * Call sites: FeedScreen's Crossfade loading branch and RootScreen's
+ * isLoggingOut transition. The caller owns the exit fade; keep this
+ * composable zero-arg.
+ */
 @Composable
 fun LoadingScreen() {
     Box(

@@ -2,14 +2,21 @@ package com.unsilence.app.data.relay
 
 import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.UserEntity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -32,6 +39,7 @@ import javax.inject.Singleton
 import kotlin.coroutines.resume
 
 private const val TAG = "TrendingClient"
+private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
 
 data class TrendingHashtag(val tag: String, val score: Double)
 
@@ -50,64 +58,121 @@ data class TrendingData(
     val profiles: List<TrendingProfile>,
 )
 
-@Singleton
-class TrendingClient @Inject constructor(
-    private val okHttpClient: OkHttpClient,
-    private val memoryEventStore: MemoryEventStore,
-    private val relayPool: RelayPool,
-) {
-    /** Staleness guard: don't fetch more than once per 30 minutes. */
-    private val lastFetchMs = AtomicLong(0L)
-    @Volatile private var cachedData: TrendingData? = null
-    private val fetchMutex = Mutex()
+internal interface TrendingTransport {
+    suspend fun fetchTrendingEvents(): List<JsonObject>?
+    suspend fun warmCountRelay()
+    suspend fun fetchFollowerCount(pubkey: String): Long?
+}
 
-    /** Ping-free client for the short-lived trending WS — the base client's
-     *  25s pingInterval would schedule keepalives on a ≤5s one-shot socket.
-     *  newBuilder() shares the base client's pools, so this is cheap. */
-    private val wsClient by lazy {
-        okHttpClient.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
+@Singleton
+class TrendingClient internal constructor(
+    private val transport: TrendingTransport,
+    private val profileLookup: (String) -> UserEntity?,
+    private val scope: CoroutineScope,
+) {
+    @Inject constructor(
+        okHttpClient: OkHttpClient,
+        memoryEventStore: MemoryEventStore,
+        relayPool: RelayPool,
+    ) : this(
+        transport = NetworkTrendingTransport(okHttpClient, relayPool),
+        profileLookup = memoryEventStore::getUserEntity,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    )
+
+    private val lastFetchMs = AtomicLong(0L)
+    private val refreshMutex = Mutex()
+
+    private val _data = MutableStateFlow<TrendingData?>(null)
+    val data: StateFlow<TrendingData?> = _data.asStateFlow()
+
+    fun refreshIfStale(forceRefresh: Boolean = false) {
+        if (!forceRefresh && isFresh()) return
+        scope.launch { refresh(forceRefresh) }
     }
 
     suspend fun fetch(forceRefresh: Boolean = false): TrendingData? {
-        val now = System.currentTimeMillis()
-        val cached = cachedData
-        if (!forceRefresh && cached != null && now - lastFetchMs.get() < STALENESS_MS) {
-            return cached
-        }
+        refresh(forceRefresh)
+        return data.value
+    }
 
-        return fetchMutex.withLock {
-            val lockedNow = System.currentTimeMillis()
-            val lockedCached = cachedData
-            if (!forceRefresh && lockedCached != null && lockedNow - lastFetchMs.get() < STALENESS_MS) {
-                return@withLock lockedCached
+    internal suspend fun refresh(forceRefresh: Boolean = false) {
+        if (!forceRefresh && isFresh()) return
+        refreshMutex.withLock {
+            if (!forceRefresh && isFresh()) return
+            try {
+                doRefresh()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Trending refresh failed: ${e.message}")
             }
-
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    fetchFromTrendingRelay()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Trending fetch failed: ${e.message}")
-                    null
-                }
-            }
-
-            if (result != null) {
-                cachedData = result
-                lastFetchMs.set(System.currentTimeMillis())
-            }
-            result ?: lockedCached
         }
     }
 
-    /**
-     * Connect to trending.relays.land, collect kind-1 events, then derive
-     * hashtag frequencies and top author profiles client-side.
-     */
-    private suspend fun fetchFromTrendingRelay(): TrendingData? {
-        val events = fetchTrendingEvents() ?: return null
-        if (events.isEmpty()) return null
+    private fun isFresh(): Boolean =
+        _data.value != null && System.currentTimeMillis() - lastFetchMs.get() < STALENESS_MS
 
-        // Client-side aggregation: t-tag frequencies + author frequencies
+    private suspend fun doRefresh(): Unit = coroutineScope {
+        val startMs = System.currentTimeMillis()
+        val warm = launch {
+            try {
+                transport.warmCountRelay()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "COUNT relay warm failed: ${e.message}")
+            }
+        }
+
+        val events = transport.fetchTrendingEvents()
+        if (events.isNullOrEmpty()) {
+            warm.cancel()
+            return@coroutineScope
+        }
+        val (topHashtags, topAuthorPubkeys) = aggregate(events)
+        if (topHashtags.isEmpty() && topAuthorPubkeys.isEmpty()) {
+            warm.cancel()
+            return@coroutineScope
+        }
+
+        val previousCounts = _data.value?.profiles
+            ?.associate { it.pubkey to it.followerCount }
+            .orEmpty()
+        _data.value = TrendingData(
+            hashtags = topHashtags,
+            profiles = topAuthorPubkeys.map { pubkey ->
+                toProfile(pubkey, previousCounts[pubkey] ?: 0L)
+            },
+        )
+        lastFetchMs.set(System.currentTimeMillis())
+        val phase1Ms = System.currentTimeMillis() - startMs
+
+        warm.join()
+        val enriched = topAuthorPubkeys.map { pubkey ->
+            async {
+                val count = try {
+                    withTimeoutOrNull(COUNT_TIMEOUT_MS) {
+                        transport.fetchFollowerCount(pubkey)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+                toProfile(pubkey, count ?: previousCounts[pubkey] ?: 0L)
+            }
+        }.awaitAll()
+
+        _data.value = TrendingData(hashtags = topHashtags, profiles = enriched)
+        Log.w(
+            TAG,
+            "Trending: ${topHashtags.size} tags, ${enriched.size} profiles from ${events.size} " +
+                "events (phase1=${phase1Ms}ms total=${System.currentTimeMillis() - startMs}ms)",
+        )
+    }
+
+    private fun aggregate(events: List<JsonObject>): Pair<List<TrendingHashtag>, List<String>> {
         val tagCounts = mutableMapOf<String, Int>()
         val authorCounts = mutableMapOf<String, Int>()
 
@@ -129,20 +194,43 @@ class TrendingClient @Inject constructor(
             .sortedByDescending { it.value }
             .take(TRENDING_CANDIDATE_LIMIT)
             .map { TrendingHashtag(it.key, it.value.toDouble()) }
-
         val topAuthorPubkeys = authorCounts.entries
             .sortedByDescending { it.value }
             .take(TRENDING_CANDIDATE_LIMIT)
             .map { it.key }
 
-        val profiles = enrichProfiles(topAuthorPubkeys)
-
-        Log.d(TAG, "Trending: ${topHashtags.size} tags, ${profiles.size} profiles from ${events.size} events")
-        return TrendingData(hashtags = topHashtags, profiles = profiles)
+        return topHashtags to topAuthorPubkeys
     }
 
-    /** Standard NIP-01 REQ for kind 1, limit 200. Collects until EOSE or 5s timeout. */
-    private suspend fun fetchTrendingEvents(): List<JsonObject>? {
+    private fun toProfile(pubkey: String, followerCount: Long): TrendingProfile {
+        val user = profileLookup(pubkey)
+        return TrendingProfile(
+            pubkey = pubkey,
+            name = user?.name,
+            displayName = user?.displayName,
+            picture = user?.picture,
+            about = user?.about,
+            nip05 = user?.nip05,
+            followerCount = followerCount,
+        )
+    }
+
+    companion object {
+        private const val STALENESS_MS = 10 * 60 * 1000L
+        private const val TRENDING_CANDIDATE_LIMIT = 32
+        private const val COUNT_TIMEOUT_MS = 2_500L
+    }
+}
+
+private class NetworkTrendingTransport(
+    okHttpClient: OkHttpClient,
+    private val relayPool: RelayPool,
+) : TrendingTransport {
+    private val wsClient by lazy {
+        okHttpClient.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
+    }
+
+    override suspend fun fetchTrendingEvents(): List<JsonObject>? {
         return withTimeoutOrNull(5_000) {
             suspendCancellableCoroutine { cont ->
                 val subId = "trending-${System.nanoTime()}"
@@ -167,9 +255,7 @@ class TrendingClient @Inject constructor(
                         try {
                             val arr = Json.parseToJsonElement(text).jsonArray
                             when (arr[0].jsonPrimitive.content) {
-                                "EVENT" -> {
-                                    events.add(arr[2].jsonObject)
-                                }
+                                "EVENT" -> events.add(arr[2].jsonObject)
                                 "EOSE" -> {
                                     webSocket.send(buildJsonArray {
                                         add(JsonPrimitive("CLOSE"))
@@ -199,45 +285,21 @@ class TrendingClient @Inject constructor(
         }
     }
 
-    /**
-     * For each pubkey: look up profile in MES, fetch follower count via
-     * antiprimal NIP-45 COUNT (parallel).
-     */
-    private suspend fun enrichProfiles(pubkeys: List<String>): List<TrendingProfile> =
-        coroutineScope {
-            relayPool.connectAndAwait(
-                listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true,
-            )
-
-            pubkeys.map { pubkey ->
-                async {
-                    val user = memoryEventStore.getUserEntity(pubkey)
-                    val followerCount = try {
-                        relayPool.sendCount(
-                            relayUrl = ANTIPRIMAL_RELAY_URL,
-                            filter = buildJsonObject {
-                                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                            },
-                        ) ?: 0L
-                    } catch (_: Exception) { 0L }
-
-                    TrendingProfile(
-                        pubkey = pubkey,
-                        name = user?.name,
-                        displayName = user?.displayName,
-                        picture = user?.picture,
-                        about = user?.about,
-                        nip05 = user?.nip05,
-                        followerCount = followerCount,
-                    )
-                }
-            }.awaitAll()
-        }
-
-    companion object {
-        private const val STALENESS_MS = 30 * 60 * 1000L // 30 minutes
-        private const val TRENDING_CANDIDATE_LIMIT = 32
-        private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
+    override suspend fun warmCountRelay() {
+        relayPool.connectAndAwait(
+            listOf(ANTIPRIMAL_RELAY_URL),
+            timeoutMs = 3_000,
+            forceEvict = true,
+        )
     }
+
+    override suspend fun fetchFollowerCount(pubkey: String): Long? =
+        relayPool.sendCount(
+            relayUrl = ANTIPRIMAL_RELAY_URL,
+            filter = buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+            },
+            timeoutMs = 2_500L,
+        )
 }

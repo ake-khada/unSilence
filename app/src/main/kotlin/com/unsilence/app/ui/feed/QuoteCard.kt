@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,6 +47,7 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.StateFlow
 
 /** Single-phase embedded quote resolution data. */
 private data class QuoteResolution(
@@ -77,6 +79,7 @@ internal fun QuoteCard(
     onHashtagClick: (String) -> Unit = {},
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     hasCachedOgMetadata: ((String) -> Boolean)? = null,
@@ -163,7 +166,10 @@ internal fun QuoteCard(
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
         val loadedEvent = quoteData.event
-        val author = quoteData.author
+        val liveAuthor = loadedEvent?.pubkey?.let { pubkey ->
+            profileFlow?.invoke(pubkey)?.collectAsStateWithLifecycle()?.value
+        }
+        val author = liveAuthor ?: quoteData.author
         val eventModel = quoteData.model
         if (loadedEvent != null) {
             Column {
@@ -175,6 +181,7 @@ internal fun QuoteCard(
                         modifier      = Modifier.size(24.dp),
                         sizeDp        = 24.dp,
                         lookupProfile = lookupProfile,
+                        profileFlow   = profileFlow,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -209,6 +216,7 @@ internal fun QuoteCard(
                         onAuthorClick       = onAuthorClick,
                         onHashtagClick      = onHashtagClick,
                         lookupProfile       = lookupProfile,
+                        profileFlow         = profileFlow,
                         lookupEvent         = lookupEvent,
                         lookupModel         = lookupModel,
                         fetchOgMetadata     = fetchOgMetadata,

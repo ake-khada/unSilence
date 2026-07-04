@@ -19,6 +19,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Kind-6 repost header: "X boosted · Nh ago" with mini avatar.
@@ -31,6 +32,8 @@ internal fun RepostHeader(
     sourcePubkey: String,
     sourceCreatedAt: Long,
     sourceProfile: UserEntity?,
+    lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -54,10 +57,12 @@ internal fun RepostHeader(
         )
         Spacer(Modifier.width(Spacing.micro))
         AvatarImage(
-            pubkey   = sourcePubkey,
-            picture  = sourceProfile?.picture,
-            modifier = Modifier.size(16.dp),
-            sizeDp   = 16.dp,
+            pubkey        = sourcePubkey,
+            picture       = sourceProfile?.picture,
+            modifier      = Modifier.size(16.dp),
+            sizeDp        = 16.dp,
+            lookupProfile = lookupProfile,
+            profileFlow   = profileFlow,
         )
         Spacer(Modifier.width(Spacing.micro))
         Text(

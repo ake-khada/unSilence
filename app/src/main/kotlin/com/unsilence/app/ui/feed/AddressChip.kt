@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,6 +29,7 @@ import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Tappable inline card for an addressable event (naddr: kind + pubkey + d-tag).
@@ -40,11 +42,15 @@ internal fun AddressChip(
     segment: Segment.QuoteAddress,
     onNoteClick: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val author by produceState<UserEntity?>(null, segment.author) {
+    val lookedUpAuthor by produceState<UserEntity?>(null, segment.author) {
         if (lookupProfile != null) value = lookupProfile(segment.author)
     }
+    val liveAuthor = profileFlow?.invoke(segment.author)
+        ?.collectAsStateWithLifecycle()?.value
+    val author = liveAuthor ?: lookedUpAuthor
 
     val kindLabel = when (segment.kind) {
         30023 -> "Article"
@@ -68,6 +74,8 @@ internal fun AddressChip(
                     picture  = author?.picture,
                     modifier = Modifier.size(24.dp),
                     sizeDp   = 24.dp,
+                    lookupProfile = lookupProfile,
+                    profileFlow = profileFlow,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(

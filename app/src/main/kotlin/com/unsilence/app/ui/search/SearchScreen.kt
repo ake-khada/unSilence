@@ -74,6 +74,7 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
+import com.unsilence.app.ui.common.ShimmerTrendingDiscovery
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.LocalOpenEmojiSettings
@@ -96,6 +97,8 @@ import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.sample
 
@@ -142,10 +145,9 @@ fun SearchScreen(
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
 
-    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
-    LaunchedEffect(zapFlash) {
-        val flash = zapFlash ?: return@LaunchedEffect
-        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
+    // ── Action failure snackbar ──────────────────────────────────────────────
+    LaunchedEffect(Unit) {
+        actionsViewModel.actionError.collect { showSnackbar(it) }
     }
 
     val focusRequester = remember { FocusRequester() }
@@ -206,6 +208,7 @@ fun SearchScreen(
 
     DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
     LaunchedEffect(Unit) {
+        viewModel.refreshTrendingIfStale()
         // Only auto-focus (open keyboard) if there's no pre-filled query
         if (initialQuery == null) focusRequester.requestFocus()
     }
@@ -355,16 +358,20 @@ fun SearchScreen(
         ) {
             when {
                 !state.hasSearched -> {
-                    TrendingDiscovery(
-                        hashtags = trendingHashtags,
-                        users = trendingUsers,
-                        onHashtagClick = { tag ->
-                            viewModel.search("#$tag")
-                            pendingSearch = true
-                            selectedTab = 3
-                        },
-                        onUserClick = onAuthorClickDismiss,
-                    )
+                    if (trendingHashtags.isEmpty() && trendingUsers.isEmpty()) {
+                        ShimmerTrendingDiscovery()
+                    } else {
+                        TrendingDiscovery(
+                            hashtags = trendingHashtags,
+                            users = trendingUsers,
+                            onHashtagClick = { tag ->
+                                viewModel.search("#$tag")
+                                pendingSearch = true
+                                selectedTab = 3
+                            },
+                            onUserClick = onAuthorClickDismiss,
+                        )
+                    }
                 }
 
                 state.loading && state.noteResults.isEmpty() && state.peopleResults.isEmpty() -> {
@@ -587,7 +594,7 @@ private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
                 )
             }
             Text(
-                text     = "${user.pubkey.take(6)}…${user.pubkey.takeLast(4)}",
+                text     = remember(user.pubkey) { shortNpub(user.pubkey) },
                 color    = TextSecondary,
                 fontSize = AppType.footnote,
             )
@@ -831,10 +838,9 @@ private fun TrendingUserRow(user: UserEntity, onClick: () -> Unit) {
                 )
             }
             // npub + follower count in mono
+            val npub = remember(user.pubkey) { shortNpub(user.pubkey) }
             val meta = buildString {
-                append(user.pubkey.take(6))
-                append("\u2026")
-                append(user.pubkey.takeLast(4))
+                append(npub)
                 if (user.followerCount != null && user.followerCount > 0) {
                     append(" \u00B7 ")
                     append(formatCount(user.followerCount))
@@ -857,4 +863,10 @@ private fun formatCount(count: Long): String = when {
     count >= 1_000_000 -> "${count / 1_000_000}.${(count % 1_000_000) / 100_000}M"
     count >= 1_000     -> "${count / 1_000}.${(count % 1_000) / 100}k"
     else               -> count.toString()
+}
+
+private fun shortNpub(pubkeyHex: String): String {
+    val npub = runCatching { pubkeyHex.hexToByteArray().toNpub() }.getOrNull()
+    val value = npub ?: pubkeyHex
+    return if (value.length > 18) "${value.take(10)}\u2026${value.takeLast(6)}" else value
 }

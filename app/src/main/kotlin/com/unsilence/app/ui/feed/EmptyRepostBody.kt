@@ -33,6 +33,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.StateFlow
 
 private data class EmptyRepostState(
     val event: EventEntity? = null,
@@ -48,6 +49,7 @@ fun EmptyRepostBody(
     targetAuthorPubkey: String?,
     lookupEventWithAuthor: suspend (String, List<String>, String?) -> EventEntity?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     lookupModel: ((String) -> EventModel?)?,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     hasCachedOgMetadata: ((String) -> Boolean)? = null,
@@ -114,6 +116,7 @@ fun EmptyRepostBody(
                     onNoteClick         = onNoteClick,
                     onAuthorClick       = onAuthorClick,
                     lookupProfile       = lookupProfile,
+                    profileFlow         = profileFlow,
                     lookupEvent         = { id, h -> lookupEventWithAuthor(id, h, null) },
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,

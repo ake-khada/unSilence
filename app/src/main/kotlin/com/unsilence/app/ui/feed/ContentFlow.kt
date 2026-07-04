@@ -34,6 +34,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.StateFlow
 
 /** Maximum number of OG preview cards rendered per note. */
 private const val MAX_OG_CARDS = 1
@@ -63,6 +64,7 @@ internal fun ContentFlow(
     onAuthorClick: (String) -> Unit,
     onHashtagClick: (String) -> Unit = {},
     lookupProfile: (suspend (String) -> UserEntity?)?,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
     lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
@@ -257,6 +259,7 @@ internal fun ContentFlow(
                             { id, hints -> lookupEventWithAuthor.invoke(id, hints, seg.author) }
                         } else lookupEvent,
                         lookupProfile   = lookupProfile,
+                        profileFlow     = profileFlow,
                         lookupModel     = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,
                         hasCachedOgMetadata = hasCachedOgMetadata,
@@ -299,6 +302,7 @@ internal fun ContentFlow(
                             segment       = seg,
                             onNoteClick   = onNoteClick,
                             lookupProfile = lookupProfile,
+                            profileFlow   = profileFlow,
                             modifier      = chipMod,
                         )
                     }

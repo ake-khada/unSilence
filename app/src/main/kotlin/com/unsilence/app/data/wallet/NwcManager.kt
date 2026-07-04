@@ -11,18 +11,29 @@ import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
+import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -42,7 +53,12 @@ private const val PREFS_FILE = "unsilence_nwc"
 private const val KEY_PUBKEY = "wallet_pubkey"
 private const val KEY_RELAY  = "wallet_relay"
 private const val KEY_SECRET = "wallet_secret"
+private const val KEY_OWNER  = "owner_pubkey"
 private const val BALANCE_TTL_MS = 60_000L
+private const val PAYMENT_TIMEOUT_MS = 45_000L
+private const val PAYMENT_READY_TIMEOUT_MS = 7_000L
+
+class WalletPaymentPendingException(message: String) : Exception(message)
 
 /** Parsed fields from a nostr+walletconnect:// URI. */
 data class NwcConnection(
@@ -87,6 +103,10 @@ class NwcManager @Inject constructor(
 
     /** Balance TTL cache: (timestampMs, msats) — settings screens query on every entry. */
     @Volatile private var lastBalance: Pair<Long, Long>? = null
+    @Volatile private var paymentSession: PaymentSession? = null
+    private val paymentSessionLock = Any()
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val isConfigured: Boolean
         get() = prefs.contains(KEY_PUBKEY)
@@ -97,6 +117,7 @@ class NwcManager @Inject constructor(
      */
     fun save(uri: String): Boolean {
         val conn = parseUri(uri.trim()) ?: return false
+        closePaymentSession("wallet changed")
         prefs.edit()
             .putString(KEY_PUBKEY, conn.walletPubkey)
             .putString(KEY_RELAY,  conn.relayUrl)
@@ -108,9 +129,25 @@ class NwcManager @Inject constructor(
     }
 
     fun clear() {
+        closePaymentSession("wallet cleared")
         prefs.edit().clear().apply()
         lastBalance = null
         Log.d(TAG, "NWC connection cleared")
+    }
+
+    /**
+     * Backstop for fast account switches where teardown can bail behind a newer
+     * bootstrap. Normal logout clears NWC credentials; this catches credentials
+     * that survive only because that teardown was intentionally skipped.
+     */
+    fun resetIfOwnerChanged(ownerPubkeyHex: String) {
+        val owner = ownerPubkeyHex.lowercase()
+        val stampedOwner = prefs.getString(KEY_OWNER, null)?.lowercase()
+        if (stampedOwner != null && stampedOwner != owner) {
+            clear()
+            Log.w(TAG, "OWNER-FENCE: cleared NWC credentials for previous account")
+        }
+        prefs.edit().putString(KEY_OWNER, owner).apply()
     }
 
     fun connection(): NwcConnection? {
@@ -120,17 +157,7 @@ class NwcManager @Inject constructor(
         return NwcConnection(pubkey, relay, secret)
     }
 
-    /** Pre-warmed NWC WebSocket handle. Call [warmUp] to start connecting, [payInvoice] to use. */
-    data class WarmSocket(
-        val ws: WebSocket,
-        val deferred: CompletableDeferred<Result<Unit>>,
-        val nwcPrivKeyBytes: ByteArray,
-        val walletPubBytes: ByteArray,
-        val nwcPubkeyHex: String,
-        val nwcSigner: NostrSignerInternal,
-        val walletPubkey: String,
-        val expectedRequestId: AtomicReference<String?>,
-    )
+    internal class WarmSocket internal constructor(internal val sessionKey: String)
 
     /** Crypto material derived from the stored connection — shared by [warmUp] and [getBalance]. */
     private class NwcCredentials(
@@ -155,158 +182,305 @@ class NwcManager @Inject constructor(
         )
     }
 
-    /**
-     * Start connecting the NWC WebSocket BEFORE the bolt11 is ready.
-     * Returns a [WarmSocket] handle. Call [sendPayment] once the invoice is available.
-     * Returns null if NWC is not configured.
-     */
-    fun warmUp(): WarmSocket? {
+    private fun paymentSessionKey(creds: NwcCredentials): String =
+        "${creds.conn.walletPubkey}|${creds.conn.relayUrl}|${creds.nwcPubkeyHex}"
+
+    private fun currentPaymentSession(): PaymentSession? {
         val creds = credentials() ?: return null
+        val key = paymentSessionKey(creds)
+        var newSession: PaymentSession? = null
+        val session = synchronized(paymentSessionLock) {
+            paymentSession
+                ?.takeIf { it.key == key && !it.isClosed }
+                ?: PaymentSession(creds, key).also {
+                    paymentSession = it
+                    newSession = it
+                }
+        }
+        newSession?.connect()
+        return session
+    }
 
-        val nwcPrivKeyBytes = creds.nwcPrivKeyBytes
-        val nwcPubkeyHex    = creds.nwcPubkeyHex
-        val walletPubBytes  = creds.walletPubBytes
+    private fun closePaymentSession(reason: String) {
+        val session = synchronized(paymentSessionLock) {
+            paymentSession.also { paymentSession = null }
+        }
+        session?.close(reason)
+    }
 
-        val deferred = CompletableDeferred<Result<Unit>>()
-        val expectedRequestId = AtomicReference<String?>(null)
+    private fun discardPaymentSession(session: PaymentSession) {
+        synchronized(paymentSessionLock) {
+            if (paymentSession === session) paymentSession = null
+        }
+    }
 
-        val reqCmd = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("nwc-resp-${System.currentTimeMillis()}"))
-            add(buildJsonObject {
-                put("kinds",   buildJsonArray { add(JsonPrimitive(23195)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(creds.conn.walletPubkey)) })
-                put("#p",      buildJsonArray { add(JsonPrimitive(nwcPubkeyHex)) })
-            })
-        }.toString()
+    /**
+     * Start or reuse the NWC payment WebSocket BEFORE the bolt11 is ready.
+     * The socket is kept open for later zaps and closed on wallet/account changes.
+     */
+    internal fun warmUp(): WarmSocket? {
+        val session = currentPaymentSession() ?: return null
+        return WarmSocket(session.key)
+    }
 
-        val listener = object : WebSocketListener() {
+    /**
+     * Send a pay_invoice request after the persistent NWC socket is connected and subscribed.
+     * Payments are serialized because a single NWC connection has one active request/response pair.
+     */
+    internal suspend fun sendPayment(
+        warm: WarmSocket,
+        bolt11: String,
+        amountMsats: Long? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val creds = credentials() ?: return@withContext Result.failure(IllegalStateException("NWC not configured"))
+        val key = paymentSessionKey(creds)
+        if (key != warm.sessionKey) {
+            return@withContext Result.failure(IllegalStateException("Wallet connection changed before payment"))
+        }
+        val session = currentPaymentSession()
+            ?: return@withContext Result.failure(IllegalStateException("NWC not configured"))
+        session.sendPayment(bolt11, amountMsats)
+    }
+
+    private data class PendingPayment(
+        val requestId: String,
+        val deferred: CompletableDeferred<Result<Unit>>,
+        val eventCmd: String,
+    )
+
+    private inner class PaymentSession(
+        private val creds: NwcCredentials,
+        val key: String,
+    ) {
+        private val ready = CompletableDeferred<Result<Unit>>()
+        private val sendMutex = Mutex()
+        private val pending = AtomicReference<PendingPayment?>(null)
+        private val subId = "nwc-resp-${System.currentTimeMillis()}"
+
+        @Volatile var isClosed: Boolean = false
+            private set
+        @Volatile private var webSocket: WebSocket? = null
+
+        fun connect() {
+            val request = Request.Builder().url(creds.conn.relayUrl).build()
+            webSocket = okHttpClient.newWebSocket(request, listener())
+        }
+
+        fun close(reason: String) {
+            isClosed = true
+            if (!ready.isCompleted) {
+                ready.complete(Result.failure(Exception("Wallet relay closed: $reason")))
+            }
+            pending.getAndSet(null)?.deferred?.complete(Result.failure(Exception("Wallet relay closed: $reason")))
+            webSocket?.close(1000, reason.take(120))
+            webSocket = null
+        }
+
+        suspend fun sendPayment(bolt11: String, amountMsats: Long?): Result<Unit> = sendMutex.withLock {
+            val readyResult = try {
+                withTimeout(PAYMENT_READY_TIMEOUT_MS) { ready.await() }
+            } catch (e: TimeoutCancellationException) {
+                close("ready timeout")
+                Log.w(TAG, "NWC payment session was not ready within ${PAYMENT_READY_TIMEOUT_MS}ms")
+                return@withLock Result.failure(Exception("Wallet relay did not become ready"))
+            } catch (e: CancellationException) {
+                throw e
+            }
+            readyResult.getOrElse { return@withLock Result.failure(it) }
+
+            val ws = webSocket ?: return@withLock Result.failure(Exception("Wallet relay is not connected"))
+            val nowSeconds = System.currentTimeMillis() / 1000L
+            val plaintext = buildJsonObject {
+                put("method", "pay_invoice")
+                put("id",     nowSeconds.toString())
+                put("params", buildJsonObject {
+                    put("invoice", bolt11)
+                    if (amountMsats != null) put("amount", amountMsats)
+                })
+            }.toString()
+
+            val encryptedContent = runCatching {
+                Nip04.encrypt(plaintext, creds.nwcPrivKeyBytes, creds.walletPubBytes)
+            }.getOrElse { return@withLock Result.failure(it) }
+
+            val template = EventTemplate<Event>(
+                createdAt = nowSeconds,
+                kind      = 23194,
+                tags      = arrayOf(arrayOf("p", creds.conn.walletPubkey)),
+                content   = encryptedContent,
+            )
+            val signed = runCatching { creds.nwcSigner.sign(template) }
+                .getOrElse { return@withLock Result.failure(it) }
+
+            val eventCmd = buildJsonArray {
+                add(JsonPrimitive("EVENT"))
+                add(NostrJson.parseToJsonElement(toEventJson(signed)))
+            }.toString()
+
+            val payment = PendingPayment(signed.id, CompletableDeferred(), eventCmd)
+            if (!pending.compareAndSet(null, payment)) {
+                return@withLock Result.failure(IllegalStateException("Another wallet payment is already pending"))
+            }
+            if (!ws.send(eventCmd)) {
+                pending.compareAndSet(payment, null)
+                close("send failed")
+                return@withLock Result.failure(IllegalStateException("Wallet relay disconnected before payment was sent"))
+            }
+            Log.d(TAG, "NWC payment sent on persistent WS")
+
+            try {
+                withTimeout(PAYMENT_TIMEOUT_MS) { payment.deferred.await() }
+            } catch (e: TimeoutCancellationException) {
+                pending.compareAndSet(payment, null)
+                Log.w(TAG, "NWC payment still pending after ${PAYMENT_TIMEOUT_MS}ms")
+                Result.failure(
+                    WalletPaymentPendingException(
+                        "Wallet has not confirmed this zap yet. Check your wallet before retrying."
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                pending.compareAndSet(payment, null)
+            }
+        }
+
+        private fun listener() = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(reqCmd)
-                Log.d(TAG, "NWC WS pre-warmed, subscription sent")
+                webSocket.send(responseSubscription())
+                if (!ready.isCompleted) ready.complete(Result.success(Unit))
+                Log.d(TAG, "NWC payment session ready")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
-                    val msg  = NostrJson.parseToJsonElement(text).jsonArray
-                    val type = msg.getOrNull(0)?.jsonPrimitive?.content ?: return
-                    if (type != "EVENT" || msg.size < 3) return
-
-                    val obj  = msg[2].jsonObject
-                    val kind = obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
-                    if (kind != 23195) return
-                    val expected = expectedRequestId.get() ?: return
-                    if (responseRequestId(obj) != expected) return
-
-                    val encContent = obj["content"]?.jsonPrimitive?.content ?: return
-                    val decrypted  = runCatching {
-                        Nip04.decrypt(encContent, nwcPrivKeyBytes, walletPubBytes)
-                    }.getOrNull()
-                    if (decrypted == null) {
-                        Log.w(TAG, "NWC decrypt failed, skipping")
-                        return
-                    }
-
-                    Log.d(TAG, "NWC response: $decrypted")
-                    val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
-                    val errorElement = resp["error"]
-                    if (errorElement != null && errorElement !is kotlinx.serialization.json.JsonNull) {
-                        val errObj = errorElement.jsonObject
-                        val code = errObj["code"]?.jsonPrimitive?.content
-                        val rawMsg = errObj["message"]?.jsonPrimitive?.content
-                        Log.w(TAG, "NWC payment error [$code]: $rawMsg")
-                        val userMsg = when (code) {
-                            "PAYMENT_FAILED"       -> "No route found — recipient may be unreachable"
-                            "INSUFFICIENT_BALANCE"  -> "Insufficient wallet balance"
-                            "QUOTA_EXCEEDED"        -> "Wallet spending limit reached"
-                            "NOT_FOUND"             -> "Invoice expired or not found"
-                            else                    -> rawMsg?.take(80) ?: "Payment failed"
+                    val msg = NostrJson.parseToJsonElement(text).jsonArray
+                    when (msg.getOrNull(0)?.jsonPrimitive?.content ?: return) {
+                        "AUTH" -> {
+                            val challenge = msg.getOrNull(1)?.jsonPrimitive?.content
+                            if (challenge.isNullOrBlank()) return
+                            scope.launch {
+                                if (sendAuthResponse(webSocket, creds, challenge)) {
+                                    webSocket.send(responseSubscription())
+                                    pending.get()?.eventCmd?.let { webSocket.send(it) }
+                                    if (!ready.isCompleted) ready.complete(Result.success(Unit))
+                                } else {
+                                    fail(Exception("Wallet relay authentication failed"))
+                                }
+                            }
+                            return
                         }
-                        deferred.complete(Result.failure(Exception(userMsg)))
-                    } else {
-                        Log.d(TAG, "NWC payment success")
-                        deferred.complete(Result.success(Unit))
+                        "OK" -> {
+                            handleEventOk(msg)
+                            return
+                        }
+                        "NOTICE" -> {
+                            Log.w(TAG, "NWC relay notice: ${msg.getOrNull(1)?.jsonPrimitive?.content?.take(160).orEmpty()}")
+                            return
+                        }
+                        "CLOSED" -> {
+                            val reason = msg.getOrNull(2)?.jsonPrimitive?.content.orEmpty()
+                            Log.w(TAG, "NWC subscription closed by relay: ${reason.take(160)}")
+                            if (reason.startsWith("auth-required", ignoreCase = true)) {
+                                fail(Exception("Wallet relay requires authentication but did not provide a challenge"))
+                            }
+                            return
+                        }
+                        "EVENT" -> Unit
+                        else -> return
                     }
-                    webSocket.close(1000, "done")
+                    handleResponseEvent(msg)
                 } catch (e: Exception) {
                     Log.w(TAG, "NWC response parse error: ${e.message}")
-                    if (!deferred.isCompleted) {
-                        deferred.complete(Result.failure(e))
-                    }
+                    fail(e)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "NWC WS failure: ${t.message}")
-                if (!deferred.isCompleted) deferred.complete(Result.failure(t))
+                fail(t)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (!deferred.isCompleted) deferred.complete(Result.failure(Exception("WS closed: $reason")))
+                if (!isClosed) fail(Exception("WS closed: $reason"))
             }
         }
 
-        val request = Request.Builder().url(creds.conn.relayUrl).build()
-        val ws = okHttpClient.newWebSocket(request, listener)
-
-        return WarmSocket(
-            ws,
-            deferred,
-            nwcPrivKeyBytes,
-            walletPubBytes,
-            nwcPubkeyHex,
-            creds.nwcSigner,
-            creds.conn.walletPubkey,
-            expectedRequestId,
-        )
-    }
-
-    /**
-     * Send a pay_invoice request on an already-connected [WarmSocket].
-     * Blocks until the wallet responds or 15s timeout.
-     */
-    suspend fun sendPayment(warm: WarmSocket, bolt11: String): Result<Unit> = withContext(Dispatchers.IO) {
-        val nowSeconds = System.currentTimeMillis() / 1000L
-        val plaintext = buildJsonObject {
-            put("method", "pay_invoice")
-            put("id",     nowSeconds.toString())
-            put("params", buildJsonObject { put("invoice", bolt11) })
+        private fun responseSubscription(): String = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds",   buildJsonArray { add(JsonPrimitive(23195)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(creds.conn.walletPubkey)) })
+                put("#p",      buildJsonArray { add(JsonPrimitive(creds.nwcPubkeyHex)) })
+            })
         }.toString()
 
-        val encryptedContent = runCatching {
-            Nip04.encrypt(plaintext, warm.nwcPrivKeyBytes, warm.walletPubBytes)
-        }.getOrElse { return@withContext Result.failure(it) }
+        private fun handleEventOk(msg: JsonArray) {
+            val payment = pending.get() ?: return
+            val eventId = msg.getOrNull(1)?.jsonPrimitive?.content ?: return
+            if (eventId != payment.requestId) return
+            val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull ?: return
+            val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
+            if (success) return
 
-        val template = EventTemplate<Event>(
-            createdAt = nowSeconds,
-            kind      = 23194,
-            tags      = arrayOf(arrayOf("p", warm.walletPubkey)),
-            content   = encryptedContent,
-        )
-        val signed = runCatching { warm.nwcSigner.sign(template) }
-            .getOrElse { return@withContext Result.failure(it) }
-
-        val eventCmd = buildJsonArray {
-            add(JsonPrimitive("EVENT"))
-            add(NostrJson.parseToJsonElement(toEventJson(signed)))
-        }.toString()
-
-        warm.expectedRequestId.set(signed.id)
-        if (!warm.ws.send(eventCmd)) {
-            warm.expectedRequestId.set(null)
-            return@withContext Result.failure(IllegalStateException("NWC socket closed before pay_invoice was sent"))
-        }
-        Log.d(TAG, "NWC payment sent on warm WS")
-
-        val result = runCatching {
-            withTimeout(15_000) { warm.deferred.await() }
-        }.getOrElse { e ->
-            warm.ws.close(1000, "timeout")
-            Result.failure(e)
+            Log.w(TAG, "NWC payment event rejected by relay: ${message.take(160)}")
+            if (message.contains("auth", ignoreCase = true)) return
+            if (pending.compareAndSet(payment, null)) {
+                payment.deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
+            }
         }
 
-        warm.ws.close(1000, "done")
-        result
+        private fun handleResponseEvent(msg: JsonArray) {
+            if (msg.size < 3) return
+            val obj = msg[2].jsonObject
+            if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
+            val payment = pending.get() ?: return
+            if (responseRequestId(obj) != payment.requestId) return
+
+            val encContent = obj["content"]?.jsonPrimitive?.content ?: return
+            val decrypted = runCatching {
+                Nip04.decrypt(encContent, creds.nwcPrivKeyBytes, creds.walletPubBytes)
+            }.getOrNull()
+            if (decrypted == null) {
+                Log.w(TAG, "NWC decrypt failed, skipping")
+                return
+            }
+
+            Log.d(TAG, "NWC response: $decrypted")
+            val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
+            val errorElement = resp["error"]
+            val result = if (errorElement != null && errorElement !is kotlinx.serialization.json.JsonNull) {
+                val errObj = errorElement.jsonObject
+                val code = errObj["code"]?.jsonPrimitive?.content
+                val rawMsg = errObj["message"]?.jsonPrimitive?.content
+                Log.w(TAG, "NWC payment error [$code]: $rawMsg")
+                val userMsg = when (code) {
+                    "PAYMENT_FAILED"      -> "No route found — recipient may be unreachable"
+                    "INSUFFICIENT_BALANCE" -> "Insufficient wallet balance"
+                    "QUOTA_EXCEEDED"       -> "Wallet spending limit reached"
+                    "NOT_FOUND"            -> "Invoice expired or not found"
+                    else                   -> rawMsg?.take(80) ?: "Payment failed"
+                }
+                Result.failure(Exception(userMsg))
+            } else {
+                Log.d(TAG, "NWC payment success")
+                Result.success(Unit)
+            }
+
+            if (pending.compareAndSet(payment, null)) {
+                payment.deferred.complete(result)
+            }
+        }
+
+        private fun fail(cause: Throwable) {
+            isClosed = true
+            if (!ready.isCompleted) ready.complete(Result.failure(cause))
+            pending.getAndSet(null)?.deferred?.complete(Result.failure(cause))
+            webSocket?.close(1000, "failed")
+            webSocket = null
+            discardPaymentSession(this)
+        }
     }
 
     /**
@@ -384,7 +558,47 @@ class NwcManager @Inject constructor(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val msg = NostrJson.parseToJsonElement(text).jsonArray
-                    if (msg.getOrNull(0)?.jsonPrimitive?.content != "EVENT") return
+                    when (val type = msg.getOrNull(0)?.jsonPrimitive?.content ?: return) {
+                        "AUTH" -> {
+                            val challenge = msg.getOrNull(1)?.jsonPrimitive?.content
+                            if (challenge.isNullOrBlank()) return
+                            scope.launch {
+                                if (sendAuthResponse(webSocket, creds, challenge)) {
+                                    webSocket.send(reqCmd)
+                                    webSocket.send(eventCmd)
+                                } else if (!deferred.isCompleted) {
+                                    deferred.complete(null)
+                                }
+                            }
+                            return
+                        }
+                        "OK" -> {
+                            val eventId = msg.getOrNull(1)?.jsonPrimitive?.content
+                            val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull
+                            val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
+                            if (eventId == signed.id && success == false) {
+                                Log.w(TAG, "NWC balance request rejected by relay: ${message.take(160)}")
+                                if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
+                                    deferred.complete(null)
+                                }
+                            }
+                            return
+                        }
+                        "NOTICE" -> {
+                            Log.w(TAG, "NWC balance relay notice: ${msg.getOrNull(1)?.jsonPrimitive?.content?.take(160).orEmpty()}")
+                            return
+                        }
+                        "CLOSED" -> {
+                            Log.w(TAG, "NWC balance subscription closed: ${msg.getOrNull(2)?.jsonPrimitive?.content?.take(160).orEmpty()}")
+                            if (!deferred.isCompleted) deferred.complete(null)
+                            return
+                        }
+                        "EVENT" -> Unit
+                        else -> {
+                            Log.d(TAG, "Ignoring NWC balance relay message type=$type")
+                            return
+                        }
+                    }
                     if (msg.size < 3) return
                     val obj = msg[2].jsonObject
                     if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
@@ -451,6 +665,50 @@ class NwcManager @Inject constructor(
             }
         }
         return null
+    }
+
+    private suspend fun sendAuthResponse(
+        webSocket: WebSocket,
+        creds: NwcCredentials,
+        challenge: String,
+    ): Boolean {
+        val signed = runCatching {
+            val normalizedUrl = RelayUrlNormalizer.normalize(creds.conn.relayUrl)
+            creds.nwcSigner.sign(RelayAuthEvent.build(normalizedUrl, challenge))
+        }.getOrElse { e ->
+            Log.w(TAG, "NWC relay auth signing failed: ${e.message}")
+            return false
+        }
+
+        val authCmd = buildJsonArray {
+            add(JsonPrimitive("AUTH"))
+            add(NostrJson.parseToJsonElement(toEventJson(signed)))
+        }.toString()
+        val sent = webSocket.send(authCmd)
+        if (sent) {
+            Log.w(TAG, "NWC AUTH response sent to ${creds.conn.relayUrl} (eventId=${signed.id.take(8)})")
+        } else {
+            Log.w(TAG, "NWC AUTH response failed to send to ${creds.conn.relayUrl}")
+        }
+        return sent
+    }
+
+    private fun handlePaymentOk(
+        msg: JsonArray,
+        expectedRequestId: String?,
+        deferred: CompletableDeferred<Result<Unit>>,
+    ) {
+        val eventId = msg.getOrNull(1)?.jsonPrimitive?.content ?: return
+        val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull ?: return
+        val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
+        if (eventId != expectedRequestId) return
+
+        if (!success) {
+            Log.w(TAG, "NWC payment event rejected by relay: ${message.take(160)}")
+            if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
+                deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
+            }
+        }
     }
 
 }
