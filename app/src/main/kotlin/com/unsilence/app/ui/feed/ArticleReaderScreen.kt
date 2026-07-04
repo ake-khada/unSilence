@@ -369,7 +369,8 @@ fun ArticleReaderScreen(
                             // AuthorHeader applies its own padding — pass it bare.
                             AuthorHeader(
                                 pubkey        = model.pubkey,
-                                picture       = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+                                picture       = authorProfile?.picture?.takeIf { it.isNotBlank() }
+                                    ?: if (isRepost) null else row.authorPicture,
                                 displayName   = authorLabel,
                                 nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
                                 createdAt     = model.createdAt,

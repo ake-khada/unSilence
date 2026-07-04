@@ -160,14 +160,7 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
-        // Account-switch residue: a bailed teardown may have left a different user's
-        // events in MES. Clear before claiming ownership. Same-pubkey relogin keeps data.
-        val prevOwner = memoryEventStore.ownPubkey
-        if (prevOwner != null && prevOwner != pubkeyHex) memoryEventStore.clear()
-        memoryEventStore.ownPubkey = pubkeyHex
-        zapPreferencesStore.selectOwner(pubkeyHex)
-        blossomServersStore.selectOwner(pubkeyHex)
-        settingsStore.selectOwner(pubkeyHex)
+        claimAccountOwner(pubkeyHex)
         eventProcessor.start()
 
         // Once per login: clear ProfilePipeline session state so the own-post
@@ -373,10 +366,10 @@ class AppBootstrapper @Inject constructor(
         when (settleResult) {
             MuteSettleResult.NsecDecrypted,
             MuteSettleResult.AmberDecrypted,
-            MuteSettleResult.NoPrivateContent,
-            MuteSettleResult.NoEventFound -> {
-                muteListRepository.markPublishSafe()
+            MuteSettleResult.NoPrivateContent -> {
+                muteListRepository.markPublishSafe("bootstrap settled: $settleResult")
             }
+            MuteSettleResult.NoEventFound,
             MuteSettleResult.AmberDecryptFailed,
             MuteSettleResult.Timeout,
             MuteSettleResult.EncryptRoundTripFailed -> {
@@ -555,11 +548,27 @@ class AppBootstrapper @Inject constructor(
         // Pre-warm feed-switcher relays (favorites + read relays). Fire-and-forget —
         // reactive flow recomputes when favorites change.
         feedRelayWarmer.start()
-        scope.launch { trendingClient.fetch() }
+        scope.launch {
+            if (!relayCapabilitiesStore.isNetworkDown) {
+                trendingClient.refreshIfStale()
+            }
+        }
 
         cancelLegacyBackgroundSync()
 
         Log.d(TAG, "Bootstrap complete for $pubkeyHex")
+    }
+
+    private fun claimAccountOwner(pubkeyHex: String) {
+        // Account-switch residue: a bailed teardown may have left a different user's
+        // events in MES. Clear before claiming ownership. Same-pubkey relogin keeps data.
+        val prevOwner = memoryEventStore.ownPubkey
+        if (prevOwner != null && prevOwner != pubkeyHex) memoryEventStore.clear()
+        memoryEventStore.ownPubkey = pubkeyHex
+        zapPreferencesStore.selectOwner(pubkeyHex)
+        blossomServersStore.selectOwner(pubkeyHex)
+        settingsStore.selectOwner(pubkeyHex)
+        nwcManager.resetIfOwnerChanged(pubkeyHex)
     }
 
     /**
@@ -658,7 +667,6 @@ class AppBootstrapper @Inject constructor(
             MuteSettleResult.NsecDecrypted,
             MuteSettleResult.AmberDecrypted,
             MuteSettleResult.NoPrivateContent,
-            MuteSettleResult.NoEventFound,
         )
         if (!wouldBeSafe) return baseResult
 
@@ -666,6 +674,47 @@ class AppBootstrapper @Inject constructor(
         val roundTripOk = signingManager.encryptRoundTrip()
         if (!roundTripOk) return MuteSettleResult.EncryptRoundTripFailed
         return baseResult
+    }
+
+    /**
+     * Called after Amber grants encryption/decryption permission. A successful
+     * canary round-trip proves the permission path works, but it does not by
+     * itself repopulate the already-loaded encrypted mute list. Re-decrypt the
+     * current kind-10000 content before allowing publishes; otherwise the next
+     * mute edit can publish an empty private list.
+     */
+    suspend fun recoverMuteListAfterAmberAuthorization(): Boolean {
+        val pubkeyHex = keyManager.getPublicKeyHex() ?: run {
+            muteListRepository.markPublishUnsafe("Amber reauth: no active account")
+            return false
+        }
+        if (!signingManager.encryptRoundTrip()) {
+            muteListRepository.markPublishUnsafe("Amber reauth: encrypt round-trip failed")
+            return false
+        }
+
+        val content = memoryEventStore.getMuteListContent(pubkeyHex)
+        if (content.isNullOrEmpty()) {
+            muteListRepository.markPublishUnsafe("Amber reauth: no loaded encrypted mute list to decrypt")
+            return false
+        }
+
+        val plaintext = signingManager.decrypt(content, pubkeyHex)
+        val parsed = plaintext?.let(::parseMuteTags)
+        if (parsed == null) {
+            muteListRepository.markPublishUnsafe("Amber reauth: existing mute list decrypt failed")
+            return false
+        }
+
+        memoryEventStore.updateMuteListPrivateTags(
+            pubkeyHex,
+            parsed.pubkeys,
+            parsed.hashtags,
+            parsed.words,
+            parsed.eventIds,
+        )
+        muteListRepository.markPublishSafe("Amber reauth decrypted existing mute list")
+        return true
     }
 
     private suspend fun settleMuteListInner(pubkeyHex: String): MuteSettleResult {
@@ -735,7 +784,7 @@ class AppBootstrapper @Inject constructor(
             event.pubkey,
             parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,
         )
-        muteListRepository.markPublishSafe()
+        muteListRepository.markPublishSafe("Amber async decrypt succeeded")
     }
 
     private enum class MuteSettleResult {

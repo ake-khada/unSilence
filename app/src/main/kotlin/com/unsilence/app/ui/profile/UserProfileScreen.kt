@@ -161,12 +161,7 @@ fun UserProfileScreen(
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
 
-    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
-    LaunchedEffect(zapFlash) {
-        val flash = zapFlash ?: return@LaunchedEffect
-        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
-    }
-    // ── React/repost failure snackbar ────────────────────────────────────────
+    // ── Action failure snackbar ──────────────────────────────────────────────
     LaunchedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }

@@ -90,4 +90,76 @@ class ZapReceiptRelaysTest {
         )
         assertEquals(listOf(n("wss://fallback.com")), r)
     }
+
+    @Test
+    fun `cap preserves author write and own read before popular event tail`() {
+        val r = zapReceiptRelays(
+            targetAuthorWrite = (1..6).map { "wss://author-write$it.com" },
+            ownRead           = (1..4).map { "wss://own-read$it.com" },
+            eventSeen         = (1..20).map { "wss://seen$it.com" },
+            relayHints        = listOf("wss://hint.com"),
+            fallbackHint      = "wss://fallback.com",
+            blocked           = emptySet(),
+            maxRelays         = 6,
+            maxAuthorWrite    = 4,
+            maxOwnRead        = 2,
+            maxSourceRelays   = 2,
+            maxRelayHints     = 1,
+        )
+
+        assertEquals(
+            listOf(
+                n("wss://author-write1.com"),
+                n("wss://author-write2.com"),
+                n("wss://author-write3.com"),
+                n("wss://author-write4.com"),
+                n("wss://own-read1.com"),
+                n("wss://own-read2.com"),
+            ),
+            r,
+        )
+    }
+
+    @Test
+    fun `cap fills from source and hints when core relay buckets are small`() {
+        val r = zapReceiptRelays(
+            targetAuthorWrite = listOf("wss://author-write.com"),
+            ownRead           = listOf("wss://own-read.com"),
+            eventSeen         = listOf("wss://seen1.com", "wss://seen2.com", "wss://seen3.com"),
+            relayHints        = listOf("wss://hint.com"),
+            fallbackHint      = "wss://fallback.com",
+            blocked           = emptySet(),
+            maxRelays         = 6,
+            maxAuthorWrite    = 4,
+            maxOwnRead        = 2,
+            maxSourceRelays   = 2,
+            maxRelayHints     = 1,
+        )
+
+        assertEquals(
+            listOf(
+                n("wss://author-write.com"),
+                n("wss://own-read.com"),
+                n("wss://seen1.com"),
+                n("wss://seen2.com"),
+                n("wss://hint.com"),
+                n("wss://fallback.com"),
+            ),
+            r,
+        )
+    }
+
+    @Test
+    fun `default relay selection is uncapped`() {
+        val r = zapReceiptRelays(
+            targetAuthorWrite = (1..30).map { "wss://author-write$it.com" },
+            ownRead = emptyList(),
+            eventSeen = emptyList(),
+            relayHints = emptyList(),
+            fallbackHint = null,
+            blocked = emptySet(),
+        )
+
+        assertEquals(30, r.size)
+    }
 }

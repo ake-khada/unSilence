@@ -281,6 +281,8 @@ fun EventCard(
                 sourcePubkey    = model.sourcePubkey,
                 sourceCreatedAt = model.sourceCreatedAt,
                 sourceProfile   = sourceProfile,
+                lookupProfile   = lookupProfile,
+                profileFlow     = profileFlow,
                 onClick         = { onNoteClick(model.navigateId) },
             )
         }
@@ -296,7 +298,8 @@ fun EventCard(
         val isRepost = model.repost != null
         AuthorHeader(
             pubkey      = model.pubkey,
-            picture     = authorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+            picture     = authorProfile?.picture?.takeIf { it.isNotBlank() }
+                ?: if (isRepost) null else row.authorPicture,
             displayName = authorProfile?.displayName?.takeIf { it.isNotBlank() }
                 ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                 ?: (if (isRepost) null else row.displayName)
@@ -316,6 +319,7 @@ fun EventCard(
                 author              = parentAuthor,
                 onNoteClick         = onNoteClick,
                 lookupProfile       = lookupProfile,
+                profileFlow         = profileFlow,
                 lookupModel         = lookupModel,
                 lookupEvent         = lookupEvent,
                 onAuthorClick       = onAuthorClick,
@@ -354,6 +358,7 @@ fun EventCard(
                     onAuthorClick       = onAuthorClick,
                     onHashtagClick      = onHashtagClick,
                     lookupProfile       = lookupProfile,
+                    profileFlow         = profileFlow,
                     lookupEvent         = lookupEvent,
                     lookupEventWithAuthor = lookupEventWithAuthor,
                     lookupModel         = lookupModel,
@@ -386,6 +391,7 @@ fun EventCard(
                         targetAuthorPubkey = model.repost.targetAuthorPubkey,
                         lookupEventWithAuthor = lookupEventWithAuthor,
                         lookupProfile = lookupProfile,
+                        profileFlow = profileFlow,
                         lookupModel = lookupModel,
                         fetchOgMetadata = fetchOgMetadata,
                         hasCachedOgMetadata = hasCachedOgMetadata,
@@ -550,6 +556,8 @@ private fun ArticleLayout(
                 sourcePubkey    = model.sourcePubkey,
                 sourceCreatedAt = model.sourceCreatedAt,
                 sourceProfile   = sourceProfile,
+                lookupProfile   = lookupProfile,
+                profileFlow     = profileFlow,
                 onClick         = { onNoteClick(model.navigateId) },
             )
         }
@@ -557,7 +565,8 @@ private fun ArticleLayout(
         // Author row
         AuthorHeader(
             pubkey      = model.pubkey,
-            picture     = articleAuthorProfile?.picture ?: if (isRepost) null else row.authorPicture,
+            picture     = articleAuthorProfile?.picture?.takeIf { it.isNotBlank() }
+                ?: if (isRepost) null else row.authorPicture,
             displayName = articleAuthorProfile?.displayName?.takeIf { it.isNotBlank() }
                 ?: articleAuthorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                 ?: (if (isRepost) null else row.displayName)

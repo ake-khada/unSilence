@@ -17,7 +17,6 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
-import com.unsilence.app.data.repository.MuteListRepository
 import kotlinx.coroutines.launch
 import com.unsilence.app.ui.onboarding.RootScreen
 import com.unsilence.app.ui.theme.UnsilenceTheme
@@ -29,7 +28,6 @@ class MainActivity : ComponentActivity() {
 
     @Inject lateinit var signingManager: SigningManager
     @Inject lateinit var relayPreferencesStore: RelayPreferencesStore
-    @Inject lateinit var muteListRepository: MuteListRepository
     @Inject lateinit var appBootstrapper: AppBootstrapper
     @Inject lateinit var keyManager: KeyManager
 
@@ -41,9 +39,8 @@ class MainActivity : ComponentActivity() {
         val pubkey = AmberSigner.parseLoginResult(result.data)
         if (pubkey != null) {
             lifecycleScope.launch {
-                val ok = signingManager.encryptRoundTrip()
+                val ok = appBootstrapper.recoverMuteListAfterAmberAuthorization()
                 if (ok) {
-                    muteListRepository.markPublishSafe()
                     Toast.makeText(
                         this@MainActivity,
                         "Amber permissions granted \u2014 mute sync enabled",

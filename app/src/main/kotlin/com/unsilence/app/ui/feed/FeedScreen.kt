@@ -130,6 +130,7 @@ fun FeedScreen(
     val showSnackbar    = LocalShowSnackbar.current
     val isLoadingV     by viewModel.isLoading.collectAsStateWithLifecycle()
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
+    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
     val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
     val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
@@ -158,12 +159,7 @@ fun FeedScreen(
     // A fresh list on unrelated screen recompositions invalidates every card.
     val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
 
-    // ── Zap failure snackbar (lifted from per-card LaunchedEffect) ────────────
-    LaunchedEffect(zapFlash) {
-        val flash = zapFlash ?: return@LaunchedEffect
-        if (!flash.success) showSnackbar("Zap failed: ${flash.message ?: "unknown error"}")
-    }
-    // ── React/repost failure snackbar ────────────────────────────────────────
+    // ── Action failure snackbar ──────────────────────────────────────────────
     LaunchedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
@@ -274,6 +270,19 @@ fun FeedScreen(
         animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
         label         = "tabRowOffset",
     )
+    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight
+    val refreshLineProgress = remember { Animatable(0f) }
+    LaunchedEffect(isRefreshing) {
+        if (isRefreshing) {
+            refreshLineProgress.snapTo(0f)
+            refreshLineProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 3000, easing = FastOutSlowInEasing),
+            )
+        } else {
+            refreshLineProgress.snapTo(0f)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -337,35 +346,13 @@ fun FeedScreen(
             }
 
             else -> {
-                val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
                 val pullState = rememberPullToRefreshState()
                 PullToRefreshBox(
                     isRefreshing = isRefreshing,
                     onRefresh    = { viewModel.triggerRefresh() },
                     state        = pullState,
                     modifier     = Modifier.fillMaxSize(),
-                    indicator    = {
-                        if (isRefreshing) {
-                            val progress = remember { Animatable(0f) }
-                            LaunchedEffect(Unit) {
-                                progress.animateTo(
-                                    targetValue = 1f,
-                                    animationSpec = tween(
-                                        durationMillis = 3000,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                )
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .fillMaxWidth(progress.value)
-                                    .offset(y = totalTopPadding)
-                                    .height(1.5.dp)
-                                    .background(BrandDeep),
-                            )
-                        }
-                    },
+                    indicator    = {},
                 ) {
                 LazyColumn(
                     state    = listState,
@@ -471,6 +458,17 @@ fun FeedScreen(
             }
         }
         } // Crossfade
+
+        if (isRefreshing) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth(refreshLineProgress.value)
+                    .offset { IntOffset(0, refreshLineOffset.roundToPx()) }
+                    .height(1.5.dp)
+                    .background(BrandDeep),
+            )
+        }
 
         // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
         Box(

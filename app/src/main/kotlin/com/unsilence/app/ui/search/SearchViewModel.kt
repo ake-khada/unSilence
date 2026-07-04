@@ -95,31 +95,38 @@ class SearchViewModel @Inject constructor(
         _uiState.update { it.copy(query = query) }
     }
 
+    fun refreshTrendingIfStale() {
+        trendingClient.refreshIfStale()
+    }
+
     init {
-        // Fetch trending data from antiprimal (network), fall back to local MES scan
+        // Paint immediately from local MES, then collect the shared progressive
+        // trending snapshot: stale cache, phase-1 hashtags/users, then counts.
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
-            val networkData = trendingClient.fetch()
-            trendingCandidates.value = if (networkData != null && networkData.hashtags.isNotEmpty()) {
-                TrendingCandidates(
-                    hashtags = networkData.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) },
-                    users = networkData.profiles.map { profile ->
-                        UserEntity(
-                            pubkey = profile.pubkey,
-                            name = profile.name,
-                            displayName = profile.displayName,
-                            picture = profile.picture,
-                            about = profile.about,
-                            nip05 = profile.nip05,
-                            followerCount = profile.followerCount,
-                        )
-                    },
-                )
-            } else {
-                // Fallback: local MES scan
-                TrendingCandidates(
+            if (trendingClient.data.value == null) {
+                trendingCandidates.value = TrendingCandidates(
                     hashtags = memoryEventStore.trendingHashtags(TRENDING_CANDIDATE_LIMIT),
                     users = memoryEventStore.trendingUsers(TRENDING_CANDIDATE_LIMIT),
                 )
+            }
+            trendingClient.refreshIfStale()
+            trendingClient.data.collect { data ->
+                if (data != null && data.hashtags.isNotEmpty()) {
+                    trendingCandidates.value = TrendingCandidates(
+                        hashtags = data.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) },
+                        users = data.profiles.map { profile ->
+                            UserEntity(
+                                pubkey = profile.pubkey,
+                                name = profile.name,
+                                displayName = profile.displayName,
+                                picture = profile.picture,
+                                about = profile.about,
+                                nip05 = profile.nip05,
+                                followerCount = profile.followerCount,
+                            )
+                        },
+                    )
+                }
             }
         }
 

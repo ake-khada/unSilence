@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -275,6 +276,7 @@ internal fun ThreadParentCard(
     author: UserEntity?,
     onNoteClick: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     onAuthorClick: (String) -> Unit = {},
@@ -304,6 +306,9 @@ internal fun ThreadParentCard(
             )
         }.getOrNull()
     }
+    val liveAuthor = profileFlow?.invoke(event.pubkey)
+        ?.collectAsStateWithLifecycle()?.value
+    val effectiveAuthor = liveAuthor ?: author
 
     Column(
         modifier = modifier
@@ -322,14 +327,16 @@ internal fun ThreadParentCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             AvatarImage(
                 pubkey = event.pubkey,
-                picture = author?.picture,
+                picture = effectiveAuthor?.picture,
                 modifier = Modifier.size(24.dp),
                 sizeDp = 24.dp,
+                lookupProfile = lookupProfile,
+                profileFlow = profileFlow,
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = author?.displayName?.takeIf { it.isNotBlank() }
-                    ?: author?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
+                text = effectiveAuthor?.displayName?.takeIf { it.isNotBlank() }
+                    ?: effectiveAuthor?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
                     ?: "${event.pubkey.take(6)}…${event.pubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
@@ -360,6 +367,7 @@ internal fun ThreadParentCard(
                     onNoteClick         = onNoteClick,
                     onAuthorClick       = onAuthorClick,
                     lookupProfile       = lookupProfile,
+                    profileFlow         = profileFlow,
                     lookupEvent         = lookupEvent,
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,

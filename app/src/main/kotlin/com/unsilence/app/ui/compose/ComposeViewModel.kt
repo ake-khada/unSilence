@@ -16,6 +16,12 @@ import com.unsilence.app.data.blossom.BlossomClient
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.ImageCompressor
 import com.unsilence.app.data.blossom.VideoTranscoder
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.DraftBlock
+import com.unsilence.app.data.drafts.DraftContext
+import com.unsilence.app.data.drafts.DraftStore
+import com.unsilence.app.data.drafts.toBlob
+import com.unsilence.app.data.drafts.toDraftAttachment
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.model.ContentParser
@@ -28,6 +34,7 @@ import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -143,6 +150,7 @@ class ComposeViewModel @Inject constructor(
     private val blossomClient: BlossomClient,
     private val blossomServersStore: BlossomServersStore,
     private val settingsStore: SettingsStore,
+    private val draftStore: DraftStore,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
     val ogFetcher: com.unsilence.app.data.relay.OgFetcher,
@@ -188,6 +196,29 @@ class ComposeViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val hasAnyUserContent: StateFlow<Boolean> = _blocks
+        .map { blocks ->
+            blocks.any { block ->
+                when (block) {
+                    is ComposeBlock.Text -> block.content.isNotBlank()
+                    is ComposeBlock.Attachment -> true
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val hasDraftableContent: StateFlow<Boolean> = _blocks
+        .map { blocks -> draftBlocksFrom(blocks).isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val hasUnsavedMedia: StateFlow<Boolean> = _blocks
+        .map { blocks ->
+            blocks.any {
+                it is ComposeBlock.Attachment && it.state !is AttachmentState.Uploaded
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     val canPublish: StateFlow<Boolean> = _blocks
         .map { blocks ->
             val hasText = blocks.any { it is ComposeBlock.Text && it.content.isNotBlank() }
@@ -211,6 +242,15 @@ class ComposeViewModel @Inject constructor(
 
     private val _isSensitive = MutableStateFlow(false)
     val isSensitive: StateFlow<Boolean> = _isSensitive.asStateFlow()
+
+    private val _savedDraftFingerprint = MutableStateFlow<String?>(null)
+    val hasUnsavedDraftChanges: StateFlow<Boolean> = combine(
+        _blocks,
+        _isSensitive,
+        _savedDraftFingerprint,
+    ) { blocks, isSensitive, savedFingerprint ->
+        hasAnyContent(blocks) && currentContentFingerprint(blocks, isSensitive) != savedFingerprint
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     fun toggleSensitive() { _isSensitive.value = !_isSensitive.value }
 
@@ -347,6 +387,52 @@ class ComposeViewModel @Inject constructor(
         viewModelScope.launch { blossomServersStore.initialize() }
     }
 
+    fun restoreDraft(draft: Draft) {
+        val restored = draft.blocks.map { block ->
+            when (block) {
+                is DraftBlock.Text -> ComposeBlock.Text(block.content)
+                is DraftBlock.Attachment -> {
+                    val blob = block.toBlob()
+                    ComposeBlock.Attachment(
+                        AttachmentState.Uploaded(
+                            uri = Uri.parse(blob.url),
+                            id = UUID.randomUUID().toString(),
+                            displayName = blob.url.substringAfterLast('/').ifBlank { "attachment" },
+                            originalBytes = blob.sizeBytes,
+                            quality = AttachmentQuality.ORIGINAL,
+                            blob = blob,
+                        )
+                    )
+                }
+            }
+        }.ifEmpty { listOf(ComposeBlock.Text("")) }
+        _blocks.value = if (restored.lastOrNull() is ComposeBlock.Text) {
+            restored
+        } else {
+            restored + ComposeBlock.Text("")
+        }
+        _isSensitive.value = draft.isSensitive
+        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value)
+        _sendState.value = SendState.Composing
+    }
+
+    fun saveCurrentDraft(): Boolean {
+        val pk = pubkeyHex ?: return false
+        val draft = buildCurrentDraft() ?: return false
+        draftStore.save(pk, draft)
+        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value)
+        return true
+    }
+
+    fun discardCurrentDraft() {
+        val pk = pubkeyHex ?: return
+        draftStore.delete(pk, currentContext().key)
+    }
+
+    fun deleteDraft(draft: Draft) {
+        pubkeyHex?.let { draftStore.delete(it, draft.key) }
+    }
+
     /** Manually trigger upload for a single idle attachment. */
     fun startUpload(id: String) {
         val block = _blocks.value.firstOrNull {
@@ -451,7 +537,7 @@ class ComposeViewModel @Inject constructor(
                     block.state.id == id &&
                     block.state is AttachmentState.Failed
                 ) {
-                    val f = block.state as AttachmentState.Failed
+                    val f = block.state
                     block.copy(
                         state = AttachmentState.Idle(
                             uri = f.uri,
@@ -598,6 +684,7 @@ class ComposeViewModel @Inject constructor(
     fun reset() {
         published = false
         publishError = null
+        replyToEventId = null
         replyToRow = null
         quoteRow = null
         quoteEventId = null
@@ -611,15 +698,19 @@ class ComposeViewModel @Inject constructor(
         _pendingEmojiInsert.value = null
         _isSensitive.value = false
         _blocks.value = listOf(ComposeBlock.Text(""))
+        _savedDraftFingerprint.value = null
     }
 
     // ── Reply mode ──────────────────────────────────────────────────────────
 
     /** Parent note for reply mode, looked up from MES. */
+    private var replyToEventId by mutableStateOf<String?>(null)
+
     var replyToRow by mutableStateOf<com.unsilence.app.data.memory.FeedRow?>(null)
         private set
 
     fun loadReplyTo(eventId: String) {
+        replyToEventId = eventId
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         replyToRow = rows.firstOrNull()
     }
@@ -656,6 +747,94 @@ class ComposeViewModel @Inject constructor(
         quoteRow = rows.firstOrNull()
     }
 
+    private fun currentContext(): DraftContext {
+        val article = articleCommentTarget
+        return when {
+            article != null -> DraftContext.ArticleComment(
+                articleId = article.articleId,
+                articleCoord = article.articleCoord,
+                articlePubkey = article.articlePubkey,
+                articleRelayHint = article.articleRelayHint,
+                parentId = article.parentId,
+                parentKind = article.parentKind,
+                parentPubkey = article.parentPubkey,
+                parentRelayHint = article.parentRelayHint,
+            )
+            replyToEventId != null -> DraftContext.Reply(
+                parentId = replyToEventId!!,
+                parentPubkey = replyToRow?.pubkey,
+            )
+            quoteEventId != null -> DraftContext.Quote(
+                eventId = quoteEventId!!,
+                quotedPubkey = quoteRow?.pubkey,
+            )
+            else -> DraftContext.New
+        }
+    }
+
+    private fun buildCurrentDraft(): Draft? {
+        val blocks = _blocks.value
+        val draftBlocks = draftBlocksFrom(blocks)
+        if (draftBlocks.isEmpty()) return null
+        val context = currentContext()
+        return Draft(
+            key = context.key,
+            blocks = draftBlocks,
+            isSensitive = _isSensitive.value,
+            updatedAt = System.currentTimeMillis(),
+            context = context,
+            hadUnsavedMedia = hasUnsavedMediaBlocks(blocks),
+        )
+    }
+
+    private fun draftBlocksFrom(blocks: List<ComposeBlock>): List<DraftBlock> =
+        blocks.mapNotNull { block ->
+            when (block) {
+                is ComposeBlock.Text -> block.content
+                    .takeIf { it.isNotBlank() }
+                    ?.let { DraftBlock.Text(it) }
+                is ComposeBlock.Attachment ->
+                    (block.state as? AttachmentState.Uploaded)?.blob?.toDraftAttachment()
+            }
+        }
+
+    private fun hasUnsavedMediaBlocks(blocks: List<ComposeBlock>): Boolean =
+        blocks.any { it is ComposeBlock.Attachment && it.state !is AttachmentState.Uploaded }
+
+    private fun hasAnyContent(blocks: List<ComposeBlock>): Boolean =
+        blocks.any { block ->
+            when (block) {
+                is ComposeBlock.Text -> block.content.isNotBlank()
+                is ComposeBlock.Attachment -> true
+            }
+        }
+
+    private fun currentContentFingerprint(
+        blocks: List<ComposeBlock>,
+        isSensitive: Boolean,
+    ): String {
+        val blockFingerprint = blocks.joinToString(separator = "\u001E") { block ->
+            when (block) {
+                is ComposeBlock.Text -> "t:${block.content}"
+                is ComposeBlock.Attachment -> when (val state = block.state) {
+                    is AttachmentState.Uploaded -> {
+                        val blob = state.blob
+                        "u:${blob.url}:${blob.sha256}:${blob.sizeBytes}:${blob.mimeType}:${blob.dimensions}:${blob.blurhash}:${blob.thumbnailUrl}:${blob.durationMs}"
+                    }
+                    is AttachmentState.Idle -> "pending:${state.id}:${state.displayName}:${state.originalBytes}:${state.quality}"
+                    is AttachmentState.Uploading -> "pending:${state.id}:${state.displayName}:${state.originalBytes}:${state.quality}"
+                    is AttachmentState.Failed -> "failed:${state.id}:${state.displayName}:${state.originalBytes}:${state.quality}:${state.message}"
+                }
+            }
+        }
+        return "${currentContext().key}|$isSensitive|$blockFingerprint"
+    }
+
+    private fun deleteCurrentDraft() {
+        val pk = pubkeyHex ?: return
+        draftStore.delete(pk, currentContext().key)
+    }
+
     // ── Confirm flow ────────────────────────────────────────────────────────
 
     fun requestPublish(isReply: Boolean) {
@@ -690,7 +869,7 @@ class ComposeViewModel @Inject constructor(
         val state = _sendState.value as? SendState.Failed ?: return
         // Re-enter Composing then re-request — blocks + reply/comment state intact
         _sendState.value = SendState.Composing
-        val isReply = replyToRow != null
+        val isReply = replyToEventId != null || replyToRow != null || articleCommentTarget != null
         requestPublish(isReply)
         val confirming = _sendState.value as? SendState.Confirming ?: return
         when {
@@ -1122,6 +1301,7 @@ class ComposeViewModel @Inject constructor(
             if (acceptedCount > 0) {
                 // Insert into MES for local state
                 withContext(Dispatchers.IO) { insertIntoMes() }
+                deleteCurrentDraft()
                 // Brief pause to show final state
                 delay(800)
                 _blocks.value = listOf(ComposeBlock.Text(""))

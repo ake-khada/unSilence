@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -54,7 +55,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -73,11 +76,15 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.drafts.CloseDraftSheet
 import com.unsilence.app.ui.feed.ComposePreviewCard
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
@@ -88,6 +95,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Warn
+import kotlinx.coroutines.delay
 
 @Composable
 fun ComposeScreen(
@@ -95,6 +103,7 @@ fun ComposeScreen(
     replyToEventId: String? = null,
     quoteEventId: String? = null,
     articleCommentTarget: ArticleCommentTarget? = null,
+    initialDraft: Draft? = null,
     viewModel: ComposeViewModel = hiltViewModel(
         key = "compose-${LocalAppSessionKey.current}",
     ),
@@ -105,6 +114,9 @@ fun ComposeScreen(
     val blocks        by viewModel.blocks.collectAsStateWithLifecycle()
     val canPublish    by viewModel.canPublish.collectAsStateWithLifecycle()
     val sendState     by viewModel.sendState.collectAsStateWithLifecycle()
+    val hasDraftableContent by viewModel.hasDraftableContent.collectAsStateWithLifecycle()
+    val hasUnsavedMedia by viewModel.hasUnsavedMedia.collectAsStateWithLifecycle()
+    val hasUnsavedDraftChanges by viewModel.hasUnsavedDraftChanges.collectAsStateWithLifecycle()
 
     val mentionPickerOpen by viewModel.mentionPickerOpen.collectAsStateWithLifecycle()
     val mentionQuery      by viewModel.mentionQuery.collectAsStateWithLifecycle()
@@ -118,24 +130,43 @@ fun ComposeScreen(
     val emojiCategories   by viewModel.emojiCategories.collectAsStateWithLifecycle()
     val pinnedShortcodes  by viewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pendingEmoji      by viewModel.pendingEmojiInsert.collectAsStateWithLifecycle()
+    val showSnackbar = LocalShowSnackbar.current
 
     // Article comments preview/post like a reply (parent card + "Replying" chrome);
     // the VM routes to the NIP-22 kind-1111 path via articleCommentTarget.
-    val isReply = replyToEventId != null || articleCommentTarget != null
-    val isQuote = quoteEventId != null
+    val initialContext = initialDraft?.context
+    val effectiveArticleTarget = articleCommentTarget
+        ?: (initialContext as? DraftContext.ArticleComment)?.toArticleCommentTarget()
+    val effectiveReplyToEventId = replyToEventId
+        ?: (initialContext as? DraftContext.Reply)?.parentId
+    val effectiveQuoteEventId = quoteEventId
+        ?: (initialContext as? DraftContext.Quote)?.eventId
+    val isReply = effectiveReplyToEventId != null || effectiveArticleTarget != null
+    val isQuote = effectiveQuoteEventId != null
     val replyToRow = viewModel.replyToRow
     val quoteRow = viewModel.quoteRow
     val isConfirming = sendState is SendState.Confirming
     val isPublishing = sendState is SendState.Publishing
     val isFailed = sendState is SendState.Failed
     val keyboardController = LocalSoftwareKeyboardController.current
+    var showCloseDraftSheet by remember { mutableStateOf(false) }
+    var saveNotice by remember { mutableStateOf<String?>(null) }
+
+    fun requestDismiss() {
+        when {
+            isConfirming -> viewModel.cancelSend()
+            hasUnsavedDraftChanges && !isPublishing -> showCloseDraftSheet = true
+            else -> onDismiss()
+        }
+    }
 
     // Reset ViewModel state on open (activity-scoped VM survives recomposition)
-    LaunchedEffect(Unit) {
+    LaunchedEffect(effectiveReplyToEventId, effectiveQuoteEventId, effectiveArticleTarget, initialDraft?.key) {
         viewModel.reset()
-        if (replyToEventId != null) viewModel.loadReplyTo(replyToEventId)
-        if (quoteEventId != null) viewModel.loadQuoteTo(quoteEventId)
-        if (articleCommentTarget != null) viewModel.loadArticleComment(articleCommentTarget)
+        if (effectiveReplyToEventId != null) viewModel.loadReplyTo(effectiveReplyToEventId)
+        if (effectiveQuoteEventId != null) viewModel.loadQuoteTo(effectiveQuoteEventId)
+        if (effectiveArticleTarget != null) viewModel.loadArticleComment(effectiveArticleTarget)
+        if (initialDraft != null) viewModel.restoreDraft(initialDraft)
     }
 
     // Auto-dismiss once the note is published
@@ -152,6 +183,17 @@ fun ComposeScreen(
     // System back during confirm → cancel (blocked during publishing)
     BackHandler(enabled = isConfirming || isFailed) {
         viewModel.cancelSend()
+    }
+
+    BackHandler(enabled = sendState is SendState.Composing && hasUnsavedDraftChanges) {
+        showCloseDraftSheet = true
+    }
+
+    LaunchedEffect(saveNotice) {
+        if (saveNotice != null) {
+            delay(1_800)
+            saveNotice = null
+        }
     }
 
     // ── Photo picker ────────────────────────────────────────────────────────
@@ -200,7 +242,7 @@ fun ComposeScreen(
                 // No close button during Publishing — event already broadcast
                 if (!isPublishing) {
                     IconButton(onClick = {
-                        if (isConfirming) viewModel.cancelSend() else onDismiss()
+                        requestDismiss()
                     }) {
                         Icon(
                             imageVector = Icons.Filled.Close,
@@ -444,6 +486,24 @@ fun ComposeScreen(
                         }
                     }
 
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(22.dp)
+                            .padding(horizontal = Spacing.medium),
+                        contentAlignment = Alignment.CenterEnd,
+                    ) {
+                        saveNotice?.let { message ->
+                            Text(
+                                text = message,
+                                color = if (message == "Draft saved") Mint else TextSecondary,
+                                fontSize = AppType.caption,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+
                     // ── Action row (pinned bottom, keyboard-aware) ──────────
                     Row(
                         modifier = Modifier
@@ -507,6 +567,20 @@ fun ComposeScreen(
                             )
                         }
 
+                        IconButton(
+                            onClick = {
+                                saveNotice = if (viewModel.saveCurrentDraft()) "Draft saved" else "Nothing to save"
+                            },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Save,
+                                contentDescription = "Save draft",
+                                tint = if (hasDraftableContent) BrandDeep else TextSecondary.copy(alpha = 0.55f),
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+
                         Spacer(Modifier.weight(1f))
 
                         // Char counter — visible only past 280 chars
@@ -565,7 +639,7 @@ fun ComposeScreen(
                                 tagsJson = state.previewTagsJson,
                                 createdAt = System.currentTimeMillis() / 1000,
                                 relayUrl = "",
-                                replyToId = replyToEventId,
+                                replyToId = effectiveReplyToEventId,
                                 rootId = null,
                                 hasContentWarning = false,
                                 contentWarningReason = null,
@@ -753,7 +827,38 @@ fun ComposeScreen(
             categories = emojiCategories,
         )
     }
+
+    if (showCloseDraftSheet) {
+        CloseDraftSheet(
+            hasDraftableContent = hasDraftableContent,
+            hasUnsavedMedia = hasUnsavedMedia,
+            onSaveDraft = {
+                val saved = viewModel.saveCurrentDraft()
+                showCloseDraftSheet = false
+                if (saved) showSnackbar("Draft saved")
+                onDismiss()
+            },
+            onDiscard = {
+                viewModel.discardCurrentDraft()
+                showCloseDraftSheet = false
+                onDismiss()
+            },
+            onContinueEditing = { showCloseDraftSheet = false },
+        )
+    }
 }
+
+private fun DraftContext.ArticleComment.toArticleCommentTarget(): ArticleCommentTarget =
+    ArticleCommentTarget(
+        articleId = articleId,
+        articleCoord = articleCoord,
+        articlePubkey = articlePubkey,
+        articleRelayHint = articleRelayHint,
+        parentId = parentId,
+        parentKind = parentKind,
+        parentPubkey = parentPubkey,
+        parentRelayHint = parentRelayHint,
+    )
 
 // ── Notify-whom toggle ──────────────────────────────────────────────────
 
