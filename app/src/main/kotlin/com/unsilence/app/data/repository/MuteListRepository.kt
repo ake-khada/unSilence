@@ -1,6 +1,5 @@
 package com.unsilence.app.data.repository
 
-import android.util.Log
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -28,8 +27,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val COALESCE_WINDOW_MS = 500L
-private const val TAG = "MuteListRepository"
-
 enum class MuteResult {
     /** Local mute applied + network publish scheduled. */
     Queued,
@@ -69,12 +66,10 @@ class MuteListRepository @Inject constructor(
 
     fun markPublishSafe(reason: String = "verified") {
         _publishSafe.value = true
-        Log.i(TAG, "Mute publish enabled: $reason")
     }
 
     fun markPublishUnsafe(reason: String) {
         _publishSafe.value = false
-        Log.w(TAG, "Mute publish disabled: $reason")
     }
 
     /** Called from MES handleMuteList to check if an arriving event is our own echo. */

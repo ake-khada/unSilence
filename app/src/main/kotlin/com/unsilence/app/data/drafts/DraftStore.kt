@@ -1,7 +1,6 @@
 package com.unsilence.app.data.drafts
 
 import android.content.Context
-import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -23,7 +22,6 @@ import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val TAG = "DraftStore"
 private val Context.draftsDataStore: DataStore<Preferences> by preferencesDataStore(name = "drafts")
 
 @Singleton
@@ -56,7 +54,7 @@ class DraftStore @Inject constructor(
                 synchronized(lock) {
                     _drafts.value = mergeDraftMaps(hydrated, _drafts.value)
                 }
-            }.onFailure { Log.w(TAG, "Draft hydration failed: ${it.message}") }
+            }
             loaded.complete(Unit)
         }
     }
@@ -105,7 +103,7 @@ class DraftStore @Inject constructor(
                         prefs[key] = json.encodeToString(list)
                     }
                 }
-            }.onFailure { Log.w(TAG, "Draft persist failed: ${it.message}") }
+            }
         }
     }
 

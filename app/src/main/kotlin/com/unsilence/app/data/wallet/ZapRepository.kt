@@ -1,6 +1,5 @@
 package com.unsilence.app.data.wallet
 
-import android.util.Log
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
@@ -39,7 +38,6 @@ data class ZapRequest(
     val isPrivate: Boolean = false,
 )
 
-private const val TAG = "ZapRepository"
 private const val LNURL_CACHE_TTL_MS = 5 * 60 * 1000L
 
 class ZapException(message: String) : Exception(message)
@@ -102,10 +100,7 @@ class ZapRepository @Inject constructor(
         // receipt AND where we publish the zap request — own write + recipient read +
         // event relays (H20c outbox targeting), falling back to the single relayUrl.
         val zapRelays = targetRelays.ifEmpty { listOf(relayUrl) }
-        val t0 = System.currentTimeMillis()
         val amountSats = request.amountSats
-        val mode = if (request.isPrivate) "private" else "public"
-        Log.d(TAG, "Zap start: mode=$mode amount=$amountSats relays=${zapRelays.size}")
 
         // ── 1. Get lightning address from author's profile ────────────────────
         val lud16 = userRepository.getUserLud16(eventPubkey)
@@ -123,7 +118,6 @@ class ZapRepository @Inject constructor(
             lnurlCache[lud16] = fetched to (System.currentTimeMillis() + LNURL_CACHE_TTL_MS)
             fetched
         }
-        Log.d(TAG, "LNURL resolved in ${System.currentTimeMillis() - t0}ms")
 
         // ── 3. Build kind-9734 zap request event ─────────────────────────────
         val msats = runCatching { Math.multiplyExact(amountSats, 1000L) }
@@ -132,12 +126,10 @@ class ZapRepository @Inject constructor(
         val nowSeconds = System.currentTimeMillis() / 1000L
 
         val zapRequest: Event = if (request.isPrivate) {
-            Log.d(TAG, "Building private zap request")
             buildPrivateZapRequest(
                 eventPubkey, eventId, zapRelays, msats, nowSeconds, request.message,
             ) ?: return Result.failure(Exception("Private zap signing failed"))
         } else {
-            Log.d(TAG, "Building public zap request")
             val template = EventTemplate<Event>(
                 createdAt = nowSeconds,
                 kind      = 9734,
@@ -164,12 +156,8 @@ class ZapRepository @Inject constructor(
 
         val zapRequestJson = toEventJson(zapRequest)
         val bolt11 = fetchBolt11(meta.callback, msats, zapRequestJson).getOrElse { e ->
-            Log.w(TAG, "Zap invoice fetch failed: mode=$mode amount=$amountSats relays=${zapRelays.size} " +
-                "elapsed=${System.currentTimeMillis() - t0}ms reason=${e.message}")
             return Result.failure(e)
         }
-
-        Log.d(TAG, "bolt11 obtained in ${System.currentTimeMillis() - t0}ms for $amountSats sats, mode=$mode")
 
         // NWC amount is only needed for amountless invoices. Some wallets reject
         // it when the BOLT-11 already carries its own amount.
@@ -177,14 +165,11 @@ class ZapRepository @Inject constructor(
 
         // ── 5. Pay on the already-connected WebSocket ─────────────────────────
         val payResult = nwcManager.sendPayment(warmSocket, bolt11, nwcAmountMsats)
-        val elapsedMs = System.currentTimeMillis() - t0
         if (payResult.isSuccess) {
-            Log.d(TAG, "Zap total: ${elapsedMs}ms, success=true, mode=$mode")
             return Result.success(zapRequest)
         }
 
         val failure = payResult.exceptionOrNull() ?: Exception("Payment failed")
-        Log.w(TAG, "Zap payment failed: mode=$mode amount=$amountSats elapsed=${elapsedMs}ms reason=${failure.message}")
         return Result.failure(failure)
     }
 
@@ -222,8 +207,7 @@ class ZapRepository @Inject constructor(
             return try {
                 val tagsWithAnon = tags + arrayOf(arrayOf("anon", ""))
                 signerSync.sign<Event>(nowSeconds, 9734, tagsWithAnon, message ?: "")
-            } catch (e: Exception) {
-                Log.w(TAG, "Private zap (sync) failed: ${e.message}")
+            } catch (_: Exception) {
                 null
             }
         }
@@ -234,24 +218,20 @@ class ZapRepository @Inject constructor(
             createdAt = nowSeconds, kind = 9733, tags = tags,
             content = message ?: "",
         )
-        val signedInner = signingManager.sign(innerTemplate) ?: run {
-            Log.w(TAG, "inner kind-9733 sign failed"); return null
-        }
+        val signedInner = signingManager.sign(innerTemplate) ?: return null
         val innerJson = toEventJson(signedInner)
 
         // 2. Random anon keypair for encryption + outer signing.
         val anonKeyPair = KeyPair()
-        val anonPrivBytes = anonKeyPair.privKey ?: run {
-            Log.w(TAG, "anon keypair missing privKey"); return null
-        }
+        val anonPrivBytes = anonKeyPair.privKey ?: return null
 
         // 3. Encrypt inner JSON (bech32 pzap1…_iv1… format).
         val ciphertext = try {
             PrivateZapEncryption.encryptPrivateZapMessage(
                 innerJson, anonPrivBytes, recipientPubkey.hexToByteArray(),
             )
-        } catch (e: Exception) {
-            Log.w(TAG, "anon encrypt failed: ${e.message}"); return null
+        } catch (_: Exception) {
+            return null
         }
 
         // 4. Outer kind-9734: anon-signed, ciphertext in anon tag, empty content.
@@ -262,9 +242,7 @@ class ZapRepository @Inject constructor(
         )
         return try {
             NostrSignerInternal(anonKeyPair).sign(outerTemplate)
-        } catch (e: Exception) {
-            Log.w(TAG, "anon outer sign failed: ${e.message}"); null
-        }
+        } catch (_: Exception) { null }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

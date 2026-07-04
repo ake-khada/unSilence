@@ -145,7 +145,6 @@ class NwcManager @Inject constructor(
         val stampedOwner = prefs.getString(KEY_OWNER, null)?.lowercase()
         if (stampedOwner != null && stampedOwner != owner) {
             clear()
-            Log.w(TAG, "OWNER-FENCE: cleared NWC credentials for previous account")
         }
         prefs.edit().putString(KEY_OWNER, owner).apply()
     }
@@ -281,7 +280,6 @@ class NwcManager @Inject constructor(
                 withTimeout(PAYMENT_READY_TIMEOUT_MS) { ready.await() }
             } catch (e: TimeoutCancellationException) {
                 close("ready timeout")
-                Log.w(TAG, "NWC payment session was not ready within ${PAYMENT_READY_TIMEOUT_MS}ms")
                 return@withLock Result.failure(Exception("Wallet relay did not become ready"))
             } catch (e: CancellationException) {
                 throw e
@@ -326,13 +324,11 @@ class NwcManager @Inject constructor(
                 close("send failed")
                 return@withLock Result.failure(IllegalStateException("Wallet relay disconnected before payment was sent"))
             }
-            Log.d(TAG, "NWC payment sent on persistent WS")
 
             try {
                 withTimeout(PAYMENT_TIMEOUT_MS) { payment.deferred.await() }
             } catch (e: TimeoutCancellationException) {
                 pending.compareAndSet(payment, null)
-                Log.w(TAG, "NWC payment still pending after ${PAYMENT_TIMEOUT_MS}ms")
                 Result.failure(
                     WalletPaymentPendingException(
                         "Wallet has not confirmed this zap yet. Check your wallet before retrying."
@@ -349,7 +345,6 @@ class NwcManager @Inject constructor(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 webSocket.send(responseSubscription())
                 if (!ready.isCompleted) ready.complete(Result.success(Unit))
-                Log.d(TAG, "NWC payment session ready")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -375,12 +370,10 @@ class NwcManager @Inject constructor(
                             return
                         }
                         "NOTICE" -> {
-                            Log.w(TAG, "NWC relay notice: ${msg.getOrNull(1)?.jsonPrimitive?.content?.take(160).orEmpty()}")
                             return
                         }
                         "CLOSED" -> {
                             val reason = msg.getOrNull(2)?.jsonPrimitive?.content.orEmpty()
-                            Log.w(TAG, "NWC subscription closed by relay: ${reason.take(160)}")
                             if (reason.startsWith("auth-required", ignoreCase = true)) {
                                 fail(Exception("Wallet relay requires authentication but did not provide a challenge"))
                             }
@@ -391,13 +384,11 @@ class NwcManager @Inject constructor(
                     }
                     handleResponseEvent(msg)
                 } catch (e: Exception) {
-                    Log.w(TAG, "NWC response parse error: ${e.message}")
                     fail(e)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "NWC WS failure: ${t.message}")
                 fail(t)
             }
 
@@ -424,7 +415,6 @@ class NwcManager @Inject constructor(
             val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
             if (success) return
 
-            Log.w(TAG, "NWC payment event rejected by relay: ${message.take(160)}")
             if (message.contains("auth", ignoreCase = true)) return
             if (pending.compareAndSet(payment, null)) {
                 payment.deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
@@ -443,18 +433,15 @@ class NwcManager @Inject constructor(
                 Nip04.decrypt(encContent, creds.nwcPrivKeyBytes, creds.walletPubBytes)
             }.getOrNull()
             if (decrypted == null) {
-                Log.w(TAG, "NWC decrypt failed, skipping")
                 return
             }
 
-            Log.d(TAG, "NWC response: $decrypted")
             val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
             val errorElement = resp["error"]
             val result = if (errorElement != null && errorElement !is kotlinx.serialization.json.JsonNull) {
                 val errObj = errorElement.jsonObject
                 val code = errObj["code"]?.jsonPrimitive?.content
                 val rawMsg = errObj["message"]?.jsonPrimitive?.content
-                Log.w(TAG, "NWC payment error [$code]: $rawMsg")
                 val userMsg = when (code) {
                     "PAYMENT_FAILED"      -> "No route found — recipient may be unreachable"
                     "INSUFFICIENT_BALANCE" -> "Insufficient wallet balance"
@@ -464,7 +451,6 @@ class NwcManager @Inject constructor(
                 }
                 Result.failure(Exception(userMsg))
             } else {
-                Log.d(TAG, "NWC payment success")
                 Result.success(Unit)
             }
 
@@ -553,7 +539,6 @@ class NwcManager @Inject constructor(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 webSocket.send(reqCmd)
                 webSocket.send(eventCmd)
-                Log.d(TAG, "NWC balance request sent")
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
@@ -577,7 +562,6 @@ class NwcManager @Inject constructor(
                             val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull
                             val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
                             if (eventId == signed.id && success == false) {
-                                Log.w(TAG, "NWC balance request rejected by relay: ${message.take(160)}")
                                 if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
                                     deferred.complete(null)
                                 }
@@ -585,17 +569,14 @@ class NwcManager @Inject constructor(
                             return
                         }
                         "NOTICE" -> {
-                            Log.w(TAG, "NWC balance relay notice: ${msg.getOrNull(1)?.jsonPrimitive?.content?.take(160).orEmpty()}")
                             return
                         }
                         "CLOSED" -> {
-                            Log.w(TAG, "NWC balance subscription closed: ${msg.getOrNull(2)?.jsonPrimitive?.content?.take(160).orEmpty()}")
                             if (!deferred.isCompleted) deferred.complete(null)
                             return
                         }
                         "EVENT" -> Unit
                         else -> {
-                            Log.d(TAG, "Ignoring NWC balance relay message type=$type")
                             return
                         }
                     }
@@ -607,7 +588,6 @@ class NwcManager @Inject constructor(
                     val decrypted = runCatching {
                         Nip04.decrypt(encContent, nwcPrivKeyBytes, walletPubBytes)
                     }.getOrNull() ?: return
-                    Log.d(TAG, "NWC balance response: $decrypted")
                     val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
                     if (resp["error"] != null && resp["error"] !is kotlinx.serialization.json.JsonNull) {
                         deferred.complete(null)
@@ -622,7 +602,6 @@ class NwcManager @Inject constructor(
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "NWC balance WS failure: ${t.message}")
                 if (!deferred.isCompleted) deferred.complete(null)
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -675,8 +654,7 @@ class NwcManager @Inject constructor(
         val signed = runCatching {
             val normalizedUrl = RelayUrlNormalizer.normalize(creds.conn.relayUrl)
             creds.nwcSigner.sign(RelayAuthEvent.build(normalizedUrl, challenge))
-        }.getOrElse { e ->
-            Log.w(TAG, "NWC relay auth signing failed: ${e.message}")
+        }.getOrElse {
             return false
         }
 
@@ -684,13 +662,7 @@ class NwcManager @Inject constructor(
             add(JsonPrimitive("AUTH"))
             add(NostrJson.parseToJsonElement(toEventJson(signed)))
         }.toString()
-        val sent = webSocket.send(authCmd)
-        if (sent) {
-            Log.w(TAG, "NWC AUTH response sent to ${creds.conn.relayUrl} (eventId=${signed.id.take(8)})")
-        } else {
-            Log.w(TAG, "NWC AUTH response failed to send to ${creds.conn.relayUrl}")
-        }
-        return sent
+        return webSocket.send(authCmd)
     }
 
     private fun handlePaymentOk(
@@ -704,7 +676,6 @@ class NwcManager @Inject constructor(
         if (eventId != expectedRequestId) return
 
         if (!success) {
-            Log.w(TAG, "NWC payment event rejected by relay: ${message.take(160)}")
             if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
                 deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
             }
