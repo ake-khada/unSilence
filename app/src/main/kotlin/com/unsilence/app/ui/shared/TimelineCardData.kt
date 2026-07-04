@@ -33,10 +33,20 @@ class TimelineCardData @Inject constructor(
 
     fun profileFlow(pubkey: String, scope: CoroutineScope): StateFlow<UserEntity?> =
         synchronized(profileCache) {
-            profileCache.get(pubkey) ?: userRepository.userFlow(pubkey)
-                .stateIn(scope, SharingStarted.WhileSubscribed(CARD_FLOW_STOP_TIMEOUT_MS), null)
+            val current = userRepository.getUser(pubkey)
+            val cached = profileCache.get(pubkey)
+            if (cached != null && !needsProfileFlowRefresh(cached.value, current)) {
+                return@synchronized cached
+            }
+            userRepository.userFlow(pubkey)
+                .stateIn(scope, SharingStarted.WhileSubscribed(CARD_FLOW_STOP_TIMEOUT_MS), current)
                 .also { profileCache.put(pubkey, it) }
         }
+
+    private fun needsProfileFlowRefresh(cached: UserEntity?, current: UserEntity?): Boolean {
+        if (current == null) return false
+        return cached == null || cached.updatedAt < current.updatedAt || cached.picture != current.picture
+    }
 
     fun statsFlow(eventId: String, scope: CoroutineScope): StateFlow<EventStats> =
         synchronized(statsCache) {

@@ -94,7 +94,7 @@ class UserProfileViewModel @Inject constructor(
 
     @OptIn(FlowPreview::class)
     val tabPostsFlow: StateFlow<List<FeedRow>> =
-        combine(_events, _contentFilter) { events, cf ->
+        combine(_events, _contentFilter, userFlow) { events, cf, profile ->
             if (events.isEmpty()) return@combine emptyList()
             val displayed = events.asSequence()
                 .filter { matchesContentFilter(it, cf) }
@@ -103,7 +103,10 @@ class UserProfileViewModel @Inject constructor(
             if (displayed.isEmpty()) return@combine emptyList()
             val ids = displayed.map { it.id }.toSet()
             val rowsById = memoryEventStore.feedRowsByIds(ids).associateBy { it.id }
-            displayed.map { evt -> rowsById[evt.id] ?: memoryEventStore.synthesizeFeedRow(evt) }
+            displayed.map { evt ->
+                (rowsById[evt.id] ?: memoryEventStore.synthesizeFeedRow(evt))
+                    .withProfileAuthorSnapshot(profile)
+            }
         }
             .sample(FEED_SAMPLE_MS)
             .flowOn(Dispatchers.Default)
