@@ -2720,14 +2720,14 @@ class RelayPool @Inject constructor(
             // Cold-lane flush for kind-0 events
             delay(COLD_LANE_FLUSH_MS)
 
-            // ── Fallback: indexers-empty → author's own relays (H19b) ─────
+            // ── Fallback: indexers incomplete → author's own relays (H19b) ─
             val mes = memoryEventStore.get()
-            val stillMissing = novel.filter { !mes.hasProfile(it) }
-            if (stillMissing.isEmpty()) return@launch
+            val stillIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
+            if (stillIncomplete.isEmpty()) return@launch
 
             val triedRelays = targetUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
             val relayToPks = mutableMapOf<String, MutableList<String>>()
-            for (pk in stillMissing) {
+            for (pk in stillIncomplete) {
                 val candidates = mutableSetOf<String>()
                 candidates.addAll(mes.writeRelaysFor(pk))
                 candidates.addAll(mes.relaysSeenForPubkey(pk))
@@ -2740,8 +2740,8 @@ class RelayPool @Inject constructor(
             }
             if (relayToPks.isEmpty()) {
                 val fbNow = System.currentTimeMillis()
-                stillMissing.forEach { profileFallbackNegCache[it] = fbNow }
-                Log.w(TAG, "PROFFB: ${stillMissing.size} pk(s) unresolvable — no relay signal")
+                stillIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
+                Log.w(TAG, "PROFFB: ${stillIncomplete.size} pk(s) incomplete — no relay signal")
                 return@launch
             }
 
@@ -2772,14 +2772,14 @@ class RelayPool @Inject constructor(
             sendOneShotBatch(fbRelayUrls, listOf(fbReq), listOf(fbSubId))
             delay(COLD_LANE_FLUSH_MS)
 
-            // Negative-cache remaining misses; log successes for field validation
+            // Negative-cache remaining incomplete avatars; log successes for field validation
             val fbNow = System.currentTimeMillis()
-            val finalMissing = fbPks.filter { !mes.hasProfile(it) }
-            val resolved = fbPks.size - finalMissing.size
-            if (resolved > 0) Log.w(TAG, "PROFFB: $resolved pk(s) resolved via fallback")
-            finalMissing.forEach { profileFallbackNegCache[it] = fbNow }
-            if (finalMissing.isNotEmpty()) {
-                Log.w(TAG, "PROFFB: ${finalMissing.size} pk(s) still unresolved after fallback")
+            val finalIncomplete = fbPks.filter { profileMissingPicture(mes.getUserEntity(it)) }
+            val resolved = fbPks.size - finalIncomplete.size
+            if (resolved > 0) Log.w(TAG, "PROFFB: $resolved pk(s) resolved avatar via fallback")
+            finalIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
+            if (finalIncomplete.isNotEmpty()) {
+                Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after fallback")
             }
         }
         Log.d(TAG, "Fetching ${novel.size} profiles+relaylists → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")

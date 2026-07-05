@@ -118,7 +118,7 @@ class ProfileResolver @Inject constructor(
             // Re-fetch if no picture and last update was >1h ago.
             val user = memoryEventStore.getUserEntity(pk)
             if (user == null) return@filterTo true // timestamp set but no entity — defensive
-            user.picture.isNullOrBlank() && lastUpdated < noPictureThreshold
+            profileMissingPicture(user) && lastUpdated < noPictureThreshold
         }
     }
 
@@ -185,7 +185,7 @@ class ProfileResolver @Inject constructor(
                 toFetch.add(pk)
             } else {
                 val user = memoryEventStore.getUserEntity(pk)
-                if (user != null && user.picture.isNullOrBlank() && lastUpdated < noPictureThreshold) {
+                if (user == null || (profileMissingPicture(user) && lastUpdated < noPictureThreshold)) {
                     toFetch.add(pk)
                 }
             }
