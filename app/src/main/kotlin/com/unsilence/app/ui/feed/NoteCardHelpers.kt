@@ -221,6 +221,8 @@ internal fun AvatarImage(
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 ) {
+    var lookedUpProfile by remember(pubkey) { mutableStateOf<UserEntity?>(null) }
+
     // Observe the profile reactively — when MES receives the kind-0,
     // _profileSignal bumps and this re-emits the updated UserEntity.
     val liveProfile = profileFlow?.invoke(pubkey)
@@ -228,13 +230,14 @@ internal fun AvatarImage(
 
     val effectivePicture = liveProfile?.picture?.takeIf { it.isNotBlank() }
         ?: picture?.takeIf { it.isNotBlank() }
+        ?: lookedUpProfile?.picture?.takeIf { it.isNotBlank() }
 
     // Trigger profile fetch when picture is missing — debounced to avoid
     // thundering-herd on initial feed render where many avatars are null.
     if (effectivePicture.isNullOrBlank() && lookupProfile != null) {
         LaunchedEffect(pubkey) {
             delay(800)
-            lookupProfile(pubkey)
+            lookedUpProfile = lookupProfile(pubkey)
         }
     }
 

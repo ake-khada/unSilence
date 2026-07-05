@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -563,7 +564,13 @@ class NoteActionsViewModel @Inject constructor(
         // Trigger profile fetch — fetchMissingProfiles pre-filters via
         // profileResolver.filterUnresolved() and has in-flight guards.
         userRepository.fetchMissingProfiles(listOf(pubkey))
-        if (cached != null) return cached
+        if (cached != null) {
+            return withTimeoutOrNull(2_000L) {
+                memoryEventStore.userEntityFlow(pubkey)
+                    .filter { !it?.picture.isNullOrBlank() }
+                    .first()
+            } ?: cached
+        }
         return withTimeoutOrNull(5_000L) {
             memoryEventStore.userEntityFlow(pubkey).filterNotNull().first()
         }
