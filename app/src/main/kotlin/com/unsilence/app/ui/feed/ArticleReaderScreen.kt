@@ -233,7 +233,7 @@ fun ArticleReaderScreen(
     // Effective author (inner author on a reposted article — never the reposter),
     // mirroring EventCard.ArticleLayout's resolution.
     val isRepost = model.repost != null
-    val authorProfile = profileFlow?.invoke(model.pubkey)?.collectAsStateWithLifecycle()?.value
+    val authorProfile = collectProfileAsState(model.pubkey, profileFlow)
     val authorLabel = authorProfile?.displayName?.takeIf { it.isNotBlank() }
         ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
         ?: (if (isRepost) null else row.displayName)

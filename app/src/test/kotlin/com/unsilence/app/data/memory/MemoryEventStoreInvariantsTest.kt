@@ -619,6 +619,183 @@ class MemoryEventStoreInvariantsTest {
         assertTrue(third!!.content.contains("new"))
     }
 
+    @Test
+    fun `kind 0 pictureless newer profile keeps older avatar for display`() {
+        val pk = "profile-avatar-keep"
+        val noteId = "note-avatar-keep"
+        val picture = "https://example.com/avatar-old.jpg"
+
+        store.insert(
+            event(
+                id = "profile-with-picture",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"old","picture":"$picture"}""",
+                createdAt = 100,
+            ),
+        )
+        store.insert(event(id = noteId, pubkey = pk, kind = 1, content = "hello", createdAt = 150))
+        assertEquals(picture, store.feedRowsByIds(setOf(noteId)).first().authorPicture)
+
+        store.insert(
+            event(
+                id = "profile-pictureless-newer",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"new"}""",
+                createdAt = 200,
+            ),
+        )
+
+        assertTrue(store.getProfile(pk)!!.content.contains("new"))
+        assertEquals(picture, store.getUserEntity(pk)?.picture)
+        assertEquals(picture, store.feedRowsByIds(setOf(noteId)).first().authorPicture)
+    }
+
+    @Test
+    fun `kind 0 older avatar backfills pictureless latest profile`() {
+        val pk = "profile-avatar-backfill"
+        val noteId = "note-avatar-backfill"
+        val picture = "https://example.com/avatar-backfill.jpg"
+
+        store.insert(
+            event(
+                id = "profile-pictureless-latest",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"latest"}""",
+                createdAt = 200,
+            ),
+        )
+        store.insert(event(id = noteId, pubkey = pk, kind = 1, content = "hello", createdAt = 250))
+        assertNull(store.feedRowsByIds(setOf(noteId)).first().authorPicture)
+
+        store.insert(
+            event(
+                id = "profile-older-with-picture",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"older","picture":"$picture"}""",
+                createdAt = 100,
+            ),
+        )
+
+        assertTrue(store.getProfile(pk)!!.content.contains("latest"))
+        assertEquals(picture, store.getUserEntity(pk)?.picture)
+        assertEquals(picture, store.feedRowsByIds(setOf(noteId)).first().authorPicture)
+    }
+
+    @Test
+    fun `kind 0 newer avatar replaces older avatar fallback`() {
+        val pk = "profile-avatar-replace"
+        val oldPicture = "https://example.com/avatar-old.jpg"
+        val newPicture = "https://example.com/avatar-new.jpg"
+
+        store.insert(
+            event(
+                id = "profile-avatar-old",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"old","picture":"$oldPicture"}""",
+                createdAt = 100,
+            ),
+        )
+        store.insert(
+            event(
+                id = "profile-avatar-new",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"new","picture":"$newPicture"}""",
+                createdAt = 200,
+            ),
+        )
+
+        assertEquals(newPicture, store.getUserEntity(pk)?.picture)
+    }
+
+    @Test
+    fun `kind 0 partial newer profile keeps older visual identity fields`() {
+        val pk = "profile-identity-keep"
+        val picture = "https://example.com/avatar-old.jpg"
+        val nip05 = "old@example.com"
+
+        store.insert(
+            event(
+                id = "profile-identity-complete",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"old","display_name":"Old Display","picture":"$picture","nip05":"$nip05"}""",
+                createdAt = 100,
+            ),
+        )
+        store.insert(
+            event(
+                id = "profile-identity-partial-newer",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"new"}""",
+                createdAt = 200,
+            ),
+        )
+
+        val user = store.getUserEntity(pk)!!
+        assertEquals("new", user.name)
+        assertNull(user.displayName)
+        assertEquals(picture, user.picture)
+        assertEquals(nip05, user.nip05)
+    }
+
+    @Test
+    fun `kind 0 older visual identity backfills blank latest profile`() {
+        val pk = "profile-identity-backfill"
+        val picture = "https://example.com/avatar-backfill.jpg"
+        val nip05 = "backfill@example.com"
+
+        store.insert(
+            event(
+                id = "profile-identity-blank-latest",
+                pubkey = pk,
+                kind = 0,
+                content = """{}""",
+                createdAt = 200,
+            ),
+        )
+        store.insert(
+            event(
+                id = "profile-identity-older",
+                pubkey = pk,
+                kind = 0,
+                content = """{"name":"older","display_name":"Older Display","picture":"$picture","nip05":"$nip05"}""",
+                createdAt = 100,
+            ),
+        )
+
+        val user = store.getUserEntity(pk)!!
+        assertEquals("older", user.name)
+        assertEquals("Older Display", user.displayName)
+        assertEquals(picture, user.picture)
+        assertEquals(nip05, user.nip05)
+    }
+
+    @Test
+    fun `kind 0 profile aliases map to rendered identity fields`() {
+        val pk = "profile-identity-alias"
+
+        store.insert(
+            event(
+                id = "profile-identity-aliases",
+                pubkey = pk,
+                kind = 0,
+                content = """{"displayName":"Camel Display","avatar":"https://example.com/avatar-alias.jpg"}""",
+                createdAt = 100,
+            ),
+        )
+
+        val user = store.getUserEntity(pk)!!
+        assertEquals("Camel Display", user.displayName)
+        assertEquals("https://example.com/avatar-alias.jpg", user.picture)
+    }
+
     // ── Kind 3 follows (replaceable) ────────────────────────────────────────
 
     @Test
@@ -3709,6 +3886,45 @@ class MemoryEventStoreInvariantsTest {
             assertEquals(1, updated.size)
             assertEquals("reaction", (updated[0] as NotificationRow.Grouped).notifType)
 
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `notificationsFlow emits when actor profile arrives`() = runTest {
+        val actorPubkey = "notification-actor"
+        val picture = "https://example.com/notif-avatar.jpg"
+        store.insert(
+            event(
+                id = "mention-before-profile",
+                pubkey = actorPubkey,
+                kind = 1,
+                content = "hello",
+                createdAt = 200,
+                tags = listOf(listOf("p", myPubkey)),
+            ),
+        )
+
+        store.notificationsFlow(myPubkey, limit = 50).test {
+            val initial = awaitItem()
+            val initialRow = initial.single() as NotificationRow.Single
+            assertNull(initialRow.actorName)
+            assertNull(initialRow.actorPicture)
+
+            store.insert(
+                event(
+                    id = "notification-actor-profile",
+                    pubkey = actorPubkey,
+                    kind = 0,
+                    content = """{"name":"Notif Actor","picture":"$picture"}""",
+                    createdAt = 250,
+                ),
+            )
+
+            val updated = awaitItem()
+            val updatedRow = updated.single() as NotificationRow.Single
+            assertEquals("Notif Actor", updatedRow.actorName)
+            assertEquals(picture, updatedRow.actorPicture)
             cancelAndIgnoreRemainingEvents()
         }
     }

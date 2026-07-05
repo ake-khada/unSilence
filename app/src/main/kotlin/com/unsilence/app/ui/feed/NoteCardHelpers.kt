@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,6 +50,7 @@ import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -213,6 +215,17 @@ private fun decodeNostrRef(uri: String): NostrRef? {
 // ── Composable helpers ─────────────��─────────────────────────────────────────
 
 @Composable
+internal fun collectProfileAsState(
+    pubkey: String,
+    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+): UserEntity? {
+    if (profileFlow == null) return null
+    return key(pubkey) {
+        profileFlow(pubkey).collectAsStateWithLifecycle().value
+    }
+}
+
+@Composable
 internal fun AvatarImage(
     pubkey: String,
     picture: String?,
@@ -225,12 +238,12 @@ internal fun AvatarImage(
 
     // Observe the profile reactively — when MES receives the kind-0,
     // _profileSignal bumps and this re-emits the updated UserEntity.
-    val liveProfile = profileFlow?.invoke(pubkey)
-        ?.collectAsStateWithLifecycle()?.value
+    val liveProfile = collectProfileAsState(pubkey, profileFlow)
 
     val effectivePicture = liveProfile?.picture?.takeIf { it.isNotBlank() }
         ?: picture?.takeIf { it.isNotBlank() }
         ?: lookedUpProfile?.picture?.takeIf { it.isNotBlank() }
+    var imageFailed by remember(pubkey, effectivePicture) { mutableStateOf(false) }
 
     // Trigger profile fetch when picture is missing — debounced to avoid
     // thundering-herd on initial feed render where many avatars are null.
@@ -242,12 +255,18 @@ internal fun AvatarImage(
     }
 
     Box(modifier = modifier.clip(CircleShape)) {
-        IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
+        if (effectivePicture.isNullOrBlank() || imageFailed) {
+            IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
+        }
         if (!effectivePicture.isNullOrBlank()) {
             AsyncImage(
                 model              = rememberAvatarImageRequest(effectivePicture, sizeDp),
                 contentDescription = null,
                 modifier           = Modifier.fillMaxSize(),
+                contentScale        = ContentScale.Crop,
+                onLoading          = { imageFailed = false },
+                onSuccess          = { imageFailed = false },
+                onError            = { imageFailed = true },
             )
         }
     }

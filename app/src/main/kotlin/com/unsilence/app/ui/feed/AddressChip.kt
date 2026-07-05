@@ -15,7 +15,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,8 +47,7 @@ internal fun AddressChip(
     val lookedUpAuthor by produceState<UserEntity?>(null, segment.author) {
         if (lookupProfile != null) value = lookupProfile(segment.author)
     }
-    val liveAuthor = profileFlow?.invoke(segment.author)
-        ?.collectAsStateWithLifecycle()?.value
+    val liveAuthor = collectProfileAsState(segment.author, profileFlow)
     val author = liveAuthor ?: lookedUpAuthor
 
     val kindLabel = when (segment.kind) {

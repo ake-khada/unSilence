@@ -153,14 +153,26 @@ fun EventCard(
     val hideWhole = sensitiveMode == SensitiveContentMode.HIDE && isSensitive
 
     // Resolve source profile for repost header (kind-6 wrapper author).
-    val sourceProfile = if (model.repost != null && profileFlow != null) {
-        profileFlow(model.sourcePubkey).collectAsStateWithLifecycle().value
+    val liveSourceProfile = if (model.repost != null) {
+        collectProfileAsState(model.sourcePubkey, profileFlow)
     } else null
+    val sourceProfile = liveSourceProfile?.takeIf { !it.picture.isNullOrBlank() }
+        ?: if (model.repost != null && row.pubkey == model.sourcePubkey) {
+            UserEntity(
+                pubkey = model.sourcePubkey,
+                name = row.authorName,
+                displayName = row.authorDisplayName,
+                picture = row.authorPicture,
+                nip05 = row.authorNip05,
+            )
+        } else {
+            liveSourceProfile
+        }
 
     // Fallback profile fetch for reposts when the source's profile hasn't
     // arrived yet — the existing AvatarImage `lookupProfile` debounce covers
     // most cases; this LaunchedEffect catches the long tail.
-    if (model.repost != null && sourceProfile == null && lookupProfile != null) {
+    if (model.repost != null && sourceProfile?.picture.isNullOrBlank() && lookupProfile != null) {
         LaunchedEffect(model.sourcePubkey) {
             delay(1500)
             lookupProfile(model.sourcePubkey)
@@ -177,9 +189,7 @@ fun EventCard(
     // a fallback when the flow hasn't emitted yet, so the first frame after
     // mount doesn't flash empty avatars on rows whose profiles MES already
     // has cached.
-    val authorProfile = if (profileFlow != null) {
-        profileFlow(model.pubkey).collectAsStateWithLifecycle().value
-    } else null
+    val authorProfile = collectProfileAsState(model.pubkey, profileFlow)
 
     // For repost cards, model.pubkey is the inner (effective) author and
     // model.sourcePubkey is the wrapper author. authorProfile reactively
@@ -540,7 +550,7 @@ private fun ArticleLayout(
     // path (see the standard-layout AuthorHeader) so a reposted article never shows
     // the reposter's identity.
     val isRepost = model.repost != null
-    val articleAuthorProfile = profileFlow?.invoke(model.pubkey)?.collectAsStateWithLifecycle()?.value
+    val articleAuthorProfile = collectProfileAsState(model.pubkey, profileFlow)
 
     Column(
         modifier = modifier
