@@ -4,15 +4,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
+import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
+import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -58,6 +62,7 @@ class SearchViewModel @Inject constructor(
     private val trendingClient: TrendingClient,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val userRepository: UserRepository,
+    private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
@@ -94,6 +99,21 @@ class SearchViewModel @Inject constructor(
         _queryFlow.value = query
         _uiState.update { it.copy(query = query) }
     }
+
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey, viewModelScope)
+
+    fun statsFlow(eventId: String): StateFlow<EventStats> =
+        timelineCardData.statsFlow(eventId, viewModelScope)
+
+    fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
+        timelineCardData.zapDetailsForEvent(eventId)
+
+    fun repostPubkeysForEvent(eventId: String): List<String> =
+        timelineCardData.repostPubkeysForEvent(eventId)
+
+    fun reactionsForEvent(eventId: String): List<ReactionInfo> =
+        timelineCardData.reactionsForEvent(eventId)
 
     fun refreshTrendingIfStale() {
         trendingClient.refreshIfStale()

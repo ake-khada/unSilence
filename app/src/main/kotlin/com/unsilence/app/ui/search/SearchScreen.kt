@@ -416,6 +416,7 @@ fun SearchScreen(
                             { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                             pinnedEmojis,
+                            viewModel,
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             if (state.peopleResults.isNotEmpty()) {
@@ -474,6 +475,7 @@ fun SearchScreen(
                             { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                             pinnedEmojis,
+                            viewModel,
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             eventFeedItems(
@@ -524,8 +526,11 @@ fun SearchScreen(
             onAuthorClick   = onAuthorClickDismiss,
             onHashtagClick  = onHashtagClick,
             lookupProfile   = actionsViewModel::lookupProfile,
-            // SearchScreen has no per-event aggregation flows → reader falls back to
-            // static row.* counts + empty drawer (profileFlow/statsFlow/... default null).
+            profileFlow     = viewModel::profileFlow,
+            statsFlow       = viewModel::statsFlow,
+            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent     = viewModel::reactionsForEvent,
         )
     }
 
@@ -642,7 +647,8 @@ private fun rememberCallbacks(
     onArticleClick: (FeedRow) -> Unit,
     onReactLongPress: (String, String) -> Unit,
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
-): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis) {
+    viewModel: SearchViewModel,
+): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis, viewModel) {
     EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,
@@ -661,6 +667,11 @@ private fun rememberCallbacks(
         lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
         fetchOgMetadata = actionsViewModel::fetchOgMetadata,
         hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
+        profileFlow = viewModel::profileFlow,
+        statsFlow = viewModel::statsFlow,
+        zapDetailsForEvent = viewModel::zapDetailsForEvent,
+        repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+        reactionsForEvent = viewModel::reactionsForEvent,
     )
 }
 

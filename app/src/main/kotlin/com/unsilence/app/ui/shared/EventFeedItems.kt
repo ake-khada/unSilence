@@ -19,7 +19,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +42,7 @@ import com.unsilence.app.ui.feed.ContentFlow
 import com.unsilence.app.ui.feed.EventCard
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
+import com.unsilence.app.ui.feed.collectProfileAsState
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
@@ -294,8 +294,7 @@ internal fun ThreadParentCard(
             )
         }.getOrNull()
     }
-    val liveAuthor = profileFlow?.invoke(event.pubkey)
-        ?.collectAsStateWithLifecycle()?.value
+    val liveAuthor = collectProfileAsState(event.pubkey, profileFlow)
     val effectiveAuthor = liveAuthor ?: author
 
     Column(

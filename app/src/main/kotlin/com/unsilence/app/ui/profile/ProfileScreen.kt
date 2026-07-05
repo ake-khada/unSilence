@@ -77,6 +77,7 @@ import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.PostActionsBottomSheet
+import com.unsilence.app.ui.feed.collectProfileAsState
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -588,7 +589,7 @@ fun ProfileScreen(
         )
     }
     actionsRow?.let { row ->
-        val authorProfile = viewModel.profileFlow(row.pubkey).collectAsStateWithLifecycle().value
+        val authorProfile = collectProfileAsState(row.pubkey, viewModel::profileFlow)
         PostActionsBottomSheet(
             authorPubkey = row.pubkey,
             authorProfile = authorProfile,

@@ -795,17 +795,34 @@ class MemoryEventStore @Inject constructor(
     // ─── Kind handlers ──────────────────────────────────────────────────────
 
     private fun handleProfile(event: NostrEvent) {
+        val incomingFields = parseProfileJson(event.content)
         profilesByPubkey.compute(event.pubkey) { _, existing ->
             if (existing == null || event.createdAt >= existing.createdAt) {
-                profileUpdatedAt[event.pubkey] = System.currentTimeMillis()
-                profileFieldsCache[event.pubkey] = parseProfileJson(event.content)
-                profileAccessedAt[event.pubkey] = System.nanoTime()
+                markProfileUpdated(event.pubkey)
+                profileFieldsCache[event.pubkey] = incomingFields.withIdentityFallback(profileFieldsCache[event.pubkey])
                 event
             } else {
+                fillMissingProfileIdentity(event.pubkey, incomingFields)
                 existing
             }
         }
         trimProfilesIfNeeded()
+    }
+
+    private fun fillMissingProfileIdentity(pubkey: String, candidateFields: Map<String, String?>) {
+        val currentFields = cachedProfileFields(pubkey)
+        val mergedFields = currentFields.withIdentityFallback(candidateFields)
+        if (mergedFields == currentFields) return
+        markProfileUpdated(pubkey)
+        profileFieldsCache[pubkey] = mergedFields
+    }
+
+    private fun markProfileUpdated(pubkey: String) {
+        val now = System.currentTimeMillis()
+        profileUpdatedAt.compute(pubkey) { _, previous ->
+            if (previous == null || now > previous) now else previous + 1
+        }
+        profileAccessedAt[pubkey] = System.nanoTime()
     }
 
     /**
@@ -4006,16 +4023,17 @@ class MemoryEventStore @Inject constructor(
 
     /**
      * Reactive notification flow driven by per-recipient signal.
-     * Only re-emits when something affecting THIS recipient changes —
-     * not on every kind-1 insert globally.
+     * Also listens to profile changes so actor avatars/names fetched after the
+     * row was built repaint without waiting for another notification event.
      */
     fun notificationsFlow(
         recipientPubkey: String,
         followedOnly: Boolean = false,
         limit: Int? = null,
     ): Flow<List<NotificationRow>> =
-        notificationSignalFor(recipientPubkey)
-            .map { getNotifications(recipientPubkey, followedOnly, limit) }
+        combine(notificationSignalFor(recipientPubkey), _profileSignal) { _, _ ->
+            getNotifications(recipientPubkey, followedOnly, limit)
+        }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -5652,11 +5670,49 @@ private fun parseProfileJson(content: String): Map<String, String?> {
         val obj = NostrJson.parseToJsonElement(content).jsonObject
         buildMap {
             for (key in PROFILE_JSON_KEYS) {
-                val element = obj[key]
-                put(key, if (element != null && element !is JsonNull && element is JsonPrimitive) element.content else null)
+                put(key, profileJsonString(obj, PROFILE_JSON_FIELD_ALIASES[key] ?: listOf(key)))
             }
         }
     } catch (_: Exception) { emptyMap() }
 }
 
+private fun profileJsonString(
+    obj: kotlinx.serialization.json.JsonObject,
+    keys: List<String>,
+): String? {
+    var blank: String? = null
+    for (key in keys) {
+        val element = obj[key]
+        val value = if (element != null && element !is JsonNull && element is JsonPrimitive) {
+            element.content
+        } else {
+            null
+        } ?: continue
+        if (value.isNotBlank()) return value
+        if (blank == null) blank = value
+    }
+    return blank
+}
+
+private fun Map<String, String?>.withIdentityFallback(fallbackFields: Map<String, String?>?): Map<String, String?> {
+    if (fallbackFields == null) return this
+    var merged: MutableMap<String, String?>? = null
+    for (key in PROFILE_IDENTITY_FALLBACK_KEYS) {
+        if (nonBlankProfileField(key) != null) continue
+        if (key == "display_name" && nonBlankProfileField("name") != null) continue
+        val fallback = fallbackFields.nonBlankProfileField(key) ?: continue
+        val target = merged ?: toMutableMap().also { merged = it }
+        target[key] = fallback
+    }
+    return merged ?: this
+}
+
+private fun Map<String, String?>.nonBlankProfileField(key: String): String? =
+    this[key]?.takeIf { it.isNotBlank() }
+
 private val PROFILE_JSON_KEYS = listOf("name", "display_name", "about", "picture", "nip05", "lud16", "banner")
+private val PROFILE_JSON_FIELD_ALIASES = mapOf(
+    "display_name" to listOf("display_name", "displayName"),
+    "picture" to listOf("picture", "avatar", "image"),
+)
+private val PROFILE_IDENTITY_FALLBACK_KEYS = listOf("name", "display_name", "picture", "nip05", "banner")
