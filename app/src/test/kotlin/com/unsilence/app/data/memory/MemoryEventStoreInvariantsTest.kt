@@ -11,6 +11,7 @@ package com.unsilence.app.data.memory
 import app.cash.turbine.test
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.ui.feed.engagementId
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -330,6 +331,214 @@ class MemoryEventStoreInvariantsTest {
 
         assertEquals(2, store.reactionCount(targetId))
         assertEquals(2, store.reactionsForEvent(targetId).size)
+    }
+
+    // ── NIP-09 deletion requests ───────────────────────────────────────────
+
+    @Test
+    fun `kind-5 deletion removes own reaction from counts and actor state`() = runTest {
+        val targetId = "delete-reaction-target"
+        store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))
+        store.insert(event(id = "reaction-delete-me", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+
+        assertEquals(1, store.reactionCount(targetId))
+        assertEquals(setOf(targetId), store.reactedEventIdsFlow("alice").first())
+
+        store.insert(
+            event(
+                id = "delete-reaction",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(listOf("e", "reaction-delete-me"), listOf("k", "7")),
+            ),
+        )
+
+        assertEquals(0, store.reactionCount(targetId))
+        assertNull(store.getNostrEvent("reaction-delete-me"))
+        assertEquals(emptySet<String>(), store.reactedEventIdsFlow("alice").first())
+    }
+
+    @Test
+    fun `kind-5 deletion removes duplicate own reposts from count and actor state`() = runTest {
+        val targetId = "delete-repost-target"
+        store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))
+        store.insert(event(id = "repost-delete-me-1", pubkey = "alice", kind = 6, rootId = targetId, tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "repost-delete-me-2", pubkey = "alice", kind = 6, rootId = targetId, tags = listOf(listOf("e", targetId))))
+
+        assertEquals(1, store.repostCount(targetId))
+        assertEquals(listOf("alice"), store.repostPubkeysForEvent(targetId))
+        assertEquals(setOf(targetId), store.repostedEventIdsFlow("alice").first())
+
+        store.insert(
+            event(
+                id = "delete-reposts",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(
+                    listOf("e", "repost-delete-me-1"),
+                    listOf("e", "repost-delete-me-2"),
+                    listOf("k", "6"),
+                ),
+            ),
+        )
+
+        assertEquals(0, store.repostCount(targetId))
+        assertNull(store.getNostrEvent("repost-delete-me-1"))
+        assertNull(store.getNostrEvent("repost-delete-me-2"))
+        assertEquals(emptySet<String>(), store.repostedEventIdsFlow("alice").first())
+    }
+
+    @Test
+    fun `kind-5 deleting one duplicate repost keeps actor state and avatar contributor`() = runTest {
+        val targetId = "delete-one-repost-target"
+        store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))
+        store.insert(event(id = "repost-keep-1", pubkey = "alice", kind = 6, rootId = targetId, tags = listOf(listOf("e", targetId))))
+        store.insert(event(id = "repost-keep-2", pubkey = "alice", kind = 6, rootId = targetId, tags = listOf(listOf("e", targetId))))
+
+        store.insert(
+            event(
+                id = "delete-one-repost",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(listOf("e", "repost-keep-1"), listOf("k", "6")),
+            ),
+        )
+
+        assertEquals(1, store.repostCount(targetId))
+        assertEquals(listOf("alice"), store.repostPubkeysForEvent(targetId))
+        assertEquals(setOf(targetId), store.repostedEventIdsFlow("alice").first())
+        assertNull(store.getNostrEvent("repost-keep-1"))
+        assertNotNull(store.getNostrEvent("repost-keep-2"))
+    }
+
+    @Test
+    fun `kind-5 deletion is ignored when deletion author does not match target event author`() {
+        val targetId = "delete-author-mismatch-target"
+        store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))
+        store.insert(event(id = "reaction-author-mismatch", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId))))
+
+        store.insert(
+            event(
+                id = "bad-delete",
+                pubkey = "bob",
+                kind = 5,
+                tags = listOf(listOf("e", "reaction-author-mismatch"), listOf("k", "7")),
+            ),
+        )
+
+        assertEquals(1, store.reactionCount(targetId))
+        assertNotNull(store.getNostrEvent("reaction-author-mismatch"))
+    }
+
+    @Test
+    fun `kind-5 tombstone blocks later arrival of deleted event`() {
+        val targetId = "delete-before-target"
+        store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))
+        store.insert(
+            event(
+                id = "delete-before-reaction",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(listOf("e", "late-reaction"), listOf("k", "7")),
+            ),
+        )
+
+        assertFalse(store.insert(event(id = "late-reaction", pubkey = "alice", kind = 7, content = "+", tags = listOf(listOf("e", targetId)))))
+        assertEquals(0, store.reactionCount(targetId))
+        assertNull(store.getNostrEvent("late-reaction"))
+    }
+
+    @Test
+    fun `kind-5 deleting own reply removes feed row and decrements parent reply count`() {
+        val parentId = "delete-reply-parent"
+        val replyId = "delete-reply"
+        store.insert(event(id = parentId, pubkey = "bob", kind = 1))
+        store.insert(event(id = replyId, pubkey = "alice", kind = 1, replyToId = parentId))
+
+        assertEquals(1, store.replyCount(parentId))
+        assertEquals(1, store.feedRowsByIds(setOf(replyId)).size)
+
+        store.insert(
+            event(
+                id = "delete-reply-request",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(listOf("e", replyId), listOf("k", "1")),
+            ),
+        )
+
+        assertEquals(0, store.replyCount(parentId))
+        assertTrue(store.feedRowsByIds(setOf(replyId)).isEmpty())
+        assertNull(store.getNostrEvent(replyId))
+    }
+
+    @Test
+    fun `kind-5 addressable deletion removes matching article`() {
+        val articleId = "delete-article"
+        store.insert(
+            event(
+                id = articleId,
+                pubkey = "alice",
+                kind = 30023,
+                content = "article",
+                tags = listOf(listOf("d", "slug")),
+            ),
+        )
+        assertEquals(1, store.feedRowsByIds(setOf(articleId)).size)
+
+        store.insert(
+            event(
+                id = "delete-article-request",
+                pubkey = "alice",
+                kind = 5,
+                tags = listOf(listOf("a", "30023:alice:slug"), listOf("k", "30023")),
+            ),
+        )
+
+        assertTrue(store.feedRowsByIds(setOf(articleId)).isEmpty())
+        assertNull(store.getNostrEvent(articleId))
+    }
+
+    @Test
+    fun `kind-5 deleting article comment invalidates article stats flow`() = runTest {
+        val articleId = "delete-article-comment-article"
+        val coord = "30023:alice:slug"
+        val commentId = "delete-article-comment"
+        store.insert(
+            event(
+                id = articleId,
+                pubkey = "alice",
+                kind = 30023,
+                content = "article",
+                tags = listOf(listOf("d", "slug")),
+            ),
+        )
+        store.insert(
+            event(
+                id = commentId,
+                pubkey = "bob",
+                kind = 1111,
+                content = "article comment",
+                tags = listOf(listOf("A", coord), listOf("k", "30023")),
+            ),
+        )
+
+        store.statsFlow(articleId).test {
+            assertEquals(1, awaitItem().replyCount)
+
+            store.insert(
+                event(
+                    id = "delete-article-comment-request",
+                    pubkey = "bob",
+                    kind = 5,
+                    tags = listOf(listOf("e", commentId), listOf("k", "1111")),
+                ),
+            )
+
+            assertEquals(0, awaitItem().replyCount)
+            cancelAndIgnoreRemainingEvents()
+        }
+        assertTrue(store.articleCommentsFlow(coord).first().isEmpty())
     }
 
     // ── Zap stats ───────────────────────────────────────────────────────────

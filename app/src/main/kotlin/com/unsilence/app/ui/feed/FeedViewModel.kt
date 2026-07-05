@@ -199,13 +199,15 @@ class FeedViewModel @Inject constructor(
             _contentFilter,
             memoryEventStore.ownMuteListFlow(),
             relayPreferencesStore.sensitiveContentModeFlow(),
-        ) { events, cf, muteList, scm ->
+            memoryEventStore.feedSignalFlow,
+        ) { events, cf, muteList, scm, _ ->
             if (events.isEmpty()) {
                 feedRowCache.evictAll()
                 return@combine emptyList()
             }
             val hideSensitive = scm == SensitiveContentMode.HIDE
             val displayed = events.asSequence()
+                .filterNot { memoryEventStore.isDeleted(it) }
                 .filter { matchesContentFilter(it, cf) }
                 .filter { !isMuted(it, muteList) }
                 .filter { !hideSensitive || !it.hasContentWarning }

@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +52,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
@@ -73,6 +76,7 @@ import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
+import com.unsilence.app.ui.feed.PostActionsBottomSheet
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -92,6 +96,9 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
@@ -128,10 +135,13 @@ fun ProfileScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
     val showSnackbar     = LocalShowSnackbar.current
+    val ctx              = LocalContext.current
 
     var showEditProfile by remember { mutableStateOf(false) }
     var showSettings    by remember { mutableStateOf(false) }
     var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
+    var actionsRow      by remember { mutableStateOf<FeedRow?>(null) }
+    var deleteRow       by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
     var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -207,6 +217,7 @@ fun ProfileScreen(
         zapDetailsForEvent = viewModel::zapDetailsForEvent,
         repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
         reactionsForEvent = viewModel::reactionsForEvent,
+        onLongPress = { row -> actionsRow = row },
     ) }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
@@ -574,6 +585,58 @@ fun ProfileScreen(
         EditProfileScreen(
             viewModel = viewModel,
             onDismiss = { showEditProfile = false },
+        )
+    }
+    actionsRow?.let { row ->
+        val authorProfile = viewModel.profileFlow(row.pubkey).collectAsStateWithLifecycle().value
+        PostActionsBottomSheet(
+            authorPubkey = row.pubkey,
+            authorProfile = authorProfile,
+            onDismiss = { actionsRow = null },
+            onCopyText = { clipboard.setText(AnnotatedString(row.content)) },
+            onCopyLink = {
+                val nevent = NEvent.create(row.id, null, null, null as NormalizedRelayUrl?)
+                clipboard.setText(AnnotatedString("nostr:$nevent"))
+                showSnackbar("Link copied")
+            },
+            onShare = {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
+                }
+                ctx.startActivity(Intent.createChooser(shareIntent, null))
+            },
+            onMuteUser = {},
+            onReport = {},
+            canDelete = actionsViewModel.isOwnPubkey(row.pubkey),
+            onDelete = {
+                deleteRow = row
+                actionsRow = null
+            },
+            showModerationActions = false,
+        )
+    }
+
+    deleteRow?.let { row ->
+        AlertDialog(
+            onDismissRequest = { deleteRow = null },
+            title = { Text("Delete post?", color = Color.White) },
+            text = { Text("This will publish a deletion request for this event.", color = TextSecondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl)
+                    deleteRow = null
+                    showSnackbar("Delete requested")
+                }) {
+                    Text("Delete", color = Zap)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteRow = null }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = Black,
         )
     }
     articleRow?.let { row ->
