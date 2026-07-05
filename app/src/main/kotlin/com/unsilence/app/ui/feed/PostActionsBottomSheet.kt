@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Share
@@ -43,6 +44,9 @@ fun PostActionsBottomSheet(
     onShare: () -> Unit,
     onMuteUser: () -> Unit,
     onReport: () -> Unit,
+    canDelete: Boolean = false,
+    onDelete: () -> Unit = {},
+    showModerationActions: Boolean = true,
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -83,17 +87,25 @@ fun PostActionsBottomSheet(
             SheetActionRow(Icons.Default.ContentCopy, "Copy text") { onCopyText(); onDismiss() }
             SheetActionRow(Icons.Default.Link, "Copy link") { onCopyLink(); onDismiss() }
             SheetActionRow(Icons.Default.Share, "Share") { onShare(); onDismiss() }
-
-            HorizontalDivider(
-                color = Color.White.copy(alpha = 0.1f),
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
-
-            SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", Zap) {
-                onMuteUser(); onDismiss()
+            if (canDelete) {
+                SheetActionRow(Icons.Default.Delete, "Delete", Zap) {
+                    onDelete()
+                    onDismiss()
+                }
             }
-            SheetActionRow(Icons.Default.Flag, "Report", Zap) {
-                onReport()
+
+            if (showModerationActions) {
+                HorizontalDivider(
+                    color = Color.White.copy(alpha = 0.1f),
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+
+                SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", Zap) {
+                    onMuteUser(); onDismiss()
+                }
+                SheetActionRow(Icons.Default.Flag, "Report", Zap) {
+                    onReport()
+                }
             }
         }
     }

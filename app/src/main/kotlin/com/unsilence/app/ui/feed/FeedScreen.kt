@@ -25,6 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -145,6 +147,7 @@ fun FeedScreen(
     // ── Long-press bottom sheet state ────────────────────────────────────────
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     var reportRow by remember { mutableStateOf<FeedRow?>(null) }
+    var deleteRow by remember { mutableStateOf<FeedRow?>(null) }
     val haptics = LocalHapticFeedback.current
     val clipboard = LocalClipboardManager.current
     val ctx = LocalContext.current
@@ -565,6 +568,34 @@ fun FeedScreen(
                 reportRow = row
                 actionsRow = null
             },
+            canDelete = actionsViewModel.isOwnPubkey(row.pubkey),
+            onDelete = {
+                deleteRow = row
+                actionsRow = null
+            },
+        )
+    }
+
+    deleteRow?.let { row ->
+        AlertDialog(
+            onDismissRequest = { deleteRow = null },
+            title = { Text("Delete post?", color = White) },
+            text = { Text("This will publish a deletion request for this event.", color = TextSecondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl)
+                    deleteRow = null
+                    showSnackbar("Delete requested")
+                }) {
+                    Text("Delete", color = com.unsilence.app.ui.theme.Zap)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteRow = null }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = Black,
         )
     }
 

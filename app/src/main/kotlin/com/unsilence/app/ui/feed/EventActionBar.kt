@@ -145,8 +145,12 @@ internal fun EventActionBar(
                     modifier         = Modifier.background(Black),
                 ) {
                     DropdownMenuItem(
-                        text    = { Text("Boost", color = Color.White, fontSize = AppType.body) },
-                        onClick = { onRepost(); showRepostMenu = false; showSnackbar("Boosted") },
+                        text    = { Text(if (hasReposted) "Undo boost" else "Boost", color = Color.White, fontSize = AppType.body) },
+                        onClick = {
+                            onRepost()
+                            showRepostMenu = false
+                            showSnackbar(if (hasReposted) "Boost removed" else "Boosted")
+                        },
                     )
                     DropdownMenuItem(
                         text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },

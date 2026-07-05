@@ -94,9 +94,10 @@ class UserProfileViewModel @Inject constructor(
 
     @OptIn(FlowPreview::class)
     val tabPostsFlow: StateFlow<List<FeedRow>> =
-        combine(_events, _contentFilter, userFlow) { events, cf, profile ->
+        combine(_events, _contentFilter, userFlow, memoryEventStore.feedSignalFlow) { events, cf, profile, _ ->
             if (events.isEmpty()) return@combine emptyList()
             val displayed = events.asSequence()
+                .filterNot { memoryEventStore.isDeleted(it) }
                 .filter { matchesContentFilter(it, cf) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()

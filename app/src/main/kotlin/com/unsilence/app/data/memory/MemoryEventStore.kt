@@ -314,10 +314,17 @@ class MemoryEventStore @Inject constructor(
     private val reactedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
     private val repostedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
     private val zappedTargetsByActor = ConcurrentHashMap<String, MutableSet<String>>()
+    private data class ActorTargetKey(val actor: String, val target: String)
+    private val reactionEventIdsByActorTarget = ConcurrentHashMap<ActorTargetKey, MutableSet<String>>()
+    private val repostEventIdsByActorTarget = ConcurrentHashMap<ActorTargetKey, MutableSet<String>>()
     private val actorAccessedAt = ConcurrentHashMap<String, Long>()
 
     /** Posts where engagement download hit the limit — cards show "N+" for these. */
     private val engagementCapped: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private data class DeletionTombstone(val pubkey: String, val createdAt: Long)
+    private val deletedEventTombstones = ConcurrentHashMap<String, DeletionTombstone>()
+    private val deletedAddressableTombstones = ConcurrentHashMap<String, DeletionTombstone>()
 
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
@@ -698,6 +705,7 @@ class MemoryEventStore @Inject constructor(
         if (event.kind in DERIVED_ONLY_KINDS) {
             return insertDerivedOnly(event, dirty)
         }
+        if (event.kind != 5 && isDeletedByTombstone(event)) return false
 
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
@@ -747,6 +755,7 @@ class MemoryEventStore @Inject constructor(
             3 -> handleFollows(event, dirty)
             6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
+            5 -> handleDeletion(event, dirty)
             9734 -> handleZapRequest(event)
             9735 -> handleZapReceipt(event, dirty)
             10000 -> handleMuteList(event)
@@ -925,7 +934,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleRepost(event: NostrEvent, dirty: InsertDirty) {
-        val targetId = event.rootId ?: return
+        val targetId = repostTargetId(event) ?: return
         repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
         repostPubkeysByTarget
             .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
@@ -934,6 +943,7 @@ class MemoryEventStore @Inject constructor(
         dirty.invalidatedStatsIds.add(targetId)
         // Actor-side index: track what this pubkey has reposted
         addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
+        addActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
     }
 
     /**
@@ -957,9 +967,7 @@ class MemoryEventStore @Inject constructor(
         // Last e-tag is the target; for a reaction to an addressable event (e.g. a
         // long-form article) there may be no e-tag — fall back to the a/A coordinate
         // so article likes are counted (reactionCount merges the coord key).
-        val targetId = (event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }
-            ?: event.tags.lastOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
-            ?.get(1) ?: return
+        val targetId = reactionTargetId(event) ?: return
         val contentStr = event.content.ifBlank { "+" }
         val reactionContent = parseReactionContent(contentStr, event.tags)
         // NIP-25 "-" is a downvote — don't index as a displayable reaction
@@ -973,6 +981,27 @@ class MemoryEventStore @Inject constructor(
         // Actor-side index: track what this pubkey has reacted to (skip dislikes)
         if (reactionContent != ReactionContent.Standard("-")) {
             addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+            addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+        }
+    }
+
+    private fun handleDeletion(event: NostrEvent, dirty: InsertDirty) {
+        for (tag in event.tags) {
+            if (tag.size < 2) continue
+            when (tag[0]) {
+                "e" -> deleteReferencedEvent(
+                    eventId = tag[1],
+                    deletionPubkey = event.pubkey,
+                    deletionCreatedAt = event.createdAt,
+                    dirty = dirty,
+                )
+                "a" -> deleteReferencedAddressable(
+                    coordinate = tag[1],
+                    deletionPubkey = event.pubkey,
+                    deletionCreatedAt = event.createdAt,
+                    dirty = dirty,
+                )
+            }
         }
     }
 
@@ -1004,6 +1033,227 @@ class MemoryEventStore @Inject constructor(
                 .add(ReactionInfo(event.pubkey, reactionContent))
         }
         Log.d("MES", "Reindexed ${kind7Ids.size} kind-7 reactions (custom=$customCount, standard=$standardCount, dislikes=$dislikeCount, noETag=$noETagCount)")
+    }
+
+    private fun rebuildActionEventIndexesFromEvents() {
+        reactionEventIdsByActorTarget.clear()
+        repostEventIdsByActorTarget.clear()
+        for (event in eventsById.values) {
+            when (event.kind) {
+                7 -> {
+                    val targetId = reactionTargetId(event) ?: continue
+                    val reactionContent = parseReactionContent(event.content.ifBlank { "+" }, event.tags)
+                    if (reactionContent != ReactionContent.Standard("-")) {
+                        addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+                    }
+                }
+                6, 16 -> {
+                    val targetId = repostTargetId(event) ?: continue
+                    addActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
+                }
+            }
+        }
+    }
+
+    private fun reactionTargetId(event: NostrEvent): String? =
+        (event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }
+            ?: event.tags.lastOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
+            ?.get(1)
+
+    private fun repostTargetId(event: NostrEvent): String? =
+        event.rootId
+            ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+            ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "a" }?.getOrNull(1)
+
+    private fun actionKey(actorPubkey: String, targetId: String) =
+        ActorTargetKey(actorPubkey, targetId)
+
+    private fun addActionEventId(
+        index: ConcurrentHashMap<ActorTargetKey, MutableSet<String>>,
+        actorPubkey: String,
+        targetId: String,
+        eventId: String,
+    ) {
+        index.getOrPut(actionKey(actorPubkey, targetId)) { ConcurrentHashMap.newKeySet() }.add(eventId)
+    }
+
+    private fun removeActionEventId(
+        index: ConcurrentHashMap<ActorTargetKey, MutableSet<String>>,
+        actorPubkey: String,
+        targetId: String,
+        eventId: String,
+    ) {
+        val key = actionKey(actorPubkey, targetId)
+        val set = index[key] ?: return
+        set.remove(eventId)
+        if (set.isEmpty()) index.remove(key)
+    }
+
+    private fun removeFromActorIndex(
+        index: ConcurrentHashMap<String, MutableSet<String>>,
+        actorPubkey: String,
+        targetId: String,
+    ) {
+        val targets = index[actorPubkey] ?: return
+        targets.remove(targetId)
+        if (targets.isEmpty()) index.remove(actorPubkey)
+        actorAccessedAt[actorPubkey] = System.nanoTime()
+    }
+
+    private fun addressableCoordinate(event: NostrEvent): String? {
+        if (event.kind !in 10000..39999) return null
+        val dTag = if (event.kind in 30000..39999) {
+            event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1).orEmpty()
+        } else {
+            ""
+        }
+        return "${event.kind}:${event.pubkey}:$dTag"
+    }
+
+    private fun isDeletedByTombstone(event: NostrEvent): Boolean {
+        val eventTombstone = deletedEventTombstones[event.id]
+        if (eventTombstone != null && eventTombstone.pubkey == event.pubkey) return true
+        val coord = addressableCoordinate(event) ?: return false
+        val addressableTombstone = deletedAddressableTombstones[coord]
+        return addressableTombstone != null &&
+            addressableTombstone.pubkey == event.pubkey &&
+            event.createdAt <= addressableTombstone.createdAt
+    }
+
+    fun isDeleted(event: NostrEvent): Boolean = isDeletedByTombstone(event)
+
+    private fun deleteReferencedAddressable(
+        coordinate: String,
+        deletionPubkey: String,
+        deletionCreatedAt: Long,
+        dirty: InsertDirty,
+    ) {
+        val parts = coordinate.split(":", limit = 3)
+        if (parts.size < 3 || parts[1] != deletionPubkey) return
+        deletedAddressableTombstones[coordinate] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+
+        val storedKey = "${parts[1]}:${parts[0]}:${parts[2]}"
+        val storedId = replaceableByCoordinate[storedKey] ?: articleIdByCoord[coordinate] ?: return
+        deleteReferencedEvent(storedId, deletionPubkey, deletionCreatedAt, dirty)
+    }
+
+    private fun deleteReferencedEvent(
+        eventId: String,
+        deletionPubkey: String,
+        deletionCreatedAt: Long,
+        dirty: InsertDirty,
+    ) {
+        val existing = eventsById[eventId]
+        if (existing == null) {
+            deletedEventTombstones[eventId] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+            return
+        }
+        if (existing.kind == 5 || existing.pubkey != deletionPubkey) return
+        deletedEventTombstones[eventId] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+        deleteStoredEvent(existing, dirty)
+    }
+
+    private fun deleteStoredEvent(event: NostrEvent, dirty: InsertDirty) {
+        deindexDerivedForDeletion(event, dirty)
+        removeFromIndexes(event)
+        lastTouchedAt.remove(event.id)
+        feedRowCache.remove(event.id)
+        feedRowAccessedAt.remove(event.id)
+        videoRenderModelsByEventId.remove(event.id)
+        imetaImageDimsByEventId.remove(event.id)
+        eventModelsByEventId.remove(event.id)
+        if (event.replyToId != null) idsByReplyTarget[event.replyToId]?.remove(event.id)
+        if (event.rootId != null && event.rootId != event.replyToId) idsByReplyTarget[event.rootId]?.remove(event.id)
+        if (event.kind == 30023) {
+            addressableCoordinate(event)?.let { coord ->
+                articleIdByCoord.remove(coord)
+                articleCoordById.remove(event.id)
+            }
+        }
+        deindexArticleComment(event, dirty)
+        if (event.kind in setOf(1, 6, 16, 20, 21, 30023, 1111)) dirty.feed = true
+    }
+
+    private fun deindexArticleComment(event: NostrEvent, dirty: InsertDirty) {
+        if (event.kind != 1 && event.kind != 1111) return
+        for (tag in event.tags) {
+            if (tag.size < 2 || (tag[0] != "a" && tag[0] != "A")) continue
+            val ids = commentIdsByCoord[tag[1]] ?: continue
+            if (ids.remove(event.id)) {
+                if (ids.isEmpty()) commentIdsByCoord.remove(tag[1])
+                statsUpdatedAt[tag[1]] = System.currentTimeMillis()
+                invalidateStatsForTarget(tag[1], dirty)
+                dirty.stats = true
+            }
+        }
+    }
+
+    private fun deindexDerivedForDeletion(event: NostrEvent, dirty: InsertDirty) {
+        when (event.kind) {
+            1 -> {
+                decrementReplyTarget(event.replyToId, dirty)
+                if (event.rootId != null && event.rootId != event.replyToId) {
+                    decrementReplyTarget(event.rootId, dirty)
+                }
+            }
+            1111 -> {
+                val parentKind = event.tags
+                    .firstOrNull { it.size >= 2 && it[0] == "k" }
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+                if (parentKind == 1111) {
+                    val parentId = event.replyToId
+                        ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+                    if (parentId != event.id) decrementReplyTarget(parentId, dirty)
+                }
+            }
+            6, 16 -> {
+                val targetId = repostTargetId(event) ?: return
+                decrementCounter(repostCounts, targetId)
+                removeActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
+                val hasMore = repostEventIdsByActorTarget[actionKey(event.pubkey, targetId)]?.isNotEmpty() == true
+                if (!hasMore) {
+                    repostPubkeysByTarget[targetId]?.remove(event.pubkey)
+                    if (repostPubkeysByTarget[targetId]?.isEmpty() == true) repostPubkeysByTarget.remove(targetId)
+                    removeFromActorIndex(repostedTargetsByActor, event.pubkey, targetId)
+                }
+                invalidateStatsForTarget(targetId, dirty)
+                dirty.action = true
+            }
+            7 -> {
+                val targetId = reactionTargetId(event) ?: return
+                val reactionContent = parseReactionContent(event.content.ifBlank { "+" }, event.tags)
+                if (reactionContent != ReactionContent.Standard("-")) {
+                    reactionsByTarget[targetId]?.remove(ReactionInfo(event.pubkey, reactionContent))
+                    if (reactionsByTarget[targetId]?.isEmpty() == true) reactionsByTarget.remove(targetId)
+                    removeActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+                    val hasMore = reactionEventIdsByActorTarget[actionKey(event.pubkey, targetId)]?.isNotEmpty() == true
+                    if (!hasMore) removeFromActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+                    invalidateStatsForTarget(targetId, dirty)
+                    dirty.action = true
+                }
+            }
+            9734 -> {
+                val targetId = event.rootId ?: return
+                removeFromActorIndex(zappedTargetsByActor, event.pubkey, targetId)
+                dirty.action = true
+            }
+        }
+    }
+
+    private fun decrementReplyTarget(targetId: String?, dirty: InsertDirty) {
+        if (targetId == null) return
+        decrementCounter(replyCounts, targetId)
+        statsUpdatedAt[targetId] = System.currentTimeMillis()
+        dirty.invalidatedStatsIds.add(targetId)
+        dirty.stats = true
+    }
+
+    private fun decrementCounter(index: ConcurrentHashMap<String, Int>, key: String) {
+        index.computeIfPresent(key) { _, value ->
+            val next = value - 1
+            if (next > 0) next else null
+        }
     }
 
     private fun handleZapRequest(event: NostrEvent) {
@@ -2419,7 +2669,14 @@ class MemoryEventStore @Inject constructor(
         // truth) — never replyCounts + coord-index, which can disagree.
         return if (coord != null) articleCommentIds(coord).size else (replyCounts[eventId] ?: 0)
     }
-    fun repostCount(eventId: String): Int = repostCounts[eventId] ?: 0
+    fun repostCount(eventId: String): Int {
+        val pubkeys = repostPubkeysForEvent(eventId)
+        if (pubkeys.isNotEmpty()) return pubkeys.size
+        val coord = articleCoordForEvent(eventId)
+        val direct = repostCounts[eventId] ?: 0
+        val viaCoord = if (coord != null) repostCounts[coord] ?: 0 else 0
+        return direct + viaCoord
+    }
     /**
      * Displayed reaction count for [eventId]: distinct (pubkey, content) entries,
      * excluding NIP-25 "-" dislikes. Equals the total avatars the engagement
@@ -2596,8 +2853,16 @@ class MemoryEventStore @Inject constructor(
     }
 
     /** Deduplicated pubkeys of users who reposted [eventId]. */
-    fun repostPubkeysForEvent(eventId: String): List<String> =
-        repostPubkeysByTarget[eventId]?.toList() ?: emptyList()
+    fun repostPubkeysForEvent(eventId: String): List<String> {
+        val coord = articleCoordForEvent(eventId)
+        val direct = repostPubkeysByTarget[eventId]
+        val viaCoord = if (coord != null) repostPubkeysByTarget[coord] else null
+        return when {
+            viaCoord == null -> direct?.toList() ?: emptyList()
+            direct == null -> viaCoord.toList()
+            else -> (direct + viaCoord).toList()
+        }
+    }
 
     /** Reaction info for all reactions to [eventId] — merges id-keyed and
      *  (for addressable events) coordinate-keyed reactions. */
@@ -2907,6 +3172,32 @@ class MemoryEventStore @Inject constructor(
         _actionSignal
             .map { withResolvedCoords(repostedTargetsByActor[pubkey]) }
             .distinctUntilChanged()
+
+    fun reactionEventIdsForTarget(pubkey: String, targetId: String): Set<String> =
+        actionEventIdsForTarget(reactionEventIdsByActorTarget, pubkey, targetId, setOf(7))
+
+    fun repostEventIdsForTarget(pubkey: String, targetId: String): Set<String> =
+        actionEventIdsForTarget(repostEventIdsByActorTarget, pubkey, targetId, setOf(6, 16))
+
+    private fun actionEventIdsForTarget(
+        index: ConcurrentHashMap<ActorTargetKey, MutableSet<String>>,
+        pubkey: String,
+        targetId: String,
+        kinds: Set<Int>,
+    ): Set<String> {
+        val indexed = index[actionKey(pubkey, targetId)]?.toSet().orEmpty()
+        if (indexed.isNotEmpty()) return indexed
+        val eventIds = idsByPubkey[pubkey]?.toList() ?: return emptySet()
+        return eventIds.mapNotNull { eventsById[it] }
+            .filter { event ->
+                event.kind in kinds && when (event.kind) {
+                    7 -> reactionTargetId(event) == targetId
+                    6, 16 -> repostTargetId(event) == targetId
+                    else -> false
+                }
+            }
+            .mapTo(mutableSetOf()) { it.id }
+    }
 
     /** Set of target event IDs the given [pubkey] has zapped (kind 9734, NOT 9735). */
     fun zappedEventIdsFlow(pubkey: String): Flow<Set<String>> =
@@ -4101,6 +4392,7 @@ class MemoryEventStore @Inject constructor(
 
         // Rebuild reaction set from raw kind-7 events (same as binary path)
         reindexReactionsFromEvents()
+        rebuildActionEventIndexesFromEvents()
         // Backfill parent reply counts for old snapshots created before
         // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
         // so newer snapshots that already persisted the counts do not double.
@@ -4503,6 +4795,7 @@ class MemoryEventStore @Inject constructor(
             val event = input.readEventBinary(version)
             insertFromSnapshot(event)
         }
+        rebuildActionEventIndexesFromEvents()
 
         // AGGREGATES section
         val replyN = input.readInt()
@@ -4958,6 +5251,7 @@ class MemoryEventStore @Inject constructor(
             insertDerivedOnly(event, snapshotDirtySink)
             return
         }
+        if (event.kind != 5 && isDeletedByTombstone(event)) return
 
         eventsById[event.id] = event
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -5006,6 +5300,7 @@ class MemoryEventStore @Inject constructor(
         val sink = snapshotDirtySink
         when (event.kind) {
             0 -> handleProfile(event)
+            5 -> handleDeletion(event, sink)
             3 -> handleFollows(event, sink)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event, sink)
@@ -5233,6 +5528,10 @@ class MemoryEventStore @Inject constructor(
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
+        reactionEventIdsByActorTarget.clear()
+        repostEventIdsByActorTarget.clear()
+        deletedEventTombstones.clear()
+        deletedAddressableTombstones.clear()
         actorAccessedAt.clear()
         _followsSignal.value++
         _actionSignal.value++
@@ -5282,6 +5581,10 @@ class MemoryEventStore @Inject constructor(
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
         zappedTargetsByActor.clear()
+        reactionEventIdsByActorTarget.clear()
+        repostEventIdsByActorTarget.clear()
+        deletedEventTombstones.clear()
+        deletedAddressableTombstones.clear()
         actorAccessedAt.clear()
         engagementCapped.clear()
         profileAnchoredIds.clear()

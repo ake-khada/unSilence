@@ -360,6 +360,10 @@ class NoteActionsViewModel @Inject constructor(
         customEmojiUrl: String? = null,
     ) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (emoji == "+" && customEmojiUrl == null && hasOwnReactionForTarget(eventId)) {
+                deleteOwnReaction(eventId, eventPubkey)
+                return@launch
+            }
             val nowSeconds = System.currentTimeMillis() / 1000L
 
             val baseTags = arrayOf(
@@ -393,6 +397,10 @@ class NoteActionsViewModel @Inject constructor(
 
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (hasOwnRepostForTarget(eventId)) {
+                deleteOwnRepost(eventId, eventPubkey, eventRelayUrl)
+                return@launch
+            }
             val nowSeconds = System.currentTimeMillis() / 1000L
             // Full NostrEvent: we need the ORIGINAL's kind (to pick 6 vs 16), its d tag
             // (for an addressable a-coordinate), and a relay it was actually seen on.
@@ -440,6 +448,110 @@ class NoteActionsViewModel @Inject constructor(
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
             snapshotScheduler.scheduleImmediate()
         }
+    }
+
+    fun isOwnPubkey(pubkey: String): Boolean = pubkeyHex == pubkey
+
+    fun deleteEvent(eventId: String, eventPubkey: String, eventRelayUrl: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val own = pubkeyHex
+            if (own == null || own != eventPubkey) {
+                _actionError.tryEmit("Delete failed — only your own events can be deleted")
+                return@launch
+            }
+            val original = memoryEventStore.getNostrEvent(eventId)
+            if (original == null) {
+                _actionError.tryEmit("Delete failed — event not found")
+                return@launch
+            }
+            if (original.pubkey != own) {
+                _actionError.tryEmit("Delete failed — event author mismatch")
+                return@launch
+            }
+            publishDeletionRequest(
+                deletedEvents = listOf(original),
+                relayTargets = engagementTargets(eventId, eventPubkey, eventRelayUrl),
+                signingError = "Delete failed — signing rejected (check Amber permissions)",
+            )
+        }
+    }
+
+    private suspend fun deleteOwnReaction(eventId: String, eventPubkey: String) {
+        val own = pubkeyHex ?: return
+        val targetKeys = listOfNotNull(eventId, memoryEventStore.articleCoordForEvent(eventId)).distinct()
+        val deletedEvents = targetKeys
+            .flatMap { memoryEventStore.reactionEventIdsForTarget(own, it) }
+            .distinct()
+            .mapNotNull { memoryEventStore.getNostrEvent(it) }
+            .filter { it.pubkey == own && it.kind == ReactionEvent.KIND }
+        if (deletedEvents.isEmpty()) {
+            _actionError.tryEmit("Unlike failed — original reaction not found")
+            return
+        }
+        publishDeletionRequest(
+            deletedEvents = deletedEvents,
+            relayTargets = engagementTargets(eventId, eventPubkey, null),
+            signingError = "Unlike failed — signing rejected (check Amber permissions)",
+        )
+    }
+
+    private fun hasOwnReactionForTarget(eventId: String): Boolean {
+        val own = pubkeyHex ?: return false
+        if (eventId in reactedEventIds.value) return true
+        val targetKeys = listOfNotNull(eventId, memoryEventStore.articleCoordForEvent(eventId)).distinct()
+        return targetKeys.any { memoryEventStore.reactionEventIdsForTarget(own, it).isNotEmpty() }
+    }
+
+    private suspend fun deleteOwnRepost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
+        val own = pubkeyHex ?: return
+        val targetKeys = listOfNotNull(eventId, memoryEventStore.articleCoordForEvent(eventId)).distinct()
+        val deletedEvents = targetKeys
+            .flatMap { memoryEventStore.repostEventIdsForTarget(own, it) }
+            .distinct()
+            .mapNotNull { memoryEventStore.getNostrEvent(it) }
+            .filter { it.pubkey == own && (it.kind == RepostEvent.KIND || it.kind == 16) }
+        if (deletedEvents.isEmpty()) {
+            _actionError.tryEmit("Unboost failed — original repost not found")
+            return
+        }
+        val relayHint = memoryEventStore.getNostrEvent(eventId)
+            ?.relaysSeen
+            ?.firstOrNull { it.isNotBlank() }
+            ?: eventRelayUrl
+        publishDeletionRequest(
+            deletedEvents = deletedEvents,
+            relayTargets = engagementTargets(eventId, eventPubkey, relayHint),
+            signingError = "Unboost failed — signing rejected (check Amber permissions)",
+        )
+    }
+
+    private fun hasOwnRepostForTarget(eventId: String): Boolean {
+        val own = pubkeyHex ?: return false
+        if (eventId in repostedEventIds.value) return true
+        val targetKeys = listOfNotNull(eventId, memoryEventStore.articleCoordForEvent(eventId)).distinct()
+        return targetKeys.any { memoryEventStore.repostEventIdsForTarget(own, it).isNotEmpty() }
+    }
+
+    private suspend fun publishDeletionRequest(
+        deletedEvents: List<NostrEvent>,
+        relayTargets: List<String>,
+        signingError: String,
+    ) {
+        if (deletedEvents.isEmpty()) return
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val signed = signingManager.sign(EventTemplate<Event>(
+            createdAt = nowSeconds,
+            kind = 5,
+            tags = buildDeletionRequestTags(deletedEvents),
+            content = "",
+        )) ?: run {
+            _actionError.tryEmit(signingError)
+            return
+        }
+
+        relayPool.publish(toEventJson(signed), relayTargets)
+        memoryEventStore.insert(signedEventToNostrEvent(signed))
+        snapshotScheduler.scheduleImmediate()
     }
 
     fun zap(eventId: String, eventPubkey: String, relayUrl: String, request: ZapRequest) {
@@ -716,6 +828,26 @@ internal data class RepostDescriptor(val kind: Int, val tags: Array<Array<String
     // kind + tag contents directly), so the default reference-based ones are fine.
     override fun equals(other: Any?) = this === other
     override fun hashCode() = System.identityHashCode(this)
+}
+
+internal fun buildDeletionRequestTags(events: List<NostrEvent>): Array<Array<String>> {
+    val tags = mutableListOf<Array<String>>()
+    events.distinctBy { it.id }.forEach { tags.add(arrayOf("e", it.id)) }
+    events.map { it.kind }.distinct().forEach { tags.add(arrayOf("k", it.toString())) }
+    events.mapNotNull(::deletionAddressableCoordinate)
+        .distinct()
+        .forEach { tags.add(arrayOf("a", it)) }
+    return tags.toTypedArray()
+}
+
+private fun deletionAddressableCoordinate(event: NostrEvent): String? {
+    if (event.kind !in 10000..39999) return null
+    val dTag = if (event.kind in 30000..39999) {
+        event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1).orEmpty()
+    } else {
+        ""
+    }
+    return "${event.kind}:${event.pubkey}:$dTag"
 }
 
 /**
