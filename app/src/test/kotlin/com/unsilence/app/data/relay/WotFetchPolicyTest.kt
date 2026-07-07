@@ -1,14 +1,20 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
+import com.unsilence.app.data.DEFAULT_WOT_RELAY
+import com.unsilence.app.data.WOT_REGISTRY_LOOKUP_RELAYS
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 class WotFetchPolicyTest {
 
@@ -26,6 +32,34 @@ class WotFetchPolicyTest {
         assertEquals(1, chunks[2].size)
         assertEquals(401, chunks.flatten().distinct().size)
         assertTrue(chunks.flatten().all { it == it.lowercase() && it.length == 64 })
+    }
+
+    @Test
+    fun `wot subject chunks place priority subjects in the first chunk`() {
+        val owner = pubkey(300)
+        val subjects = (0 until 401).map(::pubkey)
+
+        val chunks = wotSubjectChunks(subjects, prioritySubjects = listOf(owner.uppercase()))
+
+        assertEquals(owner, chunks.first().first())
+        assertEquals(WOT_ASSERTION_CHUNK_SIZE, chunks.first().size)
+        assertEquals(3, chunks.size)
+        assertEquals(401, chunks.flatten().distinct().size)
+        assertTrue(chunks.all { it.size <= WOT_ASSERTION_CHUNK_SIZE })
+    }
+
+    @Test
+    fun `wot assertion filter has no limit so historical duplicates cannot crowd out subjects`() {
+        val provider = pubkey(9)
+        val filter = wotAssertionFilter(
+            providerPubkey = provider.uppercase(),
+            subjects = listOf(pubkey(2), pubkey(1), pubkey(2), "bad"),
+        )!!
+
+        assertNull(filter["limit"])
+        assertEquals(listOf("30382"), filter.valuesFor("kinds"))
+        assertEquals(listOf(provider), filter.valuesFor("authors"))
+        assertEquals(listOf(pubkey(1), pubkey(2)), filter.valuesFor("#d"))
     }
 
     @Test
@@ -93,6 +127,54 @@ class WotFetchPolicyTest {
     }
 
     @Test
+    fun `wot registry lookup bypasses capability filtering only for registry relays`() {
+        val targets = wotRegistryLookupTargets(
+            readRelays = listOf("nos.lol", "wss://read.example.com", "not-a-relay"),
+            registryRelays = WOT_REGISTRY_LOOKUP_RELAYS,
+        )
+
+        assertEquals(
+            listOf(
+                "wss://nos.lol",
+                "wss://read.example.com",
+                "wss://nip85.nosfabrica.com",
+                "wss://nip85.brainstorm.world",
+            ),
+            targets.relayUrls,
+        )
+        assertEquals(
+            setOf("wss://nip85.nosfabrica.com", "wss://nip85.brainstorm.world", "wss://nos.lol"),
+            targets.capabilityBypassRelays,
+        )
+    }
+
+    @Test
+    fun `own 10040 prefs resolve to stored provider instead of default fallback`() {
+        val personalProvider = pubkey(12)
+        val own = wotProviderDescriptorFromPrefs(
+            WotProviderPrefs(
+                pubkey = personalProvider,
+                relay = "nip85.nosfabrica.com",
+                source = WotProviderSource.OWN_10040,
+            )
+        )
+
+        assertEquals(personalProvider, own.providerPubkey)
+        assertEquals("wss://nip85.nosfabrica.com", own.relayHint)
+        assertNotEquals(DEFAULT_WOT_PROVIDER_PUBKEY, own.providerPubkey)
+
+        val default = wotProviderDescriptorFromPrefs(
+            WotProviderPrefs(
+                pubkey = personalProvider,
+                relay = "wss://custom.example.com",
+                source = WotProviderSource.DEFAULT,
+            )
+        )
+        assertEquals(DEFAULT_WOT_PROVIDER_PUBKEY, default.providerPubkey)
+        assertEquals(DEFAULT_WOT_RELAY, default.relayHint)
+    }
+
+    @Test
     fun `coalescer candidate selection drops non pending and includes stale profile scores only when requested`() {
         val pending = pubkey(1)
         val absent = pubkey(2)
@@ -142,4 +224,7 @@ class WotFetchPolicyTest {
             )
         )
     }
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.valuesFor(key: String): List<String> =
+        (get(key) as JsonArray).map { it.jsonPrimitive.content }
 }

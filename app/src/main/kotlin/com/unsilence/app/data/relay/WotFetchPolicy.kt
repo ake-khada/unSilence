@@ -1,7 +1,15 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
+import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.memory.WotProviderDescriptor
 import java.security.MessageDigest
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 internal const val WOT_ASSERTION_CHUNK_SIZE = 200
 internal const val WOT_FETCH_TIMEOUT_MS = 15_000L
@@ -18,12 +26,20 @@ internal fun normalizeWotPubkey(pubkey: String?): String? {
 internal fun wotSubjectChunks(
     subjects: Collection<String>,
     chunkSize: Int = WOT_ASSERTION_CHUNK_SIZE,
-): List<List<String>> =
-    subjects
+    prioritySubjects: Collection<String> = emptyList(),
+): List<List<String>> {
+    val normalizedSubjects = subjects
         .mapNotNull(::normalizeWotPubkey)
         .distinct()
-        .sorted()
-        .chunked(chunkSize)
+        .toSet()
+    val priority = prioritySubjects
+        .mapNotNull(::normalizeWotPubkey)
+        .distinct()
+        .filter { it in normalizedSubjects }
+    val prioritySet = priority.toSet()
+
+    return (priority + normalizedSubjects.filterNot { it in prioritySet }.sorted()).chunked(chunkSize)
+}
 
 internal fun markWotChunkIfEosed(
     chunk: List<String>,
@@ -32,6 +48,50 @@ internal fun markWotChunkIfEosed(
 ): Boolean {
     if (eosed) markQueried(chunk)
     return eosed
+}
+
+internal fun wotAssertionFilter(providerPubkey: String, subjects: Collection<String>): JsonObject? {
+    val provider = normalizeWotPubkey(providerPubkey) ?: return null
+    val normalizedSubjects = subjects.mapNotNull(::normalizeWotPubkey).distinct().sorted()
+    if (normalizedSubjects.isEmpty()) return null
+
+    return buildJsonObject {
+        put("kinds", buildJsonArray { add(JsonPrimitive(30382)) })
+        put("authors", buildJsonArray { add(JsonPrimitive(provider)) })
+        put("#d", buildJsonArray { normalizedSubjects.forEach { add(JsonPrimitive(it)) } })
+    }
+}
+
+internal data class WotRegistryLookupTargets(
+    val relayUrls: List<String>,
+    val capabilityBypassRelays: Set<String>,
+)
+
+internal fun wotRegistryLookupTargets(
+    readRelays: Collection<String>,
+    registryRelays: Collection<String>,
+): WotRegistryLookupTargets {
+    val normalizedReadRelays = readRelays.mapNotNull(::normalizeRelayUrl).distinct()
+    val normalizedRegistryRelays = registryRelays.mapNotNull(::normalizeRelayUrl).distinct()
+    return WotRegistryLookupTargets(
+        relayUrls = (normalizedReadRelays + normalizedRegistryRelays).distinct(),
+        capabilityBypassRelays = normalizedRegistryRelays.toSet(),
+    )
+}
+
+internal fun wotProviderDescriptorFromPrefs(prefs: WotProviderPrefs): WotProviderDescriptor {
+    if (prefs.source == WotProviderSource.DEFAULT) {
+        return WotProviderDescriptor(
+            providerPubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+            relayHint = DEFAULT_WOT_RELAY,
+            updatedAt = 0L,
+        )
+    }
+    return WotProviderDescriptor(
+        providerPubkey = normalizeWotPubkey(prefs.pubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY,
+        relayHint = normalizeRelayUrl(prefs.relay) ?: DEFAULT_WOT_RELAY,
+        updatedAt = 0L,
+    )
 }
 
 internal fun wotTargetsHash(providerPubkey: String, targets: Collection<String>): String {

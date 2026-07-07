@@ -13,6 +13,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -380,6 +381,27 @@ class EventProcessorInvariantsTest {
         val lookup = store.wotFor(subject)
         assertTrue(lookup is WotLookup.Scored)
         assertEquals(91, (lookup as WotLookup.Scored).assertion.rank)
+    }
+
+    @Test
+    fun `kind 10040 can be reprocessed after owner is claimed`() = runTest {
+        val own = "b".repeat(64)
+        val provider = "2".repeat(64)
+        val tags = """[["30382:rank","$provider","wss://nip85.example.com"]]"""
+        val (raw, relay) = rawEvent(seed = 780, kind = 10040, content = "", tags = tags)
+
+        processor.process(raw, relay)
+        processor.drainForTest()
+        assertNull(store.ownWotProviderFromRegistry())
+
+        store.ownPubkey = own
+        processor.process(raw, relay)
+        processor.drainForTest()
+
+        val descriptor = store.ownWotProviderFromRegistry()
+        assertNotNull(descriptor)
+        assertEquals(provider, descriptor!!.providerPubkey)
+        assertEquals("wss://nip85.example.com", descriptor.relayHint)
     }
 
     // ── kind-16 generic repost ingestion (regression anchor) ────────────────

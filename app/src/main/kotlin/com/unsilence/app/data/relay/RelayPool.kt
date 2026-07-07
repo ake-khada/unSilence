@@ -26,7 +26,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
-import com.unsilence.app.data.DEFAULT_WOT_RELAY
+import com.unsilence.app.data.WOT_REGISTRY_LOOKUP_RELAYS
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -929,10 +929,20 @@ class RelayPool @Inject constructor(
         reqs: List<String>,
         subIds: List<String>,
         timeoutMs: Long = 8_000,
+        capabilityBypassRelays: Set<String> = emptySet(),
     ) {
         val excluded = activeSingleRelayFeedUrl
+        val bypassRelays = capabilityBypassRelays.mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val logBypass = bypassRelays.isNotEmpty()
         val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-            .filter { it !in blockedUrls && it != excluded && !relayCapabilitiesStore.shouldSkip(it) }
+            .filter { relayUrl ->
+                relayUrl !in blockedUrls &&
+                    relayUrl != excluded &&
+                    (relayUrl in bypassRelays || !relayCapabilitiesStore.shouldSkip(relayUrl))
+            }
+        if (logBypass) {
+            Log.i(TAG, "sendOneShotBatch: capability bypass relays=${bypassRelays.joinToString(",")}")
+        }
         if (normalized.isEmpty() || reqs.isEmpty()) {
             if (excluded != null && urls.any { normalizeRelayUrl(it) == excluded }) {
                 Log.d(TAG, "one-shot skipped: only feedRelay in target set")
@@ -951,7 +961,11 @@ class RelayPool @Inject constructor(
             }
         }
 
-        Log.d(TAG, "sendOneShotBatch: ${normalized.size} urls → ${reused.size} reused, ${ephemeral.size} ephemeral")
+        if (logBypass) {
+            Log.i(TAG, "sendOneShotBatch: ${normalized.size} urls → ${reused.size} reused, ${ephemeral.size} ephemeral")
+        } else {
+            Log.d(TAG, "sendOneShotBatch: ${normalized.size} urls → ${reused.size} reused, ${ephemeral.size} ephemeral")
+        }
 
         // Pre-filter reused URLs to those present in the pool — must match the
         // send loop's `connections[url] ?: continue` gate so every relay that
@@ -995,7 +1009,7 @@ class RelayPool @Inject constructor(
 
         coroutineScope {
             ephemeral.map { url ->
-                async { openEphemeral(url, reqs, subIds.toSet(), timeoutMs) }
+                async { openEphemeral(url, reqs, subIds.toSet(), timeoutMs, logInfo = logBypass) }
             }.awaitAll()
         }
     }
@@ -1010,6 +1024,7 @@ class RelayPool @Inject constructor(
         reqs: List<String>,
         subIds: Set<String>,
         timeoutMs: Long,
+        logInfo: Boolean = false,
     ) {
         // Rate limit: min 50ms gap per URL
         val lastOpen = ephemeralLastOpenNanos.computeIfAbsent(url) { AtomicLong(0) }
@@ -1031,7 +1046,8 @@ class RelayPool @Inject constructor(
                 }
             }
             if (state != RelayState.CONNECTED) {
-                Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
+                if (logInfo) Log.i(TAG, "Ephemeral connect failed: $url (state=$state)")
+                else Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
                 return
             }
 
@@ -1069,7 +1085,8 @@ class RelayPool @Inject constructor(
                 }
             }
             val eosed = subIds.size - pendingSubs.size
-            Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
+            if (logInfo) Log.i(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
+            else Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
         } finally {
             conn.close()
         }
@@ -2144,14 +2161,32 @@ class RelayPool @Inject constructor(
         providerPubkey: String,
         relayHint: String,
         subjects: Collection<String>,
+        prioritySubjects: Collection<String> = emptyList(),
     ): Boolean {
         val provider = normalizeWotPubkey(providerPubkey) ?: return false
         val relayUrl = normalizeRelayUrl(relayHint) ?: return false
         if (relayUrl in blockedUrls || relayCapabilitiesStore.shouldSkip(relayUrl)) return false
 
-        val chunks = wotSubjectChunks(subjects)
+        val chunks = wotSubjectChunks(subjects, prioritySubjects = prioritySubjects)
         if (chunks.isEmpty()) return false
 
+        var allEosed = true
+        for ((index, chunk) in chunks.withIndex()) {
+            val eosed = fetchWotChunk(relayUrl, provider, chunk, index + 1, chunks.size)
+            if (!eosed) {
+                allEosed = false
+            }
+        }
+        return allEosed
+    }
+
+    private suspend fun fetchWotChunk(
+        relayUrl: String,
+        provider: String,
+        chunk: List<String>,
+        page: Int,
+        totalPages: Int,
+    ): Boolean {
         val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
         return try {
             conn.connect()
@@ -2161,23 +2196,14 @@ class RelayPool @Inject constructor(
                 }
             }
             if (state != RelayState.CONNECTED) {
-                Log.w(TAG, "WoT fetch connect failed: $relayUrl (state=$state)")
+                Log.w(TAG, "WoT fetch connect failed for chunk $page/$totalPages on $relayUrl (state=$state)")
                 return false
             }
-
-            var allEosed = true
-            for ((index, chunk) in chunks.withIndex()) {
-                val eosed = fetchWotChunk(conn, relayUrl, provider, chunk, index + 1, chunks.size)
-                if (!eosed) {
-                    allEosed = false
-                    break
-                }
-            }
-            allEosed
+            fetchWotChunk(conn, relayUrl, provider, chunk, page, totalPages)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "WoT fetch failed on $relayUrl: ${e.message}")
+            Log.w(TAG, "WoT fetch failed for chunk $page/$totalPages on $relayUrl: ${e.message}")
             false
         } finally {
             conn.close()
@@ -2193,19 +2219,15 @@ class RelayPool @Inject constructor(
         totalPages: Int,
     ): Boolean {
         val subId = "wot-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
+        val filter = wotAssertionFilter(provider, chunk) ?: return false
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(30382)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(provider)) })
-                put("#d", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
-                put("limit", JsonPrimitive(chunk.size))
-            })
+            add(filter)
         }.toString()
         if (!conn.send(req)) return false
 
-        var eventCount = 0
+        val verifiedEvents = ArrayList<NostrEvent>(chunk.size)
         val eosed = withTimeoutOrNull(WOT_FETCH_TIMEOUT_MS) {
             while (true) {
                 val raw = conn.messages.receive()
@@ -2213,7 +2235,7 @@ class RelayPool @Inject constructor(
                     raw.startsWith("[\"EVENT\"") -> {
                         val event = processor.parseAndVerify(raw, relayUrl)
                         if (event != null && event.kind == 30382 && normalizeWotPubkey(event.pubkey) == provider) {
-                            if (memoryEventStore.get().insert(event)) eventCount++
+                            verifiedEvents.add(event)
                         }
                     }
                     raw.startsWith("[\"EOSE\"") && extractEoseSubId(raw) == subId -> {
@@ -2239,9 +2261,11 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
         }.toString())
 
-        markWotChunkIfEosed(chunk, eosed) {
-            memoryEventStore.get().markWotSubjectsQueried(it)
-        }
+        val eventCount = memoryEventStore.get().insertWotAssertionChunk(
+            providerPubkey = provider,
+            events = verifiedEvents,
+            queriedSubjects = if (eosed) chunk else emptyList(),
+        )
         Log.d(TAG, "WoT chunk $page/$totalPages from $relayUrl: eose=$eosed events=$eventCount subjects=${chunk.size}")
         return eosed
     }
@@ -2255,10 +2279,15 @@ class RelayPool @Inject constructor(
      */
     suspend fun fetchOwn10040(ownPubkey: String): Boolean {
         val owner = normalizeWotPubkey(ownPubkey) ?: return false
-        val relayUrls = (memoryEventStore.get().readRelaysFor(owner) + DEFAULT_WOT_RELAY)
-            .mapNotNull { normalizeRelayUrl(it) }
-            .distinct()
-        if (relayUrls.isEmpty()) return false
+        val targets = wotRegistryLookupTargets(
+            readRelays = memoryEventStore.get().readRelaysFor(owner),
+            registryRelays = WOT_REGISTRY_LOOKUP_RELAYS,
+        )
+        if (targets.relayUrls.isEmpty()) return false
+        Log.i(
+            TAG,
+            "WoT 10040 lookup owner=${owner.take(8)} relays=${targets.relayUrls.joinToString(",")} bypass=${targets.capabilityBypassRelays.joinToString(",")}",
+        )
 
         val subId = "wot-10040-${System.nanoTime()}"
         val req = buildJsonArray {
@@ -2274,8 +2303,17 @@ class RelayPool @Inject constructor(
         val eoseDeferred = CompletableDeferred<Unit>()
         oneShotEoseCallbacks[subId] = eoseDeferred
         return try {
-            sendOneShotBatch(relayUrls, listOf(req), listOf(subId), timeoutMs = 8_000L)
-            withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+            sendOneShotBatch(
+                urls = targets.relayUrls,
+                reqs = listOf(req),
+                subIds = listOf(subId),
+                timeoutMs = 8_000L,
+                capabilityBypassRelays = targets.capabilityBypassRelays,
+            )
+            val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+            val knownProvider = memoryEventStore.get().ownWotProviderFromRegistry()?.providerPubkey?.take(8)
+            Log.i(TAG, "WoT 10040 lookup complete eose=$eosed provider=${knownProvider ?: "none"}")
+            eosed
         } finally {
             cleanupOneShotSub(subId)
         }

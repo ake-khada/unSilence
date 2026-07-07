@@ -150,6 +150,11 @@ class RelayPreferencesStore @Inject constructor(
     suspend fun lastWotFetchAt(): Long =
         dataStore.data.first()[KEY_LAST_WOT_FETCH] ?: 0L
 
+    fun lastWotFetchAtFlow(): Flow<Long> =
+        dataStore.data
+            .map { prefs -> prefs[KEY_LAST_WOT_FETCH] ?: 0L }
+            .distinctUntilChanged()
+
     suspend fun lastWotTargetsHash(): String =
         dataStore.data.first()[KEY_LAST_WOT_TARGETS_HASH].orEmpty()
 

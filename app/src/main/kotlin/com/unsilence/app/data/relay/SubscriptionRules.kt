@@ -13,7 +13,8 @@ object SubscriptionRules {
     /**
      * One-shot subscription prefixes: relay sends CLOSE after EOSE.
      *
-     * 28 prefixes (emoji/hint-batch/setref added for slot leak fix).
+     * One-shot fetches must be listed here for EOSE callback coverage and
+     * slot cleanup to run.
      */
     private val oneShotPrefixes = listOf(
         "kind3-",
@@ -47,6 +48,7 @@ object SubscriptionRules {
         "emoji-set-",
         "emoji-discover-",
         "setref-",
+        "wot-10040-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =
