@@ -9,6 +9,8 @@ package com.unsilence.app.data.memory
 // ─────────────────────────────────────────────────────────────────────────────
 
 import app.cash.turbine.test
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
+import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.ui.feed.engagementId
 import kotlinx.coroutines.flow.first
@@ -142,6 +144,215 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(42, monitor.rttOpen)
         assertEquals(listOf(11), monitor.supportedNips)
         assertEquals("monitor-pk", monitor.monitorPubkey)
+    }
+
+    // ── NIP-85 WoT assertions ──────────────────────────────────────────────
+
+    @Test
+    fun `kind 30382 wot assertions are compact derived tri-state state`() {
+        val subject = "a".repeat(64)
+        val absent = "b".repeat(64)
+        val untouched = "c".repeat(64)
+
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+
+        val evt = event(
+            id = "wot-1",
+            pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+            kind = 30382,
+            createdAt = 1_000,
+            tags = listOf(
+                listOf("d", subject),
+                listOf("rank", "87"),
+                listOf("hops", "2"),
+                listOf("personalizedGrapeRank_influence", "0.42"),
+                listOf("verifiedFollowerCount", "123"),
+                listOf("verifiedMuterCount", "0"),
+                listOf("verifiedReporterCount", "1"),
+            ),
+        )
+
+        assertTrue(store.insert(evt))
+        assertTrue(store.eventsByIds(setOf("wot-1")).isEmpty())
+        assertNull(store.snapshotSize().eventsByKind[30382])
+
+        val lookup = store.wotFor(subject)
+        assertTrue(lookup is WotLookup.Scored)
+        val scored = (lookup as WotLookup.Scored).assertion
+        assertEquals(DEFAULT_WOT_PROVIDER_PUBKEY, scored.providerPubkey)
+        assertEquals(87, scored.rank)
+        assertEquals(2, scored.hops)
+        assertEquals(123L, scored.verifiedFollowers)
+        assertEquals(1L, scored.verifiedReporters)
+
+        store.markWotSubjectsQueried(listOf(absent))
+        assertTrue(store.wotFor(absent) is WotLookup.Absent)
+        assertTrue(store.wotFor(untouched) is WotLookup.Pending)
+        assertTrue(store.hasWotData())
+    }
+
+    @Test
+    fun `kind 30382 ignores wrong provider and non pubkey subjects`() {
+        val subject = "a".repeat(64)
+        val wrongProvider = "d".repeat(64)
+
+        assertFalse(
+            store.insert(
+                event(
+                    id = "wot-wrong-provider",
+                    pubkey = wrongProvider,
+                    kind = 30382,
+                    createdAt = 1_000,
+                    tags = listOf(listOf("d", subject), listOf("rank", "88")),
+                )
+            )
+        )
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+
+        assertFalse(
+            store.insert(
+                event(
+                    id = "wot-bad-subject",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 1_001,
+                    tags = listOf(listOf("d", "nostr:bad-subject"), listOf("rank", "88")),
+                )
+            )
+        )
+        assertFalse(store.hasWotData())
+    }
+
+    @Test
+    fun `wot provider switch clears scores and queried absences`() {
+        val subject = "a".repeat(64)
+        val absent = "b".repeat(64)
+        val newProvider = "e".repeat(64)
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "wot-before-switch",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 1_000,
+                    tags = listOf(listOf("d", subject), listOf("rank", "75")),
+                )
+            )
+        )
+        store.markWotSubjectsQueried(listOf(absent))
+        assertTrue(store.wotFor(subject) is WotLookup.Scored)
+        assertTrue(store.wotFor(absent) is WotLookup.Absent)
+
+        store.setActiveWotProvider(newProvider, "wss://nip85.example.com")
+
+        assertTrue(store.getWotAssertions().isEmpty())
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+        assertTrue(store.wotFor(absent) is WotLookup.Pending)
+        assertFalse(store.hasWotData())
+        assertEquals(newProvider, store.activeWotProvider().providerPubkey)
+
+        assertFalse(
+            store.insert(
+                event(
+                    id = "wot-old-provider-after-switch",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 2_000,
+                    tags = listOf(listOf("d", subject), listOf("rank", "99")),
+                )
+            )
+        )
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "wot-new-provider-after-switch",
+                    pubkey = newProvider,
+                    kind = 30382,
+                    createdAt = 2_001,
+                    tags = listOf(listOf("d", subject), listOf("rank", "66")),
+                )
+            )
+        )
+        val scoredAfterSwitch = store.wotFor(subject) as WotLookup.Scored
+        assertEquals(newProvider, scoredAfterSwitch.assertion.providerPubkey)
+        assertEquals(66, scoredAfterSwitch.assertion.rank)
+    }
+
+    @Test
+    fun `kind 10040 stores own public wot provider registry only`() {
+        val own = "1".repeat(64)
+        val provider = "2".repeat(64)
+        val foreign = "3".repeat(64)
+        store.ownPubkey = own
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "own-10040",
+                    pubkey = own,
+                    kind = 10040,
+                    createdAt = 1_000,
+                    tags = listOf(listOf("30382:rank", provider, "wss://nip85.example.com")),
+                )
+            )
+        )
+        assertEquals(provider, store.ownWotProviderFromRegistry()?.providerPubkey)
+        assertEquals("wss://nip85.example.com", store.ownWotProviderFromRegistry()?.relayHint)
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "foreign-10040",
+                    pubkey = foreign,
+                    kind = 10040,
+                    createdAt = 2_000,
+                    tags = listOf(listOf("30382:rank", foreign, "wss://evil.example.com")),
+                )
+            )
+        )
+        assertEquals(provider, store.ownWotProviderFromRegistry()?.providerPubkey)
+    }
+
+    @Test
+    fun `kind 30385 relay trust is accepted only from pinned provider`() {
+        val tags = listOf(
+            listOf("d", "wss://relay.example.com"),
+            listOf("score", "90"),
+            listOf("reliability", "91"),
+            listOf("quality", "92"),
+            listOf("accessibility", "93"),
+            listOf("confidence", "high"),
+            listOf("observations", "10"),
+        )
+
+        assertFalse(
+            store.insert(
+                event(
+                    id = "trust-wrong-provider",
+                    pubkey = "f".repeat(64),
+                    kind = 30385,
+                    createdAt = 1_000,
+                    tags = tags,
+                )
+            )
+        )
+        assertTrue(store.getTrustScores().isEmpty())
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "trust-right-provider",
+                    pubkey = TRUST_SCORE_PROVIDER_PUBKEY,
+                    kind = 30385,
+                    createdAt = 1_001,
+                    tags = tags,
+                )
+            )
+        )
+        assertEquals(90, store.getTrustScores()["wss://relay.example.com"]?.score)
     }
 
     // ── Kind 6 repost stats ─────────────────────────────────────────────────
@@ -523,21 +734,20 @@ class MemoryEventStoreInvariantsTest {
             ),
         )
 
-        store.statsFlow(articleId).test {
-            assertEquals(1, awaitItem().replyCount)
+        assertEquals(1, store.currentStatsSnapshot(articleId).replyCount)
+        val beforeStatsSignal = store.statsSignalFlow.value
 
-            store.insert(
-                event(
-                    id = "delete-article-comment-request",
-                    pubkey = "bob",
-                    kind = 5,
-                    tags = listOf(listOf("e", commentId), listOf("k", "1111")),
-                ),
-            )
+        store.insert(
+            event(
+                id = "delete-article-comment-request",
+                pubkey = "bob",
+                kind = 5,
+                tags = listOf(listOf("e", commentId), listOf("k", "1111")),
+            ),
+        )
 
-            assertEquals(0, awaitItem().replyCount)
-            cancelAndIgnoreRemainingEvents()
-        }
+        assertEquals(0, store.currentStatsSnapshot(articleId).replyCount)
+        assertNotEquals(beforeStatsSignal, store.statsSignalFlow.value)
         assertTrue(store.articleCommentsFlow(coord).first().isEmpty())
     }
 

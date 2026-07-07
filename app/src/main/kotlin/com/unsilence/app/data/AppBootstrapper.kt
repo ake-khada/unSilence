@@ -13,15 +13,19 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.shouldSkipBootstrapWotFetch
+import com.unsilence.app.data.relay.wotTargetsHash
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.wallet.ZapPreferencesStore
@@ -66,10 +70,6 @@ private val DEFAULT_SEARCH_URLS = listOf(
     "wss://search.nos.today",
     ANTIPRIMAL_RELAY_URL,
 )
-
-/** Pubkey of the trustedrelays.xyz operator who publishes kind 30385 events. */
-private const val TRUST_SCORE_PROVIDER_PUBKEY =
-    "ad3cdbe9fb09b8edf7b3e0e5286d66e58b58eaa64d061bbcf3a935edf8abf421"
 
 @Singleton
 class AppBootstrapper @Inject constructor(
@@ -519,6 +519,73 @@ class AppBootstrapper @Inject constructor(
                 }
             }
         }
+
+        val wotPrefs = relayPreferencesStore.wotProviderPrefsSuspending()
+        val wotTargets = ((memoryEventStore.getFollows(pubkeyHex) ?: emptySet()) + pubkeyHex)
+        val wotJob = scope.launch {
+            val resolvedProvider = if (wotPrefs.source == WotProviderSource.OWN_10040) {
+                val fetched = relayPool.fetchOwn10040(pubkeyHex)
+                val ownProvider = if (fetched) {
+                    withTimeoutOrNull(2_000L) {
+                        var provider = memoryEventStore.ownWotProviderFromRegistry()
+                        while (provider == null) {
+                            delay(100L)
+                            provider = memoryEventStore.ownWotProviderFromRegistry()
+                        }
+                        provider
+                    }
+                } else {
+                    null
+                }
+                ownProvider ?: WotProviderDescriptor(
+                    providerPubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    relayHint = DEFAULT_WOT_RELAY,
+                    updatedAt = 0L,
+                )
+            } else {
+                WotProviderDescriptor(
+                    providerPubkey = if (wotPrefs.source == WotProviderSource.DEFAULT) {
+                        DEFAULT_WOT_PROVIDER_PUBKEY
+                    } else {
+                        wotPrefs.pubkey
+                    },
+                    relayHint = if (wotPrefs.source == WotProviderSource.DEFAULT) {
+                        DEFAULT_WOT_RELAY
+                    } else {
+                        wotPrefs.relay
+                    },
+                    updatedAt = 0L,
+                )
+            }
+
+            memoryEventStore.setActiveWotProvider(resolvedProvider.providerPubkey, resolvedProvider.relayHint)
+            val targetsHash = wotTargetsHash(resolvedProvider.providerPubkey, wotTargets)
+            val wotAge = System.currentTimeMillis() - relayPreferencesStore.lastWotFetchAt()
+            val lastWotTargetsHash = relayPreferencesStore.lastWotTargetsHash()
+            if (shouldSkipBootstrapWotFetch(
+                    hasWotData = memoryEventStore.hasWotData(),
+                    ageMs = wotAge,
+                    lastTargetsHash = lastWotTargetsHash,
+                    currentTargetsHash = targetsHash,
+                    stalenessMs = maintenanceStalenessMs,
+                )
+            ) {
+                Log.d(TAG, "Phase3: WoT assertions fresh for unchanged provider/targets; skipping fetch")
+            } else {
+                Log.d(TAG, "Phase3: fetching WoT assertions for ${wotTargets.size} target(s)")
+                val ok = relayPool.fetchWotAssertions(
+                    providerPubkey = resolvedProvider.providerPubkey,
+                    relayHint = resolvedProvider.relayHint,
+                    subjects = wotTargets,
+                )
+                if (ok) {
+                    relayPreferencesStore.setLastWotFetch(System.currentTimeMillis(), targetsHash)
+                } else {
+                    Log.w(TAG, "Phase3: WoT fetch failed — not advancing 12h gate")
+                }
+            }
+        }
+
         val monitorAge = System.currentTimeMillis() - relayPreferencesStore.lastMonitorFetchAt()
         val hasMonitors = memoryEventStore.relayMonitorCount() > 0
         val monitorJob = if (hasMonitors && monitorAge < maintenanceStalenessMs) {
@@ -539,6 +606,7 @@ class AppBootstrapper @Inject constructor(
             }
         }
         trustJob?.join()
+        wotJob.join()
         monitorJob?.join()
 
         // Retire the old local pinned-relay store (one-time, idempotent) — the feed carousel

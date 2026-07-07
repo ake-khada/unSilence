@@ -338,6 +338,40 @@ data class RelayHealthInfo(
 }
 
 /**
+ * NIP-85 kind-30382 user-level Web-of-Trust assertion.
+ *
+ * Keyed by [subjectPubkey], but the provider is stored on every row so provider
+ * switches cannot silently reuse stale scores from a previous grapevine.
+ */
+data class WotAssertionEntity(
+    val subjectPubkey: String,
+    val providerPubkey: String,
+    val rank: Int,
+    val hops: Int? = null,
+    val influence: Double? = null,
+    val average: Double? = null,
+    val confidence: Double? = null,
+    val input: Double? = null,
+    val pageRank: Double? = null,
+    val verifiedFollowers: Long? = null,
+    val verifiedMuters: Long? = null,
+    val verifiedReporters: Long? = null,
+    val updatedAt: Long = 0L,
+)
+
+sealed interface WotLookup {
+    data class Scored(val assertion: WotAssertionEntity) : WotLookup
+    data object Absent : WotLookup
+    data object Pending : WotLookup
+}
+
+data class WotProviderDescriptor(
+    val providerPubkey: String,
+    val relayHint: String,
+    val updatedAt: Long,
+)
+
+/**
  * Instrumentation result from a paginated fetch session.
  */
 data class PaginatedFetchResult(

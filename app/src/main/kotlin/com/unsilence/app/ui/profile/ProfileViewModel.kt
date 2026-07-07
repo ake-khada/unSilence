@@ -24,6 +24,7 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
+import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -63,6 +64,7 @@ class ProfileViewModel @Inject constructor(
     private val timelineService: TimelineService,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val blossomClient: BlossomClient,
     private val imageCompressor: ImageCompressor,
     private val blossomServersStore: BlossomServersStore,
@@ -166,6 +168,8 @@ class ProfileViewModel @Inject constructor(
 
     init {
         if (pubkeyHex != null) {
+            wotHydrationCoalescer.requestProfileHydration(pubkeyHex)
+
             viewModelScope.launch {
                 selectedTab.collectLatest { tab ->
                     resubscribeForTab(pubkeyHex, tab)

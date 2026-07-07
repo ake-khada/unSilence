@@ -9,6 +9,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import android.util.Log
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
+import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import com.unsilence.app.data.memory.SensitiveContentMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +37,23 @@ private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
 private val KEY_LAST_TRUST_FETCH = longPreferencesKey("last_trust_fetch_at")
 private val KEY_LAST_TRUST_RELAY_URLS = stringSetPreferencesKey("last_trust_relay_urls")
 private val KEY_SENSITIVE_CONTENT_MODE = stringPreferencesKey("sensitive_content_mode")
+private val KEY_WOT_PROVIDER_PUBKEY = stringPreferencesKey("wot_provider_pubkey")
+private val KEY_WOT_PROVIDER_RELAY = stringPreferencesKey("wot_provider_relay")
+private val KEY_WOT_PROVIDER_SOURCE = stringPreferencesKey("wot_provider_source")
+private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
+private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
+
+enum class WotProviderSource {
+    DEFAULT,
+    OWN_10040,
+    CUSTOM,
+}
+
+data class WotProviderPrefs(
+    val pubkey: String,
+    val relay: String,
+    val source: WotProviderSource,
+)
 
 @Singleton
 class RelayPreferencesStore @Inject constructor(
@@ -108,6 +127,40 @@ class RelayPreferencesStore @Inject constructor(
         }
     }
 
+    // ─── NIP-85 WoT Provider ───────────────────────────────────────────────
+
+    fun wotProviderPrefsFlow(): Flow<WotProviderPrefs> =
+        dataStore.data
+            .map { prefs -> prefs.toWotProviderPrefs() }
+            .distinctUntilChanged()
+
+    suspend fun wotProviderPrefsSuspending(): WotProviderPrefs =
+        dataStore.data.first().toWotProviderPrefs()
+
+    suspend fun setWotProvider(pubkey: String, relay: String, source: WotProviderSource) {
+        val normalizedPubkey = normalizeHexPubkey(pubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY
+        val normalizedRelay = normalizeRelayUrl(relay) ?: DEFAULT_WOT_RELAY
+        dataStore.edit { prefs ->
+            prefs[KEY_WOT_PROVIDER_PUBKEY] = normalizedPubkey
+            prefs[KEY_WOT_PROVIDER_RELAY] = normalizedRelay
+            prefs[KEY_WOT_PROVIDER_SOURCE] = source.name
+        }
+    }
+
+    suspend fun lastWotFetchAt(): Long =
+        dataStore.data.first()[KEY_LAST_WOT_FETCH] ?: 0L
+
+    suspend fun lastWotTargetsHash(): String =
+        dataStore.data.first()[KEY_LAST_WOT_TARGETS_HASH].orEmpty()
+
+    /** Advance WoT staleness gate atomically after a successful provider-target fetch. */
+    suspend fun setLastWotFetch(timestamp: Long, targetsHash: String) {
+        dataStore.edit { prefs ->
+            prefs[KEY_LAST_WOT_FETCH] = timestamp
+            prefs[KEY_LAST_WOT_TARGETS_HASH] = targetsHash
+        }
+    }
+
     // ─── Pinned Relays ──────────────────────────────────────────────────────
 
     /**
@@ -156,5 +209,23 @@ class RelayPreferencesStore @Inject constructor(
 
     suspend fun setSensitiveContentMode(mode: SensitiveContentMode) {
         dataStore.edit { prefs -> prefs[KEY_SENSITIVE_CONTENT_MODE] = mode.name }
+    }
+
+    private fun Preferences.toWotProviderPrefs(): WotProviderPrefs {
+        val source = prefsWotSource(this[KEY_WOT_PROVIDER_SOURCE])
+        return WotProviderPrefs(
+            pubkey = normalizeHexPubkey(this[KEY_WOT_PROVIDER_PUBKEY]) ?: DEFAULT_WOT_PROVIDER_PUBKEY,
+            relay = normalizeRelayUrl(this[KEY_WOT_PROVIDER_RELAY] ?: DEFAULT_WOT_RELAY) ?: DEFAULT_WOT_RELAY,
+            source = source,
+        )
+    }
+
+    private fun prefsWotSource(raw: String?): WotProviderSource =
+        WotProviderSource.entries.firstOrNull { it.name == raw } ?: WotProviderSource.DEFAULT
+
+    private fun normalizeHexPubkey(pubkey: String?): String? {
+        val normalized = pubkey?.trim()?.lowercase() ?: return null
+        if (normalized.length != 64) return null
+        return normalized.takeIf { value -> value.all { it in '0'..'9' || it in 'a'..'f' } }
     }
 }
