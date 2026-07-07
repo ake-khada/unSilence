@@ -1,9 +1,11 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.WotLookup
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -358,6 +360,26 @@ class EventProcessorInvariantsTest {
             "writeRelaysFor should NOT contain the read relay",
             "wss://author-read.example.com" !in writeRelays,
         )
+    }
+
+    @Test
+    fun `kind 30382 control path only channels active wot provider`() = runTest {
+        val subject = "d".repeat(64)
+        val tags = """[["d","$subject"],["rank","91"]]"""
+
+        val (wrongRaw, wrongRelay) = rawEvent(seed = 760, kind = 30382, content = "", tags = tags)
+        processor.process(wrongRaw, wrongRelay)
+        processor.drainForTest()
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+
+        val (rightRaw, rightRelay) = rawEvent(seed = 761, kind = 30382, content = "", tags = tags)
+        val fixedRaw = rightRaw.replace("b".repeat(64), DEFAULT_WOT_PROVIDER_PUBKEY)
+        processor.process(fixedRaw, rightRelay)
+        processor.drainForTest()
+
+        val lookup = store.wotFor(subject)
+        assertTrue(lookup is WotLookup.Scored)
+        assertEquals(91, (lookup as WotLookup.Scored).assertion.rank)
     }
 
     // ── kind-16 generic repost ingestion (regression anchor) ────────────────

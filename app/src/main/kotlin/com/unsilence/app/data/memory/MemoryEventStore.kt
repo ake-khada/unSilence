@@ -2,6 +2,9 @@ package com.unsilence.app.data.memory
 
 import android.util.Log
 // FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
+import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
+import com.unsilence.app.data.DEFAULT_WOT_RELAY
+import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
@@ -91,12 +94,14 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
  *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
+private const val WOT_ASSERTION_CAP = 5_000
+private const val WOT_ASSERTION_TRIM = 500
 private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023, 1111)
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16, 1111)
-private val DERIVED_ONLY_KINDS = setOf(30166)
+private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
 
 @Singleton
 class MemoryEventStore @Inject constructor(
@@ -400,6 +405,15 @@ class MemoryEventStore @Inject constructor(
     // ─── Trust scores (kind 30385) ────────────────────────────────────────────
     private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
 
+    // ─── NIP-85 user-level WoT assertions (kind 30382) ───────────────────────
+    private val wotBySubject = ConcurrentHashMap<String, WotAssertionEntity>()
+    private val wotQueriedSubjects = ConcurrentHashMap.newKeySet<String>()
+    private val wotAccessedAt = ConcurrentHashMap<String, Long>()
+    private val wotProviderLock = Any()
+    @Volatile private var activeWotProviderPubkey: String = DEFAULT_WOT_PROVIDER_PUBKEY
+    @Volatile private var activeWotProviderRelay: String = DEFAULT_WOT_RELAY
+    @Volatile private var ownWotProviderRegistry: WotProviderDescriptor? = null
+
     // ─── Relay monitors (kind 30166 / NIP-66) ─────────────────────────────────
     private val relayMonitorsByUrl = ConcurrentHashMap<String, RelayMonitorEntity>()
 
@@ -518,6 +532,7 @@ class MemoryEventStore @Inject constructor(
 
     /** Bumps when engagement aggregates (kinds 7/9734/9735) change. Consumers re-render counts. */
     val statsSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _statsSignal
+    val wotSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _wotSignal
 
     /** Targeted invalidation for per-event-id stats observation. */
     sealed class StatsInvalidation {
@@ -534,6 +549,7 @@ class MemoryEventStore @Inject constructor(
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
     private val _trustScoreSignal = MutableStateFlow(0L)
+    private val _wotSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
     private val _emojiSetSignal = MutableStateFlow(0L)
     private val _snapshotRestoredSignal = MutableStateFlow(0L)
@@ -577,6 +593,7 @@ class MemoryEventStore @Inject constructor(
         var action = false
         var relayConfig = false
         var trustScore = false
+        var wot = false
         var relayMonitor = false
         var relaySet = false
         var emojiSet = false
@@ -592,6 +609,7 @@ class MemoryEventStore @Inject constructor(
         if (d.action) _actionSignal.value = now
         if (d.relayConfig) _relayConfigSignal.value = now
         if (d.trustScore) _trustScoreSignal.value = now
+        if (d.wot) _wotSignal.value = now
         if (d.relayMonitor) _relayMonitorSignal.value = now
         if (d.relaySet) _relaySetSignal.value = now
         if (d.emojiSet) _emojiSetSignal.value = now
@@ -702,6 +720,7 @@ class MemoryEventStore @Inject constructor(
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
     private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
+        if (event.kind == 30385 && !isTrustScoreProvider(event.pubkey)) return false
         if (event.kind in DERIVED_ONLY_KINDS) {
             return insertDerivedOnly(event, dirty)
         }
@@ -763,6 +782,7 @@ class MemoryEventStore @Inject constructor(
             10006 -> handleBlocked(event, dirty)
             10007 -> handleSearchRelays(event, dirty)
             10012 -> handleFavorites(event, dirty)
+            10040 -> handleWotProviderRegistry(event, dirty)
             10063 -> handleBlossomServers(event)
             30002 -> {
                 handleParameterizedReplaceable(event)
@@ -781,6 +801,7 @@ class MemoryEventStore @Inject constructor(
         pendingRelays.remove(event.id)
         return when (event.kind) {
             30166 -> handleRelayMonitor(event, dirty)
+            30382 -> handleWotAssertion(event, dirty)
             else -> false
         }
     }
@@ -1764,9 +1785,115 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
+    // ─── Kind 30382: NIP-85 user-level WoT assertions ─────────────────────
+
+    private fun handleWotAssertion(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
+        val provider = normalizeHexPubkey(event.pubkey) ?: return false
+
+        fun tag(name: String): String? = event.tags.firstOrNull {
+            it.size >= 2 && it[0] == name
+        }?.get(1)
+
+        val subject = normalizeHexPubkey(tag("d")) ?: return false
+        val rank = tag("rank")?.toIntOrNull()?.takeIf { it in 0..100 } ?: return false
+
+        var changed = false
+        synchronized(wotProviderLock) {
+            if (provider != activeWotProviderPubkey) return false
+
+            wotQueriedSubjects.add(subject)
+            wotAccessedAt[subject] = System.nanoTime()
+
+            wotBySubject.compute(subject) { _, existing ->
+                if (existing != null && existing.updatedAt >= event.createdAt) {
+                    existing
+                } else {
+                    changed = true
+                    WotAssertionEntity(
+                        subjectPubkey = subject,
+                        providerPubkey = provider,
+                        rank = rank,
+                        hops = tag("hops")?.toIntOrNull(),
+                        influence = tag("personalizedGrapeRank_influence")?.toDoubleOrNull()
+                            ?: tag("influence")?.toDoubleOrNull(),
+                        average = tag("personalizedGrapeRank_average")?.toDoubleOrNull()
+                            ?: tag("average")?.toDoubleOrNull(),
+                        confidence = tag("personalizedGrapeRank_confidence")?.toDoubleOrNull()
+                            ?: tag("confidence")?.toDoubleOrNull(),
+                        input = tag("personalizedGrapeRank_input")?.toDoubleOrNull()
+                            ?: tag("input")?.toDoubleOrNull(),
+                        pageRank = tag("personalizedPageRank")?.toDoubleOrNull()
+                            ?: tag("pageRank")?.toDoubleOrNull(),
+                        verifiedFollowers = tag("verifiedFollowerCount")?.toLongOrNull()
+                            ?: tag("followers")?.toLongOrNull(),
+                        verifiedMuters = tag("verifiedMuterCount")?.toLongOrNull(),
+                        verifiedReporters = tag("verifiedReporterCount")?.toLongOrNull(),
+                        updatedAt = event.createdAt,
+                    )
+                }
+            }
+            if (changed) trimWotAssertionsIfNeeded()
+        }
+
+        if (changed) {
+            if (dirty != null) dirty.wot = true
+            else _wotSignal.value = System.nanoTime()
+        }
+        return changed
+    }
+
+    // ─── Kind 10040: NIP-85 provider registry ─────────────────────────────
+
+    private fun handleWotProviderRegistry(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
+        val own = ownPubkey ?: return false
+        if (event.pubkey != own) return false
+
+        val providerTag = event.tags.firstOrNull { tag ->
+            tag.size >= 3 && tag[0] == "30382:rank"
+        } ?: return false
+
+        val providerPubkey = normalizeHexPubkey(providerTag[1]) ?: return false
+        val relayHint = normalizeRelayUrl(providerTag.getOrNull(2) ?: return false) ?: return false
+        val existing = ownWotProviderRegistry
+        if (existing != null && existing.updatedAt >= event.createdAt) return false
+
+        ownWotProviderRegistry = WotProviderDescriptor(
+            providerPubkey = providerPubkey,
+            relayHint = relayHint,
+            updatedAt = event.createdAt,
+        )
+        if (dirty != null) dirty.wot = true
+        else _wotSignal.value = System.nanoTime()
+        return true
+    }
+
+    private fun isTrustScoreProvider(pubkey: String): Boolean =
+        normalizeHexPubkey(pubkey) == TRUST_SCORE_PROVIDER_PUBKEY
+
+    private fun normalizeHexPubkey(pubkey: String?): String? {
+        val normalized = pubkey?.trim()?.lowercase() ?: return null
+        if (normalized.length != 64) return null
+        return normalized.takeIf { value -> value.all { it in '0'..'9' || it in 'a'..'f' } }
+    }
+
+    private fun trimWotAssertionsIfNeeded() {
+        if (wotAccessedAt.size <= WOT_ASSERTION_CAP && wotBySubject.size <= WOT_ASSERTION_CAP) return
+        val toRemove = wotAccessedAt.entries
+            .sortedBy { it.value }
+            .take(WOT_ASSERTION_TRIM)
+            .map { it.key }
+        for (subject in toRemove) {
+            wotAccessedAt.remove(subject)
+            wotBySubject.remove(subject)
+            wotQueriedSubjects.remove(subject)
+        }
+    }
+
     // ─── Kind 30385: Trusted Relay Assertions ─────────────────────────────
 
     private fun handleTrustScore(event: NostrEvent, dirty: InsertDirty? = null) {
+        if (!isTrustScoreProvider(event.pubkey)) return
+
         fun tag(name: String): String? = event.tags.firstOrNull {
             it.size >= 2 && it[0] == name
         }?.get(1)
@@ -3707,6 +3834,91 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    // ─── NIP-85 WoT query APIs (kind 30382 / kind 10040) ─────────────────
+
+    fun isActiveWotProvider(pubkey: String): Boolean =
+        normalizeHexPubkey(pubkey) == activeWotProviderPubkey
+
+    fun setActiveWotProvider(providerPubkey: String, relayHint: String = DEFAULT_WOT_RELAY) {
+        val normalizedProvider = normalizeHexPubkey(providerPubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY
+        val normalizedRelay = normalizeRelayUrl(relayHint) ?: DEFAULT_WOT_RELAY
+        var changed = false
+        synchronized(wotProviderLock) {
+            changed = normalizedProvider != activeWotProviderPubkey
+            activeWotProviderPubkey = normalizedProvider
+            activeWotProviderRelay = normalizedRelay
+            if (changed) {
+                clearWotAssertionsLocked()
+            }
+        }
+        if (changed) _wotSignal.value = System.nanoTime()
+    }
+
+    fun activeWotProvider(): WotProviderDescriptor =
+        WotProviderDescriptor(
+            providerPubkey = activeWotProviderPubkey,
+            relayHint = activeWotProviderRelay,
+            updatedAt = 0L,
+        )
+
+    fun ownWotProviderFromRegistry(): WotProviderDescriptor? = ownWotProviderRegistry
+
+    fun getWotAssertions(): Map<String, WotAssertionEntity> = HashMap(wotBySubject)
+
+    fun hasWotData(): Boolean = wotBySubject.isNotEmpty() || wotQueriedSubjects.isNotEmpty()
+
+    fun wotFor(pubkey: String): WotLookup {
+        val subject = normalizeHexPubkey(pubkey) ?: return WotLookup.Pending
+        val assertion = wotBySubject[subject]
+        return when {
+            assertion != null -> {
+                wotAccessedAt[subject] = System.nanoTime()
+                WotLookup.Scored(assertion)
+            }
+            subject in wotQueriedSubjects -> {
+                wotAccessedAt[subject] = System.nanoTime()
+                WotLookup.Absent
+            }
+            else -> WotLookup.Pending
+        }
+    }
+
+    fun wotFlow(pubkey: String): Flow<WotLookup> =
+        _wotSignal
+            .map { wotFor(pubkey) }
+            .onStart { emit(wotFor(pubkey)) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    fun markWotSubjectsQueried(subjects: Collection<String>) {
+        var changed = false
+        synchronized(wotProviderLock) {
+            for (subject in subjects.mapNotNull { normalizeHexPubkey(it) }) {
+                wotAccessedAt[subject] = System.nanoTime()
+                if (wotQueriedSubjects.add(subject)) changed = true
+            }
+            if (changed) {
+                trimWotAssertionsIfNeeded()
+            }
+        }
+        if (changed) _wotSignal.value = System.nanoTime()
+    }
+
+    fun clearWotAssertions() {
+        val changed = synchronized(wotProviderLock) {
+            clearWotAssertionsLocked()
+        }
+        if (changed) _wotSignal.value = System.nanoTime()
+    }
+
+    private fun clearWotAssertionsLocked(): Boolean {
+        if (wotBySubject.isEmpty() && wotQueriedSubjects.isEmpty() && wotAccessedAt.isEmpty()) return false
+        wotBySubject.clear()
+        wotQueriedSubjects.clear()
+        wotAccessedAt.clear()
+        return true
+    }
+
     // ─── Relay monitor query APIs (kind 30166 / NIP-66) ──────────────────
 
     override fun getRelayMonitors(): Map<String, RelayMonitorEntity> =
@@ -5542,6 +5754,10 @@ class MemoryEventStore @Inject constructor(
         deletedRelaySetTombstones.clear()
         blossomServersByPubkey.clear()
         trustScoresByUrl.clear()
+        synchronized(wotProviderLock) {
+            clearWotAssertionsLocked()
+            ownWotProviderRegistry = null
+        }
         relayMonitorsByUrl.clear()
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()
@@ -5556,6 +5772,7 @@ class MemoryEventStore @Inject constructor(
         _relayConfigSignal.value++
         _relaySetSignal.value++
         _trustScoreSignal.value++
+        _wotSignal.value++
         _relayMonitorSignal.value++
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
     }
@@ -5627,10 +5844,15 @@ class MemoryEventStore @Inject constructor(
         userEmojiListByPubkey.clear()
         emojiKindCreatedAt.clear()
         trustScoresByUrl.clear()
+        synchronized(wotProviderLock) {
+            clearWotAssertionsLocked()
+            ownWotProviderRegistry = null
+        }
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L
         _emojiSetSignal.value = 0L
         _trustScoreSignal.value = 0L
+        _wotSignal.value = 0L
         _relayMonitorSignal.value = 0L
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
         timelineServiceProvider.get().clear()

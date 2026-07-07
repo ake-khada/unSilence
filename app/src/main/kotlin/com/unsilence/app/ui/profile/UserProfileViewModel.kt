@@ -21,6 +21,7 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
+import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
@@ -64,6 +65,7 @@ class UserProfileViewModel @Inject constructor(
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineService: TimelineService,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val timelineCardData: TimelineCardData,
     private val muteListRepository: MuteListRepository,
     private val reportRepository: ReportRepository,
@@ -201,6 +203,7 @@ class UserProfileViewModel @Inject constructor(
         followingCount.value = null
         _events.value = emptyList()
         _contentFilter.value = FeedContentFilter.NOTES_ONLY
+        wotHydrationCoalescer.requestProfileHydration(pubkey)
 
         // Fetch profile metadata via NIP-65 fanout
         viewModelScope.launch {

@@ -214,8 +214,8 @@ class EventProcessor @Inject constructor(
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<NostrEvent>(capacity = 500)
 
-    /** CONTROL lane: control-plane kinds (10002, 10006, 10007, 10012, 30002,
-     *  30166, 30385). Flushed every 150 ms via [MemoryEventStore.insertBatch]
+    /** CONTROL lane: control-plane kinds (10002, 10006, 10007, 10012, 10040,
+     *  30002, 30166, 30382, 30385). Flushed every 150 ms via [MemoryEventStore.insertBatch]
      *  so signal bumps coalesce — a 1000-event monitor burst produces ONE
      *  _relayMonitorSignal bump instead of 1000.
      *
@@ -455,11 +455,17 @@ class EventProcessor @Inject constructor(
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
         // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
-        // UI, 30385 for trust scores, 30166 for relay monitors (hundreds arrive
+        // UI, 10040 for NIP-85 provider registry, 30382 for user WoT assertions,
+        // 30385 for relay trust scores, 30166 for relay monitors (hundreds arrive
         // in burst — capacity-2000 channel handles the largest observed burst).
         // The drainer flushes via insertBatch so per-event signal bumps coalesce.
         // Kind-10012 relay set refs are resolved inside flushControlBatch.
-        if (dto.kind in setOf(10000, 10002, 10006, 10007, 10012, 10030, 10063, 30002, 30030, 30166, 30385)) {
+        val isControlKind = when (dto.kind) {
+            30382 -> memoryEventStore.isActiveWotProvider(dto.pubkey)
+            10000, 10002, 10006, 10007, 10012, 10030, 10040, 10063, 30002, 30030, 30166, 30385 -> true
+            else -> false
+        }
+        if (isControlKind) {
             controlChannel.trySend(nostrEvent)
         }
 
@@ -534,9 +540,9 @@ class EventProcessor @Inject constructor(
      * CONTROL drainer: collects up to 500 control-plane events within a
      * 150 ms window, then dispatches via [MemoryEventStore.insertBatch].
      *
-     * Coalesces signal bumps for kind-10002/10006/10007/10012/30002/30166/
-     * 30385 bursts that previously hit MES one event at a time and bumped
-     * _relayConfigSignal / _trustScoreSignal / _relayMonitorSignal once per
+     * Coalesces signal bumps for kind-10002/10006/10007/10012/10040/30002/30166/
+     * 30382/30385 bursts that previously hit MES one event at a time and bumped
+     * _relayConfigSignal / _wotSignal / _trustScoreSignal / _relayMonitorSignal once per
      * event. A 1175-event relay-monitor burst now produces one bump.
      *
      * Window of 150 ms is short enough that user-perceived latency for

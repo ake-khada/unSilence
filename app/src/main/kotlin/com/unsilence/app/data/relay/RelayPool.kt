@@ -26,6 +26,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
+import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -2131,6 +2132,154 @@ class RelayPool @Inject constructor(
     }
 
     // ── Relay health fetch orchestrators ──────────────────────────────────
+
+    /**
+     * Fetch NIP-85 kind-30382 user WoT assertions for [subjects] from the active provider relay.
+     *
+     * The provider relay is opened as an ephemeral connection and never inserted into
+     * [connections]. Each chunk is marked queried only after that chunk's EOSE, preserving
+     * the MES Pending vs Absent distinction.
+     */
+    suspend fun fetchWotAssertions(
+        providerPubkey: String,
+        relayHint: String,
+        subjects: Collection<String>,
+    ): Boolean {
+        val provider = normalizeWotPubkey(providerPubkey) ?: return false
+        val relayUrl = normalizeRelayUrl(relayHint) ?: return false
+        if (relayUrl in blockedUrls || relayCapabilitiesStore.shouldSkip(relayUrl)) return false
+
+        val chunks = wotSubjectChunks(subjects)
+        if (chunks.isEmpty()) return false
+
+        val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
+        return try {
+            conn.connect()
+            val state = withTimeoutOrNull(2_000) {
+                conn.state.first {
+                    it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+                }
+            }
+            if (state != RelayState.CONNECTED) {
+                Log.w(TAG, "WoT fetch connect failed: $relayUrl (state=$state)")
+                return false
+            }
+
+            var allEosed = true
+            for ((index, chunk) in chunks.withIndex()) {
+                val eosed = fetchWotChunk(conn, relayUrl, provider, chunk, index + 1, chunks.size)
+                if (!eosed) {
+                    allEosed = false
+                    break
+                }
+            }
+            allEosed
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "WoT fetch failed on $relayUrl: ${e.message}")
+            false
+        } finally {
+            conn.close()
+        }
+    }
+
+    private suspend fun fetchWotChunk(
+        conn: RelayConnection,
+        relayUrl: String,
+        provider: String,
+        chunk: List<String>,
+        page: Int,
+        totalPages: Int,
+    ): Boolean {
+        val subId = "wot-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(30382)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(provider)) })
+                put("#d", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(chunk.size))
+            })
+        }.toString()
+        if (!conn.send(req)) return false
+
+        var eventCount = 0
+        val eosed = withTimeoutOrNull(WOT_FETCH_TIMEOUT_MS) {
+            while (true) {
+                val raw = conn.messages.receive()
+                when {
+                    raw.startsWith("[\"EVENT\"") -> {
+                        val event = processor.parseAndVerify(raw, relayUrl)
+                        if (event != null && event.kind == 30382 && normalizeWotPubkey(event.pubkey) == provider) {
+                            if (memoryEventStore.get().insert(event)) eventCount++
+                        }
+                    }
+                    raw.startsWith("[\"EOSE\"") && extractEoseSubId(raw) == subId -> {
+                        return@withTimeoutOrNull true
+                    }
+                    raw.startsWith("[\"CLOSED\"") && raw.contains("\"$subId\"") -> {
+                        Log.w(TAG, "WoT fetch CLOSED for chunk $page/$totalPages on $relayUrl")
+                        return@withTimeoutOrNull false
+                    }
+                    raw.startsWith("[\"AUTH\"") -> {
+                        val challenge = raw.substringAfter("[\"AUTH\",\"", "")
+                            .substringBefore("\"")
+                        if (challenge.isNotEmpty()) handleAuthChallenge(conn, challenge)
+                    }
+                    raw.startsWith("[\"OK\"") -> handleOk(conn, raw)
+                }
+            }
+            false
+        } == true
+
+        conn.send(buildJsonArray {
+            add(JsonPrimitive("CLOSE"))
+            add(JsonPrimitive(subId))
+        }.toString())
+
+        markWotChunkIfEosed(chunk, eosed) {
+            memoryEventStore.get().markWotSubjectsQueried(it)
+        }
+        Log.d(TAG, "WoT chunk $page/$totalPages from $relayUrl: eose=$eosed events=$eventCount subjects=${chunk.size}")
+        return eosed
+    }
+
+    /**
+     * Fetch the user's public NIP-85 provider registry (kind-10040).
+     *
+     * Events route through EventProcessor → MES, where only own-pubkey 10040 rows
+     * are accepted. The default WoT relay is included because personal providers may
+     * publish the registry there even when it is not in the user's read list.
+     */
+    suspend fun fetchOwn10040(ownPubkey: String): Boolean {
+        val owner = normalizeWotPubkey(ownPubkey) ?: return false
+        val relayUrls = (memoryEventStore.get().readRelaysFor(owner) + DEFAULT_WOT_RELAY)
+            .mapNotNull { normalizeRelayUrl(it) }
+            .distinct()
+        if (relayUrls.isEmpty()) return false
+
+        val subId = "wot-10040-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(10040)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(owner)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }.toString()
+
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        return try {
+            sendOneShotBatch(relayUrls, listOf(req), listOf(subId), timeoutMs = 8_000L)
+            withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+        } finally {
+            cleanupOneShotSub(subId)
+        }
+    }
 
     /**
      * Fetch kind 30385 (Trusted Relay Assertions) using paginated multi-relay fetch.
