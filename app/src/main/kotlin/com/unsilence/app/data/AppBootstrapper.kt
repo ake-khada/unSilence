@@ -25,6 +25,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.shouldSkipBootstrapWotFetch
+import com.unsilence.app.data.relay.wotProviderDescriptorFromPrefs
 import com.unsilence.app.data.relay.wotTargetsHash
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.settings.SettingsStore
@@ -537,25 +538,9 @@ class AppBootstrapper @Inject constructor(
                 } else {
                     null
                 }
-                ownProvider ?: WotProviderDescriptor(
-                    providerPubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
-                    relayHint = DEFAULT_WOT_RELAY,
-                    updatedAt = 0L,
-                )
+                ownProvider ?: wotProviderDescriptorFromPrefs(wotPrefs)
             } else {
-                WotProviderDescriptor(
-                    providerPubkey = if (wotPrefs.source == WotProviderSource.DEFAULT) {
-                        DEFAULT_WOT_PROVIDER_PUBKEY
-                    } else {
-                        wotPrefs.pubkey
-                    },
-                    relayHint = if (wotPrefs.source == WotProviderSource.DEFAULT) {
-                        DEFAULT_WOT_RELAY
-                    } else {
-                        wotPrefs.relay
-                    },
-                    updatedAt = 0L,
-                )
+                wotProviderDescriptorFromPrefs(wotPrefs)
             }
 
             memoryEventStore.setActiveWotProvider(resolvedProvider.providerPubkey, resolvedProvider.relayHint)
@@ -577,8 +562,10 @@ class AppBootstrapper @Inject constructor(
                     providerPubkey = resolvedProvider.providerPubkey,
                     relayHint = resolvedProvider.relayHint,
                     subjects = wotTargets,
+                    prioritySubjects = listOf(pubkeyHex),
                 )
                 if (ok) {
+                    logWotCoverageCanary(pubkeyHex, resolvedProvider)
                     relayPreferencesStore.setLastWotFetch(System.currentTimeMillis(), targetsHash)
                 } else {
                     Log.w(TAG, "Phase3: WoT fetch failed — not advancing 12h gate")
@@ -638,6 +625,23 @@ class AppBootstrapper @Inject constructor(
         settingsStore.selectOwner(pubkeyHex)
         nwcManager.resetIfOwnerChanged(pubkeyHex)
     }
+
+    private fun logWotCoverageCanary(ownerPubkey: String, provider: WotProviderDescriptor) {
+        val follows = memoryEventStore.getFollows(ownerPubkey).orEmpty()
+            .mapNotNull { it.trim().lowercase().takeIf(::isHexPubkey) }
+            .toSet()
+        val scoredSubjects = memoryEventStore.getWotAssertions().keys
+            .mapNotNull { it.trim().lowercase().takeIf(::isHexPubkey) }
+            .toSet()
+        val scoredFollows = follows.count { it in scoredSubjects }
+        Log.i(
+            TAG,
+            "WoT coverage provider=${provider.providerPubkey.take(8)} relay=${provider.relayHint} scoredFollows=$scoredFollows totalFollows=${follows.size} assertions=${scoredSubjects.size}",
+        )
+    }
+
+    private fun isHexPubkey(value: String): Boolean =
+        value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 
     /**
      * BackgroundSyncWorker.doWork() is an empty stub — the 30min periodic

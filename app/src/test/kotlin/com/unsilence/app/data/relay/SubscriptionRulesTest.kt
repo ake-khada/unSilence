@@ -33,6 +33,7 @@ class SubscriptionRulesTest {
             "engagement-",
             "batch-events-",
             "trust-scores-",
+            "wot-10040-",
         )
 
         for (prefix in prefixes) {

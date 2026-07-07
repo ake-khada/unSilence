@@ -8,8 +8,15 @@ const val BROWSER_USER_AGENT =
 const val TRUST_SCORE_PROVIDER_PUBKEY =
     "ad3cdbe9fb09b8edf7b3e0e5286d66e58b58eaa64d061bbcf3a935edf8abf421"
 
-/** Default NIP-85 user-level WoT provider: NosFabrica/straycat Brainstorm instance. */
+/** Default NIP-85 user-level WoT provider: NosFabrica house provider signing key. */
 const val DEFAULT_WOT_PROVIDER_PUBKEY =
-    "e5272de914bd301755c439b88e6959a43c9d2664831f093c51e9c799a16a102f"
+    "e6aefe2087dcc55cfe547a86523e8fc75a04133721254d7acbd7277897f05d56"
 
-const val DEFAULT_WOT_RELAY = "wss://nip85.brainstorm.world"
+const val DEFAULT_WOT_RELAY = "wss://nip85.nosfabrica.com"
+
+/** Public kind-10040 provider registries may be hosted separately from assertions. */
+val WOT_REGISTRY_LOOKUP_RELAYS = listOf(
+    DEFAULT_WOT_RELAY,
+    "wss://nip85.brainstorm.world",
+    "wss://nos.lol",
+)

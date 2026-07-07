@@ -102,6 +102,7 @@ fun SettingsScreen(
     var showDiscovery by remember { mutableStateOf(false) }
     var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
+    var showSocialGraph by remember { mutableStateOf(false) }
     var showCustomEmojis by remember { mutableStateOf(false) }
     var showDrafts by remember { mutableStateOf(false) }
     var draftToResume by remember { mutableStateOf<Draft?>(null) }
@@ -198,7 +199,7 @@ fun SettingsScreen(
                     badge = drafts.takeIf { it.isNotEmpty() }?.size?.toString(),
                 ) { showDrafts = true }
                 SettingsRow(Icons.Filled.EmojiEmotions, "Custom emojis", "Manage your emoji packs") { showCustomEmojis = true }
-                SoonRow(Icons.Filled.AccountTree, "Social graph")
+                SettingsRow(Icons.Filled.AccountTree, "Social graph", "Web-of-trust provider and coverage") { showSocialGraph = true }
 
                 // ── ADVANCED ───────────────────────────────────────────────────
                 GroupLabel("Advanced")
@@ -251,6 +252,7 @@ fun SettingsScreen(
     }
     if (showMediaUpload) MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
     if (showFilters) FiltersScreen(onDismiss = { showFilters = false })
+    if (showSocialGraph) SocialGraphScreen(onDismiss = { showSocialGraph = false })
     if (showCustomEmojis) com.unsilence.app.ui.settings.CustomEmojisScreen(onDismiss = { showCustomEmojis = false })
     if (showDrafts) {
         DraftsScreen(

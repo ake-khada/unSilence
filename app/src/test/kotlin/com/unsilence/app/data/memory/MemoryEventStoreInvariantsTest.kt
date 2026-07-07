@@ -192,6 +192,61 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `kind 30382 accepts live minimal wot assertion format`() {
+        val subject = "d".repeat(64)
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "wot-live-format",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 1_100,
+                    tags = listOf(
+                        listOf("d", subject),
+                        listOf("rank", "100"),
+                        listOf("followers", "318"),
+                    ),
+                )
+            )
+        )
+
+        val scored = store.wotFor(subject) as WotLookup.Scored
+        assertEquals(100, scored.assertion.rank)
+        assertEquals(318L, scored.assertion.verifiedFollowers)
+        assertNull(scored.assertion.hops)
+    }
+
+    @Test
+    fun `kind 30382 accepts older brainstorm tag fallbacks`() {
+        val subject = "e".repeat(64)
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "wot-old-format",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 1_200,
+                    tags = listOf(
+                        listOf("d", subject),
+                        listOf("rank", "77"),
+                        listOf("dos", "3"),
+                        listOf("personalized_grapeRank", "0.67"),
+                        listOf("personalized_pageRank", "0.12"),
+                    ),
+                )
+            )
+        )
+
+        val scored = store.wotFor(subject) as WotLookup.Scored
+        assertEquals(77, scored.assertion.rank)
+        assertEquals(3, scored.assertion.hops)
+        assertEquals(0.67, scored.assertion.influence!!, 0.0001)
+        assertEquals(0.12, scored.assertion.pageRank!!, 0.0001)
+    }
+
+    @Test
     fun `kind 30382 ignores wrong provider and non pubkey subjects`() {
         val subject = "a".repeat(64)
         val wrongProvider = "d".repeat(64)
@@ -282,6 +337,52 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `wot chunk from stale provider after switch does not mark new provider absences`() {
+        val subject = "a".repeat(64)
+        val absent = "b".repeat(64)
+        val newProvider = "e".repeat(64)
+
+        store.setActiveWotProvider(newProvider, "wss://nip85.example.com")
+
+        val staleInserted = store.insertWotAssertionChunk(
+            providerPubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+            events = listOf(
+                event(
+                    id = "wot-stale-provider-chunk",
+                    pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+                    kind = 30382,
+                    createdAt = 1_000,
+                    tags = listOf(listOf("d", subject), listOf("rank", "88")),
+                )
+            ),
+            queriedSubjects = listOf(subject, absent),
+        )
+
+        assertEquals(0, staleInserted)
+        assertTrue(store.wotFor(subject) is WotLookup.Pending)
+        assertTrue(store.wotFor(absent) is WotLookup.Pending)
+        assertFalse(store.hasWotData())
+
+        val currentInserted = store.insertWotAssertionChunk(
+            providerPubkey = newProvider,
+            events = listOf(
+                event(
+                    id = "wot-new-provider-chunk",
+                    pubkey = newProvider,
+                    kind = 30382,
+                    createdAt = 1_001,
+                    tags = listOf(listOf("d", subject), listOf("rank", "66")),
+                )
+            ),
+            queriedSubjects = listOf(subject, absent),
+        )
+
+        assertEquals(1, currentInserted)
+        assertEquals(66, (store.wotFor(subject) as WotLookup.Scored).assertion.rank)
+        assertTrue(store.wotFor(absent) is WotLookup.Absent)
+    }
+
+    @Test
     fun `kind 10040 stores own public wot provider registry only`() {
         val own = "1".repeat(64)
         val provider = "2".repeat(64)
@@ -314,6 +415,28 @@ class MemoryEventStoreInvariantsTest {
             )
         )
         assertEquals(provider, store.ownWotProviderFromRegistry()?.providerPubkey)
+    }
+
+    @Test
+    fun `kind 10040 encrypted content without public row leaves own wot provider registry absent`() {
+        val own = "1".repeat(64)
+        store.ownPubkey = own
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "own-encrypted-10040",
+                    pubkey = own,
+                    kind = 10040,
+                    content = "encrypted-provider-tags",
+                    createdAt = 1_000,
+                    tags = emptyList(),
+                )
+            )
+        )
+
+        assertNull(store.ownWotProviderFromRegistry())
+        assertEquals("encrypted-provider-tags", store.ownWotProviderEncryptedContent())
     }
 
     @Test

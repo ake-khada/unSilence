@@ -299,7 +299,12 @@ class EventProcessor @Inject constructor(
         // This is a read-only fast path. The cache is claimed only after signature
         // verification, so a bad-sig copy cannot suppress a genuine relay copy.
         val eventId = extractEventIdFromRaw(raw) ?: return
-        if (seenIds.containsKey(eventId)) {
+        // Kind-10040 provider registries are account-scoped control state. On a
+        // restored settings screen they can arrive before MES has claimed the
+        // account owner; MES must be allowed to reject then accept the same id
+        // once ownership is known.
+        val isWotProviderRegistryEvent = raw.contains("\"kind\":10040")
+        if (!isWotProviderRegistryEvent && seenIds.containsKey(eventId)) {
             // Already processed — just record this relay as a source so
             // relay-specific feeds (browse mode) include the event.
             memoryEventStore.addRelaySeen(eventId, relayUrl)
@@ -436,11 +441,15 @@ class EventProcessor @Inject constructor(
         // Signature verification — Schnorr sig + id-hash check.
         // Before claiming seenIds, so an invalid copy cannot censor the valid one.
         if (!verifySig(nostrEvent)) return
-        if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
-            memoryEventStore.addRelaySeen(nostrEvent.id, relayUrl)
-            return
+        // 10040 intentionally bypasses seenIds; MES handles own-pubkey and
+        // created_at staleness, and duplicate 10040s are rare.
+        if (dto.kind != 10040) {
+            if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
+                memoryEventStore.addRelaySeen(nostrEvent.id, relayUrl)
+                return
+            }
+            trimDedupCacheIfNeeded()
         }
-        trimDedupCacheIfNeeded()
 
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES

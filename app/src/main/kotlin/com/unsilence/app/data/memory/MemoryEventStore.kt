@@ -37,6 +37,7 @@ import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
 import com.vitorpamplona.quartz.nip44Encryption.Nip44
@@ -413,6 +414,8 @@ class MemoryEventStore @Inject constructor(
     @Volatile private var activeWotProviderPubkey: String = DEFAULT_WOT_PROVIDER_PUBKEY
     @Volatile private var activeWotProviderRelay: String = DEFAULT_WOT_RELAY
     @Volatile private var ownWotProviderRegistry: WotProviderDescriptor? = null
+    @Volatile private var ownWotProviderEncryptedContent: String? = null
+    @Volatile private var ownWotProviderEncryptedUpdatedAt: Long = 0L
 
     // ─── Relay monitors (kind 30166 / NIP-66) ─────────────────────────────────
     private val relayMonitorsByUrl = ConcurrentHashMap<String, RelayMonitorEntity>()
@@ -664,9 +667,9 @@ class MemoryEventStore @Inject constructor(
         val inserted = insertCore(event, dirty)
         if (inserted) {
             markKindDirty(event.kind, dirty)
-            flushDirty(dirty)
             evictionTickAfterInsert()
         }
+        flushDirty(dirty)
         return inserted
     }
 
@@ -691,6 +694,48 @@ class MemoryEventStore @Inject constructor(
             if (!insertCore(event, dirty)) continue
             inserted++
             markKindDirty(event.kind, dirty)
+        }
+
+        flushDirty(dirty)
+        if (inserted > 0) evictionTickAfterInsert(inserted)
+        return inserted
+    }
+
+    /**
+     * WoT chunk insert path: coalesces assertion insertion and EOSE-only queried
+     * marking into one dirty flush, so a fetched chunk produces at most one
+     * _wotSignal bump while preserving Pending vs Absent.
+     */
+    fun insertWotAssertionChunk(
+        providerPubkey: String,
+        events: List<NostrEvent>,
+        queriedSubjects: Collection<String>,
+    ): Int {
+        val chunkProvider = normalizeHexPubkey(providerPubkey) ?: return 0
+        if (events.isEmpty() && queriedSubjects.isEmpty()) return 0
+        val nowSec = System.currentTimeMillis() / 1000L
+        val dirty = InsertDirty()
+        var inserted = 0
+
+        synchronized(wotProviderLock) {
+            if (chunkProvider != activeWotProviderPubkey) return 0
+
+            for (event in events) {
+                if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) continue
+                if (!insertCore(event, dirty)) continue
+                inserted++
+                markKindDirty(event.kind, dirty)
+            }
+
+            var queriedChanged = false
+            for (subject in queriedSubjects.mapNotNull { normalizeHexPubkey(it) }) {
+                wotAccessedAt[subject] = System.nanoTime()
+                if (wotQueriedSubjects.add(subject)) queriedChanged = true
+            }
+            if (queriedChanged) {
+                trimWotAssertionsIfNeeded()
+                dirty.wot = true
+            }
         }
 
         flushDirty(dirty)
@@ -731,6 +776,9 @@ class MemoryEventStore @Inject constructor(
         if (existing != null) {
             // Duplicate — just record the relay
             existing.relaysSeen.addAll(event.relaysSeen)
+            if (event.kind == 10040 && ownWotProviderRegistry == null) {
+                handleWotProviderRegistry(existing, dirty)
+            }
             return false
         }
 
@@ -1790,9 +1838,9 @@ class MemoryEventStore @Inject constructor(
     private fun handleWotAssertion(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
         val provider = normalizeHexPubkey(event.pubkey) ?: return false
 
-        fun tag(name: String): String? = event.tags.firstOrNull {
-            it.size >= 2 && it[0] == name
-        }?.get(1)
+        fun tag(vararg names: String): String? = names.firstNotNullOfOrNull { name ->
+            event.tags.firstOrNull { it.size >= 2 && it[0] == name }?.get(1)
+        }
 
         val subject = normalizeHexPubkey(tag("d")) ?: return false
         val rank = tag("rank")?.toIntOrNull()?.takeIf { it in 0..100 } ?: return false
@@ -1813,17 +1861,23 @@ class MemoryEventStore @Inject constructor(
                         subjectPubkey = subject,
                         providerPubkey = provider,
                         rank = rank,
-                        hops = tag("hops")?.toIntOrNull(),
-                        influence = tag("personalizedGrapeRank_influence")?.toDoubleOrNull()
-                            ?: tag("influence")?.toDoubleOrNull(),
+                        hops = tag("hops", "dos")?.toIntOrNull(),
+                        influence = tag(
+                            "personalizedGrapeRank_influence",
+                            "influence",
+                            "personalized_grapeRank",
+                        )?.toDoubleOrNull(),
                         average = tag("personalizedGrapeRank_average")?.toDoubleOrNull()
                             ?: tag("average")?.toDoubleOrNull(),
                         confidence = tag("personalizedGrapeRank_confidence")?.toDoubleOrNull()
                             ?: tag("confidence")?.toDoubleOrNull(),
                         input = tag("personalizedGrapeRank_input")?.toDoubleOrNull()
                             ?: tag("input")?.toDoubleOrNull(),
-                        pageRank = tag("personalizedPageRank")?.toDoubleOrNull()
-                            ?: tag("pageRank")?.toDoubleOrNull(),
+                        pageRank = tag(
+                            "personalizedPageRank",
+                            "pageRank",
+                            "personalized_pageRank",
+                        )?.toDoubleOrNull(),
                         verifiedFollowers = tag("verifiedFollowerCount")?.toLongOrNull()
                             ?: tag("followers")?.toLongOrNull(),
                         verifiedMuters = tag("verifiedMuterCount")?.toLongOrNull(),
@@ -1846,25 +1900,43 @@ class MemoryEventStore @Inject constructor(
 
     private fun handleWotProviderRegistry(event: NostrEvent, dirty: InsertDirty? = null): Boolean {
         val own = ownPubkey ?: return false
-        if (event.pubkey != own) return false
+        if (event.pubkey != own) {
+            Log.i("MES", "WoT 10040 ignored foreign author=${event.pubkey.take(8)} own=${own.take(8)}")
+            return false
+        }
 
-        val providerTag = event.tags.firstOrNull { tag ->
-            tag.size >= 3 && tag[0] == "30382:rank"
-        } ?: return false
+        var changed = false
+        if (event.createdAt >= ownWotProviderEncryptedUpdatedAt) {
+            val encrypted = event.content.takeIf { it.isNotBlank() }
+            if (ownWotProviderEncryptedContent != encrypted) changed = true
+            ownWotProviderEncryptedContent = encrypted
+            ownWotProviderEncryptedUpdatedAt = event.createdAt
+        }
 
-        val providerPubkey = normalizeHexPubkey(providerTag[1]) ?: return false
-        val relayHint = normalizeRelayUrl(providerTag.getOrNull(2) ?: return false) ?: return false
+        val descriptor = wotProviderDescriptorFromTags(event.tags, event.createdAt)
         val existing = ownWotProviderRegistry
-        if (existing != null && existing.updatedAt >= event.createdAt) return false
+        if (descriptor != null) {
+            if (existing == null || existing.updatedAt < event.createdAt) {
+                ownWotProviderRegistry = descriptor
+                Log.i(
+                    "MES",
+                    "WoT 10040 accepted provider=${descriptor.providerPubkey.take(8)} relay=${descriptor.relayHint} createdAt=${event.createdAt}",
+                )
+                changed = true
+            }
+        } else if (existing != null && event.createdAt > existing.updatedAt) {
+            ownWotProviderRegistry = null
+            Log.i("MES", "WoT 10040 cleared provider from newer registry without public rank row")
+            changed = true
+        } else if (event.tags.isNotEmpty()) {
+            Log.w("MES", "WoT 10040 has no usable 30382:rank row tags=${event.tags.mapNotNull { it.firstOrNull() }.take(8)}")
+        }
 
-        ownWotProviderRegistry = WotProviderDescriptor(
-            providerPubkey = providerPubkey,
-            relayHint = relayHint,
-            updatedAt = event.createdAt,
-        )
-        if (dirty != null) dirty.wot = true
-        else _wotSignal.value = System.nanoTime()
-        return true
+        if (changed) {
+            if (dirty != null) dirty.wot = true
+            else _wotSignal.value = System.nanoTime()
+        }
+        return changed
     }
 
     private fun isTrustScoreProvider(pubkey: String): Boolean =
@@ -3863,6 +3935,8 @@ class MemoryEventStore @Inject constructor(
 
     fun ownWotProviderFromRegistry(): WotProviderDescriptor? = ownWotProviderRegistry
 
+    fun ownWotProviderEncryptedContent(): String? = ownWotProviderEncryptedContent
+
     fun getWotAssertions(): Map<String, WotAssertionEntity> = HashMap(wotBySubject)
 
     fun hasWotData(): Boolean = wotBySubject.isNotEmpty() || wotQueriedSubjects.isNotEmpty()
@@ -5757,6 +5831,8 @@ class MemoryEventStore @Inject constructor(
         synchronized(wotProviderLock) {
             clearWotAssertionsLocked()
             ownWotProviderRegistry = null
+            ownWotProviderEncryptedContent = null
+            ownWotProviderEncryptedUpdatedAt = 0L
         }
         relayMonitorsByUrl.clear()
         reactedTargetsByActor.clear()
@@ -5847,6 +5923,8 @@ class MemoryEventStore @Inject constructor(
         synchronized(wotProviderLock) {
             clearWotAssertionsLocked()
             ownWotProviderRegistry = null
+            ownWotProviderEncryptedContent = null
+            ownWotProviderEncryptedUpdatedAt = 0L
         }
         relayMonitorsByUrl.clear()
         _relaySetSignal.value = 0L
