@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -23,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.TextUnit
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
@@ -91,36 +91,45 @@ fun hasWotFeedSignal(lookup: WotLookup?, mode: FeedWotDisplayMode): Boolean =
     wotFeedSignal(lookup, mode) != null
 
 @Composable
-fun ProfileWotInlineLabel(
+fun WotInlineLabel(
     assertion: WotAssertionEntity,
-    onClick: () -> Unit,
+    prefix: String = "WoT",
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    fontSize: TextUnit = 10.5.sp,
+    lineHeight: TextUnit = 12.sp,
+    prefixFontWeight: FontWeight = FontWeight.Medium,
+    numeralFontWeight: FontWeight = FontWeight.SemiBold,
 ) {
     Row(
-        modifier = modifier
-            .widthIn(min = 50.dp)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 2.dp),
+        modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "WoT",
+            text = prefix,
             color = Text3,
-            fontSize = 10.5.sp,
-            lineHeight = 12.sp,
-            fontWeight = FontWeight.Medium,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = prefixFontWeight,
+            fontFamily = FontFamily.Monospace,
             maxLines = 1,
         )
         Spacer(Modifier.width(4.dp))
+        val numeralModifier = if (onClick != null) {
+            Modifier.clickable(onClick = onClick)
+        } else {
+            Modifier
+        }
         Text(
             text = assertion.rank.toString(),
             color = wotTierColor(assertion.rank),
-            fontSize = 10.5.sp,
-            lineHeight = 12.sp,
-            fontWeight = FontWeight.SemiBold,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = numeralFontWeight,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
             overflow = TextOverflow.Clip,
+            modifier = numeralModifier,
         )
     }
 }
@@ -131,43 +140,26 @@ fun WotSearchSignal(
     modifier: Modifier = Modifier,
 ) {
     when (lookup) {
-        is WotLookup.Scored -> WotScoreChip(assertion = lookup.assertion, modifier = modifier)
-        WotLookup.Absent -> WotSearchAbsentText(
-            text = "not in grapevine",
+        is WotLookup.Scored -> WotInlineLabel(
+            assertion = lookup.assertion,
+            modifier = modifier,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            numeralFontWeight = FontWeight.SemiBold,
+        )
+        WotLookup.Absent -> Text(
+            text = "–",
             color = Text3,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
             modifier = modifier,
         )
         WotLookup.Pending, null -> Unit
     }
-}
-
-@Composable
-fun WotScoreChip(
-    assertion: WotAssertionEntity,
-    modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null,
-) {
-    val color = wotTierColor(assertion.rank)
-    val text = buildString {
-        append("WoT ")
-        append(assertion.rank)
-        assertion.hops?.let { append(" · ").append(it).append(" hops") }
-    }
-    val clickable = if (onClick != null) modifier.clickable(onClick = onClick) else modifier
-    Text(
-        text = text,
-        color = color,
-        fontSize = AppType.caption,
-        fontWeight = FontWeight.SemiBold,
-        fontFamily = FontFamily.Monospace,
-        maxLines = 1,
-        overflow = TextOverflow.Clip,
-        modifier = clickable
-            .clip(RoundedCornerShape(999.dp))
-            .background(color.copy(alpha = 0.12f))
-            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
-            .padding(horizontal = 7.dp, vertical = 3.dp),
-    )
 }
 
 @Composable
@@ -181,23 +173,6 @@ fun WotTierDot(
             .clip(CircleShape)
             .background(wotTierColor(rank))
             .border(1.dp, Black.copy(alpha = 0.65f), CircleShape),
-    )
-}
-
-@Composable
-private fun WotSearchAbsentText(
-    text: String,
-    color: Color,
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        text = text,
-        color = color,
-        fontSize = 10.sp,
-        fontWeight = FontWeight.Medium,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier,
     )
 }
 
