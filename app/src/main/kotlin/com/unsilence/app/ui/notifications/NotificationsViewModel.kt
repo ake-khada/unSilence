@@ -5,14 +5,20 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationRow
+import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -30,6 +36,7 @@ class NotificationsViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NotificationsUiState())
@@ -40,6 +47,15 @@ class NotificationsViewModel @Inject constructor(
 
     private val _hasNew = MutableStateFlow(false)
     val hasNewNotifications: StateFlow<Boolean> = _hasNew.asStateFlow()
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
     /**
      * In-memory mirror of the DataStore lastSeen timestamp. Seeded once per
@@ -115,6 +131,14 @@ class NotificationsViewModel @Inject constructor(
                     if (missingPubkeys.isNotEmpty()) {
                         userRepository.fetchMissingProfiles(missingPubkeys)
                     }
+                    val actorPubkeys = items.flatMap { row ->
+                        when (row) {
+                            is NotificationRow.Single -> listOf(row.actorPubkey)
+                            is NotificationRow.Grouped -> row.actors.mapNotNull { it.pubkey }
+                        }
+                    }.toSet()
+                    _wotSubjects.value = actorPubkeys
+                    wotHydrationCoalescer.requestHydration(actorPubkeys)
                 }
         }
     }

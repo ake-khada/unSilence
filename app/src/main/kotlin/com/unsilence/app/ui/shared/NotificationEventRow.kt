@@ -41,6 +41,8 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.NotificationActor
 import com.unsilence.app.data.memory.NotificationRow
+import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
@@ -63,12 +65,14 @@ import com.unsilence.app.ui.theme.Zap
 @Composable
 fun NotificationEventRow(
     row: NotificationRow,
+    wotLookups: Map<String, WotLookup> = emptyMap(),
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     onNoteClick: (String) -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
     when (row) {
-        is NotificationRow.Single -> SingleNotificationRow(row, onNoteClick, onProfileClick)
-        is NotificationRow.Grouped -> GroupedNotificationRow(row, onNoteClick, onProfileClick)
+        is NotificationRow.Single -> SingleNotificationRow(row, wotLookups, feedWotDisplayMode, onNoteClick, onProfileClick)
+        is NotificationRow.Grouped -> GroupedNotificationRow(row, wotLookups, feedWotDisplayMode, onNoteClick, onProfileClick)
     }
 }
 
@@ -135,14 +139,16 @@ private fun NotificationPreviewText(
 @Composable
 private fun NotificationTimestamp(
     createdAt: Long,
+    lookup: WotLookup? = null,
+    mode: FeedWotDisplayMode = FeedWotDisplayMode.OFF,
     modifier: Modifier = Modifier,
 ) {
-    Text(
-        text = relativeTime(createdAt),
+    WotFeedMetaTimestamp(
+        lookup = lookup,
+        mode = mode,
+        timestamp = relativeTime(createdAt),
         modifier = modifier,
-        color = TextSecondary,
-        fontSize = AppType.caption,
-        maxLines = 1,
+        timestampColor = TextSecondary,
     )
 }
 
@@ -150,6 +156,8 @@ private fun NotificationTimestamp(
 private fun NotificationPreviewWithTimestamp(
     text: String,
     createdAt: Long,
+    lookup: WotLookup? = null,
+    mode: FeedWotDisplayMode = FeedWotDisplayMode.OFF,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -161,13 +169,15 @@ private fun NotificationPreviewWithTimestamp(
             modifier = Modifier.weight(1f),
         )
         Spacer(Modifier.width(Spacing.small))
-        NotificationTimestamp(createdAt)
+        NotificationTimestamp(createdAt, lookup = lookup, mode = mode)
     }
 }
 
 @Composable
 private fun SingleNotificationRow(
     row: NotificationRow.Single,
+    wotLookups: Map<String, WotLookup>,
+    feedWotDisplayMode: FeedWotDisplayMode,
     onNoteClick: (String) -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
@@ -223,6 +233,7 @@ private fun SingleNotificationRow(
         // avatar height, aligned, without clipping.
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                val lookup = wotLookups[row.actorPubkey]
                 NotificationPrimaryText(
                     text = actorLabel,
                     color = Color.White,
@@ -233,13 +244,15 @@ private fun SingleNotificationRow(
                 NotificationPrimaryText(text = action, color = TextSecondary)
                 if (row.targetNoteContent.isBlank()) {
                     Spacer(Modifier.width(Spacing.small))
-                    NotificationTimestamp(row.createdAt)
+                    NotificationTimestamp(row.createdAt, lookup = lookup, mode = feedWotDisplayMode)
                 }
             }
             if (row.targetNoteContent.isNotBlank()) {
                 NotificationPreviewWithTimestamp(
                     text = row.targetNoteContent.trim(),
                     createdAt = row.createdAt,
+                    lookup = wotLookups[row.actorPubkey],
+                    mode = feedWotDisplayMode,
                 )
             }
         }
@@ -257,10 +270,16 @@ private fun SingleNotificationRow(
 @Composable
 private fun GroupedNotificationRow(
     row: NotificationRow.Grouped,
+    wotLookups: Map<String, WotLookup>,
+    feedWotDisplayMode: FeedWotDisplayMode,
     onNoteClick: (String) -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
     val (icon, iconTint, verb) = notifMeta(row.notifType)
+    val groupedSignalLookup = row.actors
+        .asSequence()
+        .mapNotNull { actor -> actor.pubkey?.let { wotLookups[it] } }
+        .firstOrNull { hasWotFeedSignal(it, feedWotDisplayMode) }
     var showActors by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
@@ -307,7 +326,7 @@ private fun GroupedNotificationRow(
                 }
                 if (row.targetNoteContent.isBlank()) {
                     Spacer(Modifier.width(Spacing.small))
-                    NotificationTimestamp(row.mostRecentAt)
+                    NotificationTimestamp(row.mostRecentAt, lookup = groupedSignalLookup, mode = feedWotDisplayMode)
                 }
             }
 
@@ -316,6 +335,8 @@ private fun GroupedNotificationRow(
                 NotificationPreviewWithTimestamp(
                     text = row.targetNoteContent.trim(),
                     createdAt = row.mostRecentAt,
+                    lookup = groupedSignalLookup,
+                    mode = feedWotDisplayMode,
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }

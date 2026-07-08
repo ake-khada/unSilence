@@ -49,8 +49,10 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.rememberWidthImageRequest
 import com.unsilence.app.data.memory.SensitiveContentMode
@@ -129,6 +131,9 @@ fun EventCard(
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
     isSensitive: Boolean = false,
     contentWarningReason: String? = null,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Card flash animation — new-post arrival or thread focus highlight
@@ -244,6 +249,9 @@ fun EventCard(
             repostPubkeysForEvent = repostPubkeysForEvent,
             reactionsForEvent = reactionsForEvent,
             sourceProfile = sourceProfile,
+            wotLookup = wotLookup,
+            feedWotDisplayMode = feedWotDisplayMode,
+            role = role,
             modifier = modifier,
         )
         return
@@ -285,18 +293,6 @@ fun EventCard(
                 }
             } else Modifier,
         ) {
-        // Repost header (kind 6 only)
-        if (model.repost != null) {
-            RepostHeader(
-                sourcePubkey    = model.sourcePubkey,
-                sourceCreatedAt = model.sourceCreatedAt,
-                sourceProfile   = sourceProfile,
-                lookupProfile   = lookupProfile,
-                profileFlow     = profileFlow,
-                onClick         = { onNoteClick(model.navigateId) },
-            )
-        }
-
         // Author header. Picture/displayName/nip05 read live from authorProfile
         // (profileFlow) when present, falling back to the FeedRow snapshot for
         // first-frame stability. authorProfile reactively updates when MES
@@ -306,6 +302,11 @@ fun EventCard(
         // (toFeedRow uses event.pubkey = wrapper pubkey), so skip them to
         // avoid briefly showing the reposter's identity on the inner author.
         val isRepost = model.repost != null
+        val repostTimestamp = if (isRepost && role != CardRole.Thread && role != CardRole.Reply) {
+            model.sourceCreatedAt
+        } else {
+            null
+        }
         AuthorHeader(
             pubkey      = model.pubkey,
             picture     = authorProfile?.picture?.takeIf { it.isNotBlank() }
@@ -320,6 +321,11 @@ fun EventCard(
             onNoteClick = { onNoteClick(model.navigateId) },
             lookupProfile = lookupProfile,
             profileFlow   = profileFlow,
+            wotLookup     = wotLookup,
+            feedWotDisplayMode = feedWotDisplayMode,
+            repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
+            repostSourceProfile = if (isRepost) sourceProfile else null,
+            repostSourceCreatedAt = repostTimestamp,
         )
 
         // Thread parent card (Conversations tab)
@@ -345,6 +351,9 @@ fun EventCard(
                 onToggleMute        = onToggleMute,
                 onVideoModelsResolved = onVideoModelsResolved,
                 sensitiveMode       = sensitiveMode,
+                wotLookup           = wotLookup,
+                feedWotDisplayMode  = feedWotDisplayMode,
+                onWotSubjectsVisible = onWotSubjectsVisible,
                 modifier            = Modifier.padding(bottom = Spacing.small),
             )
         }
@@ -385,6 +394,9 @@ fun EventCard(
                     thumbnailCache      = thumbnailCache,
                     onVideoModelsResolved = onVideoModelsResolved,
                     sensitiveMode       = sensitiveMode,
+                    wotLookup           = wotLookup,
+                    feedWotDisplayMode  = feedWotDisplayMode,
+                    onWotSubjectsVisible = onWotSubjectsVisible,
                 )
 
                 // Empty-content repost fallback (mostr.pub bridge style):
@@ -418,6 +430,9 @@ fun EventCard(
                         onToggleMute = onToggleMute,
                         onVideoModelsResolved = onVideoModelsResolved,
                         sensitiveMode = sensitiveMode,
+                        wotLookup = wotLookup,
+                        feedWotDisplayMode = feedWotDisplayMode,
+                        onWotSubjectsVisible = onWotSubjectsVisible,
                     )
                 }
             }
@@ -540,6 +555,9 @@ private fun ArticleLayout(
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
     reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
     sourceProfile: UserEntity? = null,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    role: CardRole = CardRole.Article,
     modifier: Modifier = Modifier,
 ) {
     val article = model.article
@@ -558,21 +576,12 @@ private fun ArticleLayout(
             .padding(horizontal = Spacing.medium, vertical = Spacing.small)
             .clickable { onArticleClick(row) },
     ) {
-        // Repost provenance — reposted longform (kind-6/16 → 30023) shows the
-        // reposter above the inner article's author row (same RepostHeader as notes;
-        // the article AuthorHeader stays the INNER author).
-        if (model.repost != null) {
-            RepostHeader(
-                sourcePubkey    = model.sourcePubkey,
-                sourceCreatedAt = model.sourceCreatedAt,
-                sourceProfile   = sourceProfile,
-                lookupProfile   = lookupProfile,
-                profileFlow     = profileFlow,
-                onClick         = { onNoteClick(model.navigateId) },
-            )
-        }
-
         // Author row
+        val repostTimestamp = if (isRepost && role != CardRole.Thread && role != CardRole.Reply) {
+            model.sourceCreatedAt
+        } else {
+            null
+        }
         AuthorHeader(
             pubkey      = model.pubkey,
             picture     = articleAuthorProfile?.picture?.takeIf { it.isNotBlank() }
@@ -587,6 +596,11 @@ private fun ArticleLayout(
             onNoteClick = { onArticleClick(row) },
             lookupProfile = lookupProfile,
             profileFlow   = profileFlow,
+            wotLookup     = wotLookup,
+            feedWotDisplayMode = feedWotDisplayMode,
+            repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
+            repostSourceProfile = if (isRepost) sourceProfile else null,
+            repostSourceCreatedAt = repostTimestamp,
         )
 
         // Card body (grey background with rounded corners)

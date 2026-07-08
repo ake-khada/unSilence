@@ -46,6 +46,8 @@ fun NotificationsScreen(
     ),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val wotLookups by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
     Box(
         modifier = Modifier
@@ -76,6 +78,8 @@ fun NotificationsScreen(
                     items(state.items, key = { it.key }) { row ->
                         NotificationEventRow(
                             row            = row,
+                            wotLookups     = wotLookups,
+                            feedWotDisplayMode = feedWotDisplayMode,
                             onNoteClick    = onNoteClick,
                             onProfileClick = onProfileClick,
                         )

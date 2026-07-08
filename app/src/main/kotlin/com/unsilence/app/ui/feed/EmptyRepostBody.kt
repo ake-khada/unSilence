@@ -24,9 +24,11 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
@@ -70,6 +72,9 @@ fun EmptyRepostBody(
     onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
         com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
 ) {
     val state by produceState(EmptyRepostState(), targetId) {
         val ev = lookupEventWithAuthor(targetId, relayHints, targetAuthorPubkey)
@@ -131,6 +136,9 @@ fun EmptyRepostBody(
                     isMuted             = isMuted,
                     onToggleMute        = onToggleMute,
                     onVideoModelsResolved = onVideoModelsResolved,
+                    wotLookup           = wotLookup,
+                    feedWotDisplayMode  = feedWotDisplayMode,
+                    onWotSubjectsVisible = onWotSubjectsVisible,
                     nestDepth           = 0,
                 )
             }

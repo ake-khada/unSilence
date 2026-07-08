@@ -25,9 +25,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
@@ -81,6 +83,9 @@ internal fun ContentFlow(
     thumbnailCache: VideoThumbnailCache? = null,
     onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     nestDepth: Int = 0,
     modifier: Modifier = Modifier,
 ) {
@@ -272,6 +277,9 @@ internal fun ContentFlow(
                         thumbnailCache  = thumbnailCache,
                         onVideoModelsResolved = onVideoModelsResolved,
                         sensitiveMode   = sensitiveMode,
+                        wotLookup       = wotLookup,
+                        feedWotDisplayMode = feedWotDisplayMode,
+                        onWotSubjectsVisible = onWotSubjectsVisible,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
                             .padding(horizontal = hPad)

@@ -7,16 +7,23 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -36,6 +43,7 @@ class ArticleReaderViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
     private val timelineCardData: TimelineCardData,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
 ) : ViewModel() {
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
@@ -43,6 +51,16 @@ class ArticleReaderViewModel @Inject constructor(
         relayPreferencesStore.sensitiveContentModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly,
                 com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
     /** Comments for an article coordinate (oldest-first), live from MES. */
     fun commentsFlow(coord: String): Flow<List<FeedRow>> =
@@ -98,6 +116,12 @@ class ArticleReaderViewModel @Inject constructor(
     fun hydrateCommentEngagement(rows: List<FeedRow>) {
         if (rows.isEmpty()) return
         cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
+    }
+
+    fun requestWotHydration(pubkeys: Collection<String>) {
+        val subjects = pubkeys.toSet()
+        _wotSubjects.update { current -> current + subjects }
+        wotHydrationCoalescer.requestHydration(subjects)
     }
 
     // ── Quoted/embedded article resolution (for the canonical card) ───────────

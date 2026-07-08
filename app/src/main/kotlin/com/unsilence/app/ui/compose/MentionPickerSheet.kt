@@ -31,8 +31,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.shared.WotTierDot
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Spacing
@@ -43,6 +45,7 @@ import com.unsilence.app.ui.theme.TextSecondary
 fun MentionPickerSheet(
     follows: List<UserEntity>,
     searchResults: List<UserEntity>,
+    wotLookups: Map<String, WotLookup>,
     query: String,
     onQueryChange: (String) -> Unit,
     onSelect: (UserEntity) -> Unit,
@@ -80,7 +83,11 @@ fun MentionPickerSheet(
                     }
                 } else {
                     items(list, key = { it.pubkey }) { user ->
-                        UserRow(user = user, onClick = { onSelect(user) })
+                        UserRow(
+                            user = user,
+                            wotLookup = wotLookups[user.pubkey],
+                            onClick = { onSelect(user) },
+                        )
                     }
                 }
             }
@@ -89,7 +96,11 @@ fun MentionPickerSheet(
 }
 
 @Composable
-private fun UserRow(user: UserEntity, onClick: () -> Unit) {
+private fun UserRow(
+    user: UserEntity,
+    wotLookup: WotLookup?,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -129,6 +140,10 @@ private fun UserRow(user: UserEntity, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+        if (wotLookup is WotLookup.Scored) {
+            Spacer(Modifier.width(Spacing.small))
+            WotTierDot(rank = wotLookup.assertion.rank)
         }
     }
 }

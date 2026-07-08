@@ -42,6 +42,7 @@ private val KEY_WOT_PROVIDER_RELAY = stringPreferencesKey("wot_provider_relay")
 private val KEY_WOT_PROVIDER_SOURCE = stringPreferencesKey("wot_provider_source")
 private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
 private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
+private val KEY_FEED_WOT_DISPLAY_MODE = stringPreferencesKey("feed_wot_display_mode")
 
 enum class WotProviderSource {
     DEFAULT,
@@ -164,6 +165,19 @@ class RelayPreferencesStore @Inject constructor(
             prefs[KEY_LAST_WOT_FETCH] = timestamp
             prefs[KEY_LAST_WOT_TARGETS_HASH] = targetsHash
         }
+    }
+
+    fun feedWotDisplayModeFlow(): Flow<FeedWotDisplayMode> =
+        dataStore.data
+            .map { prefs ->
+                prefs[KEY_FEED_WOT_DISPLAY_MODE]
+                    ?.let { runCatching { FeedWotDisplayMode.valueOf(it) }.getOrNull() }
+                    ?: FeedWotDisplayMode.NUMBERS
+            }
+            .distinctUntilChanged()
+
+    suspend fun setFeedWotDisplayMode(mode: FeedWotDisplayMode) {
+        dataStore.edit { prefs -> prefs[KEY_FEED_WOT_DISPLAY_MODE] = mode.name }
     }
 
     // ─── Pinned Relays ──────────────────────────────────────────────────────

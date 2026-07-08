@@ -136,6 +136,8 @@ fun FeedScreen(
     val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
     val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
     val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
+    val wotLookups    by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
@@ -197,7 +199,7 @@ fun FeedScreen(
             zapFlash = zapFlash,
         )
     }
-    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis) {
+    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis, wotLookups, feedWotDisplayMode) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
             onComment = onComment,
@@ -224,6 +226,9 @@ fun FeedScreen(
             zapDetailsForEvent = viewModel::zapDetailsForEvent,
             repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
             reactionsForEvent = viewModel::reactionsForEvent,
+            wotLookup = { pubkey -> wotLookups[pubkey] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            onWotSubjectsVisible = viewModel::requestWotHydration,
             onLongPress = { row ->
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 actionsRow = row

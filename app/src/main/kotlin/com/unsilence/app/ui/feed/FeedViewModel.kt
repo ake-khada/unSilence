@@ -14,10 +14,12 @@ import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
@@ -25,7 +27,10 @@ import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
+import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.wotLookupSnapshot
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
@@ -126,6 +131,7 @@ class FeedViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val initGate: InitGate,
     private val cardHydrator: CardHydrator,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val relayPool: RelayPool,
     private val muteListRepository: MuteListRepository,
     private val reportRepository: ReportRepository,
@@ -345,6 +351,16 @@ class FeedViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val feedWotDisplayMode =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+
     // -- Profile lookup for repost original authors ----------------------------
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
@@ -476,10 +492,23 @@ class FeedViewModel @Inject constructor(
                     val engEnd = (vpEnd + lookahead).coerceAtMost(warmRows.size)
                     val viewportIds = warmRows.subList(vpStart, engEnd).map { it.id }.toSet()
                     if (warmRows.isNotEmpty()) {
+                        requestVisibleWotHydration(warmRows)
                         cardHydrator.hydrateVisibleCards(warmRows, viewportIds = viewportIds)
                     }
                 }
         }
+    }
+
+    private fun requestVisibleWotHydration(rows: List<FeedRow>) {
+        val subjects = wotSubjectsForFeedRows(rows, modelProvider = memoryEventStore::getEventModel)
+        _wotSubjects.value = subjects
+        wotHydrationCoalescer.requestHydration(subjects)
+    }
+
+    fun requestWotHydration(pubkeys: Collection<String>) {
+        if (pubkeys.isEmpty()) return
+        _wotSubjects.update { current -> current + pubkeys }
+        wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
     // ── Subscription lifecycle (mirrors Jumble NoteList useEffect) ────────────

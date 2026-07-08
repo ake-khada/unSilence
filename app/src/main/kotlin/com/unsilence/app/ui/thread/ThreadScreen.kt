@@ -94,6 +94,8 @@ fun ThreadScreen(
     LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -301,6 +303,8 @@ fun ThreadScreen(
                                     sensitiveMode       = sensitiveMode,
                                     isSensitive         = note.hasContentWarning,
                                     contentWarningReason = note.contentWarningReason,
+                                    wotLookup           = { key -> wotLookups[key] },
+                                    feedWotDisplayMode  = feedWotDisplayMode,
                                 )
                                 HorizontalDivider(
                                     color     = BorderFaint,
@@ -396,6 +400,8 @@ fun ThreadScreen(
                                         sensitiveMode       = sensitiveMode,
                                         isSensitive         = reply.hasContentWarning,
                                         contentWarningReason = reply.contentWarningReason,
+                                        wotLookup           = { key -> wotLookups[key] },
+                                        feedWotDisplayMode  = feedWotDisplayMode,
                                     )
                                 }
                             }

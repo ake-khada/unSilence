@@ -24,12 +24,17 @@ import com.unsilence.app.data.drafts.toBlob
 import com.unsilence.app.data.drafts.toDraftAttachment
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.sortMentionsByWotRank
 import com.unsilence.app.data.relay.toEventJson
+import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.SharingStarted
@@ -151,6 +156,7 @@ class ComposeViewModel @Inject constructor(
     private val blossomServersStore: BlossomServersStore,
     private val settingsStore: SettingsStore,
     private val draftStore: DraftStore,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
     val ogFetcher: com.unsilence.app.data.relay.OgFetcher,
@@ -272,25 +278,41 @@ class ComposeViewModel @Inject constructor(
 
     private val _mentionQuery = MutableStateFlow("")
     val mentionQuery: StateFlow<String> = _mentionQuery.asStateFlow()
+    private val _mentionWotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val mentionWotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_mentionWotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    val mentionFollows: StateFlow<List<com.unsilence.app.data.memory.UserEntity>> =
-        flow {
-            val pk = pubkeyHex ?: ""
-            val followPubkeys = memoryEventStore.getFollows(pk) ?: emptySet()
+    val mentionFollows: StateFlow<List<UserEntity>> = pubkeyHex?.let { pk ->
+        combine(
+            memoryEventStore.followsFlow(pk),
+            memoryEventStore.profileSignalFlow,
+            memoryEventStore.wotSignalFlow,
+        ) { followPubkeys, _, _ ->
             val users = followPubkeys
                 .mapNotNull { memoryEventStore.getUserEntity(it) }
-                .sortedBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: "" }
-            emit(users)
+            val sorted = sortMentionsByWotRank(users, memoryEventStore::wotFor)
+            updateMentionWotSubjects(sorted)
+            sorted
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    } ?: MutableStateFlow(emptyList())
 
     @OptIn(FlowPreview::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    val mentionSearchResults: StateFlow<List<com.unsilence.app.data.memory.UserEntity>> =
+    val mentionSearchResults: StateFlow<List<UserEntity>> =
         _mentionQuery
             .debounce(150)
             .distinctUntilChanged()
             .flatMapLatest { q ->
                 if (q.isBlank()) flowOf(emptyList())
-                else memoryEventStore.searchUsersFlow(q)
+                else combine(
+                    memoryEventStore.searchUsersFlow(q),
+                    memoryEventStore.wotSignalFlow,
+                ) { users, _ ->
+                    val sorted = sortMentionsByWotRank(users, memoryEventStore::wotFor)
+                    updateMentionWotSubjects(sorted)
+                    sorted
+                }
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -298,7 +320,13 @@ class ComposeViewModel @Inject constructor(
     fun closeMentionPicker() { _mentionPickerOpen.value = false }
     fun setMentionQuery(q: String) { _mentionQuery.value = q }
 
-    fun selectMention(user: com.unsilence.app.data.memory.UserEntity) {
+    private fun updateMentionWotSubjects(users: List<UserEntity>) {
+        val subjects = users.map { it.pubkey }.toSet()
+        _mentionWotSubjects.value = subjects
+        wotHydrationCoalescer.requestHydration(subjects)
+    }
+
+    fun selectMention(user: UserEntity) {
         val npub = runCatching { user.pubkey.hexToByteArray().toNpub() }.getOrNull() ?: return
         val mentionText = "nostr:$npub "
         val blockId = _focusedBlockId.value

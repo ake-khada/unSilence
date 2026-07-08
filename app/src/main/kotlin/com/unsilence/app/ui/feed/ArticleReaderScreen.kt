@@ -76,6 +76,7 @@ import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.markdown.MarkdownDocument
 import com.unsilence.app.data.model.markdown.NativeMarkdownParser
 import com.unsilence.app.data.wallet.ZapRequest
@@ -165,6 +166,8 @@ fun ArticleReaderScreen(
     }
     val commentsFlow = remember(articleCoord) { articleReaderVm.commentsFlow(articleCoord ?: "") }
     val comments by commentsFlow.collectAsStateWithLifecycle(emptyList())
+    val wotLookups by articleReaderVm.wotLookups.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
     LaunchedEffect(articleCoord) {
         if (articleCoord != null) {
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
@@ -175,6 +178,14 @@ fun ArticleReaderScreen(
         if (articleCoord != null) {
             articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
         }
+    }
+    LaunchedEffect(model.pubkey, comments) {
+        articleReaderVm.requestWotHydration(
+            buildSet {
+                add(model.pubkey)
+                addAll(wotSubjectsForFeedRows(comments, modelProvider = commentActionsVm::getEventModel))
+            }
+        )
     }
     // Depth-ordered for display: replies nest under their parent (header count
     // stays comments.size). Same flat list drives count/contributors in MES.
@@ -234,6 +245,7 @@ fun ArticleReaderScreen(
     // mirroring EventCard.ArticleLayout's resolution.
     val isRepost = model.repost != null
     val authorProfile = collectProfileAsState(model.pubkey, profileFlow)
+    val sourceProfile = if (isRepost) collectProfileAsState(model.sourcePubkey, profileFlow) else null
     val authorLabel = authorProfile?.displayName?.takeIf { it.isNotBlank() }
         ?: authorProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
         ?: (if (isRepost) null else row.displayName)
@@ -378,6 +390,10 @@ fun ArticleReaderScreen(
                                 onNoteClick   = {},
                                 lookupProfile = lookupProfile,
                                 profileFlow   = profileFlow,
+                                wotLookup     = { key -> wotLookups[key] },
+                                feedWotDisplayMode = feedWotDisplayMode,
+                                repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
+                                repostSourceProfile = sourceProfile,
                             )
 
                             // ── Banner image — full image at natural aspect (no crop) ──
@@ -645,6 +661,9 @@ fun ArticleReaderScreen(
                                 sensitiveMode         = sensitiveMode,
                                 isSensitive           = comment.hasContentWarning,
                                 contentWarningReason  = comment.contentWarningReason,
+                                wotLookup             = { key -> wotLookups[key] },
+                                feedWotDisplayMode    = feedWotDisplayMode,
+                                onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
                             )
                             }
                             HorizontalDivider(color = BorderFaint)

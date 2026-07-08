@@ -11,10 +11,16 @@ import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.sortPeopleForSearch
+import com.unsilence.app.data.relay.wotLookupSnapshot
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -63,6 +69,7 @@ class SearchViewModel @Inject constructor(
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val userRepository: UserRepository,
     private val timelineCardData: TimelineCardData,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
@@ -86,6 +93,15 @@ class SearchViewModel @Inject constructor(
     private val requestedTrendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
 
     private val _queryFlow = MutableStateFlow("")
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
     /** Accumulates event IDs that arrive on search-notes-* subscriptions from RelayPool. */
     private val _searchResultEventIds = MutableStateFlow<Set<String>>(emptySet())
@@ -198,6 +214,7 @@ class SearchViewModel @Inject constructor(
                     if (query.isEmpty()) {
                         currentSearchToken.set(0L)
                         _searchResultEventIds.value = emptySet()
+                        _wotSubjects.value = emptySet()
                         _uiState.update {
                             it.copy(
                                 peopleResults = emptyList(),
@@ -261,25 +278,39 @@ class SearchViewModel @Inject constructor(
                         localNotesFlow,
                         relayResults,
                         peopleFlow,
-                    ) { localNotes, relayNotes, people ->
+                        memoryEventStore.wotSignalFlow,
+                    ) { localNotes, relayNotes, people, _ ->
                         Triple(localNotes, relayNotes, people)
                     }.collect { (localNotes, relayNotes, people) ->
                             val mergedNotes = (localNotes + relayNotes)
                                 .distinctBy { it.id }
                                 .sortedByDescending { it.createdAt }
-                            val hasResults = mergedNotes.isNotEmpty() || people.isNotEmpty()
+                            val sortedPeople = sortPeopleForSearch(people, memoryEventStore::wotFor)
+                            val wotSubjects = buildSet {
+                                addAll(sortedPeople.map { it.pubkey })
+                                addAll(wotSubjectsForFeedRows(mergedNotes, modelProvider = memoryEventStore::getEventModel))
+                            }
+                            _wotSubjects.value = wotSubjects
+                            wotHydrationCoalescer.requestHydration(wotSubjects)
+                            val hasResults = mergedNotes.isNotEmpty() || sortedPeople.isNotEmpty()
                             val elapsed = System.currentTimeMillis() - searchStart
                             val doneLoading = hasResults || elapsed > 3_000
                             _uiState.update {
                                 it.copy(
                                     noteResults   = mergedNotes,
-                                    peopleResults = people,
+                                    peopleResults = sortedPeople,
                                     loading       = !doneLoading,
                                 )
                             }
                         }
                 }
         }
+    }
+
+    fun requestWotHydration(pubkeys: Collection<String>) {
+        if (pubkeys.isEmpty()) return
+        _wotSubjects.update { current -> current + pubkeys }
+        wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
     /** Called by DisposableEffect when SearchScreen exits composition (nav back). */
@@ -289,6 +320,7 @@ class SearchViewModel @Inject constructor(
         }
         _queryFlow.value = ""
         _searchResultEventIds.value = emptySet()
+        _wotSubjects.value = emptySet()
         _uiState.update {
             it.copy(
                 query         = "",

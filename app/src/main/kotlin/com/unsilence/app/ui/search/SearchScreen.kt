@@ -70,6 +70,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -85,6 +87,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.WotSearchSignal
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -124,6 +127,8 @@ fun SearchScreen(
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val trendingHashtags by viewModel.trendingHashtags.collectAsStateWithLifecycle()
     val trendingUsers   by viewModel.trendingUsers.collectAsStateWithLifecycle()
+    val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds       by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -417,11 +422,17 @@ fun SearchScreen(
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                             pinnedEmojis,
                             viewModel,
+                            wotLookups,
+                            feedWotDisplayMode,
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             if (state.peopleResults.isNotEmpty()) {
                                 items(state.peopleResults.take(3), key = { it.pubkey }) { user ->
-                                    ProfileCard(user = user, onClick = { onAuthorClickDismiss(user.pubkey) })
+                                    ProfileCard(
+                                        user = user,
+                                        wotLookup = wotLookups[user.pubkey],
+                                        onClick = { onAuthorClickDismiss(user.pubkey) },
+                                    )
                                     HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
                                 }
                             }
@@ -450,7 +461,11 @@ fun SearchScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.peopleResults, key = { it.pubkey }) { user ->
-                                ProfileCard(user = user, onClick = { onAuthorClickDismiss(user.pubkey) })
+                                ProfileCard(
+                                    user = user,
+                                    wotLookup = wotLookups[user.pubkey],
+                                    onClick = { onAuthorClickDismiss(user.pubkey) },
+                                )
                                 HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
                             }
                         }
@@ -476,6 +491,8 @@ fun SearchScreen(
                             { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
                             pinnedEmojis,
                             viewModel,
+                            wotLookups,
+                            feedWotDisplayMode,
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             eventFeedItems(
@@ -559,7 +576,11 @@ fun SearchScreen(
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
+private fun ProfileCard(
+    user: UserEntity,
+    wotLookup: WotLookup?,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -588,21 +609,29 @@ private fun ProfileCard(user: UserEntity, onClick: () -> Unit) {
         Column(modifier = Modifier.weight(1f)) {
             val displayName = user.displayName?.takeIf { it.isNotBlank() }
                 ?: user.name?.takeIf { it.isNotBlank() }
-            if (displayName != null) {
+            val title = displayName ?: remember(user.pubkey) { shortNpub(user.pubkey) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text       = displayName,
+                    text       = title,
                     color      = Color.White,
                     fontWeight = FontWeight.SemiBold,
                     fontSize   = AppType.body,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
+                    modifier   = Modifier.weight(1f, fill = false),
+                )
+                if (wotLookup is WotLookup.Scored || wotLookup == WotLookup.Absent) {
+                    Spacer(Modifier.width(Spacing.small))
+                    WotSearchSignal(lookup = wotLookup)
+                }
+            }
+            if (displayName != null) {
+                Text(
+                    text     = remember(user.pubkey) { shortNpub(user.pubkey) },
+                    color    = TextSecondary,
+                    fontSize = AppType.footnote,
                 )
             }
-            Text(
-                text     = remember(user.pubkey) { shortNpub(user.pubkey) },
-                color    = TextSecondary,
-                fontSize = AppType.footnote,
-            )
             if (!user.about.isNullOrBlank()) {
                 Text(
                     text     = user.about,
@@ -648,7 +677,9 @@ private fun rememberCallbacks(
     onReactLongPress: (String, String) -> Unit,
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
     viewModel: SearchViewModel,
-): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis, viewModel) {
+    wotLookups: Map<String, WotLookup>,
+    feedWotDisplayMode: FeedWotDisplayMode,
+): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis, viewModel, wotLookups, feedWotDisplayMode) {
     EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,
@@ -672,6 +703,9 @@ private fun rememberCallbacks(
         zapDetailsForEvent = viewModel::zapDetailsForEvent,
         repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
         reactionsForEvent = viewModel::reactionsForEvent,
+        wotLookup = { pubkey -> wotLookups[pubkey] },
+        feedWotDisplayMode = feedWotDisplayMode,
+        onWotSubjectsVisible = viewModel::requestWotHydration,
     )
 }
 

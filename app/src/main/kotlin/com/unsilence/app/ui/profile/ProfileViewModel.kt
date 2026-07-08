@@ -16,6 +16,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -25,6 +26,9 @@ import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.wotLookupSnapshot
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -131,6 +135,7 @@ class ProfileViewModel @Inject constructor(
     private val _isAtTop = MutableStateFlow(true)
     private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
     private var currentHandle: TimelineService.TimelineHandle? = null
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
 
     val isLoadingPosts: StateFlow<Boolean> = _isLoading.asStateFlow()
 
@@ -155,6 +160,41 @@ class ProfileViewModel @Inject constructor(
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val profileWotLookup: StateFlow<WotLookup> =
+        memoryEventStore.wotSignalFlow
+            .map { pubkeyHex?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WotLookup.Pending)
+
+    val wotProvenance: StateFlow<ProfileWotProvenance> =
+        combine(
+            memoryEventStore.wotSignalFlow,
+            memoryEventStore.profileSignalFlow,
+            relayPreferencesStore.lastWotFetchAtFlow(),
+        ) { _, _, lastFetchAt ->
+            val provider = memoryEventStore.activeWotProvider()
+            val profile = memoryEventStore.getUserEntity(provider.providerPubkey)
+            ProfileWotProvenance(
+                providerName = profile?.displayName?.takeIf { it.isNotBlank() }
+                    ?: profile?.name?.takeIf { it.isNotBlank() }
+                    ?: "Provider ${provider.providerPubkey.take(8)}…",
+                relayHint = provider.relayHint,
+                lastFetchAt = lastFetchAt,
+            )
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            ProfileWotProvenance("Provider", "", 0L),
+        )
+
+    val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+
     // ── Profile tabs ─────────────────────────────────────────────────────
 
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
@@ -168,6 +208,7 @@ class ProfileViewModel @Inject constructor(
 
     init {
         if (pubkeyHex != null) {
+            _wotSubjects.value = setOf(pubkeyHex)
             wotHydrationCoalescer.requestProfileHydration(pubkeyHex)
 
             viewModelScope.launch {
@@ -226,7 +267,34 @@ class ProfileViewModel @Inject constructor(
     fun onViewportChanged(first: Int, last: Int, isScrolling: Boolean = false) {
         val atTop = first <= 0
         if (_isAtTop.value != atTop) _isAtTop.value = atTop
+        requestVisibleWotHydration(first, last)
         // Engagement pre-fetched by ProfilePipeline — no viewport-driven hydration needed.
+    }
+
+    private fun requestVisibleWotHydration(first: Int, last: Int) {
+        val own = pubkeyHex
+        val posts = tabPostsFlow.value
+        val dataFirst = (first - PROFILE_EVENT_OFFSET).coerceAtLeast(0)
+        val dataLast = (last - PROFILE_EVENT_OFFSET).coerceAtMost(posts.lastIndex)
+        val subjects = buildSet {
+            own?.let { add(it) }
+            if (dataFirst <= dataLast) {
+                addAll(
+                    wotSubjectsForFeedRows(
+                        posts.subList(dataFirst, dataLast + 1),
+                        modelProvider = memoryEventStore::getEventModel,
+                    )
+                )
+            }
+        }
+        _wotSubjects.value = subjects
+        wotHydrationCoalescer.requestHydration(subjects)
+    }
+
+    fun requestWotHydration(pubkeys: Collection<String>) {
+        if (pubkeys.isEmpty()) return
+        _wotSubjects.update { current -> current + pubkeys }
+        wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
     fun loadMore(currentOldest: Long) {
@@ -394,6 +462,7 @@ class ProfileViewModel @Inject constructor(
     private companion object {
         const val FEED_DISPLAY_CAP = 500
         const val FEED_SAMPLE_MS = 100L
+        const val PROFILE_EVENT_OFFSET = 3
 
         /** Subscription group: Notes+Replies share kinds [1,6,16], Longform is [30023]. */
         enum class SubGroup { NOTES_REPLIES, LONGFORM }
