@@ -13,6 +13,7 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
@@ -564,6 +565,7 @@ class AppBootstrapper @Inject constructor(
                     prioritySubjects = listOf(pubkeyHex),
                 )
                 if (ok) {
+                    logWotCoverageCanary(pubkeyHex, resolvedProvider)
                     relayPreferencesStore.setLastWotFetch(System.currentTimeMillis(), targetsHash)
                 } else {
                     Log.w(TAG, "Phase3: WoT fetch failed — not advancing 12h gate")
@@ -623,6 +625,23 @@ class AppBootstrapper @Inject constructor(
         settingsStore.selectOwner(pubkeyHex)
         nwcManager.resetIfOwnerChanged(pubkeyHex)
     }
+
+    private fun logWotCoverageCanary(ownerPubkey: String, provider: WotProviderDescriptor) {
+        val follows = memoryEventStore.getFollows(ownerPubkey).orEmpty()
+            .mapNotNull { it.trim().lowercase().takeIf(::isHexPubkey) }
+            .toSet()
+        val scoredSubjects = memoryEventStore.getWotAssertions().keys
+            .mapNotNull { it.trim().lowercase().takeIf(::isHexPubkey) }
+            .toSet()
+        val scoredFollows = follows.count { it in scoredSubjects }
+        Log.i(
+            TAG,
+            "WoT coverage provider=${provider.providerPubkey.take(8)} relay=${provider.relayHint} scoredFollows=$scoredFollows totalFollows=${follows.size} assertions=${scoredSubjects.size}",
+        )
+    }
+
+    private fun isHexPubkey(value: String): Boolean =
+        value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 
     /**
      * BackgroundSyncWorker.doWork() is an empty stub — the 30min periodic

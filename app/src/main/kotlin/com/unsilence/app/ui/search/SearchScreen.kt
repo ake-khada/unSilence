@@ -106,6 +106,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.sample
 
 private val TAB_LABELS = listOf("All", "People", "Notes", "Tags")
+private val WOT_SEARCH_SIGNAL_WIDTH = 48.dp
 
 @Composable
 fun SearchScreen(
@@ -610,21 +611,15 @@ private fun ProfileCard(
             val displayName = user.displayName?.takeIf { it.isNotBlank() }
                 ?: user.name?.takeIf { it.isNotBlank() }
             val title = displayName ?: remember(user.pubkey) { shortNpub(user.pubkey) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text       = title,
-                    color      = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize   = AppType.body,
-                    maxLines   = 1,
-                    overflow   = TextOverflow.Ellipsis,
-                    modifier   = Modifier.weight(1f, fill = false),
-                )
-                if (wotLookup is WotLookup.Scored || wotLookup == WotLookup.Absent) {
-                    Spacer(Modifier.width(Spacing.small))
-                    WotSearchSignal(lookup = wotLookup)
-                }
-            }
+            Text(
+                text       = title,
+                color      = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize   = AppType.body,
+                maxLines   = 1,
+                overflow   = TextOverflow.Ellipsis,
+                modifier   = Modifier.fillMaxWidth(),
+            )
             if (displayName != null) {
                 Text(
                     text     = remember(user.pubkey) { shortNpub(user.pubkey) },
@@ -641,6 +636,16 @@ private fun ProfileCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),
                 )
+            }
+        }
+
+        if (wotLookup is WotLookup.Scored || wotLookup == WotLookup.Absent) {
+            Spacer(Modifier.width(Spacing.small))
+            Box(
+                modifier = Modifier.width(WOT_SEARCH_SIGNAL_WIDTH),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                WotSearchSignal(lookup = wotLookup)
             }
         }
     }

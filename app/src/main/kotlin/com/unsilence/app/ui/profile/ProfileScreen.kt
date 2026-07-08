@@ -58,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,7 +87,7 @@ import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.shared.ProfileWotInlineLabel
+import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
@@ -101,6 +102,7 @@ import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -243,6 +245,7 @@ fun ProfileScreen(
     val npubShort = viewModel.npub?.let {
         "${it.take(6)}…${it.takeLast(4)}"
     }
+    val scoredWotInline = profileWotLookup as? WotLookup.Scored
 
     // ── Swipe left/right to switch profile tabs ────────────────────────────
     val swipeDrag = remember { mutableFloatStateOf(0f) }
@@ -348,24 +351,7 @@ fun ProfileScreen(
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    val scored = profileWotLookup as? WotLookup.Scored
-                    if (scored != null) {
-                        Spacer(Modifier.height(2.dp))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = Spacing.medium),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            ProfileWotInlineLabel(
-                                assertion = scored.assertion,
-                                onClick = { showWotBreakdown = true },
-                            )
-                        }
-                    } else {
-                        Spacer(Modifier.height(Spacing.micro))
-                    }
+                    Spacer(Modifier.height(Spacing.micro))
                 }
 
                 // npub — tappable row with copy icon
@@ -385,8 +371,22 @@ fun ProfileScreen(
                         Text(
                             text     = npubShort,
                             color    = TextSecondary,
-                            fontSize = AppType.bodySmall,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
                         )
+                        if (scoredWotInline != null) {
+                            Text(
+                                text = " · ",
+                                color = Text3,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                            )
+                            WotInlineLabel(
+                                assertion = scoredWotInline.assertion,
+                                onClick = { showWotBreakdown = true },
+                            )
+                        }
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             imageVector        = Icons.Outlined.ContentCopy,
