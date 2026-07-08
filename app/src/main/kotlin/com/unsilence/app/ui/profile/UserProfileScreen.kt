@@ -34,8 +34,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -67,6 +69,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.repository.MuteResult
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
@@ -88,6 +91,8 @@ import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
+import com.unsilence.app.ui.shared.WotBreakdownProvenance
+import com.unsilence.app.ui.shared.ProfileWotInlineLabel
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Chat
@@ -108,6 +113,7 @@ import kotlinx.coroutines.launch
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserProfileScreen(
     pubkey: String,
@@ -147,12 +153,17 @@ fun UserProfileScreen(
     val followingCount by viewModel.followingCount.collectAsStateWithLifecycle()
     val isMuted        by viewModel.isMuted.collectAsStateWithLifecycle()
     val isOwnProfile   by viewModel.isOwnProfile.collectAsStateWithLifecycle()
+    val wotLookups     by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val profileWotLookup by viewModel.profileWotLookup.collectAsStateWithLifecycle()
+    val wotProvenance  by viewModel.wotProvenance.collectAsStateWithLifecycle()
+    val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
     var showProfileActions by remember { mutableStateOf(false) }
     var showReportSheet by remember { mutableStateOf(false) }
+    var showWotBreakdown by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
@@ -202,7 +213,7 @@ fun UserProfileScreen(
         )
     }
     val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
-    val callbacks = remember(viewModel, actionsViewModel, pubkey, pinnedEmojis) {
+    val callbacks = remember(viewModel, actionsViewModel, pubkey, pinnedEmojis, wotLookups, feedWotDisplayMode) {
         EventActionCallbacks(
             onNoteClick = onNoteClick,
             onComment = onComment,
@@ -227,6 +238,9 @@ fun UserProfileScreen(
             zapDetailsForEvent = viewModel::zapDetailsForEvent,
             repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
             reactionsForEvent = viewModel::reactionsForEvent,
+            wotLookup = { key -> wotLookups[key] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            onWotSubjectsVisible = viewModel::requestWotHydration,
         )
     }
 
@@ -406,11 +420,30 @@ fun UserProfileScreen(
                         fontSize   = AppType.heading,
                         fontWeight = FontWeight.Bold,
                         textAlign  = TextAlign.Center,
+                        maxLines   = 1,
+                        overflow   = TextOverflow.Ellipsis,
                         modifier   = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
                     )
-                    Spacer(Modifier.height(Spacing.micro))
+                    val scored = profileWotLookup as? WotLookup.Scored
+                    if (scored != null) {
+                        Spacer(Modifier.height(2.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            ProfileWotInlineLabel(
+                                assertion = scored.assertion,
+                                onClick = { showWotBreakdown = true },
+                            )
+                        }
+                    } else {
+                        Spacer(Modifier.height(Spacing.micro))
+                    }
                 }
 
                 // npub — tappable row with copy icon
@@ -735,6 +768,32 @@ fun UserProfileScreen(
         )
     }
 
+    val scoredWot = profileWotLookup as? WotLookup.Scored
+    if (showWotBreakdown && scoredWot != null) {
+        ModalBottomSheet(onDismissRequest = { showWotBreakdown = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.medium)
+                    .padding(bottom = Spacing.xl),
+            ) {
+                Text(
+                    text = "Web of trust",
+                    color = Color.White,
+                    fontSize = AppType.subheading,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(Spacing.medium))
+                ScoredStanding(scoredWot.assertion)
+                Spacer(Modifier.height(Spacing.medium))
+                WotBreakdownProvenance(
+                    text = "Via ${wotProvenance.providerName} grapevine · ${profileWotSyncedAgo(wotProvenance.lastFetchAt)}",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+
     // ── Full emoji picker sheet ─────────────────────────────────────────────
     if (showFullEmojiPicker && emojiReactTarget != null) {
         val (eventId, pubkey) = emojiReactTarget!!
@@ -754,6 +813,20 @@ fun UserProfileScreen(
             },
             categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
+    }
+}
+
+internal fun profileWotSyncedAgo(timestamp: Long): String {
+    if (timestamp <= 0L) return "never synced"
+    val ageMs = (System.currentTimeMillis() - timestamp).coerceAtLeast(0L)
+    val minutes = ageMs / 60_000L
+    val hours = ageMs / 3_600_000L
+    val days = ageMs / 86_400_000L
+    return when {
+        minutes < 1L -> "synced just now"
+        hours < 1L -> "synced ${minutes}m ago"
+        days < 1L -> "synced ${hours}h ago"
+        else -> "synced ${days}d ago"
     }
 }
 

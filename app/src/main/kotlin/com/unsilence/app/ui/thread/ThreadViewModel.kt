@@ -15,7 +15,12 @@ import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.wotLookupSnapshot
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
 import java.util.concurrent.ConcurrentHashMap
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -54,6 +59,7 @@ class ThreadViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val outboxResolver: OutboxRelayResolver,
     private val cardHydrator: CardHydrator,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
@@ -64,8 +70,17 @@ class ThreadViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly,
                 com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
 
+    val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
+        relayPreferencesStore.feedWotDisplayModeFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    val wotLookups: StateFlow<Map<String, WotLookup>> =
+        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
+            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
     /** Set when the thread root is a long-form article — replies then come from the
@@ -140,6 +155,12 @@ class ThreadViewModel @Inject constructor(
                         loading        = false,
                         focusedReplyId = tappedId.takeIf { it != focusedId },
                     )
+                    val subjects = wotSubjectsForFeedRows(
+                        listOfNotNull(focused) + flatList.map { it.row },
+                        modelProvider = memoryEventStore::getEventModel,
+                    )
+                    _wotSubjects.value = subjects
+                    wotHydrationCoalescer.requestHydration(subjects)
                 }
         }
     }
@@ -168,6 +189,7 @@ class ThreadViewModel @Inject constructor(
         articleCommentRelays = emptyList()
         fetchedReplyParents.clear()
         tappedId = null
+        _wotSubjects.value = emptySet()
         _uiState.value = ThreadUiState()
     }
 

@@ -24,6 +24,8 @@ import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.UserRepository
 import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
@@ -85,6 +87,7 @@ class NoteActionsViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val cardHydrator: CardHydrator,
+    private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val snapshotScheduler: SnapshotScheduler,
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
@@ -167,6 +170,9 @@ class NoteActionsViewModel @Inject constructor(
             if (warmStart < safeFirst) addAll(rows.subList(warmStart, safeFirst))
             if (visibleEnd < warmEnd) addAll(rows.subList(visibleEnd, warmEnd))
         }
+        wotHydrationCoalescer.requestHydration(
+            wotSubjectsForFeedRows(warmRows, modelProvider = memoryEventStore::getEventModel)
+        )
         viewModelScope.launch(Dispatchers.Default) {
             cardHydrator.warmUpcomingAssets(
                 events = warmRows,

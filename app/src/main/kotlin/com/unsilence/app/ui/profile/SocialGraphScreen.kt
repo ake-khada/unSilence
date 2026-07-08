@@ -64,6 +64,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.WotProviderDescriptor
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.WotProviderOptionState
 import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -150,10 +151,87 @@ fun SocialGraphScreen(
                         onRefresh = viewModel::refresh,
                     )
                 }
+                item {
+                    FeedScoreModeCard(
+                        mode = state.feedWotDisplayMode,
+                        onChange = viewModel::setFeedWotDisplayMode,
+                    )
+                }
                 item { HowScoresWorkCard() }
                 item { Spacer(Modifier.height(Spacing.xl)) }
             }
         }
+    }
+}
+
+@Composable
+private fun FeedScoreModeCard(
+    mode: FeedWotDisplayMode,
+    onChange: (FeedWotDisplayMode) -> Unit,
+) {
+    SettingsCard {
+        Column(verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
+            Text(
+                text = "Feed scores",
+                color = Color.White,
+                fontSize = AppType.body,
+                fontWeight = FontWeight.Medium,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                FeedScoreModeSegment(
+                    label = "Numbers",
+                    selected = mode == FeedWotDisplayMode.NUMBERS,
+                    onClick = { onChange(FeedWotDisplayMode.NUMBERS) },
+                    modifier = Modifier.weight(1f),
+                )
+                FeedScoreModeSegment(
+                    label = "Exceptions",
+                    selected = mode == FeedWotDisplayMode.EXCEPTIONS_ONLY,
+                    onClick = { onChange(FeedWotDisplayMode.EXCEPTIONS_ONLY) },
+                    modifier = Modifier.weight(1f),
+                )
+                FeedScoreModeSegment(
+                    label = "Off",
+                    selected = mode == FeedWotDisplayMode.OFF,
+                    onClick = { onChange(FeedWotDisplayMode.OFF) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedScoreModeSegment(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(if (selected) Brand.copy(alpha = 0.16f) else Surface2)
+            .border(
+                width = 1.dp,
+                color = if (selected) Brand.copy(alpha = 0.55f) else BorderSubtle,
+                shape = RoundedCornerShape(7.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Brand else TextSecondary,
+            fontSize = AppType.caption,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -404,7 +482,7 @@ private fun StandingCard(lookup: WotLookup) {
 }
 
 @Composable
-private fun ScoredStanding(assertion: WotAssertionEntity) {
+internal fun ScoredStanding(assertion: WotAssertionEntity) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,

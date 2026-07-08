@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -31,10 +32,12 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
@@ -84,6 +87,9 @@ data class EventActionCallbacks(
     val zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     val repostPubkeysForEvent: ((String) -> List<String>)? = null,
     val reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
+    val wotLookup: ((String) -> WotLookup?)? = null,
+    val feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    val onWotSubjectsVisible: (Collection<String>) -> Unit = {},
 )
 
 /**
@@ -280,6 +286,9 @@ internal fun ThreadParentCard(
     onToggleMute: () -> Unit = {},
     onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val model = remember(event.id) {
@@ -296,6 +305,9 @@ internal fun ThreadParentCard(
     }
     val liveAuthor = collectProfileAsState(event.pubkey, profileFlow)
     val effectiveAuthor = liveAuthor ?: author
+    LaunchedEffect(event.pubkey) {
+        onWotSubjectsVisible(listOf(event.pubkey))
+    }
 
     Column(
         modifier = modifier
@@ -332,11 +344,13 @@ internal fun ThreadParentCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            val lookup = wotLookup?.invoke(event.pubkey)
             Spacer(Modifier.width(6.dp))
-            Text(
-                text = relativeTime(event.createdAt),
-                color = Color.White.copy(alpha = 0.4f),
-                fontSize = AppType.bodySmall,
+            WotFeedMetaTimestamp(
+                lookup = lookup,
+                mode = feedWotDisplayMode,
+                timestamp = relativeTime(event.createdAt),
+                timestampColor = Color.White.copy(alpha = 0.4f),
             )
         }
 
@@ -368,6 +382,9 @@ internal fun ThreadParentCard(
                     isMuted             = isMuted,
                     onToggleMute        = onToggleMute,
                     onVideoModelsResolved = onVideoModelsResolved,
+                    wotLookup           = wotLookup,
+                    feedWotDisplayMode  = feedWotDisplayMode,
+                    onWotSubjectsVisible = onWotSubjectsVisible,
                     nestDepth           = 1,
                 )
             }
@@ -478,5 +495,8 @@ private fun EventFeedItem(
         sensitiveMode       = sensitiveMode,
         isSensitive         = row.hasContentWarning,
         contentWarningReason = row.contentWarningReason,
+        wotLookup           = callbacks.wotLookup,
+        feedWotDisplayMode  = callbacks.feedWotDisplayMode,
+        onWotSubjectsVisible = callbacks.onWotSubjectsVisible,
     )
 }

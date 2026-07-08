@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.WotProviderDescriptor
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotCoverage
@@ -55,6 +56,7 @@ data class SocialGraphUiState(
     val ownStanding: WotLookup,
     val coverage: WotCoverage,
     val lastWotFetchAt: Long,
+    val feedWotDisplayMode: FeedWotDisplayMode,
     val refreshing: Boolean,
     val customExpanded: Boolean,
     val customPubkeyInput: String,
@@ -79,6 +81,7 @@ data class SocialGraphUiState(
             ownStanding = WotLookup.Pending,
             coverage = WotCoverage(0, 0),
             lastWotFetchAt = 0L,
+            feedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
             refreshing = false,
             customExpanded = false,
             customPubkeyInput = "",
@@ -119,10 +122,13 @@ class SocialGraphViewModel @Inject constructor(
         relayPreferencesStore.wotProviderPrefsFlow(),
         memoryEventStore.wotSignalFlow,
         memoryEventStore.profileSignalFlow,
-        relayPreferencesStore.lastWotFetchAtFlow(),
+        combine(
+            relayPreferencesStore.lastWotFetchAtFlow(),
+            relayPreferencesStore.feedWotDisplayModeFlow(),
+        ) { lastFetchAt, feedWotDisplayMode -> lastFetchAt to feedWotDisplayMode },
         localState,
-    ) { prefs, _, _, lastFetchAt, local ->
-        buildUiState(prefs, lastFetchAt, local)
+    ) { prefs, _, _, displayPrefs, local ->
+        buildUiState(prefs, displayPrefs.first, displayPrefs.second, local)
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
@@ -223,6 +229,12 @@ class SocialGraphViewModel @Inject constructor(
         localState.value = localState.value.copy(customRelayInput = value, customError = null)
     }
 
+    fun setFeedWotDisplayMode(mode: FeedWotDisplayMode) {
+        viewModelScope.launch(Dispatchers.IO) {
+            relayPreferencesStore.setFeedWotDisplayMode(mode)
+        }
+    }
+
     fun applyCustomProvider() {
         viewModelScope.launch(Dispatchers.IO) {
             val local = localState.value
@@ -248,6 +260,7 @@ class SocialGraphViewModel @Inject constructor(
     private fun buildUiState(
         prefs: WotProviderPrefs,
         lastFetchAt: Long,
+        feedWotDisplayMode: FeedWotDisplayMode,
         local: SocialGraphLocalState,
     ): SocialGraphUiState {
         val activeProvider = memoryEventStore.activeWotProvider()
@@ -270,6 +283,7 @@ class SocialGraphViewModel @Inject constructor(
             ownStanding = ownPubkey?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending,
             coverage = computeWotCoverage(follows, assertions),
             lastWotFetchAt = lastFetchAt,
+            feedWotDisplayMode = feedWotDisplayMode,
             refreshing = local.refreshing,
             customExpanded = local.customExpanded,
             customPubkeyInput = local.customPubkeyInput,

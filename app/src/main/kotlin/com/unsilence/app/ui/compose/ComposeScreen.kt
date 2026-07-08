@@ -122,6 +122,7 @@ fun ComposeScreen(
     val mentionQuery      by viewModel.mentionQuery.collectAsStateWithLifecycle()
     val mentionFollows    by viewModel.mentionFollows.collectAsStateWithLifecycle()
     val mentionSearchResults by viewModel.mentionSearchResults.collectAsStateWithLifecycle()
+    val mentionWotLookups by viewModel.mentionWotLookups.collectAsStateWithLifecycle()
     val pendingMention    by viewModel.pendingMentionInsert.collectAsStateWithLifecycle()
     val isSensitive       by viewModel.isSensitive.collectAsStateWithLifecycle()
 
@@ -808,6 +809,7 @@ fun ComposeScreen(
         MentionPickerSheet(
             follows = mentionFollows,
             searchResults = mentionSearchResults,
+            wotLookups = mentionWotLookups,
             query = mentionQuery,
             onQueryChange = viewModel::setMentionQuery,
             onSelect = viewModel::selectMention,

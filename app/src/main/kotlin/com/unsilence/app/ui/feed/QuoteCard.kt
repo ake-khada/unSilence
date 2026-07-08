@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -35,12 +36,15 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.WotFeedMetaTimestamp
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -92,6 +96,9 @@ internal fun QuoteCard(
     onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
     sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
         com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
+    wotLookup: ((String) -> WotLookup?)? = null,
+    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
@@ -171,6 +178,9 @@ internal fun QuoteCard(
         val author = liveAuthor ?: quoteData.author
         val eventModel = quoteData.model
         if (loadedEvent != null) {
+            LaunchedEffect(loadedEvent.pubkey) {
+                onWotSubjectsVisible(listOf(loadedEvent.pubkey))
+            }
             Column {
                 // Header: avatar + name + timestamp
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -195,10 +205,11 @@ internal fun QuoteCard(
                         modifier = Modifier.weight(1f),
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text(
-                        text     = relativeTime(loadedEvent.createdAt),
-                        color    = TextSecondary,
-                        fontSize = AppType.caption,
+                    WotFeedMetaTimestamp(
+                        lookup = wotLookup?.invoke(loadedEvent.pubkey),
+                        mode = feedWotDisplayMode,
+                        timestamp = relativeTime(loadedEvent.createdAt),
+                        timestampColor = TextSecondary,
                     )
                 }
                 Spacer(Modifier.height(4.dp))
@@ -233,6 +244,9 @@ internal fun QuoteCard(
                         onToggleMute        = onToggleMute,
                         thumbnailCache      = thumbnailCache,
                         onVideoModelsResolved = onVideoModelsResolved,
+                        wotLookup           = wotLookup,
+                        feedWotDisplayMode  = feedWotDisplayMode,
+                        onWotSubjectsVisible = onWotSubjectsVisible,
                         nestDepth           = nestDepth + 1,
                     )
                 } else if (eventModel != null) {
