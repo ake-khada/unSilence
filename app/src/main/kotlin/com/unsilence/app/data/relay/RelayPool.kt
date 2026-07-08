@@ -2261,12 +2261,11 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
         }.toString())
 
-        val eventCount = memoryEventStore.get().insertWotAssertionChunk(
+        memoryEventStore.get().insertWotAssertionChunk(
             providerPubkey = provider,
             events = verifiedEvents,
             queriedSubjects = if (eosed) chunk else emptyList(),
         )
-        Log.d(TAG, "WoT chunk $page/$totalPages from $relayUrl: eose=$eosed events=$eventCount subjects=${chunk.size}")
         return eosed
     }
 
@@ -2284,10 +2283,6 @@ class RelayPool @Inject constructor(
             registryRelays = WOT_REGISTRY_LOOKUP_RELAYS,
         )
         if (targets.relayUrls.isEmpty()) return false
-        Log.i(
-            TAG,
-            "WoT 10040 lookup owner=${owner.take(8)} relays=${targets.relayUrls.joinToString(",")} bypass=${targets.capabilityBypassRelays.joinToString(",")}",
-        )
 
         val subId = "wot-10040-${System.nanoTime()}"
         val req = buildJsonArray {
@@ -2310,10 +2305,7 @@ class RelayPool @Inject constructor(
                 timeoutMs = 8_000L,
                 capabilityBypassRelays = targets.capabilityBypassRelays,
             )
-            val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
-            val knownProvider = memoryEventStore.get().ownWotProviderFromRegistry()?.providerPubkey?.take(8)
-            Log.i(TAG, "WoT 10040 lookup complete eose=$eosed provider=${knownProvider ?: "none"}")
-            eosed
+            withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
         } finally {
             cleanupOneShotSub(subId)
         }

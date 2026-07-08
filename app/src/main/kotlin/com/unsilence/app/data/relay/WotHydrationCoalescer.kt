@@ -1,6 +1,5 @@
 package com.unsilence.app.data.relay
 
-import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.WotLookup
 import kotlinx.coroutines.CoroutineScope
@@ -13,8 +12,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
-
-private const val WOT_TAG = "WotHydrator"
 
 @Singleton
 class WotHydrationCoalescer @Inject constructor(
@@ -70,12 +67,11 @@ class WotHydrationCoalescer @Inject constructor(
                 val subjects = drainEligibleSubjects()
                 if (subjects.isEmpty()) return@launch
                 val provider = memoryEventStore.activeWotProvider()
-                val ok = relayPool.fetchWotAssertions(
+                relayPool.fetchWotAssertions(
                     providerPubkey = provider.providerPubkey,
                     relayHint = provider.relayHint,
                     subjects = subjects,
                 )
-                if (!ok) Log.w(WOT_TAG, "WoT hydration failed for ${subjects.size} subjects")
             } finally {
                 inFlight.set(false)
                 if (pendingSubjects.isNotEmpty() || staleProfileSubjects.isNotEmpty()) {

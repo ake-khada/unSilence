@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.profile
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -28,7 +27,6 @@ import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -41,8 +39,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
-
-private const val TAG = "SocialGraph"
 
 data class SocialGraphUiState(
     val ownPubkey: String?,
@@ -136,7 +132,6 @@ class SocialGraphViewModel @Inject constructor(
     )
 
     init {
-        Log.i(TAG, "opened own=${ownPubkey?.take(8).orEmpty()}")
         viewModelScope.launch(Dispatchers.IO) {
             fetchOwnProviderRegistryIfNeeded()
         }
@@ -184,12 +179,9 @@ class SocialGraphViewModel @Inject constructor(
                 ?: localState.value.decryptedOwnProvider
 
             if (provider == null && memoryEventStore.ownWotProviderEncryptedContent().isNullOrBlank()) {
-                Log.i(TAG, "fetchOwn10040 start")
                 setBusy(true, "Checking your kind 10040 provider list")
-                val ok = relayPool.fetchOwn10040(own)
-                Log.i(TAG, "fetchOwn10040 returned ok=$ok")
+                relayPool.fetchOwn10040(own)
                 provider = waitForOwnProvider()
-                Log.i(TAG, "fetchOwn10040 wait provider=${provider?.providerPubkey?.take(8) ?: "none"} encrypted=${!memoryEventStore.ownWotProviderEncryptedContent().isNullOrBlank()}")
             }
 
             if (provider != null) {
@@ -304,7 +296,6 @@ class SocialGraphViewModel @Inject constructor(
 
     private suspend fun decryptOwnProviderContent(own: String): WotProviderDescriptor? {
         val content = memoryEventStore.ownWotProviderEncryptedContent()?.takeIf { it.isNotBlank() } ?: return null
-        Log.d(TAG, "decryptOwn10040 start")
         setBusy(true, "Decrypting your provider list")
         val plaintext = signingManager.decrypt(content, own)
         val provider = plaintext?.let {
@@ -319,7 +310,6 @@ class SocialGraphViewModel @Inject constructor(
     }
 
     private suspend fun switchProvider(source: WotProviderSource, provider: WotProviderDescriptor) {
-        Log.i(TAG, "switchProvider source=$source provider=${provider.providerPubkey.take(8)} relay=${provider.relayHint}")
         relayPreferencesStore.setWotProvider(provider.providerPubkey, provider.relayHint, source)
         memoryEventStore.setActiveWotProvider(provider.providerPubkey, provider.relayHint)
         userRepository.fetchMissingProfiles(listOf(provider.providerPubkey))
@@ -330,7 +320,6 @@ class SocialGraphViewModel @Inject constructor(
         val existing = refreshJob
         if (existing?.isActive == true) {
             if (!replaceExisting) {
-                Log.d(TAG, "refresh skipped inFlight provider=${provider.providerPubkey.take(8)}")
                 viewModelScope.launch {
                     setStatus("Refresh already running")
                 }
@@ -349,20 +338,16 @@ class SocialGraphViewModel @Inject constructor(
         try {
             val own = ownPubkey ?: return setStatus("No account is loaded", generation)
             if (!isCurrentProvider(provider)) {
-                Log.d(TAG, "refresh skipped stale provider=${provider.providerPubkey.take(8)}")
                 return
             }
             val targets = buildWotTargets(own)
-            Log.d(TAG, "refresh start provider=${provider.providerPubkey.take(8)} targets=${targets.size} relay=${provider.relayHint}")
             val ok = relayPool.fetchWotAssertions(
                 providerPubkey = provider.providerPubkey,
                 relayHint = provider.relayHint,
                 subjects = targets,
                 prioritySubjects = listOf(own),
             )
-            Log.d(TAG, "refresh finish ok=$ok provider=${provider.providerPubkey.take(8)} targets=${targets.size}")
             if (!isCurrentProvider(provider) || !isCurrentRefresh(generation)) {
-                Log.d(TAG, "refresh result ignored stale provider=${provider.providerPubkey.take(8)}")
                 return
             }
             if (ok) {
@@ -376,9 +361,6 @@ class SocialGraphViewModel @Inject constructor(
             } else {
                 setStatus("Sync did not complete", generation)
             }
-        } catch (e: CancellationException) {
-            Log.d(TAG, "refresh cancelled provider=${provider.providerPubkey.take(8)}")
-            throw e
         } finally {
             setBusy(false, localState.value.statusMessage, generation)
         }
