@@ -25,8 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,20 +43,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import android.content.Intent
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.IntOffset
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
-import com.unsilence.app.data.memory.UserEntity
-import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
-import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -67,6 +56,7 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
@@ -148,11 +138,6 @@ fun FeedScreen(
 
     // ── Long-press bottom sheet state ────────────────────────────────────────
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
-    var reportRow by remember { mutableStateOf<FeedRow?>(null) }
-    var deleteRow by remember { mutableStateOf<FeedRow?>(null) }
-    val haptics = LocalHapticFeedback.current
-    val clipboard = LocalClipboardManager.current
-    val ctx = LocalContext.current
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
     // (eventId, pubkey) of the note being custom-reacted to
@@ -229,10 +214,7 @@ fun FeedScreen(
             wotLookup = { pubkey -> wotLookups[pubkey] },
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
-            onLongPress = { row ->
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                actionsRow = row
-            },
+            onLongPress = { row -> actionsRow = row },
         )
     }
 
@@ -542,78 +524,15 @@ fun FeedScreen(
     }
 
     // ── Long-press actions bottom sheet ──────────────────────────────────────
-    actionsRow?.let { row ->
-        val authorProfile: UserEntity? = viewModel.profileFlow(row.pubkey)
-            .collectAsStateWithLifecycle().value
-        PostActionsBottomSheet(
-            authorPubkey = row.pubkey,
-            authorProfile = authorProfile,
-            onDismiss = { actionsRow = null },
-            onCopyText = { clipboard.setText(AnnotatedString(row.content)) },
-            onCopyLink = {
-                val nevent = NEvent.create(row.id, null, null, null as NormalizedRelayUrl?)
-                clipboard.setText(AnnotatedString("nostr:$nevent"))
-                showSnackbar("Link copied")
-            },
-            onShare = {
-                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, "https://njump.me/${row.id}")
-                }
-                ctx.startActivity(Intent.createChooser(shareIntent, null))
-            },
-            onMuteUser = {
-                when (viewModel.muteUser(row.pubkey)) {
-                    com.unsilence.app.data.repository.MuteResult.Queued ->
-                        showSnackbar("Muted")
-                    com.unsilence.app.data.repository.MuteResult.LocalOnly ->
-                        showSnackbar("Muted locally — grant NIP-44 decrypt in Amber to sync")
-                }
-            },
-            onReport = {
-                reportRow = row
-                actionsRow = null
-            },
-            canDelete = actionsViewModel.isOwnPubkey(row.pubkey),
-            onDelete = {
-                deleteRow = row
-                actionsRow = null
-            },
-        )
-    }
-
-    deleteRow?.let { row ->
-        AlertDialog(
-            onDismissRequest = { deleteRow = null },
-            title = { Text("Delete post?", color = White) },
-            text = { Text("This will publish a deletion request for this event.", color = TextSecondary) },
-            confirmButton = {
-                TextButton(onClick = {
-                    actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl)
-                    deleteRow = null
-                    showSnackbar("Delete requested")
-                }) {
-                    Text("Delete", color = com.unsilence.app.ui.theme.Zap)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteRow = null }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = Black,
-        )
-    }
-
-    reportRow?.let { row ->
-        ReportTypeSheet(
-            onDismiss = { reportRow = null },
-            onTypeSelected = { type ->
-                viewModel.reportEvent(row.id, row.pubkey, type)
-                showSnackbar("Reported")
-            },
-        )
-    }
+    PostActionsHost(
+        row = actionsRow,
+        profileFlow = viewModel::profileFlow,
+        canDelete = { row -> actionsViewModel.isOwnPubkey(row.pubkey) },
+        onMuteUser = actionsViewModel::muteUser,
+        onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
+        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        onDismiss = { actionsRow = null },
+    )
 
     // ── Full emoji picker sheet ─────────────────────────────────────────────
     if (showFullEmojiPicker && emojiReactTarget != null) {

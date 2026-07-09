@@ -26,6 +26,10 @@ import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.data.model.ReportType
+import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.repository.MuteResult
+import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
 import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
@@ -93,6 +97,8 @@ class NoteActionsViewModel @Inject constructor(
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
     private val settingsStore: SettingsStore,
+    private val muteListRepository: MuteListRepository,
+    private val reportRepository: ReportRepository,
     val sharedPlayerHolder: SharedPlayerHolder,
     val videoThumbnailCache: VideoThumbnailCache,
     val imageDimensionCache: ImageDimensionCache,
@@ -457,6 +463,12 @@ class NoteActionsViewModel @Inject constructor(
     }
 
     fun isOwnPubkey(pubkey: String): Boolean = pubkeyHex == pubkey
+
+    fun muteUser(pubkey: String): MuteResult = muteListRepository.muteUser(pubkey)
+
+    fun reportEvent(eventId: String, authorPubkey: String, type: ReportType) {
+        reportRepository.reportEvent(eventId, authorPubkey, type)
+    }
 
     fun deleteEvent(eventId: String, eventPubkey: String, eventRelayUrl: String?) {
         viewModelScope.launch(Dispatchers.IO) {

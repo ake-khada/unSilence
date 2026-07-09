@@ -74,6 +74,7 @@ private val MediaPlaceholder = Surface1
 internal fun EventMediaGrid(
     images: List<Segment.Image>,
     imageDimensionCache: ImageDimensionCache? = null,
+    onImageClick: ((Int) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     if (images.isEmpty()) return
@@ -84,7 +85,9 @@ internal fun EventMediaGrid(
     if (images.size == 1) {
         EventMediaImage(
             image = images[0],
-            onImageClick = { fullscreenIndex = 0 },
+            onImageClick = {
+                if (onImageClick != null) onImageClick(0) else fullscreenIndex = 0
+            },
             imageDimensionCache = imageDimensionCache,
             modifier = modifier,
         )
@@ -132,7 +135,9 @@ internal fun EventMediaGrid(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .clickable { fullscreenIndex = page },
+                        .clickable {
+                            if (onImageClick != null) onImageClick(page) else fullscreenIndex = page
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     AsyncImage(

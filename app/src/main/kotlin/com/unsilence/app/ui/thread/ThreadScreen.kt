@@ -62,6 +62,7 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
@@ -105,6 +106,7 @@ fun ThreadScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar = LocalShowSnackbar.current
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
     var emojiReactTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -303,6 +305,7 @@ fun ThreadScreen(
                                     sensitiveMode       = sensitiveMode,
                                     isSensitive         = note.hasContentWarning,
                                     contentWarningReason = note.contentWarningReason,
+                                    onLongPress         = { actionsRow = note },
                                     wotLookup           = { key -> wotLookups[key] },
                                     feedWotDisplayMode  = feedWotDisplayMode,
                                 )
@@ -400,6 +403,7 @@ fun ThreadScreen(
                                         sensitiveMode       = sensitiveMode,
                                         isSensitive         = reply.hasContentWarning,
                                         contentWarningReason = reply.contentWarningReason,
+                                        onLongPress         = { actionsRow = reply },
                                         wotLookup           = { key -> wotLookups[key] },
                                         feedWotDisplayMode  = feedWotDisplayMode,
                                     )
@@ -458,6 +462,16 @@ fun ThreadScreen(
             onDismiss = { videoScope.dismissFullscreen() },
         )
     }
+
+    PostActionsHost(
+        row = actionsRow,
+        profileFlow = viewModel::profileFlow,
+        canDelete = { row -> actionsViewModel.isOwnPubkey(row.pubkey) },
+        onMuteUser = actionsViewModel::muteUser,
+        onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
+        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        onDismiss = { actionsRow = null },
+    )
 
     // ── Full emoji picker sheet ─────────────────────────────────────────────
     if (showFullEmojiPicker && emojiReactTarget != null) {
