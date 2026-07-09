@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.init.InitGate
+import com.unsilence.app.data.memory.exceedsHashtagCap
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.isMuted
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
@@ -204,27 +206,34 @@ class FeedViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly, SensitiveContentMode.BLUR)
 
     private val eventsWithFilter = combine(_events, _filter) { events, filter -> events to filter }
+    private val feedSafetyFlow = combine(
+        memoryEventStore.ownMuteListFlow(),
+        relayPreferencesStore.hashtagCapFlow(),
+        relayPreferencesStore.sensitiveContentModeFlow(),
+        memoryEventStore.feedSignalFlow,
+    ) { muteList, hashtagCap, sensitiveMode, _ ->
+        FeedSafety(muteList, hashtagCap, sensitiveMode)
+    }
 
     val feedRows: StateFlow<List<FeedRow>> =
         combine(
             eventsWithFilter,
             _contentFilter,
-            memoryEventStore.ownMuteListFlow(),
-            relayPreferencesStore.sensitiveContentModeFlow(),
-            memoryEventStore.feedSignalFlow,
-        ) { eventFilterPair, cf, muteList, scm, _ ->
+            feedSafetyFlow,
+        ) { eventFilterPair, cf, safety ->
             val (events, filter) = eventFilterPair
             if (events.isEmpty()) {
                 feedRowCache.evictAll()
                 return@combine emptyList()
             }
-            val hideSensitive = scm == SensitiveContentMode.HIDE
+            val hideSensitive = safety.sensitiveMode == SensitiveContentMode.HIDE
             val nowSec = System.currentTimeMillis() / 1000L
             val preActivityCandidates = events.asSequence()
                 .filterNot { memoryEventStore.isDeleted(it) }
+                .filter { !isMuted(it, safety.muteList) }
+                .filter { !exceedsHashtagCap(it, safety.hashtagCap) }
                 .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
                 .filter { matchesContentFilter(it, cf) }
-                .filter { !isMuted(it, muteList) }
                 .filter { !hideSensitive || !it.hasContentWarning }
                 .toList()
             requestActivityCandidateSweep(filter, preActivityCandidates)
@@ -1048,30 +1057,11 @@ class FeedViewModel @Inject constructor(
     fun reportEvent(eventId: String, authorPubkey: String, type: ReportType) =
         reportRepository.reportEvent(eventId, authorPubkey, type)
 
-    private fun isMuted(evt: NostrEvent, muteList: MuteList?): Boolean {
-        if (muteList == null) return false
-        // Pubkey mute (public + private)
-        if (evt.pubkey in muteList.pubkeys || evt.pubkey in muteList.privatePubkeys) return true
-        // Event ID mute (public + private)
-        if (evt.id in muteList.eventIds || evt.id in muteList.privateEventIds) return true
-        // Word mute (public + private) — check against lowercased content.
-        // Skip for kind-6 reposts: content is a JSON envelope (NIP-18), not user text.
-        if (evt.kind != 6) {
-            val lowerContent by lazy(LazyThreadSafetyMode.NONE) { evt.content.lowercase() }
-            for (word in muteList.words) { if (lowerContent.contains(word)) return true }
-            for (word in muteList.privateWords) { if (lowerContent.contains(word)) return true }
-        }
-        // Hashtag mute (public + private) — check t-tags on the event
-        if (muteList.hashtags.isNotEmpty() || muteList.privateHashtags.isNotEmpty()) {
-            for (tag in evt.tags) {
-                if (tag.size >= 2 && tag[0] == "t") {
-                    val ht = tag[1].lowercase()
-                    if (ht in muteList.hashtags || ht in muteList.privateHashtags) return true
-                }
-            }
-        }
-        return false
-    }
+    private data class FeedSafety(
+        val muteList: MuteList?,
+        val hashtagCap: Int?,
+        val sensitiveMode: SensitiveContentMode,
+    )
 
     private data class ResubKey(
         val state: ColdStartState,

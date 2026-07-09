@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -11,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import android.util.Log
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
+import com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP
 import com.unsilence.app.data.memory.SensitiveContentMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +45,8 @@ private val KEY_WOT_PROVIDER_SOURCE = stringPreferencesKey("wot_provider_source"
 private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
 private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
 private val KEY_FEED_WOT_DISPLAY_MODE = stringPreferencesKey("feed_wot_display_mode")
+private val KEY_HASHTAG_CAP = intPreferencesKey("hashtag_cap")
+private const val HASHTAG_CAP_OFF = 0
 
 enum class WotProviderSource {
     DEFAULT,
@@ -228,6 +232,21 @@ class RelayPreferencesStore @Inject constructor(
 
     suspend fun setSensitiveContentMode(mode: SensitiveContentMode) {
         dataStore.edit { prefs -> prefs[KEY_SENSITIVE_CONTENT_MODE] = mode.name }
+    }
+
+    fun hashtagCapFlow(): Flow<Int?> =
+        dataStore.data
+            .map { prefs ->
+                when (val raw = prefs[KEY_HASHTAG_CAP]) {
+                    null -> DEFAULT_HASHTAG_CAP
+                    HASHTAG_CAP_OFF -> null
+                    else -> raw.coerceAtLeast(1)
+                }
+            }
+            .distinctUntilChanged()
+
+    suspend fun setHashtagCap(cap: Int?) {
+        dataStore.edit { prefs -> prefs[KEY_HASHTAG_CAP] = cap ?: HASHTAG_CAP_OFF }
     }
 
     private fun Preferences.toWotProviderPrefs(): WotProviderPrefs {

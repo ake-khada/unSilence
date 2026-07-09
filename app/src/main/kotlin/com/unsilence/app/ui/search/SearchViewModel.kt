@@ -4,13 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
+import com.unsilence.app.data.memory.exceedsHashtagCap
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.memory.isMuted
+import com.unsilence.app.data.memory.isPubkeyMuted
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
+import com.unsilence.app.data.memory.normalizedMutedHashtags
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
@@ -71,6 +75,8 @@ private data class SearchResultsBundle(
     val tagNotes: List<FeedRow>,
     val relayNotes: List<FeedRow>,
     val people: List<UserEntity>,
+    val muteList: MuteList? = null,
+    val hashtagCap: Int? = null,
 )
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
@@ -186,14 +192,13 @@ class SearchViewModel @Inject constructor(
                 memoryEventStore.ownMuteListFlow(),
                 memoryEventStore.profileSignalFlow,
             ) { candidates, muteList, _ ->
-                val mutedHashtags = muteList.normalizedMutedHashtags()
-                val mutedPubkeys = muteList.mutedPubkeys()
+                val mutedHashtags = normalizedMutedHashtags(muteList)
                 val hashtags = candidates.hashtags
                     .filterNot { (tag, _) -> normalizeHashtag(tag) in mutedHashtags }
                     .take(TRENDING_DISPLAY_LIMIT)
                 val users = candidates.users
                     .map { it.withLatestProfile() }
-                    .filterNot { it.pubkey in mutedPubkeys }
+                    .filterNot { isPubkeyMuted(it.pubkey, muteList) }
                     .take(TRENDING_DISPLAY_LIMIT)
                 hashtags to users
             }.collect { (hashtags, users) ->
@@ -294,7 +299,7 @@ class SearchViewModel @Inject constructor(
                     } else {
                         memoryEventStore.searchUsersFlow(query)
                     }
-                    combine(
+                    val searchResultsFlow = combine(
                         localNotesFlow,
                         tagNotesFlow,
                         relayResults,
@@ -302,15 +307,25 @@ class SearchViewModel @Inject constructor(
                         memoryEventStore.wotSignalFlow,
                     ) { localNotes, tagNotes, relayNotes, people, _ ->
                         SearchResultsBundle(localNotes, tagNotes, relayNotes, people)
+                    }
+                    val safetyFlow = combine(
+                        memoryEventStore.ownMuteListFlow(),
+                        relayPreferencesStore.hashtagCapFlow(),
+                    ) { muteList, hashtagCap ->
+                        muteList to hashtagCap
+                    }
+                    combine(searchResultsFlow, safetyFlow) { results, safety ->
+                        results.copy(muteList = safety.first, hashtagCap = safety.second)
                     }.collect { results ->
-                        val localNotes = results.localNotes
-                        val relayNotes = results.relayNotes
-                        val people = results.people
+                        val localNotes = filterSearchNoteRows(results.localNotes, results.muteList, results.hashtagCap)
+                        val relayNotes = filterSearchNoteRows(results.relayNotes, results.muteList, results.hashtagCap)
+                        val people = filterSearchPeople(results.people, results.muteList)
                         val mergedNotes = (localNotes + relayNotes)
                             .distinctBy { it.id }
                             .sortedByDescending { it.createdAt }
                         val tagRelayNotes = if (explicitHashtagTag != null) relayNotes else emptyList()
-                        val tagResults = (results.tagNotes + tagRelayNotes)
+                        val localTagNotes = filterSearchNoteRows(results.tagNotes, results.muteList, results.hashtagCap)
+                        val tagResults = (localTagNotes + tagRelayNotes)
                             .distinctBy { it.id }
                             .sortedByDescending { it.createdAt }
                         val sortedPeople = sortPeopleForSearch(people, query, memoryEventStore::wotFor)
@@ -451,16 +466,20 @@ class SearchViewModel @Inject constructor(
     }
 }
 
-private fun MuteList?.normalizedMutedHashtags(): Set<String> {
-    if (this == null) return emptySet()
-    return (hashtags.asSequence() + privateHashtags.asSequence())
-        .map(::normalizeHashtag)
-        .filter { it.isNotEmpty() }
-        .toSet()
+internal fun filterSearchNoteRows(
+    rows: List<FeedRow>,
+    muteList: MuteList?,
+    hashtagCap: Int?,
+): List<FeedRow> = rows.filterNot { row ->
+    isMuted(row, muteList) || exceedsHashtagCap(row, hashtagCap)
 }
 
-private fun MuteList?.mutedPubkeys(): Set<String> =
-    this?.let { it.pubkeys + it.privatePubkeys }.orEmpty()
+internal fun filterSearchPeople(
+    users: List<UserEntity>,
+    muteList: MuteList?,
+): List<UserEntity> = users.filterNot { user ->
+    isPubkeyMuted(user.pubkey, muteList)
+}
 
 private fun normalizeHashtag(tag: String): String =
     tag.trim().trimStart('#').lowercase()

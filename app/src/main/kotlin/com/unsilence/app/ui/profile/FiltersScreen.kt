@@ -76,6 +76,7 @@ fun FiltersScreen(
     BackHandler(onBack = onDismiss)
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val hashtagCap by viewModel.hashtagCap.collectAsStateWithLifecycle()
     val publishSafe by viewModel.publishSafe.collectAsStateWithLifecycle()
     val profileVersion by viewModel.profileVersion.collectAsStateWithLifecycle()
 
@@ -158,6 +159,11 @@ fun FiltersScreen(
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                     SectionLabel("SENSITIVE CONTENT")
                     SegmentedToggle(sensitiveMode) { viewModel.setSensitiveContentMode(it) }
+                    Spacer(Modifier.height(Spacing.medium))
+                    HashtagCapSelector(
+                        current = hashtagCap,
+                        onSelect = viewModel::setHashtagCap,
+                    )
                     Spacer(Modifier.height(Spacing.medium))
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                 }
@@ -270,6 +276,66 @@ fun FiltersScreen(
                 }
 
                 item { Spacer(Modifier.height(Spacing.xxl)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HashtagCapSelector(
+    current: Int?,
+    onSelect: (Int?) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.large),
+    ) {
+        Text(
+            text = "Hide hashtag-stuffed notes",
+            color = Color.White,
+            fontSize = AppType.body,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = "Hides notes with more than N hashtags",
+            color = TextSecondary,
+            fontSize = AppType.caption,
+        )
+        Spacer(Modifier.height(Spacing.small))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+        ) {
+            listOf<Pair<String, Int?>>(
+                "Off" to null,
+                "3" to 3,
+                "5" to 5,
+                "10" to 10,
+            ).forEach { (label, value) ->
+                val selected = current == value
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Surface2)
+                        .border(
+                            width = 1.dp,
+                            color = if (selected) Brand else Color.White.copy(alpha = 0.10f),
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .clickable { onSelect(value) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        color = if (selected) Brand else TextSecondary,
+                        fontSize = AppType.bodySmall,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
             }
         }
     }
