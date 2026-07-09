@@ -3,16 +3,18 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -20,27 +22,32 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
-import coil3.compose.SubcomposeAsyncImage
+import com.unsilence.app.data.media.SaveMediaKind
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.Brand
@@ -49,6 +56,10 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
+import me.saket.telephoto.zoomable.rememberZoomableImageState
+import me.saket.telephoto.zoomable.rememberZoomableState
 
 private val MediaPlaceholder = Surface1
 
@@ -262,7 +273,7 @@ internal fun EventMediaImage(
     }
 }
 
-/** Full-screen image viewer dialog with horizontal pager and dot indicators. */
+/** Full-screen image viewer dialog with zoomable horizontal pager pages. */
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 private fun FullScreenImageDialog(
@@ -277,74 +288,117 @@ private fun FullScreenImageDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                ) { onDismiss() },
+                .background(Color.Black),
         ) {
             val pagerState = rememberPagerState(
                 initialPage = initialIndex,
                 pageCount   = { imageUrls.size },
             )
+            val saveController = rememberMediaSaveController(SaveMediaKind.IMAGE)
+            val zoomFractions = remember(imageUrls) { mutableStateMapOf<Int, Float>() }
+            val currentZoomFraction = zoomFractions[pagerState.currentPage] ?: 0f
+            val isZoomed = currentZoomFraction > 0.01f
+            var chromeVisible by remember { mutableStateOf(true) }
+            val showChrome = chromeVisible && !isZoomed
+
+            LaunchedEffect(pagerState.currentPage) {
+                chromeVisible = true
+            }
 
             HorizontalPager(
-                state    = pagerState,
-                modifier = Modifier.fillMaxSize(),
+                state             = pagerState,
+                userScrollEnabled = !isZoomed,
+                modifier          = Modifier.fillMaxSize(),
             ) { page ->
-                SubcomposeAsyncImage(
-                    model              = imageUrls[page],
-                    contentDescription = null,
-                    contentScale       = ContentScale.Fit,
-                    loading = {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            CircularProgressIndicator(color = Color.White)
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { /* consume click so background dismiss doesn't fire */ },
+                ZoomableImagePage(
+                    url = imageUrls[page],
+                    onTap = { chromeVisible = !chromeVisible },
+                    onZoomFractionChanged = { zoomFractions[page] = it },
                 )
             }
 
-            if (imageUrls.size > 1) {
+            if (showChrome) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(96.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Black.copy(alpha = 0.70f),
+                                    Color.Transparent,
+                                ),
+                            ),
+                        ),
+                )
                 Row(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 32.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    repeat(imageUrls.size) { index ->
-                        Box(
-                            modifier = Modifier
-                                .size(if (pagerState.currentPage == index) 8.dp else 6.dp)
-                                .background(
-                                    color = if (pagerState.currentPage == index) Color.White else Color.White.copy(alpha = 0.4f),
-                                    shape = CircleShape,
-                                ),
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector        = Icons.Filled.Close,
+                            contentDescription = "Close",
+                            tint               = Color.White,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text       = "${pagerState.currentPage + 1} / ${imageUrls.size}",
+                        color      = Color.White,
+                        fontSize   = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    imageUrls.getOrNull(pagerState.currentPage)?.let { currentUrl ->
+                        MediaDownloadButton(
+                            url        = currentUrl,
+                            controller = saveController,
                         )
                     }
                 }
             }
 
-            IconButton(
-                onClick  = onDismiss,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp),
-            ) {
-                Icon(
-                    imageVector        = Icons.Filled.Close,
-                    contentDescription = "Close",
-                    tint               = Color.White,
+            saveController.message?.let { message ->
+                MediaSaveStatusPill(
+                    message = message,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp),
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ZoomableImagePage(
+    url: String,
+    onTap: () -> Unit,
+    onZoomFractionChanged: (Float) -> Unit,
+) {
+    val zoomableState = rememberZoomableState()
+    val imageState = rememberZoomableImageState(zoomableState)
+
+    LaunchedEffect(zoomableState) {
+        snapshotFlow { zoomableState.zoomFraction ?: 0f }
+            .distinctUntilChanged()
+            .collect { onZoomFractionChanged(it) }
+    }
+
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        ZoomableAsyncImage(
+            model              = url,
+            contentDescription = null,
+            state              = imageState,
+            contentScale       = ContentScale.Fit,
+            onClick            = { onTap() },
+            modifier           = Modifier.fillMaxSize(),
+        )
     }
 }
