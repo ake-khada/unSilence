@@ -8,13 +8,12 @@ import com.vitorpamplona.quartz.nip55AndroidSigner.api.permission.Permission
 import com.vitorpamplona.quartz.nip55AndroidSigner.client.ExternalSignerLogin
 import com.vitorpamplona.quartz.nip55AndroidSigner.client.isExternalSignerInstalled
 
-private const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
-
 /**
  * Thin wrapper around Quartz's NIP-55 foreground signer API.
  * Covers login, permission registration, and re-authorization flows.
  */
 object AmberSigner {
+    const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
 
     /**
      * Full set of permissions unSilence needs over its lifetime. Requested at login

@@ -67,6 +67,7 @@ import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
+import com.unsilence.app.ui.settings.keys.KeysScreen
 import com.unsilence.app.ui.settings.MediaUploadSettingsScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -102,6 +103,7 @@ fun SettingsScreen(
     var showDiscovery by remember { mutableStateOf(false) }
     var showMediaUpload by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
+    var showKeys by remember { mutableStateOf(false) }
     var showSocialGraph by remember { mutableStateOf(false) }
     var showCustomEmojis by remember { mutableStateOf(false) }
     var showDrafts by remember { mutableStateOf(false) }
@@ -203,7 +205,7 @@ fun SettingsScreen(
 
                 // ── ADVANCED ───────────────────────────────────────────────────
                 GroupLabel("Advanced")
-                SoonRow(Icons.Filled.Key, "Keys")
+                SettingsRow(Icons.Filled.Key, "Keys", "Public key, signer, and recovery") { showKeys = true }
                 SoonRow(Icons.Filled.Code, "Console")
 
                 // ── Danger zone ────────────────────────────────────────────────
@@ -252,6 +254,7 @@ fun SettingsScreen(
     }
     if (showMediaUpload) MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
     if (showFilters) FiltersScreen(onDismiss = { showFilters = false })
+    if (showKeys) KeysScreen(onDismiss = { showKeys = false })
     if (showSocialGraph) SocialGraphScreen(onDismiss = { showSocialGraph = false })
     if (showCustomEmojis) com.unsilence.app.ui.settings.CustomEmojisScreen(onDismiss = { showCustomEmojis = false })
     if (showDrafts) {

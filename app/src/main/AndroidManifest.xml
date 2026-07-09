@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
+        <package android:name="com.greenart7c3.nostrsigner" />
+
         <!-- NIP-55 Amber signer -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
@@ -15,7 +17,7 @@
     <application
         android:name=".UnsilenceApp"
         android:allowBackup="false"
-        android:fullBackupContent="false"
+        android:fullBackupContent="@xml/full_backup_content"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
