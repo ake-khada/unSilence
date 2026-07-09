@@ -37,6 +37,10 @@ class FiltersViewModel @Inject constructor(
         relayPreferencesStore.sensitiveContentModeFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SensitiveContentMode.BLUR)
 
+    val hashtagCap: StateFlow<Int?> =
+        relayPreferencesStore.hashtagCapFlow()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP)
+
     val publishSafe: StateFlow<Boolean> = muteListRepository.publishSafe
 
     val profileVersion: StateFlow<Long> = memoryEventStore.profileSignalFlow
@@ -63,6 +67,10 @@ class FiltersViewModel @Inject constructor(
 
     fun setSensitiveContentMode(mode: SensitiveContentMode) {
         viewModelScope.launch { relayPreferencesStore.setSensitiveContentMode(mode) }
+    }
+
+    fun setHashtagCap(cap: Int?) {
+        viewModelScope.launch { relayPreferencesStore.setHashtagCap(cap) }
     }
 
     /** Re-emit the Amber re-authorize signal. MainActivity picks it up and fires the intent. */
