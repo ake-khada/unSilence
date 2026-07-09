@@ -3,6 +3,7 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,18 +16,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,28 +34,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.domain.model.ActivityPreset
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
+import com.unsilence.app.domain.model.activityPreset
+import com.unsilence.app.domain.model.label
+import com.unsilence.app.domain.model.sinceLabel
+import com.unsilence.app.domain.model.withActivityPreset
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.Text3
-
-// ── Zap slider breakpoints (sats) ───────────────────────────────────────────
-private val ZAP_BREAKPOINTS = longArrayOf(
-    0, 100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 210_000, 500_000, 1_000_000, 5_000_000,
-)
-
-private fun zapSliderToSats(fraction: Float): Long {
-    val idx = (fraction * (ZAP_BREAKPOINTS.size - 1)).toInt()
-        .coerceIn(0, ZAP_BREAKPOINTS.size - 1)
-    return ZAP_BREAKPOINTS[idx]
-}
-
-private fun satsToZapSlider(sats: Long): Float {
-    val idx = ZAP_BREAKPOINTS.indexOfFirst { it >= sats }.coerceAtLeast(0)
-    return idx.toFloat() / (ZAP_BREAKPOINTS.size - 1).toFloat()
-}
+import com.unsilence.app.ui.theme.White
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -69,40 +57,30 @@ fun FilterBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Local editable state
-    var showTypes     by remember { mutableStateOf(currentFilter.showTypes) }
-    var sinceHours    by remember { mutableStateOf(currentFilter.sinceHours) }
-    var minReplies    by remember { mutableFloatStateOf(currentFilter.minReplies.toFloat()) }
-    var minReposts    by remember { mutableFloatStateOf(currentFilter.minReposts.toFloat()) }
-    var minReactions  by remember { mutableFloatStateOf(currentFilter.minReactions.toFloat()) }
-    var zapSlider     by remember { mutableFloatStateOf(satsToZapSlider(currentFilter.minZapSats)) }
+    var showTypes by remember(currentFilter) {
+        mutableStateOf(currentFilter.showTypes.takeIf { it.isNotEmpty() } ?: setOf(ShowType.ALL))
+    }
+    var sinceHours by remember(currentFilter) { mutableStateOf(currentFilter.sinceHours) }
+    var activityPreset by remember(currentFilter) { mutableStateOf(currentFilter.activityPreset()) }
 
-    fun buildFilter() = FeedFilter(
-        showTypes    = showTypes,
-        sinceHours   = sinceHours,
-        minReplies   = minReplies.toInt(),
-        minReposts   = minReposts.toInt(),
-        minReactions = minReactions.toInt(),
-        minZapSats   = zapSliderToSats(zapSlider),
-    )
+    fun buildFilter(): FeedFilter =
+        FeedFilter(
+            showTypes = showTypes.takeIf { it.isNotEmpty() } ?: setOf(ShowType.ALL),
+            sinceHours = sinceHours,
+        ).withActivityPreset(activityPreset)
 
     fun reset() {
-        showTypes    = setOf(ShowType.ALL)
-        sinceHours   = null
-        minReplies   = 0f
-        minReposts   = 0f
-        minReactions = 0f
-        zapSlider    = 0f
+        showTypes = setOf(ShowType.ALL)
+        sinceHours = null
+        activityPreset = ActivityPreset.ANY
     }
 
     ModalBottomSheet(
-        onDismissRequest = {
-            onApply(buildFilter())
-            onDismiss()
-        },
-        sheetState     = sheetState,
-        shape          = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-        dragHandle     = {
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Black,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        dragHandle = {
             Box(
                 modifier = Modifier
                     .padding(vertical = 10.dp)
@@ -117,109 +95,81 @@ fun FilterBottomSheet(
                 .navigationBarsPadding()
                 .padding(bottom = 16.dp),
         ) {
-            // ── SHOW section ─────────────────────────────────────────────
             SectionLabel("SHOW")
-            FlowRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement   = Arrangement.spacedBy(8.dp),
-            ) {
+            ChipRow {
                 val isAll = ShowType.ALL in showTypes
+                FilterChip("All", selected = isAll) { showTypes = setOf(ShowType.ALL) }
 
-                FilterChip("All", isAll) {
-                    showTypes = setOf(ShowType.ALL)
-                }
-
-                fun toggleType(type: ShowType) {
+                fun toggle(type: ShowType) {
                     val current = if (isAll) emptySet() else showTypes
                     val next = if (type in current) current - type else current + type
-                    showTypes = if (next.isEmpty()) setOf(ShowType.ALL) else next
+                    showTypes = next.takeIf { it.isNotEmpty() } ?: setOf(ShowType.ALL)
                 }
 
-                FilterChip("Text", !isAll && ShowType.TEXT in showTypes) { toggleType(ShowType.TEXT) }
-                FilterChip("Images", !isAll && ShowType.IMAGES in showTypes) { toggleType(ShowType.IMAGES) }
-                FilterChip("Video", !isAll && ShowType.VIDEO in showTypes) { toggleType(ShowType.VIDEO) }
-                FilterChip("Articles", !isAll && ShowType.ARTICLES in showTypes) { toggleType(ShowType.ARTICLES) }
-                FilterChip("Reposts", !isAll && ShowType.REPOSTS in showTypes) { toggleType(ShowType.REPOSTS) }
-            }
-
-            Spacer(Modifier.height(20.dp))
-
-            // ── WHEN section ─────────────────────────────────────────────
-            SectionLabel("WHEN")
-            FlowRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement   = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(
-                    1 to "1h", 6 to "6h", 24 to "24h",
-                    168 to "Week", 720 to "Month", null to "All",
-                ).forEach { (hours, label) ->
-                    FilterChip(label, sinceHours == hours) { sinceHours = hours }
+                listOf(ShowType.TEXT, ShowType.IMAGES, ShowType.VIDEO, ShowType.ARTICLES).forEach { type ->
+                    FilterChip(type.label, selected = !isAll && type in showTypes) { toggle(type) }
                 }
             }
 
             Spacer(Modifier.height(20.dp))
 
-            // ── ENGAGEMENT section ───────────────────────────────────────
-            SectionLabel("ENGAGEMENT")
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                EngagementSlider(
-                    label = "\uD83D\uDCAC Replies",
-                    value = minReplies,
-                    onValueChange = { minReplies = it },
-                    range = 0f..100f,
-                    steps = 99,
-                    displayValue = minReplies.toInt().toString(),
+            SectionLabel("POSTED WITHIN")
+            ChipRow {
+                val options = listOf(
+                    null to "Any time",
+                    1 to sinceLabel(1),
+                    6 to sinceLabel(6),
+                    24 to sinceLabel(24),
+                    168 to sinceLabel(168),
                 )
-                EngagementSlider(
-                    label = "\uD83D\uDD04 Reposts",
-                    value = minReposts,
-                    onValueChange = { minReposts = it },
-                    range = 0f..100f,
-                    steps = 99,
-                    displayValue = minReposts.toInt().toString(),
-                )
-                EngagementSlider(
-                    label = "\u2764\uFE0F Reactions",
-                    value = minReactions,
-                    onValueChange = { minReactions = it },
-                    range = 0f..100f,
-                    steps = 99,
-                    displayValue = minReactions.toInt().toString(),
-                )
-                EngagementSlider(
-                    label = "\u26A1 Zaps (sats)",
-                    value = zapSlider,
-                    onValueChange = { zapSlider = it },
-                    range = 0f..1f,
-                    steps = ZAP_BREAKPOINTS.size - 2,
-                    displayValue = zapSliderToSats(zapSlider).toCompactSats(),
-                )
+                options.forEach { (hours, label) ->
+                    FilterChip(label, selected = sinceHours == hours) { sinceHours = hours }
+                }
             }
 
             Spacer(Modifier.height(20.dp))
 
-            // ── Actions ──────────────────────────────────────────────────
+            SectionLabel("ACTIVITY")
+            ChipRow {
+                ActivityPreset.entries.forEach { preset ->
+                    FilterChip(preset.label, selected = activityPreset == preset) {
+                        activityPreset = preset
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(22.dp))
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = { reset() }) {
-                    Text("Reset", color = Color(0xFF888888), fontSize = AppType.body)
+                    Text("Reset", color = Text3, fontSize = AppType.body)
                 }
-                TextButton(onClick = {
-                    onApply(buildFilter())
-                    onDismiss()
-                }) {
-                    Text("Apply", color = Brand, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Brand)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            onApply(buildFilter())
+                            onDismiss()
+                        }
+                        .padding(horizontal = 22.dp, vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Apply",
+                        color = Black,
+                        fontSize = AppType.body,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
         }
@@ -227,76 +177,52 @@ fun FilterBottomSheet(
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text       = text,
-        color      = Text3,
-        fontSize   = AppType.caption,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.sp,
-        modifier   = Modifier.padding(start = 16.dp, bottom = 8.dp),
-    )
+private fun ChipRow(content: @Composable () -> Unit) {
+    FlowRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        content()
+    }
 }
 
 @Composable
-private fun EngagementSlider(
-    label: String,
-    value: Float,
-    onValueChange: (Float) -> Unit,
-    range: ClosedFloatingPointRange<Float>,
-    steps: Int,
-    displayValue: String,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text  = label,
-            color = Color(0xFFBBBBBB),
-            fontSize = AppType.bodySmall,
-            modifier = Modifier.width(110.dp),
-        )
-        Slider(
-            value         = value,
-            onValueChange = onValueChange,
-            valueRange    = range,
-            steps         = steps,
-            modifier      = Modifier.weight(1f),
-            colors        = SliderDefaults.colors(
-                thumbColor            = Brand,
-                activeTrackColor      = Brand,
-                inactiveTrackColor    = Color(0xFF333333),
-                activeTickColor       = Color.Transparent,
-                inactiveTickColor     = Color.Transparent,
-            ),
-        )
-        Text(
-            text  = displayValue,
-            color = if (value > 0f) Brand else Text3,
-            fontSize = AppType.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.width(48.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.End,
-        )
-    }
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        color = Text3,
+        fontSize = AppType.caption,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
+    )
 }
 
 @Composable
 private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (selected) Brand else Color.Transparent)
-            .border(1.dp, if (selected) Brand else Color(0xFF444444), RoundedCornerShape(20.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .clip(RoundedCornerShape(18.dp))
+            .background(Surface2)
+            .border(
+                width = 1.dp,
+                color = if (selected) Brand else Color.Transparent,
+                shape = RoundedCornerShape(18.dp),
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text       = label,
-            color      = if (selected) Black else Color.White,
-            fontSize   = AppType.bodySmall,
+            text = label,
+            color = if (selected) Brand else White.copy(alpha = 0.82f),
+            fontSize = AppType.bodySmall,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }

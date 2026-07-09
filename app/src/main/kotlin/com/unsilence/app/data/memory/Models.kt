@@ -207,7 +207,7 @@ data class EventEntry(val id: String, val createdAt: Long)
  * @param contentFilter 0 = all, 1 = notes only (no replies), 2 = replies only
  * @param relayUrls When non-null, only events seen on at least one of these relays pass.
  */
-data class FeedFilter(
+data class FeedQuery(
     val kinds: Set<Int> = setOf(1, 6, 30023),
     val followedPubkeys: Set<String>? = null,
     val contentFilter: Int = 0,

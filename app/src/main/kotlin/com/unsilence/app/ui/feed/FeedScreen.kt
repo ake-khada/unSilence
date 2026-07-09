@@ -7,9 +7,11 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,7 +23,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -36,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -48,6 +53,8 @@ import androidx.compose.ui.unit.IntOffset
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.domain.model.summaryLabel
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -61,10 +68,12 @@ import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
+import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import androidx.compose.foundation.layout.padding
@@ -112,6 +121,7 @@ fun FeedScreen(
     ),
 ) {
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
+    val currentFilter by viewModel.filterFlow.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -158,6 +168,7 @@ fun FeedScreen(
     val events = feedEvents
     val liveArrivalIds by viewModel.liveArrivalIds.collectAsStateWithLifecycle()
     val showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY
+    val filterSummary = currentFilter.summaryLabel()
 
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
@@ -254,13 +265,14 @@ fun FeedScreen(
 
     // Tab row: constant height, slides via offset (no height-collapse jerk)
     val tabRowHeight = 48.dp
-    val totalTopPadding = staticTopPadding + tabRowHeight
+    val filterPillHeight = if (filterSummary != null) 36.dp else 0.dp
+    val totalTopPadding = staticTopPadding + tabRowHeight + filterPillHeight
     val tabRowOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(totalTopPadding + 8.dp),
         animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
         label         = "tabRowOffset",
     )
-    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight
+    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight + filterPillHeight
     val refreshLineProgress = remember { Animatable(0f) }
     LaunchedEffect(isRefreshing) {
         if (isRefreshing) {
@@ -474,6 +486,22 @@ fun FeedScreen(
                 onSelect = { viewModel.setContentFilter(it) },
             )
         }
+        if (filterSummary != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .offset { IntOffset(0, (staticTopPadding + tabRowOffset + tabRowHeight).roundToPx()) }
+                    .fillMaxWidth()
+                    .height(filterPillHeight)
+                    .background(Black),
+                contentAlignment = Alignment.Center,
+            ) {
+                ActiveFeedFilterPill(
+                    summary = filterSummary,
+                    onClear = { viewModel.updateFilter(FeedFilter()) },
+                )
+            }
+        }
     }
 
     articleRow?.let { row ->
@@ -552,6 +580,43 @@ fun FeedScreen(
                 emojiReactTarget = null
             },
             categories = actionsViewModel.getSubscribedEmojisBySet(),
+        )
+    }
+}
+
+@Composable
+private fun ActiveFeedFilterPill(
+    summary: String,
+    onClear: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Surface2)
+            .border(
+                width = 1.dp,
+                color = Brand.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(16.dp),
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { onClear() }
+            .padding(horizontal = Spacing.medium, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = summary,
+            color = Brand,
+            fontSize = AppType.caption,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Icon(
+            imageVector = Icons.Filled.Close,
+            contentDescription = "Clear filter",
+            tint = Brand,
+            modifier = Modifier.size(12.dp),
         )
     }
 }

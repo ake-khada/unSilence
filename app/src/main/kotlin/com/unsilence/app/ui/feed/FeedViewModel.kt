@@ -36,6 +36,7 @@ import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -190,6 +191,9 @@ class FeedViewModel @Inject constructor(
     private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
     val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
 
+    private val _filter = MutableStateFlow(FeedFilter())
+    val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
+
     // ── feedRows derivation (incremental row cache) ────────────────────────────
 
     /** Bounded row cache — retains rows across slice swaps so pull-refresh hits instead of re-synth. */
@@ -199,24 +203,34 @@ class FeedViewModel @Inject constructor(
         relayPreferencesStore.sensitiveContentModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, SensitiveContentMode.BLUR)
 
+    private val eventsWithFilter = combine(_events, _filter) { events, filter -> events to filter }
+
     val feedRows: StateFlow<List<FeedRow>> =
         combine(
-            _events,
+            eventsWithFilter,
             _contentFilter,
             memoryEventStore.ownMuteListFlow(),
             relayPreferencesStore.sensitiveContentModeFlow(),
             memoryEventStore.feedSignalFlow,
-        ) { events, cf, muteList, scm, _ ->
+        ) { eventFilterPair, cf, muteList, scm, _ ->
+            val (events, filter) = eventFilterPair
             if (events.isEmpty()) {
                 feedRowCache.evictAll()
                 return@combine emptyList()
             }
             val hideSensitive = scm == SensitiveContentMode.HIDE
-            val displayed = events.asSequence()
+            val nowSec = System.currentTimeMillis() / 1000L
+            val preActivityCandidates = events.asSequence()
                 .filterNot { memoryEventStore.isDeleted(it) }
+                .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
                 .filter { matchesContentFilter(it, cf) }
                 .filter { !isMuted(it, muteList) }
                 .filter { !hideSensitive || !it.hasContentWarning }
+                .toList()
+            requestActivityCandidateSweep(filter, preActivityCandidates)
+
+            val displayed = preActivityCandidates.asSequence()
+                .filter { matchesActivityThresholds(it, filter) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) {
@@ -320,12 +334,7 @@ class FeedViewModel @Inject constructor(
         // combine on _contentFilter. NO subscription restart. See CG-R1.
     }
 
-    // -- Filter (kinds, dates, etc -- for filter sheet) ------------------------
-
-    private val _filter = MutableStateFlow(com.unsilence.app.domain.model.FeedFilter())
-    val filterFlow: StateFlow<com.unsilence.app.domain.model.FeedFilter> = _filter.asStateFlow()
-
-    fun updateFilter(filter: com.unsilence.app.domain.model.FeedFilter) {
+    fun updateFilter(filter: FeedFilter) {
         _filter.value = filter
     }
 
@@ -548,7 +557,8 @@ class FeedViewModel @Inject constructor(
 
         // Pre-load MES cached events for instant render (mirrors Jumble's
         // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
-        val cachedEvents = loadCachedEvents(key.type)
+        lastActivitySweepKey = null
+        val cachedEvents = loadCachedEvents(key.type, key.filter)
         if (resetView) {
             _events.value = cachedEvents
             _newEvents.value = emptyList()
@@ -559,8 +569,7 @@ class FeedViewModel @Inject constructor(
             _events.update { TimelineMerge.merge(it, cachedEvents) }
         }
 
-        // Always fetch all feed kinds; Notes↔Conversations is client-side via feedRows.
-        val subRequests = buildSubRequests(key.type)
+        val subRequests = buildSubRequests(key.type, key.filter)
         if (subRequests.isEmpty()) {
             _isLoading.value = false
             feedTrace { "setupSubscription: no subRequests, idle" }
@@ -844,7 +853,7 @@ class FeedViewModel @Inject constructor(
         // One-shot: merge cached events when snapshot restore completes.
         viewModelScope.launch {
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
-            val cached = loadCachedEvents(_feedType.value)
+            val cached = loadCachedEvents(_feedType.value, _filter.value)
             if (cached.isNotEmpty() && _events.value.size < SNAPSHOT_MERGE_CEILING) {
                 feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_events.value.size} current" }
                 _events.update { current -> TimelineMerge.merge(current, cached) }
@@ -852,8 +861,9 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun loadCachedEvents(type: FeedType): List<NostrEvent> {
-        val kinds = setOf(1, 6, 16, 20, 21, 30023)
+    private fun loadCachedEvents(type: FeedType, filter: FeedFilter): List<NostrEvent> {
+        val kinds = filter.enabledKinds.toSet()
+        if (kinds.isEmpty()) return emptyList()
         return when (type) {
             is FeedType.Following -> {
                 val follows = keyManager.getPublicKeyHex()
@@ -888,7 +898,7 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun buildSubRequests(type: FeedType): List<SubRequest> {
+    private fun buildSubRequests(type: FeedType, filter: FeedFilter): List<SubRequest> {
         val ownPubkey = keyManager.getPublicKeyHex()
         val blockedRelays = ownPubkey
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
@@ -896,15 +906,18 @@ class FeedViewModel @Inject constructor(
         val readRelays = ownPubkey
             ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
             ?: emptyList()
-        // Always REQ the full feed kind set. Notes↔Conversations is a
-        // client-side projection in feedRows via matchesContentFilter
-        // (audit finding CG-R1). The bandwidth cost of fetching reposts/
-        // articles/imeta-pictures the Conversations tab doesn't display
-        // is bounded by the 300-event limit.
-        val kinds = listOf(1, 6, 16, 20, 21, 30023)
+        // Narrow relays by the session feed filter where NIP-01 can express it
+        // (kinds + since). FeedRows remains the source of truth because kind-1
+        // media type and activity thresholds are local policy.
+        val kinds = filter.enabledKinds
+        if (kinds.isEmpty()) return emptyList()
+        val filterSince = filter.sinceHours?.let { hours ->
+            (System.currentTimeMillis() / 1000L) - hours * 60L * 60L
+        }
         val config = OutboxRelayResolver.Config(
             kinds = kinds,
             limit = 300,
+            since = filterSince,
         )
         return when (type) {
             is FeedType.Following -> {
@@ -967,6 +980,66 @@ class FeedViewModel @Inject constructor(
         }
     }
 
+    private fun matchesFeedFilterBeforeActivity(
+        evt: NostrEvent,
+        filter: FeedFilter,
+        nowSec: Long,
+    ): Boolean {
+        if (evt.kind !in filter.enabledKinds) return false
+        val model = if (evt.kind == 1 && filter.needsMediaFilter) {
+            memoryEventStore.getEventModel(evt.id)
+        } else {
+            null
+        }
+        if (!matchesShowTypes(evt.kind, evt.content, model, filter)) return false
+        val since = filter.sinceHours?.let { hours -> nowSec - hours * 60L * 60L }
+        return since == null || evt.createdAt >= since
+    }
+
+    private fun matchesActivityThresholds(evt: NostrEvent, filter: FeedFilter): Boolean {
+        if (!filter.hasActivityThresholds()) return true
+        val stats = memoryEventStore.currentStatsSnapshot(evt.id)
+        return stats.replyCount >= filter.minReplies &&
+            stats.repostCount >= filter.minReposts &&
+            stats.reactionCount >= filter.minReactions &&
+            stats.zapTotalSats >= filter.minZapSats
+    }
+
+    private var lastActivitySweepKey: ActivitySweepKey? = null
+
+    private fun requestActivityCandidateSweep(filter: FeedFilter, candidates: List<NostrEvent>) {
+        if (!filter.hasActivityThresholds()) {
+            lastActivitySweepKey = null
+            return
+        }
+        val ids = candidates
+            .asSequence()
+            .take(ACTIVITY_SWEEP_CANDIDATE_LIMIT)
+            .map { it.id }
+            .toList()
+        if (ids.isEmpty()) return
+
+        val key = ActivitySweepKey(filter, ids)
+        if (key == lastActivitySweepKey) return
+
+        val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
+        val eventsById = candidates.associateBy { it.id }
+        val rows = ids.mapNotNull { id ->
+            rowsById[id] ?: eventsById[id]?.let(memoryEventStore::synthesizeFeedRow)
+        }
+        if (rows.isEmpty()) return
+
+        lastActivitySweepKey = key
+        // Activity filters must not depend on viewport rendering: if a Popular
+        // filter hides a row before it renders, the normal viewport-scoped
+        // engagement hydration would never fetch that row's counts. Sweep a
+        // bounded newest candidate window through the existing engagement
+        // coalescer, while the filter predicate itself reads only MES's current
+        // snapshots. The feed can fill in as stats arrive, without blocking UI
+        // on hydration or deadlocking into an empty list.
+        cardHydrator.hydrateEngagement(rows, first = 0, last = rows.lastIndex)
+    }
+
     // ── Mute / Report actions ──────────────────────────────────────────────
 
     fun muteUser(pubkey: String): MuteResult = muteListRepository.muteUser(pubkey)
@@ -1005,10 +1078,17 @@ class FeedViewModel @Inject constructor(
         val followsVersion: Long,
         val ver: Int,
         val refresh: Int,
-        val filter: com.unsilence.app.domain.model.FeedFilter,
+        val filter: FeedFilter,
     ) {
         val subscriptionIdentity: SubscriptionIdentity
-            get() = SubscriptionIdentity(type, followsVersion, ver, refresh, filter)
+            get() = SubscriptionIdentity(
+                type = type,
+                followsVersion = followsVersion,
+                ver = ver,
+                refresh = refresh,
+                enabledKinds = filter.enabledKinds,
+                sinceHours = filter.sinceHours,
+            )
     }
 
     private data class SubscriptionIdentity(
@@ -1016,7 +1096,13 @@ class FeedViewModel @Inject constructor(
         val followsVersion: Long,
         val ver: Int,
         val refresh: Int,
-        val filter: com.unsilence.app.domain.model.FeedFilter,
+        val enabledKinds: List<Int>,
+        val sinceHours: Int?,
+    )
+
+    private data class ActivitySweepKey(
+        val filter: FeedFilter,
+        val ids: List<String>,
     )
 
     private companion object {
@@ -1033,6 +1119,7 @@ class FeedViewModel @Inject constructor(
         /** Approximate on-screen post count — engagement fetch scoped to this. */
         const val VIEWPORT_SIZE = 8
         const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
+        const val ACTIVITY_SWEEP_CANDIDATE_LIMIT = 150
         const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
         /** Debounce window — collapses frantic mashing, not deliberate retries. */
