@@ -89,6 +89,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
@@ -166,6 +167,7 @@ fun UserProfileScreen(
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     var showProfileActions by remember { mutableStateOf(false) }
     var showReportSheet by remember { mutableStateOf(false) }
     var showWotBreakdown by remember { mutableStateOf(false) }
@@ -246,6 +248,7 @@ fun UserProfileScreen(
             wotLookup = { key -> wotLookups[key] },
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
+            onLongPress = { row -> actionsRow = row },
         )
     }
 
@@ -789,6 +792,16 @@ fun UserProfileScreen(
             onDismiss = { videoScope.dismissFullscreen() },
         )
     }
+
+    PostActionsHost(
+        row = actionsRow,
+        profileFlow = viewModel::profileFlow,
+        canDelete = { row -> actionsViewModel.isOwnPubkey(row.pubkey) },
+        onMuteUser = actionsViewModel::muteUser,
+        onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
+        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        onDismiss = { actionsRow = null },
+    )
 
     if (showReportSheet) {
         ReportTypeSheet(

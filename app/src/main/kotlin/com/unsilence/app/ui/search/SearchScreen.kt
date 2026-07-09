@@ -90,6 +90,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.WotImpersonationBadge
 import com.unsilence.app.ui.shared.WotSearchSignal
 import com.unsilence.app.ui.shared.eventFeedItems
@@ -149,6 +150,7 @@ fun SearchScreen(
     val showSnackbar = LocalShowSnackbar.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     val noteListState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
@@ -456,6 +458,7 @@ fun SearchScreen(
                             viewModel,
                             wotLookups,
                             feedWotDisplayMode,
+                            { row -> actionsRow = row },
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             if (state.peopleResults.isNotEmpty()) {
@@ -528,6 +531,7 @@ fun SearchScreen(
                             viewModel,
                             wotLookups,
                             feedWotDisplayMode,
+                            { row -> actionsRow = row },
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             eventFeedItems(
@@ -585,6 +589,16 @@ fun SearchScreen(
             reactionsForEvent     = viewModel::reactionsForEvent,
         )
     }
+
+    PostActionsHost(
+        row = actionsRow,
+        profileFlow = viewModel::profileFlow,
+        canDelete = { row -> actionsViewModel.isOwnPubkey(row.pubkey) },
+        onMuteUser = actionsViewModel::muteUser,
+        onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
+        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        onDismiss = { actionsRow = null },
+    )
 
     // ── Full emoji picker sheet ─────────────────────────────────────────────
     if (showFullEmojiPicker && emojiReactTarget != null) {
@@ -735,7 +749,20 @@ private fun rememberCallbacks(
     viewModel: SearchViewModel,
     wotLookups: Map<String, WotLookup>,
     feedWotDisplayMode: FeedWotDisplayMode,
-): EventActionCallbacks = remember(onNoteClick, onComment, onAuthorClick, onHashtagClick, onQuote, pinnedEmojis, viewModel, wotLookups, feedWotDisplayMode) {
+    onLongPress: (FeedRow) -> Unit,
+): EventActionCallbacks = remember(
+    onNoteClick,
+    onComment,
+    onAuthorClick,
+    onHashtagClick,
+    onQuote,
+    actionsViewModel,
+    pinnedEmojis,
+    viewModel,
+    wotLookups,
+    feedWotDisplayMode,
+    onLongPress,
+) {
     EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,
@@ -762,6 +789,7 @@ private fun rememberCallbacks(
         wotLookup = { pubkey -> wotLookups[pubkey] },
         feedWotDisplayMode = feedWotDisplayMode,
         onWotSubjectsVisible = viewModel::requestWotHydration,
+        onLongPress = onLongPress,
     )
 }
 

@@ -73,6 +73,7 @@ import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
+import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
@@ -140,6 +141,7 @@ fun ArticleReaderScreen(
     val image = model.article?.image ?: articleTagValue(row.tags, "image")
     val hashtags = model.article?.hashtags ?: emptyList()
     val context = LocalContext.current
+    var commentActionsRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // Longform has no standard reading-time tag — derive it from the body word
     // count at ~200 wpm (rounded up, min 1 min). Shown as a caption under the title.
@@ -661,6 +663,7 @@ fun ArticleReaderScreen(
                                 sensitiveMode         = sensitiveMode,
                                 isSensitive           = comment.hasContentWarning,
                                 contentWarningReason  = comment.contentWarningReason,
+                                onLongPress           = { commentActionsRow = comment },
                                 wotLookup             = { key -> wotLookups[key] },
                                 feedWotDisplayMode    = feedWotDisplayMode,
                                 onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
@@ -697,6 +700,16 @@ fun ArticleReaderScreen(
             onDismiss = { commentVideoScope.dismissFullscreen() },
         )
     }
+
+    PostActionsHost(
+        row = commentActionsRow,
+        profileFlow = articleReaderVm::profileFlow,
+        canDelete = { activeRow -> commentActionsVm.isOwnPubkey(activeRow.pubkey) },
+        onMuteUser = commentActionsVm::muteUser,
+        onReport = { activeRow, type -> commentActionsVm.reportEvent(activeRow.id, activeRow.pubkey, type) },
+        onDelete = { activeRow -> commentActionsVm.deleteEvent(activeRow.id, activeRow.pubkey, activeRow.relayUrl) },
+        onDismiss = { commentActionsRow = null },
+    )
 }
 
 private fun articleTagValue(tagsJson: String, key: String): String? = runCatching {

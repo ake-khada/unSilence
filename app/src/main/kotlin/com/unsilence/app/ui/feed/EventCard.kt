@@ -7,6 +7,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -29,16 +32,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.changedToUp
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,6 +71,7 @@ import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Unified event card — replaces NoteCard + ArticleCard.
@@ -136,6 +140,8 @@ fun EventCard(
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val haptics = LocalHapticFeedback.current
+
     // Card flash animation — new-post arrival or thread focus highlight
     val flashAlpha = remember { Animatable(if (isNewPost || isFocused) 1f else 0f) }
     LaunchedEffect(isNewPost) {
@@ -266,11 +272,17 @@ fun EventCard(
             // every animation frame.
             .drawBehind { drawRect(Color.White.copy(alpha = flashAlpha.value * 0.05f)) },
     ) {
-        // Content area — card-level long-press lives here so it doesn't
-        // intercept action-bar gestures (heart long-press → emoji picker,
-        // zap long-press → amount picker).
-        Column(
-            modifier = if (onLongPress != null) Modifier.pointerInput(onLongPress) {
+        // Content area gestures live here so they don't intercept action-bar
+        // gestures (heart long-press -> emoji picker, zap long-press -> amount
+        // picker). The Initial-pass detector is not legacy cruft: it is the
+        // way card-level long-press coexists with clickable children (links,
+        // quotes, media). A Main-pass combinedClickable waits for unconsumed
+        // child presses and never starts its timer there. Embedded QuoteCards
+        // stay long-press-free to avoid nested gesture ambiguity; tapping
+        // their own body still opens the quote.
+        val contentInteractionSource = remember { MutableInteractionSource() }
+        val longPressModifier = if (onLongPress != null) {
+            Modifier.pointerInput(onLongPress) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
@@ -284,6 +296,7 @@ fun EventCard(
                         @Suppress("UNREACHABLE_CODE") true
                     }
                     if (cancelled == null) {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         onLongPress()
                         do {
                             val ev = awaitPointerEvent(PointerEventPass.Initial)
@@ -291,7 +304,15 @@ fun EventCard(
                         } while (ev.changes.any { it.pressed })
                     }
                 }
-            } else Modifier,
+            }
+        } else {
+            Modifier
+        }
+        Column(
+            modifier = longPressModifier.clickable(
+                interactionSource = contentInteractionSource,
+                indication = null,
+            ) { onNoteClick(model.navigateId) },
         ) {
         // Author header. Picture/displayName/nip05 read live from authorProfile
         // (profileFlow) when present, falling back to the FeedRow snapshot for

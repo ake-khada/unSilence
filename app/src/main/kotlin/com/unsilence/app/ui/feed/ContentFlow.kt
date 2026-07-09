@@ -225,6 +225,12 @@ internal fun ContentFlow(
                     EventMediaGrid(
                         images              = images,
                         imageDimensionCache = imageDimensionCache,
+                        // Embedded quote images should open the quoted note, not
+                        // the parent card's media viewer. Top-level images keep
+                        // fullscreen media behavior.
+                        onImageClick        = if (isEmbedded) {
+                            { onNoteClick(navigateId) }
+                        } else null,
                         modifier            = Modifier
                             .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
