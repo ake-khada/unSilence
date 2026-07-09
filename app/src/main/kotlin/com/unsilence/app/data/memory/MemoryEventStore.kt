@@ -36,6 +36,7 @@ import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
+import com.unsilence.app.data.relay.identitySearchMatchTier
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -3616,7 +3617,7 @@ class MemoryEventStore @Inject constructor(
             .map { toFeedRow(it) }
     }
 
-    /** Reactive profile search: matches name, display_name, about; case-insensitive; display_name ASC; limit 50. */
+    /** Reactive profile search: identity fields only; prefix/word-boundary hits before substrings; limit 50. */
     fun searchUsersFlow(query: String): Flow<List<UserEntity>> =
         _profileSignal
             .map { searchUsers(query) }
@@ -3624,16 +3625,18 @@ class MemoryEventStore @Inject constructor(
             .flowOn(Dispatchers.Default)
 
     private fun searchUsers(query: String): List<UserEntity> {
-        val lq = query.lowercase()
         return profilesByPubkey.values
             .mapNotNull { event ->
                 val entity = getUserEntity(event.pubkey) ?: return@mapNotNull null
-                val matches = listOfNotNull(entity.name, entity.displayName, entity.about)
-                    .any { it.lowercase().contains(lq) }
-                if (matches) entity else null
+                val tier = identitySearchMatchTier(entity, query)
+                if (tier >= 0) entity to tier else null
             }
-            .sortedBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: "" }
+            .sortedWith(
+                compareByDescending<Pair<UserEntity, Int>> { it.second }
+                    .thenBy { it.first.displayName?.lowercase() ?: it.first.name?.lowercase() ?: it.first.pubkey },
+            )
             .take(50)
+            .map { it.first }
     }
 
     /** Exact ID lookup returning FeedRows, sorted by createdAt DESC. */
@@ -3936,6 +3939,14 @@ class MemoryEventStore @Inject constructor(
     fun ownWotProviderFromRegistry(): WotProviderDescriptor? = ownWotProviderRegistry
 
     fun ownWotProviderEncryptedContent(): String? = ownWotProviderEncryptedContent
+
+    fun latestOwnWotProviderRegistryEvent(): NostrEvent? {
+        val own = ownPubkey ?: return null
+        return eventsById.values
+            .asSequence()
+            .filter { it.kind == 10040 && it.pubkey == own }
+            .maxByOrNull { it.createdAt }
+    }
 
     fun getWotAssertions(): Map<String, WotAssertionEntity> = HashMap(wotBySubject)
 

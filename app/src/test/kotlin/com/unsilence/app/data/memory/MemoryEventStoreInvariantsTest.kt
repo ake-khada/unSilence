@@ -3089,7 +3089,7 @@ class MemoryEventStoreInvariantsTest {
             content = """{"name":"b0b","display_name":"Bobby Tables","about":"SQL enthusiast"}""",
         ))
 
-        store.searchUsersFlow("Bobby").test {
+        store.searchUsersFlow("obby").test {
             val results = awaitItem()
             assertEquals(1, results.size)
             assertEquals("bob", results[0].pubkey)
@@ -3098,7 +3098,22 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `searchUsersFlow matches by about substring`() = runTest {
+    fun `searchUsersFlow matches by nip05 local part`() = runTest {
+        store.insert(event(
+            id = "profile-calle", pubkey = "calle", kind = 0,
+            content = """{"name":"other","display_name":"Someone Else","nip05":"calle@getalby.com","about":"SQL enthusiast"}""",
+        ))
+
+        store.searchUsersFlow("calle").test {
+            val results = awaitItem()
+            assertEquals(1, results.size)
+            assertEquals("calle", results[0].pubkey)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `searchUsersFlow does not match by about substring`() = runTest {
         store.insert(event(
             id = "profile-carol", pubkey = "carol", kind = 0,
             content = """{"name":"carol","display_name":"Carol","about":"Bitcoin maximalist forever"}""",
@@ -3106,8 +3121,7 @@ class MemoryEventStoreInvariantsTest {
 
         store.searchUsersFlow("maximalist").test {
             val results = awaitItem()
-            assertEquals(1, results.size)
-            assertEquals("carol", results[0].pubkey)
+            assertEquals(emptyList<UserEntity>(), results)
             cancelAndIgnoreRemainingEvents()
         }
     }
@@ -3128,27 +3142,26 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `searchUsersFlow sorts by display_name ASC`() = runTest {
+    fun `searchUsersFlow sorts prefix and word boundary matches before substrings`() = runTest {
         store.insert(event(
-            id = "p-zara", pubkey = "zara", kind = 0,
-            content = """{"name":"z","display_name":"Zara","about":"last"}""",
+            id = "p-substring", pubkey = "substring", kind = 0,
+            content = """{"name":"substring","display_name":"Unretrocalled","about":"last"}""",
         ))
         store.insert(event(
-            id = "p-alice", pubkey = "alice", kind = 0,
-            content = """{"name":"a","display_name":"Alice","about":"first"}""",
+            id = "p-prefix", pubkey = "prefix", kind = 0,
+            content = """{"name":"prefix","display_name":"Calle","about":"first"}""",
         ))
         store.insert(event(
-            id = "p-mike", pubkey = "mike", kind = 0,
-            content = """{"name":"m","display_name":"Markaa","about":"a person"}""",
+            id = "p-word", pubkey = "word", kind = 0,
+            content = """{"name":"word","display_name":"A Calle Person","about":"middle"}""",
         ))
 
-        // All match "a": Zara (display_name), Alice (name), Markaa (display_name+about)
-        store.searchUsersFlow("a").test {
+        store.searchUsersFlow("calle").test {
             val results = awaitItem()
             assertEquals(3, results.size)
-            assertEquals("Alice", results[0].displayName)
-            assertEquals("Markaa", results[1].displayName)
-            assertEquals("Zara", results[2].displayName)
+            assertEquals("A Calle Person", results[0].displayName)
+            assertEquals("Calle", results[1].displayName)
+            assertEquals("Unretrocalled", results[2].displayName)
             cancelAndIgnoreRemainingEvents()
         }
     }
@@ -3162,7 +3175,7 @@ class MemoryEventStoreInvariantsTest {
             ))
         }
 
-        store.searchUsersFlow("searchable").test {
+        store.searchUsersFlow("user").test {
             val results = awaitItem()
             assertEquals("Capped at 50", 50, results.size)
             cancelAndIgnoreRemainingEvents()

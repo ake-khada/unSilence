@@ -10,7 +10,10 @@ import com.unsilence.app.data.model.MediaManifest
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.ThreadRefs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WotSurfacePolicyTest {
@@ -93,8 +96,127 @@ class WotSurfacePolicyTest {
 
         assertEquals(
             listOf(highPopular.pubkey, highSparse.pubkey, lowPopular.pubkey, absent.pubkey),
-            sortPeopleForSearch(listOf(absent, lowPopular, highSparse, highPopular)) { lookups[it] }.map { it.pubkey },
+            sortPeopleForSearch(listOf(absent, lowPopular, highSparse, highPopular), query = "user") { lookups[it] }
+                .map { it.pubkey },
         )
+    }
+
+    @Test
+    fun `search ordering groups prefix and word boundary identity matches before substrings`() {
+        val prefix = user("a", displayName = "Calle")
+        val wordBoundary = user("b", displayName = "A Calle Person")
+        val substring = user("c", displayName = "Unretrocalled")
+        val lookups = mapOf(
+            prefix.pubkey to scored(rank = 50),
+            wordBoundary.pubkey to scored(rank = 80),
+            substring.pubkey to scored(rank = 100),
+        )
+
+        assertEquals(
+            listOf(wordBoundary.pubkey, prefix.pubkey, substring.pubkey),
+            sortPeopleForSearch(listOf(substring, prefix, wordBoundary), query = "calle") { lookups[it] }
+                .map { it.pubkey },
+        )
+    }
+
+    @Test
+    fun `identity search uses nip05 local part`() {
+        assertEquals(2, identitySearchMatchTier(user("a", nip05 = "calle@getalby.com"), "calle"))
+        assertEquals(-1, identitySearchMatchTier(user("b", about = "called by friends"), "called"))
+    }
+
+    @Test
+    fun `impersonation normalization strips non alphanumerics and lowercases`() {
+        assertEquals("calle42", normalizeImpersonationName("C Alle-42!"))
+    }
+
+    @Test
+    fun `impersonation risk detects distance one low trust lookalike`() {
+        val protected = ProtectedProfile(
+            pubkey = hex("e"),
+            normalizedName = "calle",
+            displayLabel = "Calle",
+        )
+        val candidate = user("d", displayName = "Calie")
+
+        assertNotNull(
+            detectImpersonationRisk(
+                candidate = candidate,
+                lookup = WotLookup.Absent,
+                protectedProfiles = listOf(protected),
+            ),
+        )
+    }
+
+    @Test
+    fun `impersonation risk does not claim unicode homoglyph detection in v1`() {
+        val protected = ProtectedProfile(
+            pubkey = hex("e"),
+            normalizedName = "calle",
+            displayLabel = "Calle",
+        )
+        val candidate = user("d", displayName = "\u0441alle")
+
+        assertEquals("", normalizeImpersonationName("\u0441alle"))
+        assertNull(
+            detectImpersonationRisk(
+                candidate = candidate,
+                lookup = WotLookup.Absent,
+                protectedProfiles = listOf(protected),
+            ),
+        )
+    }
+
+    @Test
+    fun `impersonation risk never flags followed or self candidates`() {
+        val followed = user("f", displayName = "Calle")
+        val protected = protectedProfileFor(followed)!!
+
+        assertNull(
+            detectImpersonationRisk(
+                candidate = followed,
+                lookup = WotLookup.Absent,
+                protectedProfiles = listOf(protected),
+            ),
+        )
+    }
+
+    @Test
+    fun `impersonation risk never flags pending or rank ten plus candidates`() {
+        val protected = ProtectedProfile(
+            pubkey = hex("e"),
+            normalizedName = "calle",
+            displayLabel = "Calle",
+        )
+        val candidate = user("d", displayName = "Calle")
+
+        assertNull(
+            detectImpersonationRisk(
+                candidate = candidate,
+                lookup = WotLookup.Pending,
+                protectedProfiles = listOf(protected),
+            ),
+        )
+        assertNull(
+            detectImpersonationRisk(
+                candidate = candidate,
+                lookup = scored(rank = 10),
+                protectedProfiles = listOf(protected),
+            ),
+        )
+        assertNotNull(
+            detectImpersonationRisk(
+                candidate = candidate,
+                lookup = scored(rank = 9),
+                protectedProfiles = listOf(protected),
+            ),
+        )
+    }
+
+    @Test
+    fun `protected profile threshold starts at rank forty`() {
+        assertFalse(isProtectedWotLookup(scored(rank = 39)))
+        assertTrue(isProtectedWotLookup(scored(rank = 40)))
     }
 
     @Test
@@ -145,8 +267,20 @@ class WotSurfacePolicyTest {
         )
     }
 
-    private fun user(seed: String): UserEntity =
-        UserEntity(pubkey = hex(seed), displayName = "User $seed")
+    private fun user(
+        seed: String,
+        name: String? = null,
+        displayName: String? = "User $seed",
+        nip05: String? = null,
+        about: String? = null,
+    ): UserEntity =
+        UserEntity(
+            pubkey = hex(seed),
+            name = name,
+            displayName = displayName,
+            nip05 = nip05,
+            about = about,
+        )
 
     private fun feedRow(
         id: String,

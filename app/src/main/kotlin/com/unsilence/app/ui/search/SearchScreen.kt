@@ -3,6 +3,7 @@ package com.unsilence.app.ui.search
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -87,8 +90,10 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.WotImpersonationBadge
 import com.unsilence.app.ui.shared.WotSearchSignal
 import com.unsilence.app.ui.shared.eventFeedItems
+import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BorderSubtle
@@ -104,9 +109,12 @@ import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.sample
+import kotlin.math.abs
 
 private val TAB_LABELS = listOf("All", "People", "Notes", "Tags")
 private val WOT_SEARCH_SIGNAL_WIDTH = 48.dp
+private val SEARCH_IMPERSONATION_INLINE_MAX_WIDTH = 150.dp
+private const val SEARCH_TAB_SWIPE_THRESHOLD_PX = 120f
 
 @Composable
 fun SearchScreen(
@@ -175,17 +183,18 @@ fun SearchScreen(
         onNoteClick(id)
     }
     var pendingSearch by remember { mutableStateOf(false) }
+    val activeEventResults = if (selectedTab == 3) state.tagResults else state.noteResults
 
     @OptIn(FlowPreview::class)
-    LaunchedEffect(state.noteResults, state.peopleResults, selectedTab, cardWidthPx) {
-        if (state.noteResults.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(activeEventResults, state.peopleResults, selectedTab, cardWidthPx) {
+        if (activeEventResults.isEmpty()) return@LaunchedEffect
         fun warmVisibleRange(first: Int, last: Int) {
             val noteOffset = if (selectedTab == 0) state.peopleResults.size.coerceAtMost(3) else 0
             val dataFirst = (first - noteOffset).coerceAtLeast(0)
-            val dataLast = (last - noteOffset).coerceAtMost(state.noteResults.lastIndex)
+            val dataLast = (last - noteOffset).coerceAtMost(activeEventResults.lastIndex)
             if (dataFirst <= dataLast) {
                 actionsViewModel.warmCardWindow(
-                    rows = state.noteResults,
+                    rows = activeEventResults,
                     first = dataFirst,
                     last = dataLast,
                     cardWidthPx = cardWidthPx,
@@ -311,7 +320,6 @@ fun SearchScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = Spacing.medium)
                     .drawBehind {
                         drawLine(
                             color       = BorderFaint,
@@ -320,12 +328,12 @@ fun SearchScreen(
                             strokeWidth = 1f,
                         )
                     },
-                horizontalArrangement = Arrangement.spacedBy(Spacing.medium),
             ) {
                 TAB_LABELS.forEachIndexed { index, label ->
                     val isActive = selectedTab == index
                     Box(
                         modifier = Modifier
+                            .weight(1f)
                             .clickable { selectedTab = index }
                             .drawBehind {
                                 if (isActive) {
@@ -338,6 +346,7 @@ fun SearchScreen(
                                 }
                             }
                             .padding(vertical = Spacing.small),
+                        contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text       = label,
@@ -353,6 +362,28 @@ fun SearchScreen(
         // ── Results ───────────────────────────────────────────────────────────
         Box(modifier = Modifier
             .fillMaxSize()
+            .pointerInput(state.hasSearched) {
+                if (!state.hasSearched) return@pointerInput
+                var horizontalDrag = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { horizontalDrag = 0f },
+                    onHorizontalDrag = { change, dragAmount ->
+                        horizontalDrag += dragAmount
+                        if (abs(horizontalDrag) > SEARCH_TAB_SWIPE_THRESHOLD_PX / 2f) {
+                            change.consume()
+                        }
+                    },
+                    onDragEnd = {
+                        when {
+                            horizontalDrag <= -SEARCH_TAB_SWIPE_THRESHOLD_PX ->
+                                selectedTab = (selectedTab + 1).coerceAtMost(TAB_LABELS.lastIndex)
+                            horizontalDrag >= SEARCH_TAB_SWIPE_THRESHOLD_PX ->
+                                selectedTab = (selectedTab - 1).coerceAtLeast(0)
+                        }
+                    },
+                    onDragCancel = { horizontalDrag = 0f },
+                )
+            }
             .nestedScroll(remember {
                 object : NestedScrollConnection {
                     override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -380,7 +411,7 @@ fun SearchScreen(
                     }
                 }
 
-                state.loading && state.noteResults.isEmpty() && state.peopleResults.isEmpty() -> {
+                state.loading && state.noteResults.isEmpty() && state.peopleResults.isEmpty() && state.tagResults.isEmpty() -> {
                     if (selectedTab == 1) {
                         // People tab loading
                         Row(
@@ -432,6 +463,7 @@ fun SearchScreen(
                                     ProfileCard(
                                         user = user,
                                         wotLookup = wotLookups[user.pubkey],
+                                        impersonationRisk = state.impersonationRisks[user.pubkey],
                                         onClick = { onAuthorClickDismiss(user.pubkey) },
                                     )
                                     HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
@@ -465,6 +497,7 @@ fun SearchScreen(
                                 ProfileCard(
                                     user = user,
                                     wotLookup = wotLookups[user.pubkey],
+                                    impersonationRisk = state.impersonationRisks[user.pubkey],
                                     onClick = { onAuthorClickDismiss(user.pubkey) },
                                 )
                                 HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
@@ -475,7 +508,8 @@ fun SearchScreen(
 
                 else -> {
                     // Notes (2) / Tags (3)
-                    if (state.noteResults.isEmpty()) {
+                    val results = if (selectedTab == 3) state.tagResults else state.noteResults
+                    if (results.isEmpty()) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
                             message = "No results for \u201c${state.query}\u201d",
@@ -497,7 +531,7 @@ fun SearchScreen(
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             eventFeedItems(
-                                events = state.noteResults,
+                                events = results,
                                 engagement = engagement,
                                 callbacks = callbacks,
                                 videoScope = null,
@@ -580,6 +614,7 @@ fun SearchScreen(
 private fun ProfileCard(
     user: UserEntity,
     wotLookup: WotLookup?,
+    impersonationRisk: ImpersonationRisk?,
     onClick: () -> Unit,
 ) {
     Row(
@@ -611,15 +646,31 @@ private fun ProfileCard(
             val displayName = user.displayName?.takeIf { it.isNotBlank() }
                 ?: user.name?.takeIf { it.isNotBlank() }
             val title = displayName ?: remember(user.pubkey) { shortNpub(user.pubkey) }
-            Text(
-                text       = title,
-                color      = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                fontSize   = AppType.body,
-                maxLines   = 1,
-                overflow   = TextOverflow.Ellipsis,
-                modifier   = Modifier.fillMaxWidth(),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text       = title,
+                    color      = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize   = AppType.body,
+                    maxLines   = 1,
+                    overflow   = TextOverflow.Ellipsis,
+                    modifier   = if (impersonationRisk != null) {
+                        Modifier.weight(1f, fill = false)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    },
+                )
+                if (impersonationRisk != null) {
+                    Spacer(Modifier.width(Spacing.small))
+                    WotImpersonationBadge(
+                        risk = impersonationRisk,
+                        modifier = Modifier.widthIn(max = SEARCH_IMPERSONATION_INLINE_MAX_WIDTH),
+                    )
+                }
+            }
             if (displayName != null) {
                 Text(
                     text     = remember(user.pubkey) { shortNpub(user.pubkey) },

@@ -29,6 +29,11 @@ data class WotProviderOptionState(
     val actionHint: String? = null,
 )
 
+data class WotProviderRegistryDraft(
+    val tags: List<List<String>>,
+    val content: String,
+)
+
 fun computeWotCoverage(
     follows: Set<String>,
     assertions: Map<String, WotAssertionEntity>,
@@ -104,6 +109,42 @@ fun parseEncryptedWotProviderTagsJson(
     val tags = parseWotTagArrayJson(plaintext) ?: return null
     return wotProviderDescriptorFromTags(tags, updatedAt)
 }
+
+fun mergeWotProviderRegistryTags(
+    existingTags: List<List<String>>,
+    provider: WotProviderDescriptor,
+): List<List<String>> {
+    val providerPubkey = normalizeWotPubkey(provider.providerPubkey) ?: provider.providerPubkey
+    val relayHint = normalizeRelayUrl(provider.relayHint) ?: provider.relayHint
+    val replacementRows = listOf(
+        listOf("30382:rank", providerPubkey, relayHint),
+        listOf("30382:followers", providerPubkey, relayHint),
+    )
+    val merged = ArrayList<List<String>>(existingTags.size + replacementRows.size)
+    var inserted = false
+    for (tag in existingTags) {
+        if (tag.firstOrNull() == "30382:rank" || tag.firstOrNull() == "30382:followers") {
+            if (!inserted) {
+                merged.addAll(replacementRows)
+                inserted = true
+            }
+        } else {
+            merged.add(tag)
+        }
+    }
+    if (!inserted) merged.addAll(replacementRows)
+    return merged
+}
+
+fun mergeWotProviderRegistryDraft(
+    existingTags: List<List<String>>,
+    existingContent: String,
+    provider: WotProviderDescriptor,
+): WotProviderRegistryDraft =
+    WotProviderRegistryDraft(
+        tags = mergeWotProviderRegistryTags(existingTags, provider),
+        content = existingContent,
+    )
 
 fun normalizeWotProviderPubkeyInput(input: String): String? {
     val trimmed = input.trim()

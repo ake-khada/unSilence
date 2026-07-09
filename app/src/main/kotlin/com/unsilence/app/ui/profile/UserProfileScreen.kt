@@ -93,6 +93,7 @@ import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
+import com.unsilence.app.ui.shared.WotImpersonationBadge
 import com.unsilence.app.ui.shared.WotInlineLabel
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.Article
@@ -114,6 +115,7 @@ import kotlinx.coroutines.launch
 
 private val BANNER_HEIGHT       = 200.dp   // φ³ region — taller for visual impact
 private val PROFILE_AVATAR_SIZE = 85.dp
+private val PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH = 116.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -157,6 +159,7 @@ fun UserProfileScreen(
     val isOwnProfile   by viewModel.isOwnProfile.collectAsStateWithLifecycle()
     val wotLookups     by viewModel.wotLookups.collectAsStateWithLifecycle()
     val profileWotLookup by viewModel.profileWotLookup.collectAsStateWithLifecycle()
+    val impersonationRisk by viewModel.impersonationRisk.collectAsStateWithLifecycle()
     val wotProvenance  by viewModel.wotProvenance.collectAsStateWithLifecycle()
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
@@ -417,18 +420,46 @@ fun UserProfileScreen(
                 Spacer(Modifier.height(Spacing.small))
 
                 if (displayName != null) {
-                    Text(
-                        text       = displayName,
-                        color      = Color.White,
-                        fontSize   = AppType.heading,
-                        fontWeight = FontWeight.Bold,
-                        textAlign  = TextAlign.Center,
-                        maxLines   = 1,
-                        overflow   = TextOverflow.Ellipsis,
-                        modifier   = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium),
-                    )
+                    val risk = impersonationRisk
+                    if (risk != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Spacer(Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH))
+                            Text(
+                                text       = displayName,
+                                color      = Color.White,
+                                fontSize   = AppType.heading,
+                                fontWeight = FontWeight.Bold,
+                                textAlign  = TextAlign.Center,
+                                maxLines   = 1,
+                                overflow   = TextOverflow.Ellipsis,
+                                modifier   = Modifier.weight(1f),
+                            )
+                            Box(
+                                modifier = Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                WotImpersonationBadge(risk = risk)
+                            }
+                        }
+                    } else {
+                        Text(
+                            text       = displayName,
+                            color      = Color.White,
+                            fontSize   = AppType.heading,
+                            fontWeight = FontWeight.Bold,
+                            textAlign  = TextAlign.Center,
+                            maxLines   = 1,
+                            overflow   = TextOverflow.Ellipsis,
+                            modifier   = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium),
+                        )
+                    }
                     Spacer(Modifier.height(Spacing.micro))
                 }
 

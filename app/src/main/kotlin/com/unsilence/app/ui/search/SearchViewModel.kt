@@ -15,9 +15,14 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.ImpersonationRisk
+import com.unsilence.app.data.relay.ProtectedProfile
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.detectImpersonationRisk
+import com.unsilence.app.data.relay.isProtectedWotLookup
+import com.unsilence.app.data.relay.protectedProfileFor
 import com.unsilence.app.data.relay.sortPeopleForSearch
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
@@ -49,7 +54,9 @@ private const val TRENDING_CANDIDATE_LIMIT = 32
 data class SearchUiState(
     val query: String           = "",
     val peopleResults: List<UserEntity> = emptyList(),
+    val impersonationRisks: Map<String, ImpersonationRisk> = emptyMap(),
     val noteResults: List<FeedRow>      = emptyList(),
+    val tagResults: List<FeedRow>       = emptyList(),
     val loading: Boolean        = false,
     val hasSearched: Boolean    = false,
 )
@@ -57,6 +64,13 @@ data class SearchUiState(
 private data class TrendingCandidates(
     val hashtags: List<Pair<String, Int>> = emptyList(),
     val users: List<UserEntity> = emptyList(),
+)
+
+private data class SearchResultsBundle(
+    val localNotes: List<FeedRow>,
+    val tagNotes: List<FeedRow>,
+    val relayNotes: List<FeedRow>,
+    val people: List<UserEntity>,
 )
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
@@ -218,7 +232,9 @@ class SearchViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 peopleResults = emptyList(),
+                                impersonationRisks = emptyMap(),
                                 noteResults   = emptyList(),
+                                tagResults    = emptyList(),
                                 loading       = false,
                                 hasSearched   = false,
                             )
@@ -238,13 +254,12 @@ class SearchViewModel @Inject constructor(
                     currentSearchToken.set(token)
                     _searchResultEventIds.value = emptySet()
 
-                    // Detect hashtag queries: starts with # or is a bare
-                    // alphanumeric+underscore token.
-                    val hashtagTag = extractHashtagQuery(query)
+                    val explicitHashtagTag = extractExplicitHashtagQuery(query)
+                    val tagSearchTag = extractTagSearchQuery(query)
 
-                    if (hashtagTag != null) {
+                    if (explicitHashtagTag != null) {
                         // NIP-12 #t filter search
-                        relayPool.searchHashtag(searchRelays, hashtagTag, token)
+                        relayPool.searchHashtag(searchRelays, explicitHashtagTag, token)
                     } else {
                         // NIP-50 full-text search
                         relayPool.searchNotes(searchRelays, query, token)
@@ -264,45 +279,69 @@ class SearchViewModel @Inject constructor(
                         }
 
                     // Combine local MES results with relay-returned results + people search.
-                    val localNotesFlow = if (hashtagTag != null) {
-                        memoryEventStore.searchNotesByHashtagFlow(hashtagTag)
+                    val localNotesFlow = if (explicitHashtagTag != null) {
+                        memoryEventStore.searchNotesByHashtagFlow(explicitHashtagTag)
                     } else {
                         memoryEventStore.searchNotesFlow(query)
                     }
-                    val peopleFlow = if (hashtagTag != null) {
+                    val tagNotesFlow = if (tagSearchTag != null) {
+                        memoryEventStore.searchNotesByHashtagFlow(tagSearchTag)
+                    } else {
+                        flowOf(emptyList())
+                    }
+                    val peopleFlow = if (explicitHashtagTag != null) {
                         flowOf(emptyList())
                     } else {
                         memoryEventStore.searchUsersFlow(query)
                     }
                     combine(
                         localNotesFlow,
+                        tagNotesFlow,
                         relayResults,
                         peopleFlow,
                         memoryEventStore.wotSignalFlow,
-                    ) { localNotes, relayNotes, people, _ ->
-                        Triple(localNotes, relayNotes, people)
-                    }.collect { (localNotes, relayNotes, people) ->
-                            val mergedNotes = (localNotes + relayNotes)
-                                .distinctBy { it.id }
-                                .sortedByDescending { it.createdAt }
-                            val sortedPeople = sortPeopleForSearch(people, memoryEventStore::wotFor)
-                            val wotSubjects = buildSet {
-                                addAll(sortedPeople.map { it.pubkey })
-                                addAll(wotSubjectsForFeedRows(mergedNotes, modelProvider = memoryEventStore::getEventModel))
-                            }
-                            _wotSubjects.value = wotSubjects
-                            wotHydrationCoalescer.requestHydration(wotSubjects)
-                            val hasResults = mergedNotes.isNotEmpty() || sortedPeople.isNotEmpty()
-                            val elapsed = System.currentTimeMillis() - searchStart
-                            val doneLoading = hasResults || elapsed > 3_000
-                            _uiState.update {
-                                it.copy(
-                                    noteResults   = mergedNotes,
-                                    peopleResults = sortedPeople,
-                                    loading       = !doneLoading,
-                                )
-                            }
+                    ) { localNotes, tagNotes, relayNotes, people, _ ->
+                        SearchResultsBundle(localNotes, tagNotes, relayNotes, people)
+                    }.collect { results ->
+                        val localNotes = results.localNotes
+                        val relayNotes = results.relayNotes
+                        val people = results.people
+                        val mergedNotes = (localNotes + relayNotes)
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.createdAt }
+                        val tagRelayNotes = if (explicitHashtagTag != null) relayNotes else emptyList()
+                        val tagResults = (results.tagNotes + tagRelayNotes)
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.createdAt }
+                        val sortedPeople = sortPeopleForSearch(people, query, memoryEventStore::wotFor)
+                        val protectedProfiles = buildProtectedProfiles(ownPubkey)
+                        val impersonationRisks = sortedPeople.mapNotNull { user ->
+                            detectImpersonationRisk(
+                                candidate = user,
+                                lookup = memoryEventStore.wotFor(user.pubkey),
+                                protectedProfiles = protectedProfiles,
+                            )?.let { user.pubkey to it }
+                        }.toMap()
+                        val wotSubjects = buildSet {
+                            addAll(sortedPeople.map { it.pubkey })
+                            addAll(wotSubjectsForFeedRows(mergedNotes, modelProvider = memoryEventStore::getEventModel))
+                            addAll(wotSubjectsForFeedRows(tagResults, modelProvider = memoryEventStore::getEventModel))
                         }
+                        _wotSubjects.value = wotSubjects
+                        wotHydrationCoalescer.requestHydration(wotSubjects)
+                        val hasResults = mergedNotes.isNotEmpty() || sortedPeople.isNotEmpty() || tagResults.isNotEmpty()
+                        val elapsed = System.currentTimeMillis() - searchStart
+                        val doneLoading = hasResults || elapsed > 3_000
+                        _uiState.update {
+                            it.copy(
+                                noteResults   = mergedNotes,
+                                tagResults    = tagResults,
+                                peopleResults = sortedPeople,
+                                impersonationRisks = impersonationRisks,
+                                loading       = !doneLoading,
+                            )
+                        }
+                    }
                 }
         }
     }
@@ -325,7 +364,9 @@ class SearchViewModel @Inject constructor(
             it.copy(
                 query         = "",
                 peopleResults = emptyList(),
+                impersonationRisks = emptyMap(),
                 noteResults   = emptyList(),
+                tagResults    = emptyList(),
                 loading       = false,
                 hasSearched   = false,
             )
@@ -362,6 +403,18 @@ class SearchViewModel @Inject constructor(
         }
     }
 
+    private fun buildProtectedProfiles(ownPubkey: String): List<ProtectedProfile> {
+        if (ownPubkey.isBlank()) return emptyList()
+        val protectedPubkeys = LinkedHashSet<String>()
+        protectedPubkeys.addAll(memoryEventStore.getFollows(ownPubkey).orEmpty())
+        memoryEventStore.getWotAssertions().values
+            .filter { isProtectedWotLookup(WotLookup.Scored(it)) }
+            .forEach { protectedPubkeys.add(it.subjectPubkey) }
+        return protectedPubkeys.mapNotNull { pubkey ->
+            memoryEventStore.getUserEntity(pubkey)?.let(::protectedProfileFor)
+        }
+    }
+
     companion object {
         val DEFAULT_SEARCH_RELAYS = listOf(
             "wss://nostr.wine",
@@ -371,20 +424,29 @@ class SearchViewModel @Inject constructor(
         )
 
         /**
-         * Returns the lowercase hashtag value if [query] is a hashtag query, or null.
-         * Hashtag query: starts with `#` followed by word chars, or is a bare
-         * alphanumeric+underscore token without spaces or special characters.
+         * Returns the lowercase hashtag value for an explicit hashtag query, or null.
          */
-        fun extractHashtagQuery(query: String): String? {
+        fun extractExplicitHashtagQuery(query: String): String? {
             val trimmed = query.trim()
             if (trimmed.startsWith("#") && trimmed.length > 1) {
                 val tag = trimmed.substring(1)
-                // All chars must be hashtag-valid (letters, digits, underscore)
-                if (tag.all { it.isLetterOrDigit() || it == '_' }) {
-                    return tag.lowercase()
-                }
+                return normalizeTagSearchToken(tag)
             }
             return null
+        }
+
+        /**
+         * Converts a searched word into the tag value used by the Tags tab.
+         */
+        fun extractTagSearchQuery(query: String): String? {
+            val trimmed = query.trim().removePrefix("#")
+            return normalizeTagSearchToken(trimmed)
+        }
+
+        private fun normalizeTagSearchToken(raw: String): String? {
+            if (raw.isBlank()) return null
+            if (!raw.all { it.isLetterOrDigit() || it == '_' }) return null
+            return raw.lowercase()
         }
     }
 }
