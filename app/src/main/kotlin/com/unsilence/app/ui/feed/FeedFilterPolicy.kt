@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
 
@@ -54,3 +55,12 @@ internal fun matchesShowTypes(
 
 internal fun FeedFilter.hasActivityThresholds(): Boolean =
     minReplies > 0 || minReposts > 0 || minReactions > 0 || minZapSats > 0
+
+internal fun activityStatsTargetId(kind: Int, id: String, rootId: String?): String? =
+    if (kind == 6 || kind == 16) rootId else id
+
+internal fun activityThresholdsPass(filter: FeedFilter, stats: EventStats): Boolean =
+    stats.replyCount >= filter.minReplies &&
+        stats.repostCount >= filter.minReposts &&
+        stats.reactionCount >= filter.minReactions &&
+        stats.zapTotalSats >= filter.minZapSats
