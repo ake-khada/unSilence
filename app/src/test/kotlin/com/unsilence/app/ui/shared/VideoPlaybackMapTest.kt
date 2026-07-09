@@ -31,6 +31,50 @@ class VideoPlaybackMapTest {
     private val quoted = listOf(model("https://host/quoted.mp4"))
 
     @Test
+    fun `fullscreen open ignores rows without a target URL`() {
+        val decision = decideFullscreenPlayback(
+            targetUrl = null,
+            holderUrl = "https://host/other.mp4",
+            mediaItemCount = 1,
+        )
+
+        assertEquals(FullscreenPlaybackDecision.Ignore, decision)
+    }
+
+    @Test
+    fun `fullscreen open resumes when holder URL matches and media is loaded`() {
+        val decision = decideFullscreenPlayback(
+            targetUrl = "https://host/own.mp4",
+            holderUrl = "https://host/own.mp4",
+            mediaItemCount = 1,
+        )
+
+        assertEquals(FullscreenPlaybackDecision.Resume, decision)
+    }
+
+    @Test
+    fun `fullscreen open rebinds when holder URL differs`() {
+        val decision = decideFullscreenPlayback(
+            targetUrl = "https://host/own.mp4",
+            holderUrl = "https://host/profile.mp4",
+            mediaItemCount = 1,
+        )
+
+        assertEquals(FullscreenPlaybackDecision.Rebind, decision)
+    }
+
+    @Test
+    fun `fullscreen open rebinds when matching holder has no media items`() {
+        val decision = decideFullscreenPlayback(
+            targetUrl = "https://host/own.mp4",
+            holderUrl = "https://host/own.mp4",
+            mediaItemCount = 0,
+        )
+
+        assertEquals(FullscreenPlaybackDecision.Rebind, decision)
+    }
+
+    @Test
     fun `own video row maps to own video`() {
         val result = resolveRowVideoModels(
             ownModels = own,

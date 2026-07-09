@@ -100,13 +100,28 @@ class VideoPlaybackScope(
         // recomputes to include row.id → targetModels; without this guard,
         // tapping it would open an empty (black) fullscreen with no media. The
         // tap is a no-op until the target warms (map recompute on next `events`).
-        if (videoRenderModels[noteId]?.firstOrNull()?.videoUrl == null) return
-        val wasActive = activeVideoNoteId
-        if (noteId != wasActive) {
-            // Different video — clear decoder output so the dialog doesn't
-            // flash the old video's last frame while LaunchedEffect swaps media.
-            exoPlayer.stop()
-            exoPlayer.clearMediaItems()
+        val targetUrl = videoRenderModels[noteId]?.firstOrNull()?.videoUrl
+        val decision = decideFullscreenPlayback(targetUrl, holder.currentUrl, exoPlayer.mediaItemCount)
+        if (decision == FullscreenPlaybackDecision.Ignore) return
+        val videoUrl = targetUrl ?: return
+        when (decision) {
+            FullscreenPlaybackDecision.Ignore -> return
+            FullscreenPlaybackDecision.Resume -> {
+                holder.claim(ownerId)
+                exoPlayer.playWhenReady = true
+            }
+            FullscreenPlaybackDecision.Rebind -> {
+                // Holder truth says the shared player is either empty or bound
+                // to a different scope's URL. Rebind before opening fullscreen:
+                // activeVideoNoteId may be unchanged, so LaunchedEffect(activeVideoUrl)
+                // will not necessarily run to repair this.
+                holder.claim(ownerId)
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+                exoPlayer.setMediaItem(MediaItem.fromUri(videoUrl))
+                exoPlayer.prepare()
+                exoPlayer.playWhenReady = true
+            }
         }
         activeVideoNoteId = noteId
         preFullscreenMuted = isMuted
@@ -118,6 +133,22 @@ class VideoPlaybackScope(
         showFullscreenVideo = false
         isMuted = preFullscreenMuted
     }
+}
+
+internal enum class FullscreenPlaybackDecision {
+    Ignore,
+    Resume,
+    Rebind,
+}
+
+internal fun decideFullscreenPlayback(
+    targetUrl: String?,
+    holderUrl: String?,
+    mediaItemCount: Int,
+): FullscreenPlaybackDecision = when {
+    targetUrl == null -> FullscreenPlaybackDecision.Ignore
+    holderUrl == targetUrl && mediaItemCount > 0 -> FullscreenPlaybackDecision.Resume
+    else -> FullscreenPlaybackDecision.Rebind
 }
 
 /**
