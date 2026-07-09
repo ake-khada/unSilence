@@ -2481,7 +2481,7 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Query API ──────────────────────────────────────────────────────────
 
-    fun feedEvents(filter: FeedFilter, limit: Int = 300): List<NostrEvent> {
+    fun feedEvents(filter: FeedQuery, limit: Int = 300): List<NostrEvent> {
         val result = mutableListOf<NostrEvent>()
         for (entry in recentByCreatedAt) {
             if (result.size >= limit) break
@@ -3241,7 +3241,7 @@ class MemoryEventStore @Inject constructor(
      * User-scoped feed query: returns events authored by [pubkey], filtered by
      * [contentFilter] and [kinds], sorted by createdAt DESC, capped at [limit].
      *
-     * contentFilter semantics (match FeedFilter contract):
+     * contentFilter semantics (match FeedQuery contract):
      *   0 = all: all kinds in the set, no filter
      *   1 = notes only: kind-1 roots (no replies, no kind-6, no kind-30023)
      *   2 = replies only: kind-1 with replyToId or rootId (no kind-6, no kind-30023)

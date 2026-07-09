@@ -70,7 +70,7 @@ class MemoryEventStoreInvariantsTest {
         relaysSeen = mutableSetOf(relayUrl),
     )
 
-    private val defaultFilter = FeedFilter(kinds = setOf(1, 6, 30023))
+    private val defaultFilter = FeedQuery(kinds = setOf(1, 6, 30023))
 
     // ── Dedup ────────────────────────────────────────────────────────────────
 
@@ -1342,7 +1342,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "k7", kind = 7, tags = listOf(listOf("e", "k1"))))
         store.insert(event(id = "k30023", kind = 30023))
 
-        val filter = FeedFilter(kinds = setOf(1, 6))
+        val filter = FeedQuery(kinds = setOf(1, 6))
         val result = store.feedEvents(filter)
         val kinds = result.map { it.kind }.toSet()
 
@@ -1551,7 +1551,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "bob-1", pubkey = "bob", kind = 1, createdAt = 2))
         store.insert(event(id = "charlie-1", pubkey = "charlie", kind = 1, createdAt = 1))
 
-        val filter = FeedFilter(kinds = setOf(1), followedPubkeys = followed)
+        val filter = FeedQuery(kinds = setOf(1), followedPubkeys = followed)
         val result = store.feedEvents(filter)
 
         assertEquals(2, result.size)
@@ -1770,7 +1770,7 @@ class MemoryEventStoreInvariantsTest {
             ))
         }
 
-        val filter = FeedFilter(
+        val filter = FeedQuery(
             kinds = setOf(1),
             contentFilter = 1,
         )
@@ -1800,11 +1800,11 @@ class MemoryEventStoreInvariantsTest {
             replyToId = "orig-article", rootId = "orig-article",
         ))
 
-        val notesOnly = store.feedEvents(FeedFilter(kinds = setOf(1, 16), contentFilter = 1))
+        val notesOnly = store.feedEvents(FeedQuery(kinds = setOf(1, 16), contentFilter = 1))
         assertTrue("kind-16 repost must appear in notes-only feed",
             notesOnly.any { it.id == "k16-feed" })
 
-        val repliesOnly = store.feedEvents(FeedFilter(kinds = setOf(1, 16), contentFilter = 2))
+        val repliesOnly = store.feedEvents(FeedQuery(kinds = setOf(1, 16), contentFilter = 2))
         assertTrue("kind-16 repost must be excluded from replies-only feed",
             repliesOnly.none { it.id == "k16-feed" })
     }
@@ -1833,7 +1833,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(both)
         store.addRelaySeen("both", "wss://global2.example.com")
 
-        val filter = FeedFilter(
+        val filter = FeedQuery(
             kinds = setOf(1),
             relayUrls = globalUrls,
         )
@@ -1845,7 +1845,7 @@ class MemoryEventStoreInvariantsTest {
         assertTrue("Both-relay event should appear", "both" in ids)
     }
 
-    // ── A.5.1 T1: FeedFilter.relayUrls contract ────────────────────────────
+    // ── A.5.1 T1: FeedQuery.relayUrls contract ────────────────────────────
 
     @Test
     fun `feedEvents with relayUrls filter returns only events seen on those relays`() {
@@ -1853,7 +1853,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "on-target", kind = 1, relayUrl = targetRelay, createdAt = 2))
         store.insert(event(id = "off-target", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
 
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(targetRelay))
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = setOf(targetRelay))
         val events = store.feedEvents(filter)
         assertEquals(1, events.size)
         assertEquals("on-target", events[0].id)
@@ -1864,7 +1864,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "a", kind = 1, relayUrl = "wss://r1.example.com", createdAt = 2))
         store.insert(event(id = "b", kind = 1, relayUrl = "wss://r2.example.com", createdAt = 1))
 
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = null)
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = null)
         val events = store.feedEvents(filter)
         assertEquals(2, events.size)
     }
@@ -1877,7 +1877,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "on-r2", kind = 1, relayUrl = relay2, createdAt = 2))
         store.insert(event(id = "on-other", kind = 1, relayUrl = "wss://other.example.com", createdAt = 1))
 
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay1, relay2))
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = setOf(relay1, relay2))
         val events = store.feedEvents(filter)
         val ids = events.map { it.id }.toSet()
         assertEquals(2, ids.size)
@@ -1890,7 +1890,7 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "match", kind = 1, relayUrl = "wss://target.example.com", createdAt = 2))
         store.insert(event(id = "nomatch", kind = 1, relayUrl = "wss://wrong.example.com", createdAt = 1))
 
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf("wss://target.example.com"))
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = setOf("wss://target.example.com"))
         val events = store.feedEvents(filter)
         assertEquals(1, events.size)
         assertEquals("match", events[0].id)
@@ -1903,7 +1903,7 @@ class MemoryEventStoreInvariantsTest {
             store.insert(event(id = "lim-$i", kind = 1, relayUrl = relay, createdAt = i.toLong()))
         }
 
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = setOf(relay))
         val events = store.feedEvents(filter, limit = 5)
         assertEquals(5, events.size)
         // Should be the 5 most recent (10, 9, 8, 7, 6) in descending order
@@ -1913,7 +1913,7 @@ class MemoryEventStoreInvariantsTest {
     @Test
     fun `feedEvents with relayUrls returns newly inserted event with matching relaysSeen`() {
         val relay = "wss://live.example.com"
-        val filter = FeedFilter(kinds = setOf(1), relayUrls = setOf(relay))
+        val filter = FeedQuery(kinds = setOf(1), relayUrls = setOf(relay))
 
         assertTrue(store.feedEvents(filter).isEmpty())
 
@@ -1979,11 +1979,11 @@ class MemoryEventStoreInvariantsTest {
         }
     }
 
-    // ── MemoryFeedFilter must not contain media fields ─────────────────────
+    // ── MemoryFeedQuery must not contain media fields ─────────────────────
 
     @Test
-    fun `MemoryFeedFilter has no media-related fields`() {
-        val filter = FeedFilter()
+    fun `MemoryFeedQuery has no media-related fields`() {
+        val filter = FeedQuery()
         val fields = filter::class.members.map { it.name }.toSet()
 
         val mediaRelatedFields = listOf(
@@ -1992,7 +1992,7 @@ class MemoryEventStoreInvariantsTest {
         )
         for (field in mediaRelatedFields) {
             assertFalse(
-                "MemoryFeedFilter must not contain '$field' — media filtering " +
+                "MemoryFeedQuery must not contain '$field' — media filtering " +
                     "is presentation-layer, applied AFTER memory query.",
                 field in fields,
             )
