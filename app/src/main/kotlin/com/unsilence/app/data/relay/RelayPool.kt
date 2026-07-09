@@ -77,6 +77,14 @@ enum class ConnectionPurpose {
     FEED_WARM,
 }
 
+data class RelayConnectionDebugSnapshot(
+    val url: String,
+    val purposes: Set<ConnectionPurpose>,
+    val oneShotCount: Int,
+    val queuedReqCount: Int,
+    val hasActiveSubscription: Boolean,
+)
+
 /** Source of "which relays currently have a non-paused subscription."
  *  Consulted by the pool sweep to avoid force-closing connections with
  *  live subscriptions. Implemented by [Subscription]. */
@@ -184,6 +192,27 @@ class RelayPool @Inject constructor(
 
     fun hasAnyPurpose(url: String): Boolean =
         connectionPurposes[url]?.isNotEmpty() == true
+
+    fun connectionDebugSnapshot(): Map<String, RelayConnectionDebugSnapshot> {
+        val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
+            .getOrDefault(emptySet())
+        val urls = buildSet {
+            addAll(connections.keys)
+            addAll(connectionPurposes.keys)
+            addAll(activeSubUrls)
+            addAll(relayOneShotCount.keys)
+            addAll(relayReqQueue.keys)
+        }
+        return urls.associateWith { url ->
+            RelayConnectionDebugSnapshot(
+                url = url,
+                purposes = connectionPurposes[url]?.toSet().orEmpty(),
+                oneShotCount = relayOneShotCount[url]?.get() ?: 0,
+                queuedReqCount = relayReqQueue[url]?.size ?: 0,
+                hasActiveSubscription = url in activeSubUrls,
+            )
+        }
+    }
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
     /** One-shot REQ callbacks that return the first EVENT's raw tags JSON. */
