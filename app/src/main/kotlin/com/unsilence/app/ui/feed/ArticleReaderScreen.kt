@@ -693,6 +693,7 @@ fun ArticleReaderScreen(
     if (commentVideoScope.showFullscreenVideo) {
         FullScreenVideoDialog(
             exoPlayer = commentVideoScope.exoPlayer,
+            videoUrl  = commentVideoScope.activeVideoUrl,
             onDismiss = { commentVideoScope.dismissFullscreen() },
         )
     }

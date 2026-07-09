@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -49,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.LinkAnnotation
@@ -64,6 +68,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.media.SaveMediaKind
+import com.unsilence.app.data.media.isSavableVideoSource
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.Nip19FailureCache
@@ -503,6 +509,7 @@ internal fun ZapButton(
 @Composable
 fun FullScreenVideoDialog(
     exoPlayer: ExoPlayer,
+    videoUrl: String? = null,
     onDismiss: () -> Unit,
 ) {
     Dialog(
@@ -510,6 +517,9 @@ fun FullScreenVideoDialog(
         properties       = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            val saveController = rememberMediaSaveController(SaveMediaKind.VIDEO)
+            val resolvedVideoUrl = videoUrl
+                ?: exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
             var dialogView by remember { mutableStateOf<PlayerView?>(null) }
             DisposableEffect(Unit) {
                 onDispose { dialogView?.player = null }
@@ -524,16 +534,53 @@ fun FullScreenVideoDialog(
                 update = { view -> view.player = exoPlayer },
                 modifier = Modifier.fillMaxSize(),
             )
-            IconButton(
-                onClick  = onDismiss,
+
+            Box(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(8.dp),
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.70f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    ),
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector        = Icons.Filled.Close,
-                    contentDescription = "Close",
-                    tint               = Color.White,
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector        = Icons.Filled.Close,
+                        contentDescription = "Close",
+                        tint               = Color.White,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                resolvedVideoUrl
+                    ?.takeIf { isSavableVideoSource(it) }
+                    ?.let { url ->
+                        MediaDownloadButton(
+                            url        = url,
+                            controller = saveController,
+                        )
+                    }
+            }
+
+            saveController.message?.let { message ->
+                MediaSaveStatusPill(
+                    message = message,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp),
                 )
             }
         }

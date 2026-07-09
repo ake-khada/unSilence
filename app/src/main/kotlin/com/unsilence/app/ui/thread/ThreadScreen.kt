@@ -454,6 +454,7 @@ fun ThreadScreen(
     if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(
             exoPlayer = videoScope.exoPlayer,
+            videoUrl  = videoScope.activeVideoUrl,
             onDismiss = { videoScope.dismissFullscreen() },
         )
     }

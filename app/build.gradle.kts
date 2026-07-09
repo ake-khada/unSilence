@@ -97,6 +97,7 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil.video)
+    implementation(libs.telephoto.zoomable.image.coil3)
     implementation(libs.exifinterface)
 
     // Markdown → HTML for NIP-23 long-form articles (rendered in WebView)
