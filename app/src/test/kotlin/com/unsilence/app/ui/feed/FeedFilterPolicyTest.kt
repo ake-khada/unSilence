@@ -6,8 +6,11 @@ import com.unsilence.app.data.model.MediaManifest
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.ThreadRefs
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.memory.EventStats
+import com.unsilence.app.domain.model.ActivityPreset
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
+import com.unsilence.app.domain.model.withActivityPreset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -52,6 +55,32 @@ class FeedFilterPolicyTest {
         assertTrue(matchesShowTypes(20, "", null, imagesOnly))
         assertFalse(matchesShowTypes(1, "https://cdn.example/cat.png", null, textOnly))
         assertFalse(matchesShowTypes(6, "", null, imagesOnly))
+    }
+
+    @Test
+    fun `repost activity thresholds use target stats instead of wrapper stats`() {
+        val filter = FeedFilter().withActivityPreset(ActivityPreset.POPULAR)
+        val targetId = activityStatsTargetId(kind = 6, id = "wrapper", rootId = "target")
+        val statsById = mapOf(
+            "wrapper" to EventStats.EMPTY,
+            "target" to EventStats(
+                replyCount = 0,
+                repostCount = 0,
+                reactionCount = 10,
+                zapCount = 0,
+                zapTotalSats = 0L,
+            ),
+        )
+
+        assertEquals("target", targetId)
+        assertTrue(activityThresholdsPass(filter, statsById.getValue(targetId!!)))
+        assertFalse(activityThresholdsPass(filter, statsById.getValue("wrapper")))
+    }
+
+    @Test
+    fun `kind 16 generic repost activity target is its root id`() {
+        assertEquals("article-target", activityStatsTargetId(kind = 16, id = "wrapper", rootId = "article-target"))
+        assertEquals(null, activityStatsTargetId(kind = 16, id = "wrapper", rootId = null))
     }
 
     private fun modelWith(segments: List<Segment>): EventModel = EventModel(

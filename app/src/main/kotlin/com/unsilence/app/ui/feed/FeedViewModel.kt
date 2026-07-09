@@ -998,11 +998,11 @@ class FeedViewModel @Inject constructor(
 
     private fun matchesActivityThresholds(evt: NostrEvent, filter: FeedFilter): Boolean {
         if (!filter.hasActivityThresholds()) return true
-        val stats = memoryEventStore.currentStatsSnapshot(evt.id)
-        return stats.replyCount >= filter.minReplies &&
-            stats.repostCount >= filter.minReposts &&
-            stats.reactionCount >= filter.minReactions &&
-            stats.zapTotalSats >= filter.minZapSats
+        // Repost wrappers do not receive the meaningful replies/reactions/zaps;
+        // those land on the target note/article. If a malformed repost has no
+        // target id, keep it visible rather than killing it as "zero activity".
+        val targetId = activityStatsTargetId(evt.kind, evt.id, evt.rootId) ?: return true
+        return activityThresholdsPass(filter, memoryEventStore.currentStatsSnapshot(targetId))
     }
 
     private var lastActivitySweepKey: ActivitySweepKey? = null
@@ -1012,20 +1012,21 @@ class FeedViewModel @Inject constructor(
             lastActivitySweepKey = null
             return
         }
-        val ids = candidates
+        val sweepCandidates = candidates.take(ACTIVITY_SWEEP_CANDIDATE_LIMIT)
+        val ids = sweepCandidates
             .asSequence()
-            .take(ACTIVITY_SWEEP_CANDIDATE_LIMIT)
-            .map { it.id }
+            .mapNotNull { activityStatsTargetId(it.kind, it.id, it.rootId) }
+            .distinct()
             .toList()
         if (ids.isEmpty()) return
 
         val key = ActivitySweepKey(filter, ids)
         if (key == lastActivitySweepKey) return
 
-        val rowsById = memoryEventStore.feedRowsByIds(ids.toSet()).associateBy { it.id }
-        val eventsById = candidates.associateBy { it.id }
-        val rows = ids.mapNotNull { id ->
-            rowsById[id] ?: eventsById[id]?.let(memoryEventStore::synthesizeFeedRow)
+        val candidateIds = sweepCandidates.map { it.id }.toSet()
+        val rowsById = memoryEventStore.feedRowsByIds(candidateIds).associateBy { it.id }
+        val rows = sweepCandidates.mapNotNull { event ->
+            rowsById[event.id] ?: memoryEventStore.synthesizeFeedRow(event)
         }
         if (rows.isEmpty()) return
 
