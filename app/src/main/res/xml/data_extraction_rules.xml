@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
+        <!-- Private-key ciphertext and EncryptedSharedPreferences keysets never leave device. -->
+        <exclude domain="sharedpref" path="unsilence_keys.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs_key_keyset__.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs_value_keyset__.xml" />
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
         <exclude domain="database" path="." />
@@ -12,6 +16,13 @@
         <exclude domain="device_sharedpref" path="." />
     </cloud-backup>
     <device-transfer>
+        <!-- Private-key ciphertext and EncryptedSharedPreferences keysets never leave device. -->
+        <exclude domain="sharedpref" path="unsilence_keys.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs_key_keyset__.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs_value_keyset__.xml" />
+        <exclude domain="device_sharedpref" path="unsilence_keys.xml" />
+        <exclude domain="device_sharedpref" path="__androidx_security_crypto_encrypted_prefs_key_keyset__.xml" />
+        <exclude domain="device_sharedpref" path="__androidx_security_crypto_encrypted_prefs_value_keyset__.xml" />
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
         <exclude domain="database" path="." />

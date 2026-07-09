@@ -76,6 +76,7 @@ dependencies {
     implementation(libs.activity.compose)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.biometric)
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
 
     // Networking
