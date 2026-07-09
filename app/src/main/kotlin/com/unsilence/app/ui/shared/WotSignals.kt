@@ -27,6 +27,7 @@ import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.FeedWotSignal
+import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.wotFeedSignal
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
@@ -56,7 +57,7 @@ fun WotFeedMetaTimestamp(
                 is FeedWotSignal.Rank -> signal.rank.toString() to
                     if (signal.distrusted) Like else wotTierColor(signal.rank)
                 FeedWotSignal.Absent -> "-" to Text3
-                is FeedWotSignal.Distant -> "${signal.hops}h" to Zap
+                is FeedWotSignal.Distant -> "${signal.hops} hops" to Zap
                 is FeedWotSignal.Distrusted -> "!" to Like
             }
             Text(
@@ -159,6 +160,36 @@ fun WotSearchSignal(
             modifier = modifier,
         )
         WotLookup.Pending, null -> Unit
+    }
+}
+
+@Composable
+fun WotImpersonationBadge(
+    risk: ImpersonationRisk,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "⚠",
+            color = Zap,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+        Spacer(Modifier.width(3.dp))
+        Text(
+            text = "name match: ${risk.protectedProfile.displayLabel}",
+            color = Zap.copy(alpha = 0.92f),
+            fontSize = AppType.caption,
+            lineHeight = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

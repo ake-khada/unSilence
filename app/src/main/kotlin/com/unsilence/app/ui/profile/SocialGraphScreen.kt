@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -39,9 +40,12 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -84,6 +88,8 @@ import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Text4
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import java.util.Locale
 
 @Composable
@@ -96,6 +102,7 @@ fun SocialGraphScreen(
     BackHandler(onBack = onDismiss)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val now = remember(state.lastWotFetchAt, state.refreshing) { System.currentTimeMillis() }
+    var confirmPublishProviderList by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -142,6 +149,14 @@ fun SocialGraphScreen(
                         onApplyCustom = viewModel::applyCustomProvider,
                     )
                 }
+                if (state.publishProviderListNeeded) {
+                    item {
+                        PublishProviderListCard(
+                            state = state,
+                            onClick = { confirmPublishProviderList = true },
+                        )
+                    }
+                }
                 item { ProvenanceBanner(state.prefs.source) }
                 item { StandingCard(state.ownStanding) }
                 item {
@@ -159,6 +174,88 @@ fun SocialGraphScreen(
                 }
                 item { HowScoresWorkCard() }
                 item { Spacer(Modifier.height(Spacing.xl)) }
+            }
+        }
+    }
+
+    if (confirmPublishProviderList) {
+        AlertDialog(
+            onDismissRequest = { confirmPublishProviderList = false },
+            containerColor = Surface1,
+            title = {
+                Text("Publish provider list", color = Color.White, fontWeight = FontWeight.SemiBold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
+                    Text(
+                        text = "This publishes your active WoT provider publicly.",
+                        color = TextSecondary,
+                        fontSize = AppType.bodySmall,
+                    )
+                    MetricRow("Provider", shortNpub(state.activeProvider.providerPubkey))
+                    MetricRow("Relay", state.activeProvider.relayHint)
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmPublishProviderList = false
+                        viewModel.publishProviderList()
+                    },
+                    enabled = !state.publishingProviderList,
+                ) {
+                    Text("Publish", color = Brand, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmPublishProviderList = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PublishProviderListCard(
+    state: SocialGraphUiState,
+    onClick: () -> Unit,
+) {
+    SettingsCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Spacing.medium),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Publish provider list",
+                    color = Color.White,
+                    fontSize = AppType.body,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    text = "${shortNpub(state.activeProvider.providerPubkey)} · ${state.activeProvider.relayHint}",
+                    color = Text3,
+                    fontSize = AppType.caption,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Button(
+                onClick = onClick,
+                enabled = !state.publishingProviderList,
+                colors = ButtonDefaults.buttonColors(containerColor = Zap, contentColor = Black),
+            ) {
+                if (state.publishingProviderList) {
+                    CircularProgressIndicator(
+                        color = Black,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp),
+                    )
+                } else {
+                    Text("Publish", fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
@@ -708,6 +805,12 @@ private fun wotTierColor(score: Int): Color = when {
 
 private fun shortKey(pubkey: String): String =
     if (pubkey.length > 14) "${pubkey.take(8)}…${pubkey.takeLast(6)}" else pubkey
+
+private fun shortNpub(pubkey: String): String =
+    runCatching { pubkey.hexToByteArray().toNpub() }
+        .getOrNull()
+        ?.let { npub -> "${npub.take(10)}…${npub.takeLast(6)}" }
+        ?: shortKey(pubkey)
 
 private fun formatDecimal(value: Double): String =
     String.format(Locale.US, "%.3f", value)

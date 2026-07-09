@@ -86,6 +86,40 @@ class WotSettingsPolicyTest {
     }
 
     @Test
+    fun `provider registry draft replaces target rows and preserves foreign rows and content`() {
+        val providerPubkey = "5".repeat(64)
+        val provider = WotProviderDescriptor(
+            providerPubkey = providerPubkey,
+            relayHint = "nip85.example.com",
+            updatedAt = 0L,
+        )
+        val foreignHops = listOf("30382:hops", "old-provider", "wss://old.example.com")
+        val foreignPrivate = listOf("encrypted-private-row", "must", "survive")
+        val draft = mergeWotProviderRegistryDraft(
+            existingTags = listOf(
+                foreignHops,
+                listOf("30382:rank", "old-provider", "wss://old.example.com"),
+                foreignPrivate,
+                listOf("30382:followers", "old-provider", "wss://old.example.com"),
+            ),
+            existingContent = "encrypted-private-content",
+            provider = provider,
+        )
+
+        assertEquals("encrypted-private-content", draft.content)
+        assertTrue(foreignHops in draft.tags)
+        assertTrue(foreignPrivate in draft.tags)
+        assertEquals(
+            listOf("30382:rank", providerPubkey, "wss://nip85.example.com"),
+            draft.tags.single { it.firstOrNull() == "30382:rank" },
+        )
+        assertEquals(
+            listOf("30382:followers", providerPubkey, "wss://nip85.example.com"),
+            draft.tags.single { it.firstOrNull() == "30382:followers" },
+        )
+    }
+
+    @Test
     fun `custom provider pubkey input accepts hex and rejects malformed values`() {
         val provider = "4".repeat(64)
 

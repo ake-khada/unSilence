@@ -2,6 +2,7 @@ package com.unsilence.app.ui.profile
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.WOT_REGISTRY_LOOKUP_RELAYS
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -18,15 +19,20 @@ import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.computeWotCoverage
 import com.unsilence.app.data.relay.defaultWotProviderDescriptor
 import com.unsilence.app.data.relay.deriveWotProviderOptions
+import com.unsilence.app.data.relay.mergeWotProviderRegistryDraft
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.normalizeWotProviderPubkeyInput
 import com.unsilence.app.data.relay.parseEncryptedWotProviderTagsJson
+import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.wotTargetsHash
 import com.unsilence.app.data.repository.UserRepository
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -53,6 +59,8 @@ data class SocialGraphUiState(
     val coverage: WotCoverage,
     val lastWotFetchAt: Long,
     val feedWotDisplayMode: FeedWotDisplayMode,
+    val publishProviderListNeeded: Boolean,
+    val publishingProviderList: Boolean,
     val refreshing: Boolean,
     val customExpanded: Boolean,
     val customPubkeyInput: String,
@@ -78,6 +86,8 @@ data class SocialGraphUiState(
             coverage = WotCoverage(0, 0),
             lastWotFetchAt = 0L,
             feedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
+            publishProviderListNeeded = false,
+            publishingProviderList = false,
             refreshing = false,
             customExpanded = false,
             customPubkeyInput = "",
@@ -91,6 +101,7 @@ data class SocialGraphUiState(
 private data class SocialGraphLocalState(
     val decryptedOwnProvider: WotProviderDescriptor? = null,
     val refreshing: Boolean = false,
+    val publishingProviderList: Boolean = false,
     val customExpanded: Boolean = false,
     val customPubkeyInput: String = "",
     val customRelayInput: String = "",
@@ -249,6 +260,42 @@ class SocialGraphViewModel @Inject constructor(
         }
     }
 
+    fun publishProviderList() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val own = ownPubkey ?: return@launch setPublishing(false, "No account is loaded")
+            val activeProvider = memoryEventStore.activeWotProvider()
+            try {
+                setPublishing(true, "Checking your kind 10040 provider list")
+                relayPool.fetchOwn10040(own)
+                val existing = waitForLatestOwnProviderRegistryEvent()
+                val draft = mergeWotProviderRegistryDraft(
+                    existingTags = existing?.tags.orEmpty(),
+                    existingContent = existing?.content.orEmpty(),
+                    provider = activeProvider,
+                )
+                val template = EventTemplate<Event>(
+                    createdAt = System.currentTimeMillis() / 1000L,
+                    kind = 10040,
+                    tags = draft.tags.map { it.toTypedArray() }.toTypedArray(),
+                    content = draft.content,
+                )
+
+                setPublishing(true, "Waiting for signature")
+                val signed = signingManager.sign(template)
+                    ?: return@launch setPublishing(false, "Signing canceled")
+                val targetRelays = (
+                    memoryEventStore.writeRelaysFor(own) + WOT_REGISTRY_LOOKUP_RELAYS
+                ).distinct()
+                relayPool.publish(toEventJson(signed), targetRelays)
+                setPublishing(false, "Provider list published")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                setPublishing(false, "Provider list publish failed")
+            }
+        }
+    }
+
     private fun buildUiState(
         prefs: WotProviderPrefs,
         lastFetchAt: Long,
@@ -256,9 +303,11 @@ class SocialGraphViewModel @Inject constructor(
         local: SocialGraphLocalState,
     ): SocialGraphUiState {
         val activeProvider = memoryEventStore.activeWotProvider()
+        val declaredProvider = memoryEventStore.ownWotProviderFromRegistry()
         val ownProvider = memoryEventStore.ownWotProviderFromRegistry() ?: local.decryptedOwnProvider
         val follows = ownPubkey?.let { memoryEventStore.getFollows(it) } ?: emptySet()
         val assertions = memoryEventStore.getWotAssertions()
+        val registryEvent = memoryEventStore.latestOwnWotProviderRegistryEvent()
         return SocialGraphUiState(
             ownPubkey = ownPubkey,
             ownNpub = ownNpub,
@@ -276,6 +325,12 @@ class SocialGraphViewModel @Inject constructor(
             coverage = computeWotCoverage(follows, assertions),
             lastWotFetchAt = lastFetchAt,
             feedWotDisplayMode = feedWotDisplayMode,
+            publishProviderListNeeded = ownPubkey != null && (
+                registryEvent == null ||
+                    declaredProvider == null ||
+                    !sameProvider(declaredProvider, activeProvider)
+                ),
+            publishingProviderList = local.publishingProviderList,
             refreshing = local.refreshing,
             customExpanded = local.customExpanded,
             customPubkeyInput = local.customPubkeyInput,
@@ -292,6 +347,14 @@ class SocialGraphViewModel @Inject constructor(
             delay(100)
         }
         return memoryEventStore.ownWotProviderFromRegistry()
+    }
+
+    private suspend fun waitForLatestOwnProviderRegistryEvent(): com.unsilence.app.data.memory.NostrEvent? {
+        repeat(20) {
+            memoryEventStore.latestOwnWotProviderRegistryEvent()?.let { return it }
+            delay(100)
+        }
+        return memoryEventStore.latestOwnWotProviderRegistryEvent()
     }
 
     private suspend fun decryptOwnProviderContent(own: String): WotProviderDescriptor? {
@@ -396,4 +459,17 @@ class SocialGraphViewModel @Inject constructor(
             }
         }
     }
+
+    private suspend fun setPublishing(value: Boolean, message: String) {
+        withContext(Dispatchers.Main.immediate) {
+            localState.value = localState.value.copy(
+                publishingProviderList = value,
+                statusMessage = message,
+            )
+        }
+    }
+
+    private fun sameProvider(a: WotProviderDescriptor, b: WotProviderDescriptor): Boolean =
+        a.providerPubkey.equals(b.providerPubkey, ignoreCase = true) &&
+            a.relayHint == b.relayHint
 }

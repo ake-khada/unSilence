@@ -16,6 +16,11 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.ImpersonationRisk
+import com.unsilence.app.data.relay.ProtectedProfile
+import com.unsilence.app.data.relay.detectImpersonationRisk
+import com.unsilence.app.data.relay.isProtectedWotLookup
+import com.unsilence.app.data.relay.protectedProfileFor
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
@@ -83,6 +88,7 @@ class UserProfileViewModel @Inject constructor(
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
     val pubkeyHex: StateFlow<String?> = _pubkeyHex.asStateFlow()
+    private val myPubkey: String? = keyManager.getPublicKeyHex()
 
     val npub: String?
         get() = _pubkeyHex.value?.let { hex ->
@@ -142,6 +148,22 @@ class UserProfileViewModel @Inject constructor(
             target?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WotLookup.Pending)
 
+    val impersonationRisk: StateFlow<ImpersonationRisk?> =
+        combine(
+            userFlow,
+            profileWotLookup,
+            memoryEventStore.wotSignalFlow,
+            memoryEventStore.profileSignalFlow,
+        ) { user, lookup, _, _ ->
+            user?.let {
+                detectImpersonationRisk(
+                    candidate = it,
+                    lookup = lookup,
+                    protectedProfiles = buildProtectedProfiles(),
+                )
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     val wotProvenance: StateFlow<ProfileWotProvenance> =
         combine(
             memoryEventStore.wotSignalFlow,
@@ -196,8 +218,6 @@ class UserProfileViewModel @Inject constructor(
     val followerCount = MutableStateFlow<Long?>(null)
     /** Following count parsed from the user's kind-3 event p-tags. */
     val followingCount = MutableStateFlow<Long?>(null)
-
-    private val myPubkey: String? = keyManager.getPublicKeyHex()
 
     val isOwnProfile: StateFlow<Boolean> = _pubkeyHex
         .map { target -> target != null && target == myPubkey }
@@ -334,6 +354,18 @@ class UserProfileViewModel @Inject constructor(
         if (pubkeys.isEmpty()) return
         _wotSubjects.update { current -> current + pubkeys }
         wotHydrationCoalescer.requestHydration(pubkeys)
+    }
+
+    private fun buildProtectedProfiles(): List<ProtectedProfile> {
+        val own = myPubkey ?: return emptyList()
+        val protectedPubkeys = LinkedHashSet<String>()
+        protectedPubkeys.addAll(memoryEventStore.getFollows(own).orEmpty())
+        memoryEventStore.getWotAssertions().values
+            .filter { isProtectedWotLookup(WotLookup.Scored(it)) }
+            .forEach { protectedPubkeys.add(it.subjectPubkey) }
+        return protectedPubkeys.mapNotNull { pubkey ->
+            memoryEventStore.getUserEntity(pubkey)?.let(::protectedProfileFor)
+        }
     }
 
     fun loadMore(currentOldest: Long) {
