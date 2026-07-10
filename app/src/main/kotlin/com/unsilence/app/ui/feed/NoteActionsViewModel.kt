@@ -47,6 +47,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -105,6 +106,7 @@ class NoteActionsViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
+    val currentPubkey: String? get() = pubkeyHex
 
     init {
         viewModelScope.launch { settingsStore.initialize() }
@@ -134,6 +136,66 @@ class NoteActionsViewModel @Inject constructor(
      * Used by VideoPlaybackScope to discover quote-only video rows.
      */
     fun getCachedEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
+
+    fun pollResponsesFlow(pollId: String): Flow<List<NostrEvent>> =
+        memoryEventStore.pollResponsesFlow(pollId)
+
+    fun loadPollResponses(pollId: String, relays: List<String>, endsAt: Long?) {
+        val targets = relays.mapNotNull(::normalizeRelayUrl).distinct().take(6)
+        if (targets.isNotEmpty()) relayPool.fetchPollResponses(pollId, targets, endsAt)
+    }
+
+    fun votePoll(
+        pollId: String,
+        pollAuthorPubkey: String,
+        selectedOptionIds: Set<String>,
+        validOptionIds: Set<String>,
+        multipleChoice: Boolean,
+        responseRelays: List<String>,
+        sourceRelay: String,
+        endsAt: Long?,
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val nowSeconds = System.currentTimeMillis() / 1000L
+            if (endsAt != null && nowSeconds > endsAt) {
+                _actionError.tryEmit("This poll has ended")
+                return@launch
+            }
+            val tags = buildPollResponseTags(
+                pollId = pollId,
+                selectedOptionIds = selectedOptionIds,
+                validOptionIds = validOptionIds,
+                multipleChoice = multipleChoice,
+            )
+            if (tags.size < 2) return@launch
+            val signed = signingManager.sign(EventTemplate<Event>(
+                createdAt = nowSeconds,
+                kind = 1018,
+                tags = tags,
+                content = "",
+            )) ?: run {
+                _actionError.tryEmit("Vote failed - signing rejected")
+                return@launch
+            }
+
+            val targets = responseRelays.mapNotNull(::normalizeRelayUrl).distinct().take(6)
+                .ifEmpty { engagementTargets(pollId, pollAuthorPubkey, sourceRelay) }
+            relayPool.publish(toEventJson(signed), targets)
+            memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = pollId))
+            snapshotScheduler.scheduleImmediate()
+        }
+    }
+
+    fun votePoll(request: PollVoteRequest) = votePoll(
+        pollId = request.pollId,
+        pollAuthorPubkey = request.pollAuthorPubkey,
+        selectedOptionIds = request.selectedOptionIds,
+        validOptionIds = request.validOptionIds,
+        multipleChoice = request.multipleChoice,
+        responseRelays = request.responseRelays,
+        sourceRelay = request.sourceRelay,
+        endsAt = request.endsAt,
+    )
 
     /**
      * Shared pre-viewport card warm path for non-feed surfaces that still render
@@ -757,7 +819,7 @@ class NoteActionsViewModel @Inject constructor(
             }
 
             // Wait for the event to appear in MemoryEventStore (via EventProcessor)
-            return withTimeoutOrNull(5_000L) {
+            return withTimeoutOrNull(10_000L) {
                 memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
             }
         } finally {
@@ -838,6 +900,20 @@ class NoteActionsViewModel @Inject constructor(
             relaysSeen = ConcurrentHashMap.newKeySet(),
         )
     }
+}
+
+internal fun buildPollResponseTags(
+    pollId: String,
+    selectedOptionIds: Set<String>,
+    validOptionIds: Set<String>,
+    multipleChoice: Boolean,
+): Array<Array<String>> {
+    val selected = selectedOptionIds.filter { it in validOptionIds }.sorted()
+        .let { if (multipleChoice) it else it.take(1) }
+    return buildList<Array<String>> {
+        add(arrayOf("e", pollId))
+        selected.forEach { add(arrayOf("response", it)) }
+    }.toTypedArray()
 }
 
 /** The repost kind + tags for a target, per NIP-18. Pure (unit-tested). */

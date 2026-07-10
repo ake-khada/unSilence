@@ -69,10 +69,12 @@ class MainActivity : FragmentActivity() {
 
         // Debug: set sensitive content mode via intent extra
         // adb shell am start -n com.unsilence.app/.MainActivity --es sensitive_mode blur
-        intent?.getStringExtra("sensitive_mode")?.let { mode ->
-            val scm = SensitiveContentMode.entries.firstOrNull { it.name.equals(mode, ignoreCase = true) }
-            if (scm != null) {
-                lifecycleScope.launch { relayPreferencesStore.setSensitiveContentMode(scm) }
+        if (BuildConfig.DEBUG) {
+            intent?.getStringExtra("sensitive_mode")?.let { mode ->
+                val scm = SensitiveContentMode.entries.firstOrNull { it.name.equals(mode, ignoreCase = true) }
+                if (scm != null) {
+                    lifecycleScope.launch { relayPreferencesStore.setSensitiveContentMode(scm) }
+                }
             }
         }
 

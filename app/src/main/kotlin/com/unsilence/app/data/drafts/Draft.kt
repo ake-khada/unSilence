@@ -79,6 +79,7 @@ data class Draft(
     val updatedAt: Long,
     val context: DraftContext,
     val hadUnsavedMedia: Boolean = false,
+    val poll: DraftPoll? = null,
 ) {
     val previewText: String
         get() = blocks.filterIsInstance<DraftBlock.Text>()
@@ -89,6 +90,19 @@ data class Draft(
 
     val attachmentCount: Int get() = blocks.count { it is DraftBlock.Attachment }
 }
+
+@Serializable
+data class DraftPoll(
+    val options: List<DraftPollOption>,
+    val multipleChoice: Boolean = false,
+    val durationSeconds: Long? = null,
+)
+
+@Serializable
+data class DraftPollOption(
+    val id: String,
+    val label: String,
+)
 
 fun BlossomBlob.toDraftAttachment(): DraftBlock.Attachment = DraftBlock.Attachment(
     url = url,

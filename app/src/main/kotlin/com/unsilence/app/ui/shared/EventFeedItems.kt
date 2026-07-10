@@ -55,6 +55,22 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
+
+@androidx.compose.runtime.Stable
+data class PollActionCallbacks(
+    val currentPubkey: String?,
+    val responses: (String) -> Flow<List<com.unsilence.app.data.memory.NostrEvent>>,
+    val load: (String, List<String>, Long?) -> Unit,
+    val vote: (com.unsilence.app.ui.feed.PollVoteRequest) -> Unit,
+)
+
+fun NoteActionsViewModel.pollActionCallbacks() = PollActionCallbacks(
+    currentPubkey = currentPubkey,
+    responses = ::pollResponsesFlow,
+    load = ::loadPollResponses,
+    vote = ::votePoll,
+)
 
 /**
  * Parameters bundle for engagement actions — avoids 15-parameter lambda pollution.
@@ -90,6 +106,7 @@ data class EventActionCallbacks(
     val wotLookup: ((String) -> WotLookup?)? = null,
     val feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     val onWotSubjectsVisible: (Collection<String>) -> Unit = {},
+    val poll: PollActionCallbacks? = null,
 )
 
 /**
@@ -498,5 +515,6 @@ private fun EventFeedItem(
         wotLookup           = callbacks.wotLookup,
         feedWotDisplayMode  = callbacks.feedWotDisplayMode,
         onWotSubjectsVisible = callbacks.onWotSubjectsVisible,
+        pollActions          = callbacks.poll,
     )
 }

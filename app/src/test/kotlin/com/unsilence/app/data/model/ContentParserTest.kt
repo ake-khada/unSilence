@@ -318,9 +318,69 @@ class ContentParserTest {
     }
 
     @Test
+    fun `Mostr repost retains ActivityPub proxy fallback`() {
+        val model = parse(
+            content = "",
+            kind = 6,
+            tagsJson = """[["e","target-abc","wss://relay.ditto.pub"],["proxy","https://misskey.io/notes/abc","activitypub"]]""",
+        )
+
+        assertEquals("https://misskey.io/notes/abc", model.repost?.proxyUrl)
+    }
+
+    @Test
+    fun `repost ignores unsafe proxy URL`() {
+        val model = parse(
+            content = "",
+            kind = 6,
+            tagsJson = """[["e","target-abc"],["proxy","javascript:alert(1)","activitypub"]]""",
+        )
+
+        assertNull(model.repost?.proxyUrl)
+    }
+
+    @Test
     fun `kind 1 has null repost`() {
         val model = parse("hello", kind = 1)
         assertNull(model.repost)
+    }
+
+    @Test
+    fun `NIP 88 poll parses bounded options and settings`() {
+        val model = parse(
+            content = "Choose a release name",
+            kind = 1068,
+            tagsJson = """[["option","a1","Aurora"],["option","b2","Beacon"],["polltype","multiplechoice"],["endsAt","1800000000"],["relay","wss://polls.example"]]""",
+        )
+
+        assertEquals(listOf("Aurora", "Beacon"), model.poll?.options?.map { it.label })
+        assertTrue(model.poll?.multipleChoice == true)
+        assertEquals(1_800_000_000L, model.poll?.endsAt)
+        assertEquals(listOf("wss://polls.example"), model.poll?.responseRelays)
+    }
+
+    @Test
+    fun `invalid poll with fewer than two options is not rendered`() {
+        val model = parse(
+            content = "Incomplete",
+            kind = 1068,
+            tagsJson = """[["option","a1","Only option"]]""",
+        )
+
+        assertNull(model.poll)
+    }
+
+    @Test
+    fun `poll accepts deployed UUID option ids and legacy close time`() {
+        val model = parse(
+            content = "Would you rather",
+            kind = 1068,
+            tagsJson = """[["option","7c2057ff-2d1e-429a-9364-e3c3009895f6","Tor"],["option","3005565d-b55c-480c-ae02-eeceb602cd0b","I2P"],["polltype","single"],["closed_at","1800000100"]]""",
+        )
+
+        assertEquals(2, model.poll?.options?.size)
+        assertFalse(model.poll?.multipleChoice == true)
+        assertEquals(1_800_000_100L, model.poll?.endsAt)
     }
 
     // ── Kind 30023 article ──────────────────────────────────────────────────

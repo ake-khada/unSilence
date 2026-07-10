@@ -486,9 +486,9 @@ class EventProcessor @Inject constructor(
         // local writes + legacy kind-1 had other paths). The feed filter's `kinds`
         // (1,6,16,20,21,30023) excludes 1111, so it never leaks into Notes/replies —
         // it surfaces only in the article reader (commentIdsByCoord) + notifications.
-        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 9734, 9735, 16, 20, 21, 30023, 1111)
+        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 30023, 1111)
         if (shouldChannel) {
-            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 || dto.kind == 21 || dto.kind == 30023 || dto.kind == 1111
+            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 || dto.kind == 21 || dto.kind == 1068 || dto.kind == 30023 || dto.kind == 1111
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)

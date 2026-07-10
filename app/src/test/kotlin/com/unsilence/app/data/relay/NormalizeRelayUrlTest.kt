@@ -45,6 +45,21 @@ class NormalizeRelayUrlTest {
         assertNull(normalizeRelayUrl("wss://relay.damus.io\u0000"))
     }
 
+    @Test
+    fun `rejects percent encoded space joining multiple relay urls`() {
+        assertNull(normalizeRelayUrl("wss://nos.lol/%20wss://relay.damus.io/%20wss://nostr.wine"))
+    }
+
+    @Test
+    fun `rejects percent encoded control character`() {
+        assertNull(normalizeRelayUrl("wss://relay.damus.io/%0a"))
+    }
+
+    @Test
+    fun `rejects empty user info before host`() {
+        assertNull(normalizeRelayUrl("wss://@nos.lol"))
+    }
+
     // ── Valid URLs still pass ─────────────────────────────────────────
 
     @Test
@@ -55,6 +70,11 @@ class NormalizeRelayUrlTest {
     @Test
     fun `accepts valid relay with trailing slash`() {
         assertNotNull(normalizeRelayUrl("wss://relay.damus.io/"))
+    }
+
+    @Test
+    fun `accepts valid relay subpath`() {
+        assertNotNull(normalizeRelayUrl("wss://relay.example.com/tenant"))
     }
 
     @Test

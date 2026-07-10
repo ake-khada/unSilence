@@ -3196,6 +3196,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(7))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })
                 put("until", JsonPrimitive(untilTimestamp))
@@ -3244,7 +3245,7 @@ class RelayPool @Inject constructor(
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3279,6 +3280,39 @@ class RelayPool @Inject constructor(
         } else {
             fetchEventsByIds(listOf(eventId))
         }
+    }
+
+    /** Fetch NIP-88 responses only when a poll card is visible. */
+    fun fetchPollResponses(
+        pollId: String,
+        relayUrls: List<String>,
+        until: Long? = null,
+    ) {
+        val targets = relayUrls.mapNotNull { normalizeRelayUrl(it) }
+            .filter { it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
+            .distinct()
+            .take(6)
+        if (targets.isEmpty()) return
+        val subId = "poll-responses-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1018)) })
+                put("#e", buildJsonArray { add(JsonPrimitive(pollId)) })
+                until?.let { put("until", JsonPrimitive(it)) }
+                put("limit", JsonPrimitive(500))
+            })
+        }.toString()
+        _activeOneShotSubs.add(subId)
+
+        val pooled = targets.filter { connections.containsKey(it) }
+        pooled.forEach { url -> connections[url]?.let { sendOneShotToRelay(it, req) } }
+        val ephemeral = targets - pooled.toSet()
+        if (ephemeral.isNotEmpty()) {
+            scope.launch { sendOneShotBatch(ephemeral, listOf(req), listOf(subId), timeoutMs = 8_000) }
+        }
+        Log.d(TAG, "fetchPollResponses: $pollId -> ${targets.size} relay(s)")
     }
 
     /**
@@ -3343,7 +3377,7 @@ class RelayPool @Inject constructor(
                 // Include kinds so relays that require them don't reject with
                 // "filters must specify at least one kind" (purplepag.es, others).
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3396,7 +3430,7 @@ class RelayPool @Inject constructor(
                 // Include kinds so relays that require them don't reject with
                 // "filters must specify at least one kind" (purplepag.es, others).
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3701,6 +3735,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(1068))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
                 put("limit", JsonPrimitive(200))
@@ -3755,6 +3790,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })

@@ -8,7 +8,7 @@ import org.junit.Test
 class FeedFilterTest {
     @Test
     fun `all show type enables the feed kind set`() {
-        assertEquals(listOf(1, 6, 16, 20, 21, 30023), FeedFilter().enabledKinds)
+        assertEquals(listOf(1, 6, 16, 20, 21, 1068, 30023), FeedFilter().enabledKinds)
     }
 
     @Test
@@ -21,7 +21,7 @@ class FeedFilterTest {
     fun `specific show types enable only matching relay kinds`() {
         val filter = FeedFilter(showTypes = setOf(ShowType.TEXT, ShowType.IMAGES, ShowType.ARTICLES))
 
-        assertEquals(listOf(1, 20, 30023), filter.enabledKinds)
+        assertEquals(listOf(1, 1068, 20, 30023), filter.enabledKinds)
         assertTrue(filter.needsMediaFilter)
         assertFalse(6 in filter.enabledKinds)
     }

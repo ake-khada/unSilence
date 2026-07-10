@@ -138,6 +138,7 @@ fun EventCard(
     wotLookup: ((String) -> WotLookup?)? = null,
     feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
+    pollActions: com.unsilence.app.ui.shared.PollActionCallbacks? = null,
     modifier: Modifier = Modifier,
 ) {
     val haptics = LocalHapticFeedback.current
@@ -420,6 +421,18 @@ fun EventCard(
                     onWotSubjectsVisible = onWotSubjectsVisible,
                 )
 
+                if (model.poll != null) {
+                    PollCard(
+                        pollId = model.engagementId,
+                        pollAuthorPubkey = model.pubkey,
+                        pollCreatedAt = model.createdAt,
+                        poll = model.poll,
+                        sourceRelay = model.relayUrl,
+                        callbacks = pollActions,
+                        modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                    )
+                }
+
                 // Empty-content repost fallback (mostr.pub bridge style):
                 // kind-6 with empty wrapper content + targetId — render the target inline.
                 // Routes via target author's outbox relays for bridge content.
@@ -430,8 +443,9 @@ fun EventCard(
                 ) {
                     EmptyRepostBody(
                         targetId = model.repost.targetId,
-                        relayHints = listOfNotNull(model.repost.relayHint),
+                        relayHints = listOfNotNull(model.repost.relayHint, model.relayUrl).distinct(),
                         targetAuthorPubkey = model.repost.targetAuthorPubkey,
+                        proxyUrl = model.repost.proxyUrl,
                         lookupEventWithAuthor = lookupEventWithAuthor,
                         lookupProfile = lookupProfile,
                         profileFlow = profileFlow,

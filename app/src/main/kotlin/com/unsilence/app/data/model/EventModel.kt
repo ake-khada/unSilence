@@ -36,7 +36,22 @@ data class EventModel(
     val article: ArticleInfo?,           // null unless effectiveKind == 30023
     val warnings: ContentWarnings,
     val customEmojis: Map<String, String> = emptyMap(), // NIP-30: shortcode → url
+    val poll: PollInfo? = null,
     val truncated: Boolean = false,      // content/segments capped (spam-post DoS bound) → show chip
+)
+
+@Immutable
+data class PollOption(
+    val id: String,
+    val label: String,
+)
+
+@Immutable
+data class PollInfo(
+    val options: List<PollOption>,
+    val multipleChoice: Boolean,
+    val endsAt: Long?,
+    val responseRelays: List<String>,
 )
 
 /**
@@ -132,6 +147,7 @@ data class RepostInfo(
     val targetId: String?,
     val relayHint: String?,
     val targetAuthorPubkey: String?,
+    val proxyUrl: String?,
     val embeddedJson: String?,
     val resolvedFromInner: Boolean,
 )

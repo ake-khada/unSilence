@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
@@ -49,6 +51,7 @@ fun EmptyRepostBody(
     targetId: String,
     relayHints: List<String>,
     targetAuthorPubkey: String?,
+    proxyUrl: String?,
     lookupEventWithAuthor: suspend (String, List<String>, String?) -> EventEntity?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
@@ -76,6 +79,7 @@ fun EmptyRepostBody(
     feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
 ) {
+    val uriHandler = LocalUriHandler.current
     val state by produceState(EmptyRepostState(), targetId) {
         val ev = lookupEventWithAuthor(targetId, relayHints, targetAuthorPubkey)
         if (ev != null) {
@@ -150,10 +154,17 @@ fun EmptyRepostBody(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(SurfaceVariant, RoundedCornerShape(8.dp))
+                    .clickable {
+                        if (proxyUrl != null) {
+                            runCatching { uriHandler.openUri(proxyUrl) }
+                        } else {
+                            onNoteClick(targetId)
+                        }
+                    }
                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
             ) {
                 Text(
-                    text = "Reposted note unavailable",
+                    text = if (proxyUrl != null) "Open original post" else "Reposted note unavailable",
                     color = TextSecondary,
                     fontSize = AppType.footnote,
                     fontWeight = FontWeight.Medium,

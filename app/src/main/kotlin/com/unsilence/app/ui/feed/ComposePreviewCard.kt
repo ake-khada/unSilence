@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import com.unsilence.app.data.memory.EventEntity
@@ -54,5 +55,16 @@ fun ComposePreviewCard(
             exoPlayer = null,
             isActiveVideo = false,
         )
+        model.poll?.let { poll ->
+            PollCard(
+                pollId = model.engagementId,
+                pollAuthorPubkey = model.pubkey,
+                pollCreatedAt = model.createdAt,
+                poll = poll,
+                sourceRelay = model.relayUrl,
+                callbacks = null,
+                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
+        }
     }
 }
