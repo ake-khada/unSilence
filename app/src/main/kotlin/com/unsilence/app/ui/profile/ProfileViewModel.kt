@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.profile
 
-import android.content.ContentResolver
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -72,7 +71,6 @@ class ProfileViewModel @Inject constructor(
     private val blossomClient: BlossomClient,
     private val imageCompressor: ImageCompressor,
     private val blossomServersStore: BlossomServersStore,
-    private val contentResolver: ContentResolver,
     private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
@@ -108,13 +106,15 @@ class ProfileViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             loading.value = true
             try {
-                val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: error("Could not read image")
                 val maxDim = if (isBanner) 1600 else 512
-                val compressed = imageCompressor.compressImage(rawBytes, maxDim, 85)
                 val server = blossomServersStore.selectedServer.value
-                val blob = blossomClient.upload(compressed, "image/jpeg", server).getOrThrow()
-                launch(Dispatchers.Main) { onUrl(blob.url) }
+                val prepared = imageCompressor.prepareImage(uri, "image/jpeg", maxDim, 85)
+                try {
+                    val blob = blossomClient.upload(prepared.file, prepared.mimeType, server).getOrThrow()
+                    launch(Dispatchers.Main) { onUrl(blob.url) }
+                } finally {
+                    prepared.file.delete()
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Profile image upload failed", e)
                 launch(Dispatchers.Main) { onError(e.message ?: "Upload failed") }

@@ -734,28 +734,18 @@ class ComposeViewModel @Inject constructor(
         server: String,
         quality: AttachmentQuality,
     ): BlossomBlob {
-        val rawBytes = withContext(Dispatchers.IO) {
-            contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: error("Could not read attachment")
-        }
-
         val (maxDim, jpegQuality) = quality.imageSettings()
-
-        val (compressed, uploadMime) = if (quality == AttachmentQuality.ORIGINAL || maxDim == 0) {
-            rawBytes to sourceMime
-        } else {
-            imageCompressor.compressImage(
-                bytes = rawBytes,
-                maxDimension = maxDim,
-                quality = jpegQuality,
-            ) to "image/jpeg"
+        val prepared = imageCompressor.prepareImage(uri, sourceMime, maxDim, jpegQuality)
+        try {
+            val blob = blossomClient.upload(
+                file = prepared.file,
+                mimeType = prepared.mimeType,
+                serverUrl = server,
+            ).getOrThrow()
+            return blob.copy(dimensions = blob.dimensions ?: prepared.dimensions)
+        } finally {
+            prepared.file.delete()
         }
-
-        return blossomClient.upload(
-            bytes = compressed,
-            mimeType = uploadMime,
-            serverUrl = server,
-        ).getOrThrow()
     }
 
     private suspend fun uploadVideo(
