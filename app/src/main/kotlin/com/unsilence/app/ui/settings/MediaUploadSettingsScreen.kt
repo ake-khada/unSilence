@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.data.blossom.AttachmentQuality
 import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.Black
@@ -60,16 +61,6 @@ import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlin.math.roundToInt
 
-private val IMAGE_DIM_STEPS = listOf(1024, 1600, 2048, 0)
-private val IMAGE_DIM_LABELS = listOf(
-    "Small — fast uploads, chat",
-    "Standard — sharp on any phone",
-    "High — tablets & desktop",
-    "Original — no resize",
-)
-private val IMAGE_QUALITY_STEPS = listOf(70, 85, 100)
-private val IMAGE_QUALITY_LABELS = listOf("70 — smaller files", "85 — balanced", "100 — best quality")
-
 @Composable
 fun MediaUploadSettingsScreen(
     onDismiss: () -> Unit,
@@ -80,8 +71,7 @@ fun MediaUploadSettingsScreen(
     BackHandler(onBack = onDismiss)
 
     val servers by viewModel.servers.collectAsStateWithLifecycle()
-    val imageMaxDim by viewModel.imageMaxDim.collectAsStateWithLifecycle()
-    val imageQuality by viewModel.imageQuality.collectAsStateWithLifecycle()
+    val imageUploadTier by viewModel.imageUploadTier.collectAsStateWithLifecycle()
     val videoQuality by viewModel.videoQuality.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
 
@@ -179,55 +169,27 @@ fun MediaUploadSettingsScreen(
                 )
                 Spacer(Modifier.height(Spacing.medium))
 
-                val dimIndex = IMAGE_DIM_STEPS.indexOf(imageMaxDim).takeIf { it >= 0 } ?: 1
-                var dimSliderIndex by remember(imageMaxDim) {
-                    mutableFloatStateOf(dimIndex.toFloat())
+                val imageSteps = AttachmentQuality.entries
+                val imageIndex = imageSteps.indexOf(imageUploadTier).takeIf { it >= 0 } ?: 1
+                var imageSliderIndex by remember(imageUploadTier) {
+                    mutableFloatStateOf(imageIndex.toFloat())
                 }
-                val displayedDimIndex = dimSliderIndex.roundToInt().coerceIn(IMAGE_DIM_STEPS.indices)
+                val displayedImageIndex = imageSliderIndex.roundToInt().coerceIn(imageSteps.indices)
 
                 Text(
-                    text = "Max size: ${IMAGE_DIM_LABELS[displayedDimIndex]}",
+                    text = "Quality: ${imageSteps[displayedImageIndex].imageSettingsLabel()}",
                     color = TextSecondary,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
-                    value = dimSliderIndex,
-                    onValueChange = { dimSliderIndex = it },
+                    value = imageSliderIndex,
+                    onValueChange = { imageSliderIndex = it },
                     onValueChangeFinished = {
-                        viewModel.setImageMaxDim(IMAGE_DIM_STEPS[displayedDimIndex])
+                        viewModel.setImageUploadTier(imageSteps[displayedImageIndex])
                     },
                     valueRange = 0f..3f,
                     steps = 2,
-                    colors = SliderDefaults.colors(
-                        thumbColor = BrandDeep,
-                        activeTrackColor = BrandDeep,
-                        inactiveTrackColor = Surface1,
-                    ),
-                )
-
-                Spacer(Modifier.height(Spacing.medium))
-
-                val qualityIndex = IMAGE_QUALITY_STEPS.indexOf(imageQuality).takeIf { it >= 0 } ?: 1
-                var qualitySliderIndex by remember(imageQuality) {
-                    mutableFloatStateOf(qualityIndex.toFloat())
-                }
-                val displayedQualityIndex = qualitySliderIndex.roundToInt().coerceIn(IMAGE_QUALITY_STEPS.indices)
-
-                Text(
-                    text = "Quality: ${IMAGE_QUALITY_LABELS[displayedQualityIndex]}",
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                )
-                Spacer(Modifier.height(Spacing.micro))
-                Slider(
-                    value = qualitySliderIndex,
-                    onValueChange = { qualitySliderIndex = it },
-                    onValueChangeFinished = {
-                        viewModel.setImageQuality(IMAGE_QUALITY_STEPS[displayedQualityIndex])
-                    },
-                    valueRange = 0f..2f,
-                    steps = 1,
                     colors = SliderDefaults.colors(
                         thumbColor = BrandDeep,
                         activeTrackColor = BrandDeep,
@@ -249,7 +211,8 @@ fun MediaUploadSettingsScreen(
                 Spacer(Modifier.height(Spacing.medium))
 
                 val videoSteps = VideoTranscoder.Quality.entries
-                val videoIndex = videoSteps.indexOf(videoQuality).takeIf { it >= 0 } ?: 0
+                val videoIndex = videoSteps.indexOf(videoQuality).takeIf { it >= 0 }
+                    ?: videoSteps.indexOf(VideoTranscoder.Quality.STANDARD)
                 var videoSliderIndex by remember(videoQuality) {
                     mutableFloatStateOf(videoIndex.toFloat())
                 }
