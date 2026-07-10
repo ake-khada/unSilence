@@ -9,7 +9,6 @@ import com.unsilence.app.data.relay.NostrJson
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.RequestBody
@@ -54,31 +53,6 @@ class BlossomClient @Inject constructor(
         .writeTimeout(60, TimeUnit.SECONDS)
         .pingInterval(0, TimeUnit.SECONDS)
         .build()
-
-    /**
-     * Upload bytes to a Blossom server.
-     * @param bytes     raw file content
-     * @param mimeType  MIME type (e.g. "image/jpeg")
-     * @param serverUrl base server URL (e.g. "https://blossom.primal.net")
-     * @return [BlossomBlob] on success
-     */
-    suspend fun upload(
-        bytes: ByteArray,
-        mimeType: String,
-        serverUrl: String,
-    ): Result<BlossomBlob> = withContext(Dispatchers.IO) {
-        try {
-            val sha256hex = sha256(bytes)
-            val body = bytes.toRequestBody(mimeType.toMediaType())
-            executeUpload(body, sha256hex, mimeType, bytes.size.toLong(), serverUrl)
-        } catch (e: BlossomException) {
-            Log.e(TAG, "Upload failed: ${e.message}")
-            Result.failure(e)
-        } catch (e: Exception) {
-            Log.e(TAG, "Upload network error", e)
-            Result.failure(BlossomException.NetworkError(e))
-        }
-    }
 
     /**
      * Upload a file to a Blossom server — streams content without loading into memory.
@@ -193,11 +167,6 @@ class BlossomClient @Inject constructor(
         val w = parts[0].toIntOrNull() ?: return null
         val h = parts[1].toIntOrNull() ?: return null
         return if (w > 0 && h > 0) w to h else null
-    }
-
-    private fun sha256(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun sha256Streaming(file: File): String {
