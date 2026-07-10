@@ -2,6 +2,7 @@ package com.unsilence.app.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.blossom.AttachmentQuality
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.blossom.DEFAULT_BLOSSOM_SERVERS
 import com.unsilence.app.data.blossom.VideoTranscoder
@@ -9,6 +10,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -40,8 +42,13 @@ class MediaUploadSettingsViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val imageMaxDim: StateFlow<Int> = blossomServersStore.imageMaxDim
-    val imageQuality: StateFlow<Int> = blossomServersStore.imageQuality
+    val imageUploadTier: StateFlow<AttachmentQuality> = blossomServersStore.imageMaxDim
+        .map(AttachmentQuality::fromImageMaxDimension)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            AttachmentQuality.STANDARD,
+        )
     val videoQuality: StateFlow<VideoTranscoder.Quality> = blossomServersStore.videoQuality
 
     init {
@@ -60,12 +67,8 @@ class MediaUploadSettingsViewModel @Inject constructor(
         viewModelScope.launch { blossomServersStore.removeServer(url) }
     }
 
-    fun setImageMaxDim(px: Int) {
-        viewModelScope.launch { blossomServersStore.setImageMaxDim(px) }
-    }
-
-    fun setImageQuality(q: Int) {
-        viewModelScope.launch { blossomServersStore.setImageQuality(q) }
+    fun setImageUploadTier(tier: AttachmentQuality) {
+        viewModelScope.launch { blossomServersStore.setImageUploadTier(tier) }
     }
 
     fun setVideoQuality(quality: VideoTranscoder.Quality) {

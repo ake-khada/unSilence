@@ -542,14 +542,7 @@ class ComposeViewModel @Inject constructor(
     }
 
     private fun defaultImageQuality(): AttachmentQuality {
-        // Settings slider uses dimSteps: 1024 / 1600 / 2048 / 0(original).
-        val maxDim = blossomServersStore.imageMaxDim.value
-        return when {
-            maxDim == 0 -> AttachmentQuality.ORIGINAL
-            maxDim <= 1024 -> AttachmentQuality.SMALL
-            maxDim <= 1600 -> AttachmentQuality.STANDARD
-            else -> AttachmentQuality.HIGH
-        }
+        return AttachmentQuality.fromImageMaxDimension(blossomServersStore.imageMaxDim.value)
     }
 
     private fun defaultVideoQuality(): AttachmentQuality {
@@ -557,6 +550,7 @@ class ComposeViewModel @Inject constructor(
             VideoTranscoder.Quality.SMALL -> AttachmentQuality.SMALL
             VideoTranscoder.Quality.STANDARD -> AttachmentQuality.STANDARD
             VideoTranscoder.Quality.HIGH -> AttachmentQuality.HIGH
+            VideoTranscoder.Quality.ORIGINAL -> AttachmentQuality.ORIGINAL
         }
     }
 

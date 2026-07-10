@@ -63,11 +63,8 @@ class BlossomServersStore @Inject constructor(
     private val _configuredServers = MutableStateFlow<List<String>>(emptyList())
     val configuredServers: StateFlow<List<String>> = _configuredServers.asStateFlow()
 
-    private val _imageMaxDim = MutableStateFlow(1600)
+    private val _imageMaxDim = MutableStateFlow(2048)
     val imageMaxDim: StateFlow<Int> = _imageMaxDim.asStateFlow()
-
-    private val _imageQuality = MutableStateFlow(85)
-    val imageQuality: StateFlow<Int> = _imageQuality.asStateFlow()
 
     private val _videoQuality = MutableStateFlow(VideoTranscoder.Quality.STANDARD)
     val videoQuality: StateFlow<VideoTranscoder.Quality> = _videoQuality.asStateFlow()
@@ -140,8 +137,7 @@ class BlossomServersStore @Inject constructor(
 
         _configuredServers.value = servers
         _selectedServer.value = selected
-        _imageMaxDim.value = prefs[KEY_IMAGE_MAX_DIM] ?: 1600
-        _imageQuality.value = prefs[KEY_IMAGE_QUALITY] ?: 85
+        _imageMaxDim.value = prefs[KEY_IMAGE_MAX_DIM] ?: 2048
         _videoQuality.value = prefs[KEY_VIDEO_QUALITY]?.let { name ->
             VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
         } ?: VideoTranscoder.Quality.STANDARD
@@ -181,17 +177,14 @@ class BlossomServersStore @Inject constructor(
         schedulePublish()
     }
 
-    suspend fun setImageMaxDim(px: Int) {
-        _imageMaxDim.value = px
+    suspend fun setImageUploadTier(tier: AttachmentQuality) {
+        val (maxDimension, outputQuality) = tier.imageSettings()
+        _imageMaxDim.value = maxDimension
         editMutex.withLock {
-            dataStore.edit { it[KEY_IMAGE_MAX_DIM] = px }
-        }
-    }
-
-    suspend fun setImageQuality(q: Int) {
-        _imageQuality.value = q
-        editMutex.withLock {
-            dataStore.edit { it[KEY_IMAGE_QUALITY] = q }
+            dataStore.edit {
+                it[KEY_IMAGE_MAX_DIM] = maxDimension
+                it[KEY_IMAGE_QUALITY] = outputQuality
+            }
         }
     }
 

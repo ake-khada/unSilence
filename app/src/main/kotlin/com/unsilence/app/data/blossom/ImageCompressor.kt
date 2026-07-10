@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.Build
 import androidx.core.graphics.scale
 import androidx.exifinterface.media.ExifInterface
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -18,17 +19,20 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 internal const val MAX_IMAGE_SOURCE_BYTES = 30L * 1024L * 1024L
-internal const val MAX_IMAGE_DECODE_DIMENSION = 2048
 
 internal fun calculateImageSampleSize(
     width: Int,
     height: Int,
-    maxDimension: Int = MAX_IMAGE_DECODE_DIMENSION,
+    targetDimension: Int,
 ): Int {
-    if (width <= 0 || height <= 0 || maxDimension <= 0) return 1
+    if (width <= 0 || height <= 0 || targetDimension <= 0) return 1
     val longest = maxOf(width, height).toLong()
+    val decodeCeiling = targetDimension.toLong() * 2L
     var sampleSize = 1
-    while ((longest + sampleSize - 1L) / sampleSize > maxDimension) {
+    while (
+        (longest + sampleSize - 1L) / sampleSize > decodeCeiling &&
+        sampleSize <= Int.MAX_VALUE / 2
+    ) {
         sampleSize = sampleSize shl 1
     }
     return sampleSize
@@ -50,8 +54,9 @@ class ImageCompressor @Inject constructor(
 
     /**
      * Prepares an image for file-backed upload without retaining the source bytes.
-     * ORIGINAL copies the bounded source stream; other modes decode at no more than
-     * 2048 px, optionally scale lower, and compress directly into a cache file.
+     * ORIGINAL copies the bounded source stream. Other modes sample-decode at no
+     * more than twice the target, scale once to the exact output size, and compress
+     * directly into a cache file.
      */
     suspend fun prepareImage(
         uri: Uri,
@@ -79,13 +84,16 @@ class ImageCompressor @Inject constructor(
 
         val options = BitmapFactory.Options().apply {
             inMutable = true
-            inSampleSize = calculateImageSampleSize(bounds.first, bounds.second)
+            inSampleSize = calculateImageSampleSize(
+                bounds.first,
+                bounds.second,
+                maxDimension,
+            )
         }
         var bitmap = openBoundedStream(uri).use { input ->
             BitmapFactory.decodeStream(input, null, options)
         } ?: error("Could not decode image")
 
-        bitmap = applyOrientation(bitmap, orientation)
         val longest = maxOf(bitmap.width, bitmap.height)
         if (longest > maxDimension) {
             val scale = maxDimension.toFloat() / longest
@@ -97,11 +105,16 @@ class ImageCompressor @Inject constructor(
             if (scaled !== bitmap) bitmap.recycle()
             bitmap = scaled
         }
+        bitmap = applyOrientation(bitmap, orientation)
 
-        val hasAlpha = bitmap.hasAlpha()
-        val mimeType = if (hasAlpha) "image/png" else "image/jpeg"
-        val format = if (hasAlpha) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
-        val output = createOutputFile(if (hasAlpha) ".png" else ".jpg")
+        val useWebp = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        val mimeType = if (useWebp) "image/webp" else "image/jpeg"
+        val format = if (useWebp) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            Bitmap.CompressFormat.JPEG
+        }
+        val output = createOutputFile(if (useWebp) ".webp" else ".jpg")
         try {
             val dimensions = bitmap.width to bitmap.height
             output.outputStream().buffered().use { sink ->
