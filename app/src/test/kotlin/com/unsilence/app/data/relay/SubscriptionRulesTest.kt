@@ -33,6 +33,7 @@ class SubscriptionRulesTest {
             "engagement-",
             "batch-events-",
             "trust-scores-",
+            "poll-responses-",
             "wot-10040-",
         )
 

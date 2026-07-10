@@ -94,6 +94,7 @@ import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.WotImpersonationBadge
 import com.unsilence.app.ui.shared.WotSearchSignal
 import com.unsilence.app.ui.shared.eventFeedItems
+import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -788,6 +789,7 @@ private fun rememberCallbacks(
         reactionsForEvent = viewModel::reactionsForEvent,
         wotLookup = { pubkey -> wotLookups[pubkey] },
         feedWotDisplayMode = feedWotDisplayMode,
+        poll = actionsViewModel.pollActionCallbacks(),
         onWotSubjectsVisible = viewModel::requestWotHydration,
         onLongPress = onLongPress,
     )

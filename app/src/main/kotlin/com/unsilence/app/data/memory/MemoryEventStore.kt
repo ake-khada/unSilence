@@ -98,7 +98,7 @@ private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
-private val CONTENT_KINDS = setOf(1, 6, 7, 9734, 9735, 16, 20, 21, 30023, 1111)
+private val CONTENT_KINDS = setOf(1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 30023, 1111)
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
@@ -749,10 +749,10 @@ class MemoryEventStore @Inject constructor(
         when (kind) {
             0 -> d.profile = true
             3 -> d.follows = true
-            1, 6, 20, 21, 30023, 1111 -> d.feed = true
+            1, 6, 20, 21, 1068, 30023, 1111 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
-        if (kind == 7 || kind == 6 || kind == 16 || kind == 9734) d.action = true
+        if (kind == 7 || kind == 6 || kind == 16 || kind == 1018 || kind == 9734) d.action = true
     }
 
     /**
@@ -1258,7 +1258,7 @@ class MemoryEventStore @Inject constructor(
             }
         }
         deindexArticleComment(event, dirty)
-        if (event.kind in setOf(1, 6, 16, 20, 21, 30023, 1111)) dirty.feed = true
+        if (event.kind in setOf(1, 6, 16, 20, 21, 1068, 30023, 1111)) dirty.feed = true
     }
 
     private fun deindexArticleComment(event: NostrEvent, dirty: InsertDirty) {
@@ -3258,7 +3258,8 @@ class MemoryEventStore @Inject constructor(
         val filtered = when (contentFilter) {
             // Notes tab: kind-1 roots (no replies) + kind-6/16 reposts — matches userNotesFlow
             1 -> events.filter {
-                (it.kind == 1 && it.replyToId == null && it.rootId == null) || it.kind == 6 || it.kind == 16
+                (it.kind == 1 && it.replyToId == null && it.rootId == null) ||
+                    it.kind == 6 || it.kind == 16 || it.kind == 1068
             }
             // Replies tab: kind-1 replies only (has replyToId or rootId)
             2 -> events.filter { it.kind == 1 && (it.replyToId != null || it.rootId != null) }
@@ -3421,6 +3422,24 @@ class MemoryEventStore @Inject constructor(
         _actionSignal
             .map { withResolvedCoords(zappedTargetsByActor[pubkey]) }
             .distinctUntilChanged()
+
+    /** NIP-88 responses for a poll. Consumers apply the poll's time bounds and vote mode. */
+    fun pollResponsesFlow(pollId: String): Flow<List<NostrEvent>> =
+        _actionSignal
+            .map { pollResponses(pollId) }
+            .distinctUntilChanged()
+
+    private fun pollResponses(pollId: String): List<NostrEvent> {
+        val result = ArrayList<NostrEvent>()
+        for (id in idsByKind[1018].orEmpty()) {
+            val event = eventsById[id] ?: continue
+            val target = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+            if (target != pollId) continue
+            if (event.tags.none { it.size >= 2 && it[0] == "response" }) continue
+            result.add(event)
+        }
+        return result.sortedWith(compareBy<NostrEvent> { it.pubkey }.thenBy { it.createdAt }.thenBy { it.id })
+    }
 
     /** Synchronous check: has the current user reacted to or reposted [eventId]?
      *  Used by CardHydrator to skip backfill for already-lit posts. Also checks the

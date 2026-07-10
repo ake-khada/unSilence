@@ -135,6 +135,7 @@ class RelayBrowseSession @Inject constructor(
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })
                 if (since != null && since > 0L) {

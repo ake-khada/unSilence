@@ -20,6 +20,8 @@ import com.unsilence.app.data.drafts.Draft
 import com.unsilence.app.data.drafts.DraftBlock
 import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.data.drafts.DraftStore
+import com.unsilence.app.data.drafts.DraftPoll
+import com.unsilence.app.data.drafts.DraftPollOption
 import com.unsilence.app.data.drafts.toBlob
 import com.unsilence.app.data.drafts.toDraftAttachment
 import com.unsilence.app.data.memory.CustomEmoji
@@ -68,6 +70,17 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 private const val TAG = "ComposeViewModel"
+
+@androidx.compose.runtime.Immutable
+data class PollDraftOption(val id: String, val label: String = "")
+
+@androidx.compose.runtime.Immutable
+data class PollDraft(
+    val enabled: Boolean = false,
+    val options: List<PollDraftOption> = emptyList(),
+    val multipleChoice: Boolean = false,
+    val durationSeconds: Long? = null,
+)
 
 // ── Attachment state ────────────────────────────────────────────────────────
 
@@ -194,6 +207,50 @@ class ComposeViewModel @Inject constructor(
     )
     val blocks: StateFlow<List<ComposeBlock>> = _blocks.asStateFlow()
 
+    private val _pollDraft = MutableStateFlow(PollDraft())
+    val pollDraft: StateFlow<PollDraft> = _pollDraft.asStateFlow()
+
+    private fun newPollOption() = PollDraftOption(UUID.randomUUID().toString().replace("-", "").take(10))
+
+    fun togglePoll() {
+        _pollDraft.update { current ->
+            if (current.enabled) PollDraft()
+            else PollDraft(
+                enabled = true,
+                options = listOf(newPollOption(), newPollOption()),
+                durationSeconds = 86_400L,
+            )
+        }
+    }
+
+    fun updatePollOption(id: String, label: String) {
+        _pollDraft.update { draft ->
+            draft.copy(options = draft.options.map { if (it.id == id) it.copy(label = label.take(300)) else it })
+        }
+    }
+
+    fun addPollOption() {
+        _pollDraft.update { draft ->
+            if (!draft.enabled || draft.options.size >= 10) draft
+            else draft.copy(options = draft.options + newPollOption())
+        }
+    }
+
+    fun removePollOption(id: String) {
+        _pollDraft.update { draft ->
+            if (draft.options.size <= 2) draft
+            else draft.copy(options = draft.options.filterNot { it.id == id })
+        }
+    }
+
+    fun setPollMultipleChoice(enabled: Boolean) {
+        _pollDraft.update { it.copy(multipleChoice = enabled) }
+    }
+
+    fun setPollDuration(seconds: Long?) {
+        _pollDraft.update { it.copy(durationSeconds = seconds?.takeIf { value -> value > 0L }) }
+    }
+
     /** Derived attachment list — preserves existing ComposeScreen binding. */
     val attachments: StateFlow<List<AttachmentState>> = _blocks
         .map { blocks ->
@@ -213,8 +270,9 @@ class ComposeViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    val hasDraftableContent: StateFlow<Boolean> = _blocks
-        .map { blocks -> draftBlocksFrom(blocks).isNotEmpty() }
+    val hasDraftableContent: StateFlow<Boolean> = combine(_blocks, _pollDraft) { blocks, poll ->
+            draftBlocksFrom(blocks).isNotEmpty() || poll.enabled
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val hasUnsavedMedia: StateFlow<Boolean> = _blocks
@@ -225,8 +283,7 @@ class ComposeViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    val canPublish: StateFlow<Boolean> = _blocks
-        .map { blocks ->
+    val canPublish: StateFlow<Boolean> = combine(_blocks, _pollDraft) { blocks, poll ->
             val hasText = blocks.any { it is ComposeBlock.Text && it.content.isNotBlank() }
             val hasUploaded = blocks.any {
                 it is ComposeBlock.Attachment && it.state is AttachmentState.Uploaded
@@ -235,7 +292,11 @@ class ComposeViewModel @Inject constructor(
                 it is ComposeBlock.Attachment &&
                 (it.state is AttachmentState.Idle || it.state is AttachmentState.Uploading)
             }
-            (hasText || hasUploaded) && !inFlight
+            if (poll.enabled) {
+                hasText && poll.options.count { it.label.isNotBlank() } >= 2 && !inFlight
+            } else {
+                (hasText || hasUploaded) && !inFlight
+            }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
@@ -254,8 +315,10 @@ class ComposeViewModel @Inject constructor(
         _blocks,
         _isSensitive,
         _savedDraftFingerprint,
-    ) { blocks, isSensitive, savedFingerprint ->
-        hasAnyContent(blocks) && currentContentFingerprint(blocks, isSensitive) != savedFingerprint
+        _pollDraft,
+    ) { blocks, isSensitive, savedFingerprint, poll ->
+        (hasAnyContent(blocks) || poll.enabled) &&
+            currentContentFingerprint(blocks, isSensitive, poll) != savedFingerprint
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     fun toggleSensitive() { _isSensitive.value = !_isSensitive.value }
@@ -440,7 +503,15 @@ class ComposeViewModel @Inject constructor(
             restored + ComposeBlock.Text("")
         }
         _isSensitive.value = draft.isSensitive
-        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value)
+        _pollDraft.value = draft.poll?.let { saved ->
+            PollDraft(
+                enabled = true,
+                options = saved.options.map { PollDraftOption(it.id, it.label) },
+                multipleChoice = saved.multipleChoice,
+                durationSeconds = saved.durationSeconds,
+            )
+        } ?: PollDraft()
+        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value, _pollDraft.value)
         _sendState.value = SendState.Composing
     }
 
@@ -448,7 +519,7 @@ class ComposeViewModel @Inject constructor(
         val pk = pubkeyHex ?: return false
         val draft = buildCurrentDraft() ?: return false
         draftStore.save(pk, draft)
-        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value)
+        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value, _pollDraft.value)
         return true
     }
 
@@ -726,6 +797,7 @@ class ComposeViewModel @Inject constructor(
         _pendingEmojiInsert.value = null
         _isSensitive.value = false
         _blocks.value = listOf(ComposeBlock.Text(""))
+        _pollDraft.value = PollDraft()
         _savedDraftFingerprint.value = null
     }
 
@@ -803,7 +875,8 @@ class ComposeViewModel @Inject constructor(
     private fun buildCurrentDraft(): Draft? {
         val blocks = _blocks.value
         val draftBlocks = draftBlocksFrom(blocks)
-        if (draftBlocks.isEmpty()) return null
+        val poll = _pollDraft.value
+        if (draftBlocks.isEmpty() && !poll.enabled) return null
         val context = currentContext()
         return Draft(
             key = context.key,
@@ -812,6 +885,13 @@ class ComposeViewModel @Inject constructor(
             updatedAt = System.currentTimeMillis(),
             context = context,
             hadUnsavedMedia = hasUnsavedMediaBlocks(blocks),
+            poll = poll.takeIf { it.enabled }?.let { active ->
+                DraftPoll(
+                    options = active.options.map { DraftPollOption(it.id, it.label) },
+                    multipleChoice = active.multipleChoice,
+                    durationSeconds = active.durationSeconds,
+                )
+            },
         )
     }
 
@@ -840,6 +920,7 @@ class ComposeViewModel @Inject constructor(
     private fun currentContentFingerprint(
         blocks: List<ComposeBlock>,
         isSensitive: Boolean,
+        poll: PollDraft = _pollDraft.value,
     ): String {
         val blockFingerprint = blocks.joinToString(separator = "\u001E") { block ->
             when (block) {
@@ -855,7 +936,11 @@ class ComposeViewModel @Inject constructor(
                 }
             }
         }
-        return "${currentContext().key}|$isSensitive|$blockFingerprint"
+        val pollFingerprint = if (poll.enabled) {
+            poll.options.joinToString("\u001F") { "${it.id}:${it.label}" } +
+                ":${poll.multipleChoice}:${poll.durationSeconds}"
+        } else "none"
+        return "${currentContext().key}|$isSensitive|$blockFingerprint|$pollFingerprint"
     }
 
     private fun deleteCurrentDraft() {
@@ -889,6 +974,7 @@ class ComposeViewModel @Inject constructor(
         when {
             articleCommentTarget != null -> publishArticleComment(state.notifyActive)
             state.isReply                -> publishReply(state.notifyActive)
+            _pollDraft.value.enabled     -> publishPoll(state.notifyActive)
             else                         -> publishNote(state.notifyActive)
         }
     }
@@ -903,6 +989,7 @@ class ComposeViewModel @Inject constructor(
         when {
             articleCommentTarget != null -> publishArticleComment(confirming.notifyActive)
             confirming.isReply           -> publishReply(confirming.notifyActive)
+            _pollDraft.value.enabled     -> publishPoll(confirming.notifyActive)
             else                         -> publishNote(confirming.notifyActive)
         }
     }
@@ -1007,6 +1094,9 @@ class ComposeViewModel @Inject constructor(
         val tags = mutableListOf<Array<String>>()
         val existingPTags = mutableSetOf<String>()
         tags.addAll(blocksToImetaTags(blocks))
+        if (!isReply && _pollDraft.value.enabled) {
+            tags.addAll(buildPollTags(_pollDraft.value))
+        }
         articleCommentTarget?.let { target ->
             // NIP-22 kind-1111 article comment tags.
             tags.addAll(Nip22Tags.articleComment(target))
@@ -1053,6 +1143,77 @@ class ComposeViewModel @Inject constructor(
     }
 
     // ── Publishing ──────────────────────────────────────────────────────────
+
+    private fun buildPollTags(
+        poll: PollDraft,
+        createdAt: Long = System.currentTimeMillis() / 1000L,
+    ): List<Array<String>> = buildList {
+        poll.options.filter { it.label.isNotBlank() }.take(10).forEach { option ->
+            add(arrayOf("option", option.id, option.label.trim()))
+        }
+        pollResponseRelays().forEach { add(arrayOf("relay", it)) }
+        add(arrayOf("polltype", if (poll.multipleChoice) "multiplechoice" else "singlechoice"))
+        poll.durationSeconds?.let { add(arrayOf("endsAt", (createdAt + it).toString())) }
+    }
+
+    private fun pollResponseRelays(): List<String> {
+        val ownPk = pubkeyHex.orEmpty()
+        return memoryEventStore.writeRelaysFor(ownPk)
+            .mapNotNull { com.unsilence.app.data.relay.normalizeRelayUrl(it) }
+            .distinct()
+            .take(6)
+            .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS.take(6) }
+    }
+
+    private fun publishPoll(activeNotifyPubkeys: Set<String>) {
+        publishError = null
+        viewModelScope.launch {
+            val current = _blocks.value
+            val poll = _pollDraft.value
+            val finalContent = blocksToContent(current)
+            val createdAt = System.currentTimeMillis() / 1000L
+            val tagList = buildList {
+                addAll(buildPollTags(poll, createdAt))
+                addAll(blocksToImetaTags(current))
+                extractMentionPubkeys(finalContent).forEach { pk ->
+                    if (pk in activeNotifyPubkeys) add(arrayOf("p", pk))
+                }
+                addAll(extractEmojiTags(finalContent))
+                addAll(extractHashtags(finalContent))
+                if (_isSensitive.value) add(arrayOf("content-warning", ""))
+            }
+            val signed = signingManager.sign(EventTemplate<Event>(
+                createdAt = createdAt,
+                kind = 1068,
+                tags = tagList.toTypedArray(),
+                content = finalContent,
+            )) ?: run {
+                _sendState.value = SendState.Failed("Signing failed - check your key or Amber connection")
+                return@launch
+            }
+
+            publishAndTrack(signed.id, toEventJson(signed), null, null) {
+                val parsedTags = signed.tags.map { it.toList() }
+                memoryEventStore.insert(NostrEvent(
+                    id = signed.id,
+                    pubkey = signed.pubKey,
+                    kind = signed.kind,
+                    content = signed.content,
+                    createdAt = signed.createdAt,
+                    tags = parsedTags,
+                    tagsJson = tagsToJson(parsedTags),
+                    sig = signed.sig,
+                    relayUrl = "local",
+                    replyToId = null,
+                    rootId = null,
+                    hasContentWarning = _isSensitive.value,
+                    contentWarningReason = null,
+                    firstSeenAt = System.currentTimeMillis(),
+                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                ))
+            }
+        }
+    }
 
     private fun publishReply(activeNotifyPubkeys: Set<String>) {
         val parent = replyToRow ?: return
@@ -1333,6 +1494,7 @@ class ComposeViewModel @Inject constructor(
                 // Brief pause to show final state
                 delay(800)
                 _blocks.value = listOf(ComposeBlock.Text(""))
+                _pollDraft.value = PollDraft()
                 published = true
                 _sendState.value = SendState.Sent
             } else {

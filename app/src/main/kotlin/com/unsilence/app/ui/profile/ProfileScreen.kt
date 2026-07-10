@@ -85,6 +85,7 @@ import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
 import com.unsilence.app.ui.shared.eventFeedItems
+import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import androidx.compose.material.icons.automirrored.outlined.Reply
@@ -223,6 +224,7 @@ fun ProfileScreen(
         reactionsForEvent = viewModel::reactionsForEvent,
         wotLookup = { key -> wotLookups[key] },
         feedWotDisplayMode = feedWotDisplayMode,
+        poll = actionsViewModel.pollActionCallbacks(),
         onWotSubjectsVisible = viewModel::requestWotHydration,
         onLongPress = { row -> actionsRow = row },
     ) }

@@ -48,6 +48,7 @@ internal fun matchesShowTypes(
         }
         20 -> ShowType.IMAGES in filter.showTypes
         21 -> ShowType.VIDEO in filter.showTypes
+        1068 -> ShowType.TEXT in filter.showTypes
         30023 -> ShowType.ARTICLES in filter.showTypes
         else -> false
     }

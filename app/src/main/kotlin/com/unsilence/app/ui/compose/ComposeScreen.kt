@@ -8,6 +8,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,10 +45,15 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Poll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -88,6 +94,7 @@ import com.unsilence.app.ui.drafts.CloseDraftSheet
 import com.unsilence.app.ui.feed.ComposePreviewCard
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
+import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
@@ -112,6 +119,7 @@ fun ComposeScreen(
     val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val userEntity    by viewModel.userEntity.collectAsStateWithLifecycle()
     val blocks        by viewModel.blocks.collectAsStateWithLifecycle()
+    val pollDraft     by viewModel.pollDraft.collectAsStateWithLifecycle()
     val canPublish    by viewModel.canPublish.collectAsStateWithLifecycle()
     val sendState     by viewModel.sendState.collectAsStateWithLifecycle()
     val hasDraftableContent by viewModel.hasDraftableContent.collectAsStateWithLifecycle()
@@ -152,6 +160,12 @@ fun ComposeScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     var showCloseDraftSheet by remember { mutableStateOf(false) }
     var saveNotice by remember { mutableStateOf<String?>(null) }
+    var initialized by remember(
+        effectiveReplyToEventId,
+        effectiveQuoteEventId,
+        effectiveArticleTarget,
+        initialDraft?.key,
+    ) { mutableStateOf(false) }
 
     fun requestDismiss() {
         when {
@@ -168,16 +182,17 @@ fun ComposeScreen(
         if (effectiveQuoteEventId != null) viewModel.loadQuoteTo(effectiveQuoteEventId)
         if (effectiveArticleTarget != null) viewModel.loadArticleComment(effectiveArticleTarget)
         if (initialDraft != null) viewModel.restoreDraft(initialDraft)
+        initialized = true
     }
 
     // Auto-dismiss once the note is published
-    LaunchedEffect(viewModel.published) {
-        if (viewModel.published) onDismiss()
+    LaunchedEffect(viewModel.published, initialized) {
+        if (initialized && viewModel.published) onDismiss()
     }
 
     // Dismiss on Sent state
-    LaunchedEffect(sendState) {
-        if (sendState is SendState.Sent) onDismiss()
+    LaunchedEffect(sendState, initialized) {
+        if (initialized && sendState is SendState.Sent) onDismiss()
         if (sendState is SendState.Confirming) keyboardController?.hide()
     }
 
@@ -231,6 +246,7 @@ fun ComposeScreen(
                         isConfirming -> "Confirm"
                         isReply -> "Replying"
                         isQuote -> "Quoting"
+                        pollDraft.enabled -> "New poll"
                         else    -> "New note"
                     },
                     color = if (isFailed) Like else TextSecondary,
@@ -406,6 +422,7 @@ fun ComposeScreen(
                                                 block.id != firstTextId -> ""
                                                 isReply -> "Write your reply\u2026"
                                                 isQuote -> "Add your comment\u2026"
+                                                pollDraft.enabled -> "Ask a question\u2026"
                                                 else -> "Break the silence..."
                                             },
                                             modifier = Modifier.fillMaxWidth(),
@@ -425,6 +442,17 @@ fun ComposeScreen(
                                     }
                                 }
                             }
+                        }
+
+                        if (pollDraft.enabled) {
+                            PollComposer(
+                                poll = pollDraft,
+                                onOptionChange = viewModel::updatePollOption,
+                                onAddOption = viewModel::addPollOption,
+                                onRemoveOption = viewModel::removePollOption,
+                                onMultipleChoiceChange = viewModel::setPollMultipleChoice,
+                                onDurationChange = viewModel::setPollDuration,
+                            )
                         }
 
                         // ── Quote preview card ──────────────────────────────
@@ -516,6 +544,12 @@ fun ComposeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
                         IconButton(
                             onClick = {
                                 pickerLauncher.launch(
@@ -556,6 +590,20 @@ fun ComposeScreen(
                             )
                         }
 
+                        if (!isReply && !isQuote) {
+                            IconButton(
+                                onClick = viewModel::togglePoll,
+                                modifier = Modifier.size(44.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Poll,
+                                    contentDescription = if (pollDraft.enabled) "Remove poll" else "Create poll",
+                                    tint = if (pollDraft.enabled) BrandDeep else TextSecondary.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
+
                         IconButton(
                             onClick = { viewModel.toggleSensitive() },
                             modifier = Modifier.size(44.dp),
@@ -581,8 +629,7 @@ fun ComposeScreen(
                                 modifier = Modifier.size(24.dp),
                             )
                         }
-
-                        Spacer(Modifier.weight(1f))
+                        }
 
                         // Char counter — visible only past 280 chars
                         val typedChars by remember(blocks) {
@@ -635,7 +682,7 @@ fun ComposeScreen(
                             ContentParser.parse(
                                 id = "preview",
                                 pubkey = pubkeyHex ?: "",
-                                kind = 1,
+                                kind = if (pollDraft.enabled) 1068 else 1,
                                 content = state.previewContent,
                                 tagsJson = state.previewTagsJson,
                                 createdAt = System.currentTimeMillis() / 1000,
@@ -847,6 +894,110 @@ fun ComposeScreen(
             },
             onContinueEditing = { showCloseDraftSheet = false },
         )
+    }
+}
+
+@Composable
+private fun PollComposer(
+    poll: PollDraft,
+    onOptionChange: (String, String) -> Unit,
+    onAddOption: () -> Unit,
+    onRemoveOption: (String) -> Unit,
+    onMultipleChoiceChange: (Boolean) -> Unit,
+    onDurationChange: (Long?) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, BorderFaint, RoundedCornerShape(6.dp)),
+        ) {
+            listOf(false to "Single choice", true to "Multiple choice").forEach { (multiple, label) ->
+                val selected = poll.multipleChoice == multiple
+                Surface(
+                    onClick = { onMultipleChoiceChange(multiple) },
+                    color = if (selected) BrandDeep.copy(alpha = 0.16f) else Color.Transparent,
+                    modifier = Modifier.weight(1f).height(40.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = label,
+                            color = if (selected) BrandDeep else TextSecondary,
+                            fontSize = AppType.caption,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = "Duration",
+            color = TextSecondary,
+            fontSize = AppType.caption,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, BorderFaint, RoundedCornerShape(6.dp)),
+        ) {
+            listOf(
+                null to "None",
+                86_400L to "1d",
+                259_200L to "3d",
+                604_800L to "7d",
+            ).forEach { (seconds, label) ->
+                val selected = poll.durationSeconds == seconds
+                Surface(
+                    onClick = { onDurationChange(seconds) },
+                    color = if (selected) BrandDeep.copy(alpha = 0.16f) else Color.Transparent,
+                    modifier = Modifier.weight(1f).height(38.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = label,
+                            color = if (selected) BrandDeep else TextSecondary,
+                            fontSize = AppType.caption,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+        }
+
+        poll.options.forEachIndexed { index, option ->
+            OutlinedTextField(
+                value = option.label,
+                onValueChange = { onOptionChange(option.id, it) },
+                placeholder = { Text("Option ${index + 1}") },
+                singleLine = true,
+                shape = RoundedCornerShape(6.dp),
+                trailingIcon = if (poll.options.size > 2) {
+                    {
+                        IconButton(onClick = { onRemoveOption(option.id) }) {
+                            Icon(Icons.Outlined.DeleteOutline, "Remove option", tint = TextSecondary)
+                        }
+                    }
+                } else null,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        if (poll.options.size < 10) {
+            TextButton(onClick = onAddOption) {
+                Icon(Icons.Filled.Add, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Add option")
+            }
+        }
     }
 }
 

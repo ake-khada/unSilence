@@ -225,6 +225,23 @@ fun FeedScreen(
             wotLookup = { pubkey -> wotLookups[pubkey] },
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
+            poll = com.unsilence.app.ui.shared.PollActionCallbacks(
+                currentPubkey = actionsViewModel.currentPubkey,
+                responses = actionsViewModel::pollResponsesFlow,
+                load = actionsViewModel::loadPollResponses,
+                vote = { request ->
+                    actionsViewModel.votePoll(
+                        pollId = request.pollId,
+                        pollAuthorPubkey = request.pollAuthorPubkey,
+                        selectedOptionIds = request.selectedOptionIds,
+                        validOptionIds = request.validOptionIds,
+                        multipleChoice = request.multipleChoice,
+                        responseRelays = request.responseRelays,
+                        sourceRelay = request.sourceRelay,
+                        endsAt = request.endsAt,
+                    )
+                },
+            ),
             onLongPress = { row -> actionsRow = row },
         )
     }

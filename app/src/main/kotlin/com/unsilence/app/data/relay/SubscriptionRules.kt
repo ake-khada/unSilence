@@ -43,6 +43,7 @@ object SubscriptionRules {
         "eng-",
         "article-comments-",
         "article-addr-",
+        "poll-responses-",
         "comment-replies-",
         "emoji-list-",
         "emoji-set-",

@@ -162,6 +162,7 @@ object ContentParser {
 
         // ── Step 6: NIP-30 custom emoji tags ─────────────────────────────
         val customEmojis = parseCustomEmojis(effectiveTagsJson)
+        val poll = if (effectiveKind == 1068) parsePollInfo(effectiveTagsJson) else null
 
         return EventModel(
             id = id,
@@ -184,9 +185,45 @@ object ContentParser {
             article = article,
             warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTagsJson),
             customEmojis = customEmojis,
+            poll = poll,
             truncated = truncated,
         )
     }
+
+    private fun parsePollInfo(tagsJson: String): PollInfo? = runCatching {
+        val tags = NostrJson.parseToJsonElement(tagsJson).jsonArray.map { it.jsonArray }
+        val seenIds = mutableSetOf<String>()
+        val options = tags.asSequence()
+            .filter { it.getOrNull(0)?.jsonPrimitive?.content == "option" }
+            .mapNotNull { tag ->
+                val id = tag.getOrNull(1)?.jsonPrimitive?.content?.take(128)?.takeIf {
+                    it.isNotBlank() && it.none(Char::isISOControl)
+                } ?: return@mapNotNull null
+                val label = tag.getOrNull(2)?.jsonPrimitive?.content?.trim()?.take(300)
+                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (!seenIds.add(id)) return@mapNotNull null
+                PollOption(id, label)
+            }
+            .take(32)
+            .toList()
+        if (options.size < 2) return@runCatching null
+
+        val pollType = tags.firstOrNull { it.getOrNull(0)?.jsonPrimitive?.content == "polltype" }
+            ?.getOrNull(1)?.jsonPrimitive?.content
+        val endsAt = tags.firstOrNull {
+            val name = it.getOrNull(0)?.jsonPrimitive?.content
+            name == "endsAt" || name == "closed_at"
+        }
+            ?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()?.takeIf { it > 0L }
+        val relays = tags.asSequence()
+            .filter { it.getOrNull(0)?.jsonPrimitive?.content == "relay" }
+            .mapNotNull { it.getOrNull(1)?.jsonPrimitive?.content }
+            .filter { it.startsWith("wss://") || it.startsWith("ws://") }
+            .distinct()
+            .take(6)
+            .toList()
+        PollInfo(options, pollType == "multiplechoice", endsAt, relays)
+    }.getOrNull()
 
     /**
      * Effective NIP-36 warning for the model. For kind-6/16 reposts the inner
@@ -227,6 +264,7 @@ object ContentParser {
         val targetId = extractFirstETagId(tagsJson)
         val relayHint = extractFirstETagRelay(tagsJson)
         val targetAuthorPubkey = extractRepostAuthorPubkey(content, tagsJson)
+        val proxyUrl = extractActivityPubProxyUrl(tagsJson)
 
         if (embeddedJson == null && targetId == null) return null
 
@@ -234,10 +272,25 @@ object ContentParser {
             targetId = targetId,
             relayHint = relayHint,
             targetAuthorPubkey = targetAuthorPubkey,
+            proxyUrl = proxyUrl,
             embeddedJson = embeddedJson,
             resolvedFromInner = embeddedJson != null,
         )
     }
+
+    private fun extractActivityPubProxyUrl(tagsJson: String): String? = runCatching {
+        NostrJson.parseToJsonElement(tagsJson).jsonArray
+            .firstOrNull { tag ->
+                val cells = tag.jsonArray
+                cells.getOrNull(0)?.jsonPrimitive?.content == "proxy" &&
+                    cells.getOrNull(2)?.jsonPrimitive?.content == "activitypub"
+            }
+            ?.jsonArray
+            ?.getOrNull(1)
+            ?.jsonPrimitive
+            ?.content
+            ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+    }.getOrNull()
 
     /**
      * The kind that drives detection/routing. A kind-6/16 repost wraps a target
