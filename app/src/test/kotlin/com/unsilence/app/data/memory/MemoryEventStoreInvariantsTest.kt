@@ -1458,6 +1458,25 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `snapshot round-trip preserves latest empty contact list`() = runTest {
+        store.updateFollows("unfollower", emptySet(), createdAt = 2_000L)
+        val tmpFile = java.io.File.createTempFile("empty-follows", ".bin")
+        try {
+            tmpFile.bufferedWriter().use { store.saveSnapshotTo(it) }
+            val restored = MemoryEventStore(
+                object : MuteKeyProvider {},
+                com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+            )
+            tmpFile.bufferedReader().use { restored.restoreSnapshotFrom(it) }
+
+            assertEquals(emptySet<String>(), restored.getFollows("unfollower"))
+            assertEquals(2_000L, restored.getFollowsCreatedAt("unfollower"))
+        } finally {
+            tmpFile.delete()
+        }
+    }
+
+    @Test
     fun `snapshot restore bumps signals to trigger UI re-render`() = runTest {
         // Populate store with mixed kinds that touch different signals
         store.insert(event(id = "sig-note", kind = 1, createdAt = 100))
@@ -1960,6 +1979,17 @@ class MemoryEventStoreInvariantsTest {
         store.updateFollows(pubkey, second, createdAt = 2000L)
 
         assertEquals("Newer follows should overwrite", second, store.getFollows(pubkey))
+    }
+
+    @Test
+    fun `followersOf drops author after newer contact list unfollows subject`() {
+        val subject = "pk-subject"
+        store.updateFollows("pk-alice", setOf(subject), createdAt = 1_000L)
+        store.updateFollows("pk-bob", setOf(subject), createdAt = 1_100L)
+        assertEquals(setOf("pk-alice", "pk-bob"), store.followersOf(subject))
+
+        store.updateFollows("pk-alice", emptySet(), createdAt = 2_000L)
+        assertEquals(setOf("pk-bob"), store.followersOf(subject))
     }
 
     @Test

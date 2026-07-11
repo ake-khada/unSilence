@@ -2109,6 +2109,7 @@ class RelayPool @Inject constructor(
         baseFilter: JsonObject,
         subIdPrefix: String,
         timeoutMs: Long = 15_000,
+        maxPages: Int = Int.MAX_VALUE,
         onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
     ): PaginatedFetchResult {
         var totalEvents = 0
@@ -2116,7 +2117,7 @@ class RelayPool @Inject constructor(
         var globalOldest = Long.MAX_VALUE
         val deadline = System.currentTimeMillis() + timeoutMs
 
-        while (System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline && totalPages < maxPages) {
             val subId = "$subIdPrefix-${System.nanoTime()}"
             val pageState = PageState()
             _activePages[subId] = pageState
@@ -2213,10 +2214,70 @@ class RelayPool @Inject constructor(
                 async {
                     val perRelayTimeout = (timeoutMs / normalized.size.coerceAtLeast(1))
                         .coerceIn(10_000, timeoutMs)
-                    paginatedFetch(conn, baseFilter, subIdPrefix, perRelayTimeout, onPage)
+                    paginatedFetch(
+                        conn = conn,
+                        baseFilter = baseFilter,
+                        subIdPrefix = subIdPrefix,
+                        timeoutMs = perRelayTimeout,
+                        maxPages = maxPages,
+                        onPage = onPage,
+                    )
                 }
             }.awaitAll()
         }
+    }
+
+    suspend fun fetchFollowerPage(
+        subjectPubkey: String,
+        until: Long?,
+        onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
+    ): List<PaginatedFetchResult> {
+        connectFollowerIndexes()
+        val filter = buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+            put("#p", buildJsonArray { add(JsonPrimitive(subjectPubkey)) })
+            put("limit", JsonPrimitive(FOLLOWERS_PAGE_SIZE))
+            until?.let { put("until", JsonPrimitive(it)) }
+        }
+        return fetchPaginatedEvents(
+            urls = FOLLOWER_INDEX_RELAY_URLS,
+            baseFilter = filter,
+            subIdPrefix = "connections-followers",
+            maxPages = 1,
+            timeoutMs = 24_000,
+            onPage = onPage,
+        )
+    }
+
+    /** Fetch each candidate author's latest replaceable contact list. */
+    suspend fun fetchLatestFollowLists(pubkeys: Collection<String>): Boolean {
+        if (pubkeys.isEmpty()) return true
+        connectFollowerIndexes()
+        var allChunksResponded = true
+        pubkeys.distinct().chunked(FOLLOWERS_PAGE_SIZE).forEach { authors ->
+            val filter = buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                put("authors", buildJsonArray { authors.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(authors.size))
+            }
+            val results = fetchPaginatedEvents(
+                urls = FOLLOWER_INDEX_RELAY_URLS,
+                baseFilter = filter,
+                subIdPrefix = "connections-verify",
+                maxPages = 1,
+                timeoutMs = 18_000,
+            )
+            if (results.none { it.totalPages > 0 }) allChunksResponded = false
+        }
+        return allChunksResponded
+    }
+
+    private suspend fun connectFollowerIndexes() = coroutineScope {
+        FOLLOWER_INDEX_RELAY_URLS.map { relayUrl ->
+            async {
+                connectAndAwait(listOf(relayUrl), timeoutMs = 4_000, forceEvict = true)
+            }
+        }.awaitAll()
     }
 
     // ── Relay health fetch orchestrators ──────────────────────────────────

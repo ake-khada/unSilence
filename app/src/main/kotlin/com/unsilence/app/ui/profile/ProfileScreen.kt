@@ -112,6 +112,7 @@ fun ProfileScreen(
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
+    onConnectionsClick: (ConnectionsTab) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: ProfileViewModel = hiltViewModel(
@@ -437,13 +438,31 @@ fun ProfileScreen(
                         .padding(horizontal = Spacing.medium),
                     horizontalArrangement = Arrangement.Center,
                 ) {
-                    StatLabel(label = "Following", value = "$followingCount")
+                    StatLabel(
+                        label = "Following",
+                        value = "$followingCount",
+                        onClick = { onConnectionsClick(ConnectionsTab.Following) },
+                    )
                     Spacer(Modifier.size(Spacing.large))
                     StatLabel(
                         label = "Followers",
                         value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+                        onClick = { onConnectionsClick(ConnectionsTab.Followers) },
                     )
                 }
+                (profileWotLookup as? WotLookup.Scored)
+                    ?.assertion
+                    ?.verifiedFollowers
+                    ?.let { verified ->
+                        Spacer(Modifier.height(Spacing.micro))
+                        Text(
+                            text = "${verified.toCompactSats()} verified in your grapevine",
+                            color = Text3,
+                            fontSize = AppType.caption,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
 
                 Spacer(Modifier.height(Spacing.medium))
             }
@@ -741,8 +760,12 @@ private fun ProfileAvatar(
 }
 
 @Composable
-private fun StatLabel(label: String, value: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+private fun StatLabel(label: String, value: String, onClick: (() -> Unit)? = null) {
+    Row(
+        modifier = (if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
             text       = value,
             color      = Color.White,

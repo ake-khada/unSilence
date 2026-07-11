@@ -552,6 +552,9 @@ class MemoryEventStore @Inject constructor(
     /** Bumps when actor-side indexes (own reactions, reposts) change. Consumers re-render reaction state. */
     val actionSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _actionSignal
 
+    /** Bumps when any materialized kind-3 contact list changes. */
+    val followsSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _followsSignal
+
     /** Bumps when engagement aggregates (kinds 7/9734/9735) change. Consumers re-render counts. */
     val statsSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _statsSignal
     val wotSignalFlow: kotlinx.coroutines.flow.StateFlow<Long> get() = _wotSignal
@@ -2654,6 +2657,11 @@ class MemoryEventStore @Inject constructor(
     fun getProfile(pubkey: String): NostrEvent? = profilesByPubkey[pubkey]
     fun hasProfile(pubkey: String): Boolean = profilesByPubkey.containsKey(pubkey)
     fun getFollows(pubkey: String): Set<String>? = followsByPubkey[pubkey]
+    fun getFollowsCreatedAt(pubkey: String): Long? = followsCreatedAt[pubkey]
+    fun followersOf(pubkey: String): Set<String> = followsByPubkey.entries
+        .asSequence()
+        .filter { (_, follows) -> pubkey in follows }
+        .mapTo(linkedSetOf()) { it.key }
 
     /** Maximum createdAt across all events in MES, or 0 if empty.
      *  Used by AppBootstrapper to inject `since` into the initial feed subscription. */
@@ -3713,6 +3721,10 @@ class MemoryEventStore @Inject constructor(
 
     fun followsFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { getFollows(pubkey) ?: emptySet() }
+            .flowOn(Dispatchers.Default)
+
+    fun followersFlow(pubkey: String): Flow<Set<String>> =
+        _followsSignal.map { followersOf(pubkey) }
             .flowOn(Dispatchers.Default)
 
     fun profileFlow(pubkey: String): Flow<NostrEvent?> =
@@ -5145,10 +5157,8 @@ class MemoryEventStore @Inject constructor(
             }
             val pks = HashSet<String>(followCount)
             for (j in 0 until followCount) pks.add(input.readStr())
-            if (pks.isNotEmpty()) {
-                followsByPubkey[pubkey] = pks
-                followsCreatedAt[pubkey] = createdAt
-            }
+            followsByPubkey[pubkey] = pks
+            followsCreatedAt[pubkey] = createdAt
         }
 
         // V5+: Own-user engaged sets — in FOLLOWS section for instant icon
@@ -5774,7 +5784,6 @@ class MemoryEventStore @Inject constructor(
         val pubkey = parts[1]
         val createdAt = parts[2].toLongOrNull() ?: return
         val pks = parts[3].split(",").filterTo(mutableSetOf()) { it.isNotBlank() }
-        if (pks.isEmpty()) return
         followsByPubkey[pubkey] = pks
         followsCreatedAt[pubkey] = createdAt
     }
