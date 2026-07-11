@@ -302,8 +302,17 @@ fun InlineVideoPlayer(
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 }
             },
+            onReset = { view ->
+                view.player = null
+                view.setOnClickListener(null)
+            },
+            onRelease = { view ->
+                view.player = null
+                view.setOnClickListener(null)
+            },
             update = { view ->
                 view.player = if (!isFullscreen) exoPlayer else null
+                view.setOnClickListener { onOpenFullscreen() }
                 view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
