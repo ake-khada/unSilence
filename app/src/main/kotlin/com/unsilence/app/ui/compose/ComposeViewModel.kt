@@ -64,6 +64,9 @@ import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -105,6 +108,8 @@ sealed interface AttachmentState {
         override val displayName: String,
         override val originalBytes: Long,
         override val quality: AttachmentQuality,
+        val phase: AttachmentUploadPhase,
+        val progressPercent: Int? = null,
     ) : AttachmentState
 
     data class Uploaded(
@@ -125,6 +130,8 @@ sealed interface AttachmentState {
         val message: String,
     ) : AttachmentState
 }
+
+enum class AttachmentUploadPhase { Preparing, Transcoding, Uploading }
 
 // ── Relay publish status ────────────────────────────────────────────────────
 
@@ -206,6 +213,7 @@ class ComposeViewModel @Inject constructor(
         listOf(ComposeBlock.Text(""))
     )
     val blocks: StateFlow<List<ComposeBlock>> = _blocks.asStateFlow()
+    private val attachmentUploadJobs = mutableMapOf<String, Job>()
 
     private val _pollDraft = MutableStateFlow(PollDraft())
     val pollDraft: StateFlow<PollDraft> = _pollDraft.asStateFlow()
@@ -538,7 +546,19 @@ class ComposeViewModel @Inject constructor(
             it is ComposeBlock.Attachment && it.state.id == id
         } as? ComposeBlock.Attachment ?: return
         val idle = block.state as? AttachmentState.Idle ?: return
-        viewModelScope.launch { uploadAttachment(idle) }
+        attachmentUploadJobs.remove(id)?.cancel()
+        lateinit var job: Job
+        job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                uploadAttachment(idle)
+            } finally {
+                if (attachmentUploadJobs[id] === job) {
+                    attachmentUploadJobs.remove(id)
+                }
+            }
+        }
+        attachmentUploadJobs[id] = job
+        job.start()
     }
 
     private fun defaultImageQuality(): AttachmentQuality {
@@ -615,6 +635,23 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun removeAttachment(id: String) {
+        val uploading = _blocks.value
+            .filterIsInstance<ComposeBlock.Attachment>()
+            .firstOrNull { it.state.id == id }
+            ?.state as? AttachmentState.Uploading
+        if (uploading != null) {
+            attachmentUploadJobs.remove(id)?.cancel()
+            updateAttachmentState(id) {
+                AttachmentState.Idle(
+                    uri = uploading.uri,
+                    id = uploading.id,
+                    displayName = uploading.displayName,
+                    originalBytes = uploading.originalBytes,
+                    quality = uploading.quality,
+                )
+            }
+            return
+        }
         _blocks.update { blocks ->
             blocks.filterNot {
                 it is ComposeBlock.Attachment && it.state.id == id
@@ -661,6 +698,8 @@ class ComposeViewModel @Inject constructor(
     }
 
     private suspend fun uploadAttachment(idle: AttachmentState.Idle) {
+        val sourceMime = contentResolver.getType(idle.uri) ?: "application/octet-stream"
+        val isVideo = sourceMime.startsWith("video/")
         updateAttachmentState(idle.id) {
             AttachmentState.Uploading(
                 uri = idle.uri,
@@ -668,44 +707,73 @@ class ComposeViewModel @Inject constructor(
                 displayName = idle.displayName,
                 originalBytes = idle.originalBytes,
                 quality = idle.quality,
+                phase = if (isVideo) {
+                    AttachmentUploadPhase.Preparing
+                } else {
+                    AttachmentUploadPhase.Uploading
+                },
             )
         }
 
         val server = blossomServersStore.selectedServer.value
-        val sourceMime = contentResolver.getType(idle.uri) ?: "application/octet-stream"
-
-        val result = runCatching {
-            if (sourceMime.startsWith("video/")) {
-                uploadVideo(idle.uri, server, idle.quality)
+        try {
+            val blob = if (isVideo) {
+                uploadVideo(idle.id, idle.uri, server, idle.quality) { progress ->
+                    updateUploadProgress(
+                        id = idle.id,
+                        phase = AttachmentUploadPhase.Transcoding,
+                        progressPercent = progress,
+                    )
+                }
             } else {
                 uploadImage(idle.uri, sourceMime, server, idle.quality)
             }
+            updateAttachmentState(idle.id) {
+                AttachmentState.Uploaded(
+                    uri = idle.uri,
+                    id = idle.id,
+                    displayName = idle.displayName,
+                    originalBytes = idle.originalBytes,
+                    quality = idle.quality,
+                    blob = blob,
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (ex: Exception) {
+            Log.e(TAG, "Upload failed for ${idle.uri}", ex)
+            updateAttachmentState(idle.id) {
+                AttachmentState.Failed(
+                    uri = idle.uri,
+                    id = idle.id,
+                    displayName = idle.displayName,
+                    originalBytes = idle.originalBytes,
+                    quality = idle.quality,
+                    message = ex.message ?: "Upload failed",
+                )
+            }
         }
+    }
 
-        updateAttachmentState(idle.id) {
-            result.fold(
-                onSuccess = { blob ->
-                    AttachmentState.Uploaded(
-                        uri = idle.uri,
-                        id = idle.id,
-                        displayName = idle.displayName,
-                        originalBytes = idle.originalBytes,
-                        quality = idle.quality,
-                        blob = blob,
-                    )
-                },
-                onFailure = { ex ->
-                    Log.e(TAG, "Upload failed for ${idle.uri}", ex)
-                    AttachmentState.Failed(
-                        uri = idle.uri,
-                        id = idle.id,
-                        displayName = idle.displayName,
-                        originalBytes = idle.originalBytes,
-                        quality = idle.quality,
-                        message = ex.message ?: "Upload failed",
-                    )
-                },
-            )
+    private fun updateUploadProgress(
+        id: String,
+        phase: AttachmentUploadPhase,
+        progressPercent: Int?,
+    ) {
+        _blocks.update { blocks ->
+            blocks.map { block ->
+                if (block is ComposeBlock.Attachment && block.state.id == id) {
+                    val uploading = block.state as? AttachmentState.Uploading
+                    if (uploading != null) {
+                        block.copy(
+                            state = uploading.copy(
+                                phase = phase,
+                                progressPercent = progressPercent?.coerceIn(0, 100),
+                            )
+                        )
+                    } else block
+                } else block
+            }
         }
     }
 
@@ -743,12 +811,23 @@ class ComposeViewModel @Inject constructor(
     }
 
     private suspend fun uploadVideo(
+        id: String,
         uri: Uri,
         server: String,
         quality: AttachmentQuality,
+        onTranscodeProgress: (Int) -> Unit,
     ): BlossomBlob {
-        val transcoded = videoTranscoder.transcode(uri, quality.videoQuality())
+        val transcoded = videoTranscoder.transcode(
+            uri = uri,
+            quality = quality.videoQuality(),
+            onProgress = onTranscodeProgress,
+        )
         try {
+            updateUploadProgress(
+                id = id,
+                phase = AttachmentUploadPhase.Uploading,
+                progressPercent = null,
+            )
             val blob = blossomClient.upload(
                 file = transcoded.file,
                 mimeType = transcoded.mimeType,
@@ -765,6 +844,8 @@ class ComposeViewModel @Inject constructor(
 
     /** Reset state for reuse — ViewModel is activity-scoped, survives recomposition. */
     fun reset() {
+        attachmentUploadJobs.values.forEach { it.cancel() }
+        attachmentUploadJobs.clear()
         published = false
         publishError = null
         replyToEventId = null

@@ -5,6 +5,9 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -15,6 +18,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,21 +35,83 @@ private const val TAG = "VideoTranscoder"
 internal const val VIDEO_BITRATE_480P = 1_500_000
 internal const val VIDEO_BITRATE_720P = 3_000_000
 internal const val VIDEO_BITRATE_1080P = 5_500_000
+internal const val AUDIO_BITRATE_BPS = 128_000
+internal const val SAVINGS_THRESHOLD = 0.85
+internal const val MAX_TRANSCODED_SOURCE_BITRATE_RATIO = 0.80
+internal const val OUTPUT_AUDIO_BITRATE_RESERVE_BPS = 160_000
+internal const val MIN_VIDEO_BITRATE_BPS = 250_000
+
+// AV1 pass-through avoids a minutes-long software decode/re-encode for already
+// compact sources. This accepts reduced playback coverage on pre-A17 iOS in
+// favor of preserving quality, size, and upload latency; H.264 and HEVC remain
+// the broadly compatible paths.
+internal val PASSTHROUGH_CODECS = setOf(
+    MimeTypes.VIDEO_H264,
+    MimeTypes.VIDEO_H265,
+    MimeTypes.VIDEO_AV1,
+)
 
 internal fun cappedVideoHeight(requestedHeight: Int, sourceHeight: Int): Int =
     if (sourceHeight > 0) minOf(requestedHeight, sourceHeight) else requestedHeight
+
+internal fun needsReencode(
+    sourceBytes: Long,
+    durationMs: Long,
+    tier: VideoTranscoder.Quality,
+): Boolean {
+    if (tier == VideoTranscoder.Quality.ORIGINAL) return false
+    if (sourceBytes <= 0L || durationMs <= 0L) return true
+    val estimatedOutputBytes =
+        (tier.bitrate.toDouble() + AUDIO_BITRATE_BPS) / 8.0 * (durationMs / 1_000.0)
+    return estimatedOutputBytes < sourceBytes.toDouble() * SAVINGS_THRESHOLD
+}
+
+internal fun compatibilityTranscodeQuality(sourceBitrateBps: Long): VideoTranscoder.Quality =
+    when {
+        sourceBitrateBps <= VIDEO_BITRATE_480P -> VideoTranscoder.Quality.SMALL
+        sourceBitrateBps <= VIDEO_BITRATE_720P -> VideoTranscoder.Quality.STANDARD
+        else -> VideoTranscoder.Quality.HIGH
+    }
+
+internal fun derivedSourceBitrateBps(fileSizeBytes: Long, durationMs: Long): Long? {
+    if (fileSizeBytes <= 0L || durationMs <= 0L) return null
+    val safeBytes = fileSizeBytes.coerceAtMost(Long.MAX_VALUE / 8_000L)
+    return safeBytes * 8_000L / durationMs
+}
+
+internal fun targetVideoBitrateBps(
+    sourceBitrateBps: Long,
+    tier: VideoTranscoder.Quality,
+): Int {
+    if (tier == VideoTranscoder.Quality.ORIGINAL || sourceBitrateBps == Long.MAX_VALUE) {
+        return tier.bitrate
+    }
+    val sourceRelativeBudget =
+        (sourceBitrateBps.toDouble() * MAX_TRANSCODED_SOURCE_BITRATE_RATIO).toLong() -
+            OUTPUT_AUDIO_BITRATE_RESERVE_BPS
+    return minOf(
+        tier.bitrate.toLong(),
+        sourceRelativeBudget.coerceAtLeast(MIN_VIDEO_BITRATE_BPS.toLong()),
+    ).toInt()
+}
+
+internal fun forcedVideoEncodeHeight(targetHeight: Int, sourceHeight: Int, forceEncode: Boolean): Int {
+    if (!forceEncode || sourceHeight <= 2 || targetHeight != sourceHeight) return targetHeight
+    val evenSourceHeight = sourceHeight - sourceHeight % 2
+    return (evenSourceHeight - 2).coerceAtLeast(2)
+}
 
 internal fun isCompatibleOriginalVideo(containerMime: String?, videoMime: String?): Boolean {
     val normalizedContainer = containerMime?.substringBefore(';')?.trim()?.lowercase()
     val normalizedVideo = videoMime?.substringBefore(';')?.trim()?.lowercase()
     return normalizedContainer == MimeTypes.VIDEO_MP4 &&
-        normalizedVideo in setOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265)
+        normalizedVideo in PASSTHROUGH_CODECS
 }
 
 @Singleton
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class VideoTranscoder @Inject constructor(
-    @ApplicationContext private val context: Context,
+    @param:ApplicationContext private val context: Context,
 ) {
     enum class Quality(
         val label: String,
@@ -70,35 +136,51 @@ class VideoTranscoder @Inject constructor(
         val durationMs: Long,
         val width: Int,
         val height: Int,
+        val bitrateBps: Long,
+        val fileSizeBytes: Long,
         val containerMime: String?,
         val videoMime: String?,
     )
 
     /** Prepares [uri] for upload, passing through compatible originals or transcoding to H.264. */
-    suspend fun transcode(uri: Uri, quality: Quality): Result = withContext(Dispatchers.IO) {
+    suspend fun transcode(
+        uri: Uri,
+        quality: Quality,
+        onProgress: (Int) -> Unit = {},
+    ): Result = withContext(Dispatchers.IO) {
         val source = extractSourceMetadata(uri)
-        if (quality == Quality.ORIGINAL &&
-            isCompatibleOriginalVideo(source.containerMime, source.videoMime)
-        ) {
+        val compatibleSource = isCompatibleOriginalVideo(source.containerMime, source.videoMime)
+        val tierNeedsReencode = needsReencode(source.fileSizeBytes, source.durationMs, quality)
+        if (compatibleSource && (quality == Quality.ORIGINAL || !tierNeedsReencode)) {
             return@withContext copyOriginal(uri, source)
         }
 
-        if (quality == Quality.ORIGINAL) {
-            Log.d(
-                TAG,
-                "Original source requires compatibility transcode: " +
-                    "container=${source.containerMime}, video=${source.videoMime}",
-            )
+        val transcodeQuality = if (quality == Quality.ORIGINAL || !tierNeedsReencode) {
+            compatibilityTranscodeQuality(source.bitrateBps)
+        } else {
+            quality
         }
-
-        val targetHeight = cappedVideoHeight(quality.heightPx, source.height)
+        val targetHeight = cappedVideoHeight(transcodeQuality.heightPx, source.height)
+        // Media3 1.5.1 has no explicit force-transcode API. If bitrate alone
+        // requires an encode, an unchanged Presentation can be optimized to a
+        // transmux. Removing two pixels (while keeping an even H.264 height)
+        // makes the video effect non-no-op and guarantees encoder creation.
+        val encodeHeight = forcedVideoEncodeHeight(
+            targetHeight = targetHeight,
+            sourceHeight = source.height,
+            forceEncode = tierNeedsReencode,
+        )
+        // A resolution or compatibility transcode must not spend more bits than
+        // the compact source. Keep room for Transformer's AAC output so the
+        // complete MP4 is materially smaller instead of merely resizing pixels.
+        val targetVideoBitrate = targetVideoBitrateBps(source.bitrateBps, transcodeQuality)
         val outFile = createTempFile("transcode", ".mp4")
 
         val mediaItem = MediaItem.fromUri(uri)
         val effects = Effects(
             /* audioProcessors = */ emptyList(),
             /* videoEffects = */ listOf(
-                Presentation.createForHeight(targetHeight),
+                Presentation.createForHeight(encodeHeight),
             ),
         )
         val editedMediaItem = EditedMediaItem.Builder(mediaItem)
@@ -108,7 +190,7 @@ class VideoTranscoder @Inject constructor(
         // Transformer must be built and started on Main (Looper requirement)
         withContext(Dispatchers.Main) {
             val encoderSettings = VideoEncoderSettings.Builder()
-                .setBitrate(quality.bitrate)
+                .setBitrate(targetVideoBitrate)
                 .build()
             val encoderFactory = DefaultEncoderFactory.Builder(context)
                 .setRequestedVideoEncoderSettings(encoderSettings)
@@ -120,8 +202,47 @@ class VideoTranscoder @Inject constructor(
                 .build()
 
             suspendCancellableCoroutine { cont ->
+                val progressHandler = Handler(Looper.getMainLooper())
+                val progressHolder = ProgressHolder()
+                var polling = true
+                val progressPoll = object : Runnable {
+                    override fun run() {
+                        if (!polling) return
+                        if (transformer.getProgress(progressHolder) ==
+                            Transformer.PROGRESS_STATE_AVAILABLE
+                        ) {
+                            onProgress(progressHolder.progress.coerceIn(0, 100))
+                        }
+                        progressHandler.postDelayed(this, 500L)
+                    }
+                }
+                fun stopProgressPolling() {
+                    polling = false
+                    progressHandler.removeCallbacks(progressPoll)
+                }
                 val listener = object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        stopProgressPolling()
+                        if (!cont.isActive) {
+                            outFile.delete()
+                            return
+                        }
+                        onProgress(100)
+                        val videoWasTranscoded = exportResult.videoConversionProcess ==
+                            ExportResult.CONVERSION_PROCESS_TRANSCODED ||
+                            exportResult.videoConversionProcess ==
+                            ExportResult.CONVERSION_PROCESS_TRANSMUXED_AND_TRANSCODED
+                        if (!videoWasTranscoded) {
+                            outFile.delete()
+                            cont.resumeWithException(
+                                IllegalStateException(
+                                    "Video export did not create an encoder " +
+                                        "(conversion=${exportResult.videoConversionProcess})",
+                                ),
+                            )
+                            return
+                        }
+
                         // ExportResult.width/height is the ENCODED buffer dimensions,
                         // which doesn't account for rotation. Read the output file's
                         // actual display dimensions so portrait video reports portrait
@@ -131,15 +252,10 @@ class VideoTranscoder @Inject constructor(
                             // Fallback: use ExportResult, accept that rotated video
                             // may have wrong aspect in imeta.
                             Log.w(TAG, "Display dimension extraction failed, using encoded dimensions")
-                            val ew = exportResult.width.takeIf { it > 0 } ?: targetHeight
-                            val eh = exportResult.height.takeIf { it > 0 } ?: targetHeight
+                            val ew = exportResult.width.takeIf { it > 0 } ?: encodeHeight
+                            val eh = exportResult.height.takeIf { it > 0 } ?: encodeHeight
                             ew to eh
                         }
-
-                        Log.d(TAG, "Transcode complete: ${outFile.length()} bytes, " +
-                            "encoded ${exportResult.width}x${exportResult.height}, " +
-                            "display ${w}x${h}, ${source.durationMs}ms, " +
-                            "target ${targetHeight}p @ ${quality.bitrate}bps")
 
                         cont.resume(Result(
                             file = outFile,
@@ -155,6 +271,11 @@ class VideoTranscoder @Inject constructor(
                         exportResult: ExportResult,
                         exportException: ExportException,
                     ) {
+                        stopProgressPolling()
+                        if (!cont.isActive) {
+                            outFile.delete()
+                            return
+                        }
                         Log.e(TAG, "Transcode failed", exportException)
                         outFile.delete()
                         cont.resumeWithException(exportException)
@@ -163,8 +284,10 @@ class VideoTranscoder @Inject constructor(
 
                 transformer.addListener(listener)
                 transformer.start(editedMediaItem, outFile.absolutePath)
+                progressHandler.post(progressPoll)
 
                 cont.invokeOnCancellation {
+                    stopProgressPolling()
                     transformer.cancel()
                     outFile.delete()
                 }
@@ -182,7 +305,6 @@ class VideoTranscoder @Inject constructor(
                 source.width > 0 && source.height > 0 -> source.width to source.height
                 else -> extractDisplayDimensions(output) ?: (0 to 0)
             }
-            Log.d(TAG, "Original MP4 pass-through: ${output.length()} bytes")
             return Result(
                 file = output,
                 mimeType = MimeTypes.VIDEO_MP4,
@@ -200,6 +322,7 @@ class VideoTranscoder @Inject constructor(
         var durationMs = 0L
         var width = 0
         var height = 0
+        var retrieverBitrateBps: Long? = null
         var retrieverMime: String? = null
         try {
             MediaMetadataRetriever().use { retriever ->
@@ -225,6 +348,10 @@ class VideoTranscoder @Inject constructor(
                 }
                 retrieverMime = retriever
                     .extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                retrieverBitrateBps = retriever
+                    .extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0L }
             }
         } catch (error: Exception) {
             Log.w(TAG, "Could not extract source metadata", error)
@@ -235,14 +362,52 @@ class VideoTranscoder @Inject constructor(
             .firstOrNull { it?.substringBefore(';')?.trim()?.lowercase() == MimeTypes.VIDEO_MP4 }
             ?: retrieverMime
             ?: providerMime
+        val fileSizeBytes = extractSourceFileSize(uri)
+        val bitrateBps = retrieverBitrateBps
+            ?: derivedSourceBitrateBps(fileSizeBytes, durationMs)
+            ?: Long.MAX_VALUE.also {
+                Log.w(
+                    TAG,
+                    "Source bitrate unavailable; forcing encode " +
+                        "(size=$fileSizeBytes, duration=$durationMs)",
+                )
+            }
 
         return SourceMetadata(
             durationMs = durationMs,
             width = width,
             height = height,
+            bitrateBps = bitrateBps,
+            fileSizeBytes = fileSizeBytes,
             containerMime = containerMime,
             videoMime = extractVideoTrackMime(uri),
         )
+    }
+
+    private fun extractSourceFileSize(uri: Uri): Long {
+        runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                descriptor.length.takeIf { it > 0L }
+            }
+        }.getOrNull()?.let { return it }
+
+        runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                descriptor.statSize.takeIf { it > 0L }
+            }
+        }.getOrNull()?.let { return it }
+
+        return runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.SIZE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else 0L
+            } ?: 0L
+        }.getOrDefault(0L)
     }
 
     private fun extractVideoTrackMime(uri: Uri): String? {

@@ -229,7 +229,11 @@ fun AttachmentBlock(
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Close,
-                            contentDescription = "Remove",
+                            contentDescription = if (state is AttachmentState.Uploading) {
+                                "Cancel"
+                            } else {
+                                "Remove"
+                            },
                             tint = TextSecondary,
                             modifier = Modifier.size(16.dp),
                         )
@@ -275,15 +279,40 @@ fun AttachmentBlock(
                             onSelect = {},
                         )
                         Spacer(Modifier.height(6.dp))
-                        LinearProgressIndicator(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(end = 24.dp)
-                                .height(3.dp)
-                                .clip(RoundedCornerShape(2.dp)),
-                            color = BrandDeep,
-                            trackColor = Color.White.copy(alpha = 0.08f),
+                        val phaseLabel = when (state.phase) {
+                            AttachmentUploadPhase.Preparing -> "Preparing"
+                            AttachmentUploadPhase.Transcoding -> state.progressPercent?.let {
+                                "Transcoding $it%"
+                            } ?: "Transcoding"
+                            AttachmentUploadPhase.Uploading -> "Uploading"
+                        }
+                        Text(
+                            text = phaseLabel,
+                            color = TextSecondary,
+                            fontSize = 11.sp,
                         )
+                        Spacer(Modifier.height(3.dp))
+                        val progressModifier = Modifier
+                            .fillMaxWidth()
+                            .padding(end = 24.dp)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                        if (state.phase == AttachmentUploadPhase.Transcoding &&
+                            state.progressPercent != null
+                        ) {
+                            LinearProgressIndicator(
+                                progress = { state.progressPercent / 100f },
+                                modifier = progressModifier,
+                                color = BrandDeep,
+                                trackColor = Color.White.copy(alpha = 0.08f),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = progressModifier,
+                                color = BrandDeep,
+                                trackColor = Color.White.copy(alpha = 0.08f),
+                            )
+                        }
                     }
                     is AttachmentState.Uploaded -> {
                         val host = runCatching {
