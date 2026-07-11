@@ -60,6 +60,19 @@ fun normalizeRelayUrl(raw: String): String? {
 /** NIP-45 COUNT + WoT relay (antiprimal.net). */
 const val ANTIPRIMAL_RELAY_URL = "wss://antiprimal.net"
 
+/** Independent COUNT indexes. Results are approximate; callers take the maximum. */
+val FOLLOWER_COUNT_RELAY_URLS = listOf(
+    ANTIPRIMAL_RELAY_URL,
+    "wss://relay.nostr.band/all",
+)
+
+/** Broad kind-3 indexes used for follower candidate discovery and verification. */
+val FOLLOWER_INDEX_RELAY_URLS = listOf(
+    ANTIPRIMAL_RELAY_URL,
+    "wss://relay.nostr.band/all",
+    "wss://purplepag.es",
+)
+
 /** Hardcoded global relay defaults — single source of truth for fallbacks. */
 val GLOBAL_RELAY_URLS = listOf(
     "wss://relay.damus.io",

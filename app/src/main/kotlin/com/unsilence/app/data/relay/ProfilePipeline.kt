@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -190,7 +192,7 @@ class ProfilePipeline @Inject constructor(
     }
 
     /**
-     * Approximate follower count via NIP-45 COUNT on the antiprimal relay,
+     * Approximate follower count via NIP-45 COUNT across independent indexes,
      * cached in MES with [MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS].
      *
      * Centralized here because the antiprimal connect uses `forceEvict = true` —
@@ -204,14 +206,22 @@ class ProfilePipeline @Inject constructor(
         if (cached != null && cachedAt != null && cachedAt > ttlFloor) return cached
 
         val newDeferred = pipelineScope.async(start = CoroutineStart.LAZY) {
-            relayPool.connectAndAwait(listOf(ANTIPRIMAL_RELAY_URL), timeoutMs = 3_000, forceEvict = true)
-            val count = relayPool.sendCount(
-                relayUrl = ANTIPRIMAL_RELAY_URL,
-                filter = buildJsonObject {
-                    put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                    put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                },
-            )
+            val filter = buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+            }
+            val count = coroutineScope {
+                FOLLOWER_COUNT_RELAY_URLS.map { relayUrl ->
+                    async {
+                        relayPool.connectAndAwait(
+                            listOf(relayUrl),
+                            timeoutMs = 3_000,
+                            forceEvict = true,
+                        )
+                        relayPool.sendCount(relayUrl = relayUrl, filter = filter)
+                    }
+                }.awaitAll()
+            }.let(::maxFollowerCount)
             if (count != null) memoryEventStore.cacheFollowerCount(pubkey, count)
             count
         }

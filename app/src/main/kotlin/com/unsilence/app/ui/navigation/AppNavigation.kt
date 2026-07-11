@@ -117,6 +117,8 @@ import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.notifications.NotificationsViewModel
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
+import com.unsilence.app.ui.profile.ConnectionsScreen
+import com.unsilence.app.ui.profile.ConnectionsTab
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayDiscoveryScreen
@@ -186,6 +188,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     var replyToEventId       by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
+    var connectionsTarget    by remember { mutableStateOf<Pair<String, ConnectionsTab>?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
     var showEmojiSettings    by remember { mutableStateOf(false) }
     var showZapSettings      by remember { mutableStateOf(false) }
@@ -371,6 +374,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onNoteClick = { eventId -> threadEventId = eventId },
                         onComment = { eventId -> replyToEventId = eventId },
                         onAuthorClick = onAuthorClick,
+                        onConnectionsClick = { tab -> connectionsTarget = userPubkey to tab },
                         onHashtagClick = onHashtagClick,
                         onBrowseRelay = onBrowseRelayFeed,
                         viewModel = hiltViewModel(key = "profile-$userPubkey"),
@@ -629,8 +633,21 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                     onNoteClick   = { eventId -> threadEventId = eventId },
                     onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
+                    onConnectionsClick = { tab -> connectionsTarget = pubkey to tab },
                     onHashtagClick = onHashtagClick,
                     actionsViewModel = noteActionsVm,
+                )
+            }
+
+            connectionsTarget?.let { (pubkey, initialTab) ->
+                ConnectionsScreen(
+                    pubkey = pubkey,
+                    initialTab = initialTab,
+                    onDismiss = { connectionsTarget = null },
+                    onProfileClick = { targetPubkey ->
+                        connectionsTarget = null
+                        userProfilePubkey = targetPubkey
+                    },
                 )
             }
 
