@@ -79,6 +79,7 @@ private const val ZAP_REQUEST_MAX_AUTHOR_WRITE_RELAYS = 4
 private const val ZAP_REQUEST_MAX_OWN_READ_RELAYS = 2
 private const val ZAP_REQUEST_MAX_SOURCE_RELAYS = 2
 private const val ZAP_REQUEST_MAX_HINT_RELAYS = 1
+private const val POLL_RESPONSE_REFRESH_MS = 60_000L
 
 /**
  * Shared ViewModel for note actions (react, repost) that works across FeedScreen and ThreadScreen.
@@ -140,9 +141,16 @@ class NoteActionsViewModel @Inject constructor(
     fun pollResponsesFlow(pollId: String): Flow<List<NostrEvent>> =
         memoryEventStore.pollResponsesFlow(pollId)
 
+    private val pollResponsesFetchedAt = ConcurrentHashMap<String, Long>()
+
     fun loadPollResponses(pollId: String, relays: List<String>, endsAt: Long?) {
         val targets = relays.mapNotNull(::normalizeRelayUrl).distinct().take(6)
-        if (targets.isNotEmpty()) relayPool.fetchPollResponses(pollId, targets, endsAt)
+        if (targets.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val previous = pollResponsesFetchedAt[pollId]
+        if (previous != null && now - previous < POLL_RESPONSE_REFRESH_MS) return
+        pollResponsesFetchedAt[pollId] = now
+        relayPool.fetchPollResponses(pollId, targets, endsAt)
     }
 
     fun votePoll(

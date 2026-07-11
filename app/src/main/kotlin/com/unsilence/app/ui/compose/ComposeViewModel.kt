@@ -1195,6 +1195,7 @@ class ComposeViewModel @Inject constructor(
                     firstSeenAt = System.currentTimeMillis(),
                     relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                 ))
+                relayPool.refreshOwnNotificationSubscription(signed.pubKey)
             }
         }
     }
