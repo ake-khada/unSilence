@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,10 +26,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -38,7 +37,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -104,6 +102,7 @@ import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -551,40 +550,6 @@ fun UserProfileScreen(
                     Spacer(Modifier.height(Spacing.micro))
                 }
 
-                // Follow/Unfollow button
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    if (followLoading) {
-                        CircularProgressIndicator(
-                            color    = Brand,
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    } else if (isFollowing) {
-                        OutlinedButton(
-                            onClick = { viewModel.toggleFollow(); showSnackbar("Unfollowed") },
-                            border  = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
-                                brush = androidx.compose.ui.graphics.SolidColor(Brand),
-                            ),
-                            modifier = Modifier.widthIn(min = 120.dp),
-                        ) {
-                            Text("Following", color = Brand, fontSize = AppType.body)
-                        }
-                    } else {
-                        Button(
-                            onClick  = { viewModel.toggleFollow(); showSnackbar("Following") },
-                            colors   = ButtonDefaults.buttonColors(containerColor = Brand),
-                            modifier = Modifier.widthIn(min = 120.dp),
-                        ) {
-                            Text("Follow", color = Black, fontSize = AppType.body, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
-                }
-
                 // Following / Followers stats row
                 Spacer(Modifier.height(Spacing.small))
                 Row(
@@ -704,6 +669,51 @@ fun UserProfileScreen(
                             onDismissRequest = { showProfileActions = false },
                             modifier         = Modifier.background(Black),
                         ) {
+                            DropdownMenuItem(
+                                enabled = !followLoading,
+                                text = {
+                                    Text(
+                                        text = when {
+                                            followLoading -> "Updating…"
+                                            isFollowing -> "Unfollow"
+                                            else -> "Follow"
+                                        },
+                                        color = if (!isFollowing) Mint else TextSecondary,
+                                        fontSize = AppType.body,
+                                        fontWeight = if (!isFollowing) {
+                                            FontWeight.SemiBold
+                                        } else {
+                                            FontWeight.Normal
+                                        },
+                                    )
+                                },
+                                leadingIcon = {
+                                    if (followLoading) {
+                                        CircularProgressIndicator(
+                                            color = Mint,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = if (isFollowing) {
+                                                Icons.Filled.PersonRemove
+                                            } else {
+                                                Icons.Filled.PersonAdd
+                                            },
+                                            contentDescription = null,
+                                            tint = if (!isFollowing) Mint else TextSecondary,
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    showProfileActions = false
+                                    val wasFollowing = isFollowing
+                                    viewModel.toggleFollow()
+                                    showSnackbar(if (wasFollowing) "Unfollowed" else "Following")
+                                },
+                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(

@@ -2232,7 +2232,6 @@ class RelayPool @Inject constructor(
         until: Long?,
         onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
     ): List<PaginatedFetchResult> {
-        connectFollowerIndexes()
         val filter = buildJsonObject {
             put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
             put("#p", buildJsonArray { add(JsonPrimitive(subjectPubkey)) })
@@ -2252,7 +2251,6 @@ class RelayPool @Inject constructor(
     /** Fetch each candidate author's latest replaceable contact list. */
     suspend fun fetchLatestFollowLists(pubkeys: Collection<String>): Boolean {
         if (pubkeys.isEmpty()) return true
-        connectFollowerIndexes()
         var allChunksResponded = true
         pubkeys.distinct().chunked(FOLLOWERS_PAGE_SIZE).forEach { authors ->
             val filter = buildJsonObject {
@@ -2270,14 +2268,6 @@ class RelayPool @Inject constructor(
             if (results.none { it.totalPages > 0 }) allChunksResponded = false
         }
         return allChunksResponded
-    }
-
-    private suspend fun connectFollowerIndexes() = coroutineScope {
-        FOLLOWER_INDEX_RELAY_URLS.map { relayUrl ->
-            async {
-                connectAndAwait(listOf(relayUrl), timeoutMs = 4_000, forceEvict = true)
-            }
-        }.awaitAll()
     }
 
     // ── Relay health fetch orchestrators ──────────────────────────────────
