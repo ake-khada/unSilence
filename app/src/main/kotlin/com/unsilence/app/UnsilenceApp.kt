@@ -118,11 +118,8 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         return ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
-                    // This app requests largeHeap for media playback. A 15% cache
-                    // therefore scales to an unnecessarily large hardware-bitmap
-                    // budget on high-memory devices and keeps scrolled-off feed
-                    // images resident. Eight percent still gives the feed useful
-                    // back-scroll reuse without allowing the cache to dominate PSS.
+                    // Keep back-scroll reuse without letting decoded feed images
+                    // dominate the normal application heap.
                     .maxSizePercent(context, 0.08)
                     .build()
             }
