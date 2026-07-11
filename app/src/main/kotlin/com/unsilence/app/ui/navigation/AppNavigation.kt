@@ -169,7 +169,11 @@ private fun feedTypeMatches(a: FeedType, b: FeedType): Boolean = when {
 }
 
 @Composable
-fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
+fun AppNavigation(
+    ownPubkey: String,
+    sessionKey: String,
+    onLogout: () -> Unit,
+) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val showSnackbar: (String) -> Unit = { message ->
@@ -210,8 +214,8 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     // Key VMs by pubkey so logout → re-login with a different npub creates fresh
     // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
     // captured the old user's pubkey at init and never re-initializes.
-    val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$userPubkey")
-    val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$userPubkey")
+    val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$sessionKey")
+    val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$sessionKey")
     // Browse a relay's feed (§05 detail footer): make it the active feed WITHOUT pinning it
     // (browsing is transient — the relay shows in the carousel only while active, see feedList),
     // dismiss the relay overlays, and drop to the feed tab.
@@ -221,9 +225,9 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
         showRelaySettings = false
         selectedTab = 0
     }
-    val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$userPubkey")
-    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$userPubkey")
-    val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$userPubkey")
+    val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$sessionKey")
+    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$sessionKey")
+    val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
@@ -316,7 +320,7 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
     }
 
     CompositionLocalProvider(
-        LocalAppSessionKey provides userPubkey,
+        LocalAppSessionKey provides sessionKey,
         LocalShowSnackbar provides showSnackbar,
         LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
@@ -374,10 +378,10 @@ fun AppNavigation(userPubkey: String, onLogout: () -> Unit) {
                         onNoteClick = { eventId -> threadEventId = eventId },
                         onComment = { eventId -> replyToEventId = eventId },
                         onAuthorClick = onAuthorClick,
-                        onConnectionsClick = { tab -> connectionsTarget = userPubkey to tab },
+                        onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
                         onHashtagClick = onHashtagClick,
                         onBrowseRelay = onBrowseRelayFeed,
-                        viewModel = hiltViewModel(key = "profile-$userPubkey"),
+                        viewModel = hiltViewModel(key = "profile-$sessionKey"),
                         actionsViewModel = noteActionsVm,
                     )
                     else -> PlaceholderScreen()

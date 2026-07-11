@@ -19,7 +19,8 @@ fun RootScreen(viewModel: RootViewModel = hiltViewModel()) {
         val sessionKey = "$pubkey-${viewModel.sessionId}"
         key(sessionKey) {
             AppNavigation(
-                userPubkey = sessionKey,
+                ownPubkey = pubkey,
+                sessionKey = sessionKey,
                 onLogout = viewModel::logout,
             )
         }
