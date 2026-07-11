@@ -4333,6 +4333,124 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `poll response without p-tag notifies poll author by e-tag`() = runTest {
+        store.insert(event(
+            id = "my-poll",
+            pubkey = myPubkey,
+            kind = 1068,
+            content = "Tea or coffee?",
+            createdAt = 100,
+            tags = listOf(listOf("option", "a", "Tea"), listOf("option", "b", "Coffee")),
+        ))
+        store.insert(event(
+            id = "vote-1",
+            pubkey = otherPubkey,
+            kind = 1018,
+            content = "",
+            createdAt = 200,
+            tags = listOf(listOf("e", "my-poll"), listOf("response", "a")),
+        ))
+
+        val row = store.getNotifications(myPubkey, limit = 50).single() as NotificationRow.Single
+        assertEquals("poll_vote", row.notifType)
+        assertEquals("vote-1", row.id)
+        assertEquals("my-poll", row.targetNoteId)
+        assertEquals("Tea or coffee?", row.targetNoteContent)
+        assertEquals(otherPubkey, row.actorPubkey)
+    }
+
+    @Test
+    fun `poll re-votes dedup to latest notification and unread count`() = runTest {
+        store.insert(event(
+            id = "my-poll-revote",
+            pubkey = myPubkey,
+            kind = 1068,
+            content = "Pick one",
+            createdAt = 100,
+            tags = listOf(listOf("option", "a", "A"), listOf("option", "b", "B")),
+        ))
+        store.insert(event(
+            id = "vote-old",
+            pubkey = otherPubkey,
+            kind = 1018,
+            createdAt = 200,
+            tags = listOf(listOf("e", "my-poll-revote"), listOf("response", "a")),
+        ))
+        store.insert(event(
+            id = "vote-new",
+            pubkey = otherPubkey,
+            kind = 1018,
+            createdAt = 300,
+            tags = listOf(listOf("e", "my-poll-revote"), listOf("response", "b")),
+        ))
+        store.insert(event(
+            id = "vote-new-z",
+            pubkey = otherPubkey,
+            kind = 1018,
+            createdAt = 300,
+            tags = listOf(listOf("e", "my-poll-revote"), listOf("response", "a")),
+        ))
+
+        val rows = store.getNotifications(myPubkey, limit = 50)
+        assertEquals(1, rows.size)
+        assertEquals("vote-new-z", (rows.single() as NotificationRow.Single).id)
+        assertEquals(1, store.notificationCountSince(myPubkey, since = 0))
+    }
+
+    @Test
+    fun `poll inserted after response backfills e-tag notification index`() = runTest {
+        store.insert(event(
+            id = "early-vote",
+            pubkey = otherPubkey,
+            kind = 1018,
+            createdAt = 200,
+            tags = listOf(listOf("e", "late-poll"), listOf("response", "a")),
+        ))
+        assertTrue(store.getNotifications(myPubkey, limit = 50).isEmpty())
+
+        store.insert(event(
+            id = "late-poll",
+            pubkey = myPubkey,
+            kind = 1068,
+            content = "Late poll",
+            createdAt = 100,
+            tags = listOf(listOf("option", "a", "A")),
+        ))
+
+        val row = store.getNotifications(myPubkey, limit = 50).single() as NotificationRow.Single
+        assertEquals("early-vote", row.id)
+    }
+
+    @Test
+    fun `invalid poll response option does not notify`() = runTest {
+        store.insert(event(
+            id = "validated-poll",
+            pubkey = myPubkey,
+            kind = 1068,
+            createdAt = 100,
+            tags = listOf(listOf("option", "valid", "Valid")),
+        ))
+        store.insert(event(
+            id = "invalid-vote",
+            pubkey = otherPubkey,
+            kind = 1018,
+            createdAt = 200,
+            tags = listOf(listOf("e", "validated-poll"), listOf("response", "injected")),
+        ))
+
+        assertTrue(store.getNotifications(myPubkey, limit = 50).isEmpty())
+    }
+
+    @Test
+    fun `authored poll ids are newest first and author scoped`() = runTest {
+        store.insert(event(id = "mine-old", pubkey = myPubkey, kind = 1068, createdAt = 100))
+        store.insert(event(id = "theirs", pubkey = otherPubkey, kind = 1068, createdAt = 300))
+        store.insert(event(id = "mine-new", pubkey = myPubkey, kind = 1068, createdAt = 200))
+
+        assertEquals(listOf("mine-new", "mine-old"), store.authoredPollIds(myPubkey))
+    }
+
+    @Test
     fun `grouped reaction reports the dominant emoji`() = runTest {
         store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "x", createdAt = 50))
         store.insert(event(id = "r1", pubkey = "a", kind = 7, content = "🔥", createdAt = 100,

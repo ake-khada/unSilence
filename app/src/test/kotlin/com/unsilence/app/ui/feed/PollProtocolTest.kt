@@ -131,4 +131,41 @@ class PollProtocolTest {
         assertEquals(mapOf("a" to 0, "b" to 1), tally.counts)
         assertEquals(setOf("b"), tally.ownChoices)
     }
+
+    @Test
+    fun `voter groups reuse latest-wins tally responses`() {
+        val tally = tallyPollVotes(
+            responses = listOf(
+                response("alice-old", "alice", 110, "a"),
+                response("alice-new", "alice", 130, "b"),
+                response("bob", "bob", 120, "a"),
+            ),
+            poll = poll,
+            pollCreatedAt = 100,
+            ownPubkey = null,
+        )
+
+        val groups = pollVoterGroups(poll, tally)
+
+        assertEquals(listOf("bob"), groups[0].voters.map { it.pubkey })
+        assertEquals(listOf("alice"), groups[1].voters.map { it.pubkey })
+        assertEquals(50, groups[0].percentage)
+        assertEquals(50, groups[1].percentage)
+    }
+
+    @Test
+    fun `multiple-choice voter appears under every selected option`() {
+        val multi = poll.copy(multipleChoice = true)
+        val tally = tallyPollVotes(
+            responses = listOf(response("both", "alice", 120, "a", "b")),
+            poll = multi,
+            pollCreatedAt = 100,
+            ownPubkey = "alice",
+        )
+
+        val groups = pollVoterGroups(multi, tally)
+
+        assertTrue(groups.all { it.voters.single().pubkey == "alice" })
+        assertTrue(groups.all { it.percentage == 100 })
+    }
 }

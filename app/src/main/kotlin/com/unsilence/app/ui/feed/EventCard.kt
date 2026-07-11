@@ -429,6 +429,11 @@ fun EventCard(
                         poll = model.poll,
                         sourceRelay = model.relayUrl,
                         callbacks = pollActions,
+                        lookupProfile = lookupProfile,
+                        profileFlow = profileFlow,
+                        wotLookup = wotLookup,
+                        onVoterClick = onAuthorClick,
+                        onWotSubjectsVisible = onWotSubjectsVisible,
                         modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                     )
                 }

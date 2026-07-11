@@ -64,6 +64,7 @@ import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.forEvent
+import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -116,6 +117,7 @@ fun ThreadScreen(
     // Resolved once per screen recomposition — getPinnedEmojis() allocates a
     // fresh list per call, which defeats Compose skipping when called per card.
     val pinnedEmojis = actionsViewModel.getPinnedEmojis()
+    val pollActions = remember(actionsViewModel) { actionsViewModel.pollActionCallbacks() }
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var didScrollToFocus by remember { mutableStateOf(false) }
@@ -308,6 +310,7 @@ fun ThreadScreen(
                                     onLongPress         = { actionsRow = note },
                                     wotLookup           = { key -> wotLookups[key] },
                                     feedWotDisplayMode  = feedWotDisplayMode,
+                                    pollActions         = pollActions,
                                 )
                                 HorizontalDivider(
                                     color     = BorderFaint,
@@ -406,6 +409,7 @@ fun ThreadScreen(
                                         onLongPress         = { actionsRow = reply },
                                         wotLookup           = { key -> wotLookups[key] },
                                         feedWotDisplayMode  = feedWotDisplayMode,
+                                        pollActions         = pollActions,
                                     )
                                 }
                             }

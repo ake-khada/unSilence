@@ -308,6 +308,7 @@ class RelayPool @Inject constructor(
     // Persistent #p notification tail — forward-looking only (since:bootstrap_time).
     // Catches new reactions/reposts/zaps/replies mentioning the user after bootstrap.
     @Volatile private var liveNotifSubReq: String? = null
+    @Volatile private var liveNotifSince: Long? = null
     private val liveNotifSubRelays = ConcurrentHashMap.newKeySet<String>()
     private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
@@ -1903,7 +1904,8 @@ class RelayPool @Inject constructor(
 
     /**
      * Paginated historical notification backfill. Fetches notification-eligible
-     * events addressed to [pubkeyHex] via #p tag from ALL connected relays,
+     * events addressed to [pubkeyHex] via #p tag, plus kind-1018 responses
+     * e-tagging one of the user's authored polls, from ALL connected relays,
      * paginating as deep as each relay allows. Events flow through
      * EventProcessor → MES → snapshot automatically.
      *
@@ -1938,6 +1940,14 @@ class RelayPool @Inject constructor(
             put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
             put("limit", JsonPrimitive(500))
         }
+        val pollIds = memoryEventStore.get().authoredPollIds(pubkeyHex)
+        val pollVoteFilter = pollIds.takeIf { it.isNotEmpty() }?.let { ids ->
+            buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1018)) })
+                put("#e", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(500))
+            }
+        }
 
         var grandTotal = 0
         // Process in batches of 6 relays (concurrent within batch).
@@ -1954,12 +1964,26 @@ class RelayPool @Inject constructor(
                 },
             )
             grandTotal += results.sumOf { it.totalEvents }
+            if (pollVoteFilter != null) {
+                val voteResults = fetchPaginatedEvents(
+                    urls = batch,
+                    baseFilter = pollVoteFilter,
+                    subIdPrefix = "notif-poll-hist",
+                    maxPages = 20,
+                    timeoutMs = 30_000,
+                    onPage = { page, count ->
+                        Log.d(TAG, "notif-poll-hist page $page: $count events")
+                    },
+                )
+                grandTotal += voteResults.sumOf { it.totalEvents }
+            }
         }
         Log.d(TAG, "fetchHistoricalNotifications done: $grandTotal events across ${allTargets.size} relays")
     }
 
     /**
-     * Open a persistent subscription for events mentioning the user (#p tag).
+     * Open a persistent subscription for events mentioning the user (#p tag)
+     * and responses to the user's authored polls (#e tag).
      * Forward-looking only: uses `since` so relays deliver only events created
      * after bootstrap. Replayed automatically on relay reconnect.
      */
@@ -1971,6 +1995,7 @@ class RelayPool @Inject constructor(
                 connectedRelayUrls().mapNotNull { normalizeRelayUrl(it) }.take(4)
             }
         if (readRelayUrls.isEmpty()) return
+        val pollIds = memoryEventStore.get().authoredPollIds(pubkeyHex)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("own-notif-live"))
@@ -1984,8 +2009,16 @@ class RelayPool @Inject constructor(
                 put("#p", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
                 put("since", JsonPrimitive(sinceEpochSeconds))
             })
+            if (pollIds.isNotEmpty()) {
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(1018)) })
+                    put("#e", buildJsonArray { pollIds.forEach { add(JsonPrimitive(it)) } })
+                    put("since", JsonPrimitive(sinceEpochSeconds))
+                })
+            }
         }.toString()
         liveNotifSubReq = req
+        liveNotifSince = sinceEpochSeconds
         liveNotifSubRelays.clear()
         liveNotifSubRelays.addAll(readRelayUrls)
         for (url in readRelayUrls) {
@@ -1994,10 +2027,19 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "subscribeOwnNotifications: ${readRelayUrls.size} relays, since=$sinceEpochSeconds")
     }
 
+    /** Rebuild the live #e filter after authoring a poll in this app session. */
+    fun refreshOwnNotificationSubscription(pubkeyHex: String) {
+        subscribeOwnNotifications(
+            pubkeyHex = pubkeyHex,
+            sinceEpochSeconds = liveNotifSince ?: (System.currentTimeMillis() / 1000L),
+        )
+    }
+
     /** Close the persistent notification subscription (teardown). */
     fun closeLiveNotifSub() {
         val urls = liveNotifSubRelays.toList()
         liveNotifSubReq = null
+        liveNotifSince = null
         liveNotifSubRelays.clear()
         if (urls.isNotEmpty()) {
             val close = """["CLOSE","own-notif-live"]"""

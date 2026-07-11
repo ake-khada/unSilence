@@ -102,7 +102,7 @@ private val CONTENT_KINDS = setOf(1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 3
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
-private val NOTIFICATION_KINDS = setOf(1, 6, 7, 9735, 16, 1111)
+private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
 
 @Singleton
@@ -240,18 +240,45 @@ class MemoryEventStore @Inject constructor(
         notificationSignalFor(recipient).value = System.nanoTime()
     }
 
-    /**
-     * Index every unique p-tag recipient of [event] and bump their
-     * notification signals. No-op for non-notification kinds.
-     */
-    private fun indexNotificationRecipients(event: NostrEvent) {
+    private fun pollIdForResponse(event: NostrEvent): String? =
+        event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+
+    private fun notificationRecipients(event: NostrEvent): Set<String> {
+        if (event.kind == 1018) {
+            val pollId = pollIdForResponse(event) ?: return emptySet()
+            val poll = eventsById[pollId]?.takeIf { it.kind == 1068 } ?: return emptySet()
+            val optionIds = poll.tags.asSequence()
+                .filter { it.size >= 2 && it[0] == "option" }
+                .map { it[1] }
+                .toSet()
+            val hasValidChoice = event.tags.any {
+                it.size >= 2 && it[0] == "response" && it[1] in optionIds
+            }
+            if (!hasValidChoice) return emptySet()
+            return setOf(poll.pubkey)
+        }
+        return event.tags.asSequence()
+            .filter { it.size >= 2 && it[0] == "p" && it[1].length == 64 }
+            .map { it[1] }
+            .toSet()
+    }
+
+    /** Index notification recipients and bump only the affected recipient flows. */
+    private fun indexNotificationRecipients(
+        event: NostrEvent,
+        backfillPollResponses: Boolean = true,
+    ) {
+        // Responses can arrive before their poll. Once the poll lands, backfill
+        // those response indexes so e-tag-only vote notifications are not lost.
+        if (event.kind == 1068 && backfillPollResponses) {
+            for (responseId in idsByKind[1018].orEmpty()) {
+                val response = eventsById[responseId] ?: continue
+                if (pollIdForResponse(response) == event.id) indexNotificationRecipients(response)
+            }
+            return
+        }
         if (event.kind !in NOTIFICATION_KINDS) return
-        val seen = HashSet<String>(4)
-        for (tag in event.tags) {
-            if (tag.size < 2 || tag[0] != "p") continue
-            val recipient = tag[1]
-            if (recipient.length != 64) continue
-            if (!seen.add(recipient)) continue
+        for (recipient in notificationRecipients(event)) {
             notifIdsByRecipient
                 .computeIfAbsent(recipient) { ConcurrentSkipListSet() }
                 .add(NotifEntry(event.createdAt, event.id))
@@ -266,11 +293,7 @@ class MemoryEventStore @Inject constructor(
     private fun deindexNotificationRecipients(event: NostrEvent) {
         if (event.kind !in NOTIFICATION_KINDS) return
         val entry = NotifEntry(event.createdAt, event.id)
-        val seen = HashSet<String>(4)
-        for (tag in event.tags) {
-            if (tag.size < 2 || tag[0] != "p") continue
-            val recipient = tag[1]
-            if (!seen.add(recipient)) continue
+        for (recipient in notificationRecipients(event)) {
             val set = notifIdsByRecipient[recipient] ?: continue
             if (set.remove(entry)) bumpNotificationSignal(recipient)
         }
@@ -284,12 +307,7 @@ class MemoryEventStore @Inject constructor(
         notifIdsByRecipient.clear()
         for ((_, event) in eventsById) {
             if (event.kind !in NOTIFICATION_KINDS) continue
-            val seen = HashSet<String>(4)
-            for (tag in event.tags) {
-                if (tag.size < 2 || tag[0] != "p") continue
-                val recipient = tag[1]
-                if (recipient.length != 64) continue
-                if (!seen.add(recipient)) continue
+            for (recipient in notificationRecipients(event)) {
                 notifIdsByRecipient
                     .computeIfAbsent(recipient) { ConcurrentSkipListSet() }
                     .add(NotifEntry(event.createdAt, event.id))
@@ -2319,6 +2337,7 @@ class MemoryEventStore @Inject constructor(
             6 to 1000,      // reposts
             16 to 1000,     // generic reposts (NIP-18) — same cap as kind-6
             7 to 1000,      // reactions (reconstructible)
+            1018 to 1000,   // poll responses (reconstructible)
             20 to 500,      // pictures
             21 to 500,      // videos
             9734 to 250,    // zap requests (reconstructible)
@@ -4245,6 +4264,7 @@ class MemoryEventStore @Inject constructor(
         val entries = notifIdsByRecipient[recipientPubkey] ?: return emptyList()
         val follows = if (followedOnly) followsByPubkey[recipientPubkey] else null
         val cap = limit ?: Int.MAX_VALUE
+        val latestPollVoteIds = latestPollVoteNotificationIds(entries)
 
         val singles = ArrayList<NotificationRow.Single>()
         val groups = LinkedHashMap<String, NotifGroupAcc>()
@@ -4266,6 +4286,10 @@ class MemoryEventStore @Inject constructor(
             if (effectivePubkey == recipientPubkey) continue
             if (follows != null && effectivePubkey !in follows) continue
 
+            if (event.kind == 1018) {
+                if (event.id !in latestPollVoteIds) continue
+            }
+
             val notifType = deriveNotifType(event, recipientPubkey)
 
             // NIP-25 "-" dislikes are not displayable notifications (mirrors the card path).
@@ -4276,7 +4300,7 @@ class MemoryEventStore @Inject constructor(
             } else null
 
             when (notifType) {
-                "reply", "mention" -> {
+                "reply", "mention", "poll_vote" -> {
                     if (slots() >= cap) continue
                     singles.add(buildSingleNotification(event, notifType))
                 }
@@ -4321,6 +4345,7 @@ class MemoryEventStore @Inject constructor(
     fun notificationCountSince(recipientPubkey: String, since: Long): Int {
         val entries = notifIdsByRecipient[recipientPubkey] ?: return 0
         var count = 0
+        val latestPollVoteIds = latestPollVoteNotificationIds(entries)
         for (entry in entries) {
             if (entry.createdAt <= since) break  // sorted DESC — done
             val event = eventsById[entry.eventId] ?: continue
@@ -4331,6 +4356,9 @@ class MemoryEventStore @Inject constructor(
                 if (effectiveSender == recipientPubkey) continue
             } else {
                 if (event.pubkey == recipientPubkey) continue
+            }
+            if (event.kind == 1018) {
+                if (event.id !in latestPollVoteIds) continue
             }
             count++
         }
@@ -4356,6 +4384,25 @@ class MemoryEventStore @Inject constructor(
     /** Defensive bound on raw events scanned per notification query (see getNotifications). */
     private val NOTIF_RAW_SCAN_CAP = 1500
 
+    /** Same deterministic latest-wins rule as poll tally: createdAt, then event id. */
+    private fun latestPollVoteNotificationIds(entries: Iterable<NotifEntry>): Set<String> {
+        val latestByVoterAndPoll = HashMap<String, NostrEvent>()
+        var scanned = 0
+        for (entry in entries) {
+            if (scanned++ >= NOTIF_RAW_SCAN_CAP) break
+            val event = eventsById[entry.eventId]?.takeIf { it.kind == 1018 } ?: continue
+            val pollId = pollIdForResponse(event) ?: continue
+            val key = "$pollId|${event.pubkey}"
+            val previous = latestByVoterAndPoll[key]
+            if (previous == null || event.createdAt > previous.createdAt ||
+                (event.createdAt == previous.createdAt && event.id > previous.id)
+            ) {
+                latestByVoterAndPoll[key] = event
+            }
+        }
+        return latestByVoterAndPoll.values.mapTo(HashSet()) { it.id }
+    }
+
     /** Target note id a grouped notification folds under (mirrors the old per-type logic). */
     private fun notifTargetId(event: NostrEvent, notifType: String): String? = when (notifType) {
         "reaction" -> event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
@@ -4367,6 +4414,7 @@ class MemoryEventStore @Inject constructor(
     /** Build a [NotificationRow.Single] for a reply/mention (kind-1/1111). */
     private fun buildSingleNotification(event: NostrEvent, notifType: String): NotificationRow.Single {
         val fields = cachedProfileFields(event.pubkey)
+        val pollId = pollIdForResponse(event).takeIf { notifType == "poll_vote" }
         return NotificationRow.Single(
             id = event.id,
             notifType = notifType,
@@ -4374,8 +4422,8 @@ class MemoryEventStore @Inject constructor(
             actorName = fields["name"],
             actorDisplayName = fields["display_name"],
             actorPicture = fields["picture"],
-            targetNoteId = event.id,
-            targetNoteContent = event.content,
+            targetNoteId = pollId ?: event.id,
+            targetNoteContent = pollId?.let { eventsById[it]?.content } ?: event.content,
             parentNoteContent = if (notifType == "reply") event.replyToId?.let { eventsById[it]?.content } ?: "" else "",
             createdAt = event.createdAt,
         )
@@ -4449,6 +4497,7 @@ class MemoryEventStore @Inject constructor(
      */
     private fun deriveNotifType(event: NostrEvent, recipientPubkey: String): String = when (event.kind) {
         7 -> "reaction"
+        1018 -> "poll_vote"
         6, 16 -> "repost"
         9735 -> "zap"
         1, 1111 -> {
@@ -4460,6 +4509,17 @@ class MemoryEventStore @Inject constructor(
         }
         else -> "mention"
     }
+
+    /** Newest authored poll IDs used by the notification relay #e filter. */
+    fun authoredPollIds(pubkey: String, limit: Int = 200): List<String> =
+        idsByKind[1068].orEmpty()
+            .asSequence()
+            .mapNotNull(eventsById::get)
+            .filter { it.pubkey == pubkey }
+            .sortedWith(compareByDescending<NostrEvent> { it.createdAt }.thenByDescending { it.id })
+            .take(limit.coerceAtLeast(0))
+            .map { it.id }
+            .toList()
 
     // ─── FeedRow conversion ─────────────────────────────────────────────────
 
@@ -4727,6 +4787,7 @@ class MemoryEventStore @Inject constructor(
         // Rebuild reaction set from raw kind-7 events (same as binary path)
         reindexReactionsFromEvents()
         rebuildActionEventIndexesFromEvents()
+        rebuildNotificationIndex()
         // Backfill parent reply counts for old snapshots created before
         // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
         // so newer snapshots that already persisted the counts do not double.
@@ -5130,6 +5191,7 @@ class MemoryEventStore @Inject constructor(
             insertFromSnapshot(event)
         }
         rebuildActionEventIndexesFromEvents()
+        rebuildNotificationIndex()
 
         // AGGREGATES section
         val replyN = input.readInt()
@@ -5353,8 +5415,8 @@ class MemoryEventStore @Inject constructor(
         // aggregate section across saves; insertFromSnapshot skips handleZapReceipt).
         repairZapDetailsFromReceipts()
 
-        // Notification recipient index: already populated per-event by
-        // insertFromSnapshot via indexNotificationRecipients — no rebuild pass.
+        // Notification recipients were rebuilt after the event section so
+        // e-tag-only poll responses resolve regardless of snapshot event order.
 
         // End-of-restore signal bumps (matches V2 reader)
         val now = System.nanoTime()
@@ -5612,7 +5674,7 @@ class MemoryEventStore @Inject constructor(
         indexArticleComment(event, null)
 
         indexRelayHints(event)
-        indexNotificationRecipients(event)
+        indexNotificationRecipients(event, backfillPollResponses = false)
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.

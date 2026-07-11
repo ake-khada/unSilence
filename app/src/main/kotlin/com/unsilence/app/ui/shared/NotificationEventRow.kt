@@ -19,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.HowToVote
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -185,6 +186,7 @@ private fun SingleNotificationRow(
     // line, then the reply/mention text on a single dim line — no grey box.
     val (badgeIcon, badgeTint, action) = when (row.notifType) {
         "reply" -> Triple(Icons.AutoMirrored.Filled.Chat, Brand, "replied")
+        "poll_vote" -> Triple(Icons.Filled.HowToVote, Brand, "voted on your poll")
         else -> Triple(Icons.Filled.AlternateEmail, TextSecondary, "mentioned you")
     }
     val actorLabel = row.actorDisplayName?.takeIf { it.isNotBlank() }
