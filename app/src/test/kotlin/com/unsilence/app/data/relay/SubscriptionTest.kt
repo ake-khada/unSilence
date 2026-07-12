@@ -256,6 +256,35 @@ class SubscriptionTest {
         assertEquals(true, eoseEvents[1])
     }
 
+    @Test
+    fun `resumeRelay skips cooldown and resumes when cooldown expires`() = runTest {
+        val url = "wss://a.example"
+        subscription.subscribe(listOf(url), NostrFilter(kinds = listOf(1)), onevent = {})
+        transport.sends.clear()
+
+        transport.rateLimitedUrls.add(url)
+        subscription.resumeRelay(url, nowMs = 1_000L)
+        assertEquals(0, transport.sends.size)
+
+        transport.rateLimitedUrls.remove(url)
+        subscription.resumeRelay(url, nowMs = 1_001L)
+        assertEquals(1, transport.sends.size)
+    }
+
+    @Test
+    fun `resumeRelay coalesces a burst per relay`() = runTest {
+        val url = "wss://a.example"
+        subscription.subscribe(listOf(url), NostrFilter(kinds = listOf(1)), onevent = {})
+        transport.sends.clear()
+
+        subscription.resumeRelay(url, nowMs = 5_000L)
+        subscription.resumeRelay(url, nowMs = 5_999L)
+        assertEquals(1, transport.sends.size)
+
+        subscription.resumeRelay(url, nowMs = 6_000L)
+        assertEquals(2, transport.sends.size)
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private fun sampleEventJson(

@@ -13,6 +13,7 @@ class FakeRelayTransport : RelayTransport {
     val sends = CopyOnWriteArrayList<SentMessage>()
     var sendShouldSucceed: (String) -> Boolean = { true }
     var connectAndAwaitReturns: Int = 0
+    val rateLimitedUrls: MutableSet<String> = mutableSetOf()
 
     override suspend fun connectAndAwait(
         relayUrls: List<String>,
@@ -25,6 +26,8 @@ class FakeRelayTransport : RelayTransport {
         if (ok) sends.add(SentMessage(url, msg))
         return ok
     }
+
+    override fun isRateLimited(url: String): Boolean = url in rateLimitedUrls
 }
 
 /** ReconnectSource fake: no-op SharedFlow, no emissions. */
