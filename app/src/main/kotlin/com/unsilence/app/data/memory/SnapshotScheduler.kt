@@ -6,6 +6,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -194,18 +195,26 @@ class SnapshotScheduler @Inject constructor(
 
     private suspend fun doSave() {
         mutex.withLock {
-            val stream = snapshotFile.startWrite()
             try {
-                // V3 binary writer is the only writer. V2 TSV writer remains
-                // in MES for restore-side migration but is no longer called.
-                DataOutputStream(BufferedOutputStream(stream)).use { out ->
-                    memoryEventStore.saveSnapshotBinary(out)
+                val stream = snapshotFile.startWrite()
+                try {
+                    // V3 binary writer is the only writer. V2 TSV writer remains
+                    // in MES for restore-side migration but is no longer called.
+                    DataOutputStream(BufferedOutputStream(stream)).use { out ->
+                        memoryEventStore.saveSnapshotBinary(out)
+                    }
+                    snapshotFile.finishWrite(stream)
+                    Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB, binary V3)")
+                } catch (t: Throwable) {
+                    // Preserve the previous AtomicFile even when serialization fails
+                    // with an Error such as OutOfMemoryError.
+                    runCatching { snapshotFile.failWrite(stream) }
+                    throw t
                 }
-                snapshotFile.finishWrite(stream)
-                Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB, binary V3)")
-            } catch (e: Exception) {
-                snapshotFile.failWrite(stream)
-                Log.e(TAG, "Snapshot save failed", e)
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                // Snapshot persistence is best-effort. A later periodic tick retries.
+                Log.e(TAG, "Snapshot save failed; keeping previous snapshot", t)
             }
         }
     }
