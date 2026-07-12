@@ -53,6 +53,19 @@ class VideoRenderModelTest {
     }
 
     @Test
+    fun `kind 22 sidecar marks native and embedded short videos`() {
+        val tags = listOf(
+            listOf("imeta", "url https://vid.host/short.mp4", "m video/mp4", "dim 720x1280"),
+        )
+        val native = buildVideoRenderModels(kind = 22, content = "", tags = tags)
+        val embedded = """{"id":"short","pubkey":"${"c".repeat(64)}","kind":22,"content":"","tags":[["imeta","url https://vid.host/short.mp4","m video/mp4","dim 720x1280"]]}"""
+        val repost = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList())
+
+        assertTrue(native.single().shortForm)
+        assertTrue(repost.single().shortForm)
+    }
+
+    @Test
     fun `imeta video mime accepts extensionless media url`() {
         val mediaUrl = "https://cdn.example/${"a".repeat(64)}"
         val tags = listOf(

@@ -10,6 +10,8 @@ data class ImetaMedia(
     val height: Int?,
     val thumb: String?,
     val image: String?,  // NIP-92 poster image for video entries
+    val fallbacks: List<String> = emptyList(),
+    val durationSeconds: Double? = null,
 )
 
 object ImetaParser {
@@ -17,55 +19,50 @@ object ImetaParser {
     fun parse(tagsJson: String): List<ImetaMedia> = runCatching {
         NostrJson.parseToJsonElement(tagsJson).jsonArray
             .filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "imeta" }
-            .mapNotNull { tag ->
-                val kvMap = tag.jsonArray.drop(1).associate { entry ->
-                    val s = entry.jsonPrimitive.content
-                    val space = s.indexOf(' ')
-                    if (space < 0) s to "" else s.substring(0, space) to s.substring(space + 1)
-                }
-                val url = kvMap["url"] ?: return@mapNotNull null
-                val dim = kvMap["dim"]
-                val (w, h) = if (dim != null && dim.contains("x")) {
-                    val parts = dim.split("x", limit = 2)
-                    val pw = parts[0].toIntOrNull()
-                    val ph = parts[1].toIntOrNull()
-                    if (pw != null && pw > 0 && ph != null && ph > 0) pw to ph else null to null
-                } else null to null
-                ImetaMedia(
-                    url = url,
-                    mimeType = kvMap["m"],
-                    width = w,
-                    height = h,
-                    thumb = kvMap["thumb"],
-                    image = kvMap["image"],
-                )
-            }
+            .mapNotNull { tag -> parseFields(tag.jsonArray.drop(1).map { it.jsonPrimitive.content }) }
     }.getOrElse { emptyList() }
 
     fun parseFromList(tags: List<List<String>>): List<ImetaMedia> =
         tags.filter { it.firstOrNull() == "imeta" }
-            .mapNotNull { tag ->
-                val kvMap = tag.drop(1).associate { entry ->
-                    val space = entry.indexOf(' ')
-                    if (space < 0) entry to "" else entry.substring(0, space) to entry.substring(space + 1)
-                }
-                val url = kvMap["url"] ?: return@mapNotNull null
-                val dim = kvMap["dim"]
-                val (w, h) = if (dim != null && dim.contains("x")) {
-                    val parts = dim.split("x", limit = 2)
-                    val pw = parts[0].toIntOrNull()
-                    val ph = parts[1].toIntOrNull()
-                    if (pw != null && pw > 0 && ph != null && ph > 0) pw to ph else null to null
-                } else null to null
-                ImetaMedia(
-                    url = url,
-                    mimeType = kvMap["m"],
-                    width = w,
-                    height = h,
-                    thumb = kvMap["thumb"],
-                    image = kvMap["image"],
-                )
+            .mapNotNull { tag -> parseFields(tag.drop(1)) }
+
+    private fun parseFields(fields: List<String>): ImetaMedia? {
+        val values = fields.map { field ->
+            val space = field.indexOf(' ')
+            if (space < 0) field to "" else field.substring(0, space) to field.substring(space + 1)
+        }
+        fun first(key: String): String? = values.firstOrNull { it.first == key }?.second
+
+        val url = first("url")?.takeIf { it.isNotBlank() } ?: return null
+        val dim = first("dim")
+        val (width, height) = if (dim != null && dim.contains('x')) {
+            val parts = dim.split('x', limit = 2)
+            val parsedWidth = parts[0].toIntOrNull()
+            val parsedHeight = parts[1].toIntOrNull()
+            if (parsedWidth != null && parsedWidth > 0 && parsedHeight != null && parsedHeight > 0) {
+                parsedWidth to parsedHeight
+            } else {
+                null to null
             }
+        } else {
+            null to null
+        }
+        return ImetaMedia(
+            url = url,
+            mimeType = first("m"),
+            width = width,
+            height = height,
+            thumb = first("thumb"),
+            image = first("image"),
+            fallbacks = values.asSequence()
+                .filter { it.first == "fallback" }
+                .map { it.second }
+                .filter { it.startsWith("https://") || it.startsWith("http://") }
+                .distinct()
+                .toList(),
+            durationSeconds = first("duration")?.toDoubleOrNull()?.takeIf { it >= 0.0 },
+        )
+    }
 
     fun videos(tagsJson: String): List<ImetaMedia> =
         parse(tagsJson).filter { it.mimeType?.startsWith("video/") == true }

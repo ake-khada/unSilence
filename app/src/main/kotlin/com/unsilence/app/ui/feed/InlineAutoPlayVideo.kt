@@ -142,14 +142,14 @@ fun VideoPreviewCard(
     val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
-        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false, model.shortForm)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
+    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(initialAspect) }
     // Track whether ratio has been resolved from a real source (imeta or MMR).
     // Allow ONE update from default → resolved, then lock permanently.
-    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
         mutableStateOf(imetaAspect != null || cachedRatio != null)
     }
 
@@ -168,7 +168,7 @@ fun VideoPreviewCard(
             modifier = Modifier.matchParentSize(),
             onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
                 { ratio ->
-                    displayAspect = feedVideoAspectRatio(ratio, false)
+                    displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
                     hasBeenResolved = true
                 }
             } else null,
@@ -220,14 +220,14 @@ fun InlineVideoPlayer(
     val imetaAspect = model.imetaAspectRatio
     val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val baseAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
-        !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio, false)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
+        !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio, false, model.shortForm)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
+    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(baseAspect) }
     // Track whether ratio has been resolved from a real source (imeta or MMR).
     // Allow ONE update from default → resolved, then lock permanently.
-    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
         mutableStateOf(imetaAspect != null || resolvedRatio != null)
     }
 
@@ -241,7 +241,7 @@ fun InlineVideoPlayer(
     }
 
     // Listen for first rendered frame + actual video dimensions
-    DisposableEffect(exoPlayer, model.videoUrl, forceSquare) {
+    DisposableEffect(exoPlayer, model.videoUrl, forceSquare, model.shortForm) {
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 isFirstFrameRendered = true
@@ -260,7 +260,7 @@ fun InlineVideoPlayer(
                     }
                     // Allow ONE update from default → resolved for unresolved videos
                     if (!hasBeenResolved && !forceSquare) {
-                        displayAspect = feedVideoAspectRatio(ratio, false)
+                        displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
                         hasBeenResolved = true
                     }
                 }

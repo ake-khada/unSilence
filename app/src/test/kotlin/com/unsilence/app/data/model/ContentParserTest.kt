@@ -541,6 +541,34 @@ class ContentParserTest {
         assertEquals(1920f / 1080f, video.model.aspectRatio, 0.01f)
     }
 
+    @Test
+    fun `kind 22 parses short-form imeta metadata with blank content`() {
+        val mediaUrl = "https://cdn.divine.video/${"e".repeat(64)}"
+        val tags = """[["imeta","url $mediaUrl","m video/mp4","dim 720x1280","image https://cdn.divine.video/poster.jpg","fallback https://mirror.example/short.mp4","duration 6.75"]]"""
+
+        val model = parse("", kind = 22, tagsJson = tags)
+
+        assertTrue(model.shortForm)
+        assertEquals(22, model.effectiveKind)
+        val video = model.segments.filterIsInstance<Segment.Video>().single()
+        assertTrue(video.model.shortForm)
+        assertEquals(mediaUrl, video.model.videoUrl)
+        assertEquals(720f / 1280f, video.model.aspectRatio, 0.01f)
+        assertEquals("https://cdn.divine.video/poster.jpg", video.model.posterUrl)
+        assertEquals(listOf("https://mirror.example/short.mp4"), video.model.fallbackUrls)
+        assertEquals(6.75, video.model.durationSeconds!!, 0.001)
+    }
+
+    @Test
+    fun `kind 21 remains normal-form video`() {
+        val tags = """[["imeta","url https://vid.host/clip.mp4","m video/mp4"]]"""
+
+        val model = parse("", kind = 21, tagsJson = tags)
+
+        assertFalse(model.shortForm)
+        assertFalse(model.media.videos.single().model.shortForm)
+    }
+
     // ── Reposted NIP-68: imeta prepend must key off effectiveKind, not raw kind ─
     // A kind-6/16 repost wrapping a blank-content kind-21 carries its video only
     // in the INNER imeta tags. The prepend used to gate on the wrapper's raw kind

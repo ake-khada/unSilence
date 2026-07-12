@@ -35,6 +35,7 @@ data class EventModel(
     val repost: RepostInfo?,             // null unless kind == 6 or 16
     val article: ArticleInfo?,           // null unless effectiveKind == 30023
     val warnings: ContentWarnings,
+    val shortForm: Boolean = false,      // NIP-71 kind 22, including embedded repost targets
     val customEmojis: Map<String, String> = emptyMap(), // NIP-30: shortcode → url
     val poll: PollInfo? = null,
     val truncated: Boolean = false,      // content/segments capped (spam-post DoS bound) → show chip

@@ -464,7 +464,7 @@ class ProfileViewModel @Inject constructor(
         const val FEED_SAMPLE_MS = 100L
         const val PROFILE_EVENT_OFFSET = 3
 
-        /** Subscription group: Notes+Replies share kinds [1,6,16], Longform is [30023]. */
+        /** Notes+Replies share note/repost/native-media kinds; Longform is [30023]. */
         enum class SubGroup { NOTES_REPLIES, LONGFORM }
 
         fun subGroupFor(tab: ProfileTab): SubGroup = when (tab) {
@@ -473,7 +473,7 @@ class ProfileViewModel @Inject constructor(
         }
 
         fun kindsForTab(tab: ProfileTab): List<Int> = when (tab) {
-            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6, 16, 1068)
+            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6, 16, 20, 21, 22, 1068)
             ProfileTab.LONGFORM -> listOf(30023)
         }
     }

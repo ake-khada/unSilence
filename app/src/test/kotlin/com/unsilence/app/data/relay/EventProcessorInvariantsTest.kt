@@ -451,6 +451,23 @@ class EventProcessorInvariantsTest {
         assertEquals(1111, stored.first().kind)
     }
 
+    @Test
+    fun `kind 22 short video uses hot lane and populates autoplay metadata`() = runTest {
+        val mediaUrl = "https://cdn.divine.video/${"d".repeat(64)}"
+        val tags = """[["imeta","url $mediaUrl","m video/mp4","dim 720x1280"]]"""
+        val (raw, url) = rawEvent(seed = 73, kind = 22, content = "", tags = tags)
+
+        processor.process(raw, url)
+        processor.drainForTest()
+
+        val stored = store.eventsByIds(setOf(eventId(73)))
+        assertEquals(1, stored.size)
+        assertEquals(22, stored.single().kind)
+        val video = store.getVideoRenderModels(eventId(73)).single()
+        assertEquals(mediaUrl, video.videoUrl)
+        assertTrue(video.shortForm)
+    }
+
     // ── shouldChannel stays selective: an unhandled kind is not stored ───────
     @Test
     fun `unchanneled kind is dropped, not stored`() = runTest {

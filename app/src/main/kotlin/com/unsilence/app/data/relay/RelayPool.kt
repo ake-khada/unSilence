@@ -3289,6 +3289,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(7))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(22))
                     add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })
@@ -3338,7 +3339,7 @@ class RelayPool @Inject constructor(
             add(buildJsonObject {
                 put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 22, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3470,7 +3471,7 @@ class RelayPool @Inject constructor(
                 // Include kinds so relays that require them don't reject with
                 // "filters must specify at least one kind" (purplepag.es, others).
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 22, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3523,7 +3524,7 @@ class RelayPool @Inject constructor(
                 // Include kinds so relays that require them don't reject with
                 // "filters must specify at least one kind" (purplepag.es, others).
                 put("kinds", buildJsonArray {
-                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 1068, 30023)) add(JsonPrimitive(k))
+                    for (k in intArrayOf(0, 1, 6, 7, 20, 21, 22, 1068, 30023)) add(JsonPrimitive(k))
                 })
             })
         }.toString()
@@ -3809,7 +3810,7 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Fetch posts by a single author: kinds 1, 6, 20, 21, 30023.
+     * Fetch posts by a single author: kinds 1, 6, 20, 21, 22, 30023.
      * One-shot subscription — CLOSE is sent after EOSE.
      */
     fun fetchUserPosts(pubkey: String, relayUrls: List<String> = emptyList()) {
@@ -3828,6 +3829,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(22))
                     add(JsonPrimitive(1068))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
@@ -3883,6 +3885,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(6))
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
+                    add(JsonPrimitive(22))
                     add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })
