@@ -560,6 +560,57 @@ class ContentParserTest {
     }
 
     @Test
+    fun `DiVine addressable short parses extensionless live imeta shape`() {
+        val mediaUrl = "https://media.divine.video/${"a".repeat(64)}"
+        val posterUrl = "https://media.divine.video/${"b".repeat(64)}"
+        val tags = """[["d","divine-video"],["imeta","url $mediaUrl","m video/mp4","image $posterUrl","dim 1080x1920","size 46000000","x ${"c".repeat(64)}","blurhash U8D+4n"]]"""
+
+        val model = parse("", kind = 34236, tagsJson = tags)
+
+        assertTrue(model.shortForm)
+        val video = model.segments.filterIsInstance<Segment.Video>().single()
+        assertTrue(video.model.shortForm)
+        assertEquals(mediaUrl, video.model.videoUrl)
+        assertEquals(1080f / 1920f, video.model.aspectRatio, 0.01f)
+        assertEquals(posterUrl, video.model.posterUrl)
+    }
+
+    @Test
+    fun `NIP-71 kinds map short-form semantics`() {
+        val tags = """[["imeta","url https://media.example/video","m video/mp4","dim 1080x1920"]]"""
+        mapOf(21 to false, 22 to true, 34235 to false, 34236 to true).forEach { (kind, expected) ->
+            val model = parse("", kind = kind, tagsJson = tags)
+            assertEquals("kind=$kind", expected, model.shortForm)
+            assertEquals("kind=$kind", expected, model.media.videos.single().model.shortForm)
+        }
+    }
+
+    @Test
+    fun `native video imeta routes YouTube pages to YouTube card`() {
+        val youtubeUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        val tags = """[["imeta","url $youtubeUrl","m image/jpeg"]]"""
+
+        val model = parse("", kind = 22, tagsJson = tags)
+
+        assertEquals(youtubeUrl, model.segments.filterIsInstance<Segment.YouTube>().single().url)
+        assertTrue(model.segments.none { it is Segment.Video })
+    }
+
+    @Test
+    fun `empty generic repost k-tag preserves addressable short target kind`() {
+        val author = "d".repeat(64)
+        val target = "e".repeat(64)
+        val tags = """[["e","$target","wss://relay.divine.video"],["a","34236:$author:clip","wss://relay.divine.video"],["k","34236"],["p","$author"]]"""
+
+        val model = parse("", kind = 16, tagsJson = tags)
+
+        assertEquals(34236, model.effectiveKind)
+        assertTrue(model.shortForm)
+        assertEquals(target, model.repost?.targetId)
+        assertTrue(model.segments.isEmpty())
+    }
+
+    @Test
     fun `kind 21 remains normal-form video`() {
         val tags = """[["imeta","url https://vid.host/clip.mp4","m video/mp4"]]"""
 

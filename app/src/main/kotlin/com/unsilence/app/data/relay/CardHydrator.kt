@@ -743,18 +743,15 @@ class CardHydrator @Inject constructor(
 
     /**
      * Everything the engagement pipeline needs, captured from the rendered row
-     * BEFORE dispatch loses context. The article coordinate (30023:pk:d) derives
-     * from the embedded article model — works for boosted/embedded longform whose
-     * kind-30023 may NOT be in eventsById — with an MES fallback. Without carrying
-     * this, dispatch would re-derive from a bare id and lose the coordinate (so no
-     * #a/#A fetch, no article likes/zaps).
+     * BEFORE dispatch loses context. Carries addressable article/video coordinates
+     * so #a/#A engagement can be fetched alongside event-id engagement.
      */
     internal data class EngagementTarget(
         val id: String,
         val coord: String?,
         val authorPubkey: String?,
         val createdAt: Long,
-        /** Where this event/article was actually seen — current NIP-65 write relays
+        /** Where this event was actually seen — current NIP-65 write relays
          *  may not cover where an old article or its zap receipts live. */
         val sourceRelays: List<String> = emptyList(),
     )
@@ -763,11 +760,12 @@ class CardHydrator @Inject constructor(
         // Prefer MES's cached parse (computeIfAbsent) over re-parsing the row — a
         // longform body is expensive and this runs per row per hydrate pass.
         val model = memoryEventStore.getOrParseEventModel(row.id) ?: row.toEventModel()
-        val coord = if (model.effectiveKind == 30023) {
-            (model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
-                ?: memoryEventStore.articleCoordForEvent(model.engagementId))
-                ?.also { memoryEventStore.registerArticleCoord(model.engagementId, it) }
-        } else null
+        val coord = when (model.effectiveKind) {
+            30023 -> model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+                ?: memoryEventStore.articleCoordForEvent(model.engagementId)
+            34235, 34236 -> memoryEventStore.articleCoordForEvent(model.engagementId)
+            else -> null
+        }?.also { memoryEventStore.registerArticleCoord(model.engagementId, it) }
         val source = buildList {
             if (row.relayUrl.isNotBlank()) add(row.relayUrl)
             memoryEventStore.getNostrEvent(model.engagementId)?.relaysSeen?.let { addAll(it) }
@@ -1212,10 +1210,8 @@ internal fun coalesceByRelay(
 
 /**
  * Build batched engagement REQ as OR'd filters: the #e filter (all engagement
- * kinds by event id) plus, when any articles are in the batch, #a and #A filters
- * for kind-7/9735 — reactions and zaps on a long-form target the article
- * COORDINATE (30023:pk:d), not its event id, so without these the article's likes
- * and zaps read as zero. [coords] are the article coordinates in this batch.
+ * kinds by event id) plus coordinate filters for addressable content. The uppercase
+ * #A filter also fetches NIP-22 comments rooted at the coordinate.
  */
 internal fun buildBatchedEngagementReq(
     subId: String,
@@ -1243,7 +1239,11 @@ internal fun buildBatchedEngagementReq(
                 put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
             })
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(7)); add(JsonPrimitive(9735)) })
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(9735))
+                    add(JsonPrimitive(1111))
+                })
                 put("#A", buildJsonArray { coords.forEach { add(JsonPrimitive(it)) } })
                 put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
             })

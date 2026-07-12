@@ -164,4 +164,31 @@ class ArticleEngagementCoordTest {
         store.insert(event(id = "r", pubkey = sender, kind = 7, content = "+", tags = listOf(listOf("e", "note-1"))))
         assertEquals(1, store.reactionCount("note-1"))
     }
+
+    @Test
+    fun `addressable video registers coordinate and aggregates A-tag comments`() {
+        val videoCoord = "34236:$author:divine-clip"
+        store.insert(
+            event(
+                id = "video-1",
+                kind = 34236,
+                tags = listOf(
+                    listOf("d", "divine-clip"),
+                    listOf("imeta", "url https://media.divine.video/video", "m video/mp4"),
+                ),
+            ),
+        )
+        store.insert(
+            event(
+                id = "comment-1",
+                pubkey = sender,
+                kind = 1111,
+                content = "nice clip",
+                tags = listOf(listOf("A", videoCoord), listOf("K", "34236"), listOf("P", author)),
+            ),
+        )
+
+        assertEquals(videoCoord, store.articleCoordForEvent("video-1"))
+        assertEquals(1, store.replyCount("video-1"))
+    }
 }

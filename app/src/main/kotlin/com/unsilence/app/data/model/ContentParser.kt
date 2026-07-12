@@ -33,6 +33,12 @@ private const val MAX_PARSE_CHARS = 20_000
 // (reused by the native markdown parser). The SEGMENT cap still applies to every kind.
 private const val MAX_SEGMENTS = 150
 
+internal fun isNip71VideoKind(kind: Int): Boolean =
+    kind == 21 || kind == 22 || kind == 34235 || kind == 34236
+
+internal fun isShortFormVideoKind(kind: Int): Boolean =
+    kind == 22 || kind == 34236
+
 /**
  * Single-pass content parser. Produces an [EventModel] from raw event fields.
  *
@@ -122,8 +128,8 @@ object ContentParser {
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
         // kind-1 notes and kind-1111 comments (incl. reposted/wrapped — effectiveKind,
         // effectiveContent) get render-only leading-`>` blockquotes; else tokenize flat.
-        // Pass effectiveKind (not raw kind) so a kind-6/16 repost wrapping a
-        // Native picture/video kinds (20/21/22) prepend their imeta-only media. For native
+        // Pass effectiveKind (not raw kind) so native picture/video kinds wrapped
+        // by a kind-6/16 repost prepend their imeta-only media. For native
         // events effectiveKind == kind, so this is a no-op there.
         val tokenized = if (effectiveKind == 1 || effectiveKind == 1111) {
             tokenizeWithBlockquotes(parseInput, imeta, qHints, effectiveKind)
@@ -184,7 +190,7 @@ object ContentParser {
             repost = repost,
             article = article,
             warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTagsJson),
-            shortForm = effectiveKind == 22,
+            shortForm = isShortFormVideoKind(effectiveKind),
             customEmojis = customEmojis,
             poll = poll,
             truncated = truncated,
@@ -370,7 +376,7 @@ object ContentParser {
      *   5. http(s) URLs  (generic Link)
      *   6. plain text    (everything else)
      *
-     * For kinds 20/21/22 (native picture/video), we ALSO surface imeta entries
+     * For native picture/video kinds, we ALSO surface imeta entries
      * as Image/Video segments at the head — these kinds put media in tags,
      * not content.
      */
@@ -383,25 +389,33 @@ object ContentParser {
         val out = mutableListOf<Segment>()
 
         // Native picture/video kinds put their primary media in imeta tags.
-        if (kind == 20 || kind == 21 || kind == 22) {
+        if (kind == 20 || isNip71VideoKind(kind)) {
             for (m in imeta) {
                 val mime = m.mimeType?.lowercase() ?: ""
+                val cleanUrl = cleanMediaUrl(m.url)
+                val youtube = YOUTUBE_URL_REGEX.matchEntire(cleanUrl)
                 when {
+                    youtube != null && isNip71VideoKind(kind) -> {
+                        if (out.none { it is Segment.YouTube && it.videoId == youtube.groupValues[1] }) {
+                            out.add(Segment.YouTube(cleanUrl, youtube.groupValues[1]))
+                        }
+                    }
                     kind == 20 || mime.startsWith("image/") -> {
                         if (out.none { it is Segment.Image && mediaUrlMatches(it.url, m.url) }) {
                             out.add(Segment.Image(
-                                url = cleanMediaUrl(m.url),
+                                url = cleanUrl,
                                 imetaAspect = if (m.width != null && m.height != null && m.height > 0)
                                     m.width.toFloat() / m.height else null,
                             ))
                         }
                     }
-                    kind == 21 || kind == 22 || mime.startsWith("video/") -> {
+                    (isNip71VideoKind(kind) && !mime.startsWith("audio/")) ||
+                        mime.startsWith("video/") -> {
                         val model = buildVideoRenderModelForUrl(
                             url = m.url,
                             imeta = imeta,
                             allowImetaVideo = true,
-                            shortForm = kind == 22,
+                            shortForm = isShortFormVideoKind(kind),
                         )
                         if (model != null && out.none { it is Segment.Video && mediaUrlMatches(it.model.videoUrl, m.url) }) {
                             out.add(Segment.Video(model))
@@ -436,7 +450,7 @@ object ContentParser {
                 val model = buildVideoRenderModelForUrl(
                     url = m.value,
                     imeta = imeta,
-                    shortForm = kind == 22,
+                    shortForm = isShortFormVideoKind(kind),
                 ) ?: return@Match null
                 Segment.Video(model)
             })

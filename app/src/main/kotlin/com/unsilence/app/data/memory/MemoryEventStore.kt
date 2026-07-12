@@ -98,7 +98,9 @@ private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
-private val CONTENT_KINDS = setOf(1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 30023, 1111)
+private val CONTENT_KINDS = setOf(
+    1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 34235, 34236, 30023, 1111,
+)
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
@@ -122,16 +124,11 @@ class MemoryEventStore @Inject constructor(
     private val idsByKind = ConcurrentHashMap<Int, MutableSet<String>>()
     private val idsByPubkey = ConcurrentHashMap<String, MutableSet<String>>()
     private val idsByReplyTarget = ConcurrentHashMap<String, MutableSet<String>>()
-    /** Addressable coordinate (`30023:pubkey:d`) ⇄ article event id, so coordinate-
-     *  targeted engagement (#a/#A reactions/zaps) resolves back to the article — in
-     *  BOTH directions. The reverse map ([articleCoordById]) is also fed from the
-     *  rendered row (registerArticleCoord) so a boosted/embedded article whose
-     *  original kind-30023 is NOT in eventsById still resolves coord→count. */
+    /** Addressable coordinate ⇄ content event id. The article-era names are retained
+     *  to avoid a risky migration; maps are kind-agnostic and also cover NIP-71 video. */
     private val articleIdByCoord = ConcurrentHashMap<String, String>()
     private val articleCoordById = ConcurrentHashMap<String, String>()
-    /** Article coordinate → ids of comments referencing it (NIP-22 kind-1111 via
-     *  `A`, legacy kind-1 via `a`). Drives articleCommentsFlow + coord-aware
-     *  replyCount. Populated on live insert + snapshot restore. */
+    /** Addressable content coordinate → ids of NIP-22 kind-1111 comments rooted by `A`. */
     private val commentIdsByCoord = ConcurrentHashMap<String, MutableSet<String>>()
     private val recentByCreatedAt = ConcurrentSkipListSet<EventEntry>(
         compareByDescending<EventEntry> { it.createdAt }.thenBy { it.id },
@@ -770,7 +767,7 @@ class MemoryEventStore @Inject constructor(
         when (kind) {
             0 -> d.profile = true
             3 -> d.follows = true
-            1, 6, 20, 21, 22, 1068, 30023, 1111 -> d.feed = true
+            1, 6, 20, 21, 22, 34235, 34236, 1068, 30023, 1111 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
         if (kind == 7 || kind == 6 || kind == 16 || kind == 1018 || kind == 9734) d.action = true
@@ -822,10 +819,12 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
-        // 2a. Addressable index: an article's coordinate ⇄ its event id.
-        if (event.kind == 30023) {
+        // 2a. Addressable content coordinate ⇄ event id. Superseded revisions are
+        // retained in v1, matching the standing article limitation. Our own actions
+        // still e-tag video event ids; publishing a-tags is a separate follow-up.
+        if (event.kind == 30023 || event.kind == 34235 || event.kind == 34236) {
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
-            registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
+            registerArticleCoord(event.id, "${event.kind}:${event.pubkey}:$d")
         }
         // Article comment index (kind-1/1111 referencing an article by a/A coord).
         indexArticleComment(event, dirty)
@@ -1272,14 +1271,16 @@ class MemoryEventStore @Inject constructor(
         eventModelsByEventId.remove(event.id)
         if (event.replyToId != null) idsByReplyTarget[event.replyToId]?.remove(event.id)
         if (event.rootId != null && event.rootId != event.replyToId) idsByReplyTarget[event.rootId]?.remove(event.id)
-        if (event.kind == 30023) {
+        if (event.kind == 30023 || event.kind == 34235 || event.kind == 34236) {
             addressableCoordinate(event)?.let { coord ->
                 articleIdByCoord.remove(coord)
                 articleCoordById.remove(event.id)
             }
         }
         deindexArticleComment(event, dirty)
-        if (event.kind in setOf(1, 6, 16, 20, 21, 22, 1068, 30023, 1111)) dirty.feed = true
+        if (event.kind in setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023, 1111)) {
+            dirty.feed = true
+        }
     }
 
     private fun deindexArticleComment(event: NostrEvent, dirty: InsertDirty) {
@@ -2344,6 +2345,8 @@ class MemoryEventStore @Inject constructor(
             20 to 500,      // pictures
             21 to 500,      // videos
             22 to 500,      // short-form videos
+            34235 to 500,   // addressable videos
+            34236 to 500,   // addressable short-form videos
             9734 to 250,    // zap requests (reconstructible)
             9735 to 250,    // zap receipts (reconstructible)
             30023 to 500,   // articles
@@ -2939,27 +2942,17 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    /** For an addressable event (kind-30023 long-form), its `kind:pubkey:d`
-     *  coordinate. Reactions/engagement often target an article by coordinate
-     *  (`a`/`A` tag) rather than event id, so article counts merge both keys, and
-     *  CardHydrator fetches by coordinate. Consults the row-registered reverse map
-     *  FIRST (so a boosted/embedded article absent from eventsById still resolves),
-     *  then derives from the stored event. Null for non-addressable events. */
+    /** For supported addressable content, its `kind:pubkey:d` coordinate. */
     fun articleCoordForEvent(eventId: String): String? =
         articleCoordById[eventId]
             ?: eventsById[eventId]
-                ?.takeIf { it.kind == 30023 }
+                ?.takeIf { it.kind == 30023 || it.kind == 34235 || it.kind == 34236 }
                 ?.let { e ->
                     val d = e.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1).orEmpty()
-                    "30023:${e.pubkey}:$d"
+                    "${e.kind}:${e.pubkey}:$d"
                 }
 
-    /**
-     * Register an article's id⇄coordinate mapping from the rendered row (where the
-     * embedded model carries the coordinate even if the original kind-30023 isn't
-     * in eventsById). When the mapping is novel, nudge the article's stats so any
-     * already-fetched coordinate-keyed engagement displays immediately.
-     */
+    /** Register an addressable content id⇄coordinate mapping and invalidate its stats. */
     fun registerArticleCoord(eventId: String, coord: String) {
         val novel = articleCoordById.put(eventId, coord) != coord
         articleIdByCoord[coord] = eventId
@@ -2972,19 +2965,15 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    /** Invalidate stats for a target plus, when the target is an addressable
-     *  coordinate, the article event it resolves to — so statsFlow(articleId)
-     *  ticks live when a #a/#A reaction or zap lands. */
+    /** Invalidate a target plus the addressable event id its coordinate resolves to. */
     private fun invalidateStatsForTarget(targetId: String, dirty: InsertDirty) {
         dirty.invalidatedStatsIds.add(targetId)
         if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
     }
 
     /**
-     * Index a kind-1/1111 event as an article comment under the article coordinate
-     * it is ROOTED at — NOT one it merely quotes/mentions. A post that quotes an
-     * article (NIP-18 `q` tag) or replies elsewhere while referencing the article
-     * must NOT show up in the article's comment section.
+     * Index a kind-1111 event under the addressable content coordinate it is
+     * ROOTED at, not one it merely quotes or mentions.
      *
      * - kind-1111 (NIP-22): the article is the comment's root iff an uppercase `A`
      *   tag matches the coordinate. (Quotes inside a comment use `q`, not `A`.)
@@ -2999,7 +2988,13 @@ class MemoryEventStore @Inject constructor(
         // and excludes quote/mention posts (they reply elsewhere). Indexing legacy
         // kind-1 here too would double-count it (handleNote + this index).
         if (event.kind != 1111) return
-        val coord = event.tags.firstOrNull { it.size >= 2 && it[0] == "A" && it[1].startsWith("30023:") }?.get(1) ?: return
+        val coord = event.tags.firstOrNull {
+            it.size >= 2 && it[0] == "A" && (
+                it[1].startsWith("30023:") ||
+                    it[1].startsWith("34235:") ||
+                    it[1].startsWith("34236:")
+                )
+        }?.get(1) ?: return
         commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
         dirty?.let { invalidateStatsForTarget(coord, it) }
     }
@@ -3027,8 +3022,7 @@ class MemoryEventStore @Inject constructor(
             .flowOn(Dispatchers.Default)
 
     /**
-     * The ONE source of truth for an article's comments — used for the rendered
-     * list, the count, AND the contributor pubkeys, so they can never disagree.
+     * The source of truth for coordinate-rooted comments and descendants.
      * NIP-22 kind-1111 (uppercase `A`, filtered to kind 1111 so stale legacy
      * coord-index entries can't leak) + genuine kind-1 replies to the article event
      * (idsByReplyTarget, excluding quote-posts).
@@ -3708,7 +3702,7 @@ class MemoryEventStore @Inject constructor(
     fun userFeedFlow(
         pubkey: String,
         contentFilter: Int = 0,
-        kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 1068, 30023),
+        kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023),
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
         // No _statsSignal: stats changes don't alter feed membership/order, and
@@ -5669,11 +5663,10 @@ class MemoryEventStore @Inject constructor(
             idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
-        // Addressable index (parity with live insert) — so coordinate-targeted
-        // engagement resolves to a restored article across a cold start.
-        if (event.kind == 30023) {
+        // Addressable index parity with live insert.
+        if (event.kind == 30023 || event.kind == 34235 || event.kind == 34236) {
             val d = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
-            registerArticleCoord(event.id, "30023:${event.pubkey}:$d")
+            registerArticleCoord(event.id, "${event.kind}:${event.pubkey}:$d")
         }
         indexArticleComment(event, null)
 
@@ -5682,7 +5675,7 @@ class MemoryEventStore @Inject constructor(
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
-        if (event.kind in setOf(1, 6, 16, 20, 21, 22)) {
+        if (event.kind in setOf(1, 6, 16, 20, 21, 22, 34235, 34236)) {
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
             val models = com.unsilence.app.data.model.buildVideoRenderModels(
                 event.kind, event.content, event.tags,

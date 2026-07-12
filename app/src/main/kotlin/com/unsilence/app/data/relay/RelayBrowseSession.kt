@@ -136,6 +136,8 @@ class RelayBrowseSession @Inject constructor(
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
                     add(JsonPrimitive(22))
+                    add(JsonPrimitive(34235))
+                    add(JsonPrimitive(34236))
                     add(JsonPrimitive(1068))
                     add(JsonPrimitive(30023))
                 })

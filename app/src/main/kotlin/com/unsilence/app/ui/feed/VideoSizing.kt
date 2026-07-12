@@ -13,7 +13,9 @@ internal fun feedVideoAspectRatio(
     val raw = rawAspectRatio?.takeIf { it > 0f } ?: (16f / 9f)
     return when {
         raw >= 1f -> raw              // landscape: use actual
-        shortForm -> maxOf(raw, 4f / 5f) // shorts: bounded feed crop, native aspect in fullscreen
+        // Shorts keep their native portrait frame at full card width. Matching the
+        // container to the media avoids both destructive crop and side letterboxing.
+        shortForm -> raw
         else -> maxOf(raw, 9f / 16f)  // other portrait video keeps existing behavior
     }
 }

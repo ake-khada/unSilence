@@ -98,7 +98,7 @@ internal fun VideoThumbnailImage(
         Image(
             bitmap = thumbnail!!.bitmap.asImageBitmap(),
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
             modifier = modifier,
         )
     }
@@ -107,7 +107,7 @@ internal fun VideoThumbnailImage(
         AsyncImage(
             model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = requestAspectRatio),
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
             modifier = modifier,
             onSuccess = { state ->
                 val w = state.result.image.width
@@ -299,7 +299,11 @@ fun InlineVideoPlayer(
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    resizeMode = if (model.shortForm) {
+                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    } else {
+                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    }
                 }
             },
             onReset = { view ->
@@ -313,7 +317,11 @@ fun InlineVideoPlayer(
             update = { view ->
                 view.player = if (!isFullscreen) exoPlayer else null
                 view.setOnClickListener { onOpenFullscreen() }
-                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                view.resizeMode = if (model.shortForm) {
+                    AspectRatioFrameLayout.RESIZE_MODE_FIT
+                } else {
+                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                }
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
             modifier = Modifier

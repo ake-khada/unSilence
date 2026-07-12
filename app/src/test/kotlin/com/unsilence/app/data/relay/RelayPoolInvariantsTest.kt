@@ -1,9 +1,15 @@
 package com.unsilence.app.data.relay
 
 import org.junit.Ignore
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RelayPoolInvariantsTest {
+    @Test
+    fun `reference fetch kinds retain addressable NIP-71 targets`() {
+        assertTrue(34235 in EVENT_REFERENCE_FETCH_KINDS)
+        assertTrue(34236 in EVENT_REFERENCE_FETCH_KINDS)
+    }
 
     @Ignore(
         "Pending A.7 — RelayPool refactor for testability. " +

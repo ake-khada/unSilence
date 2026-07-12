@@ -58,9 +58,11 @@ class EngagementFetchTest {
         assertEquals(listOf("evt-1"), filters[0]["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(listOf("30023:pk:slug"), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(listOf("30023:pk:slug"), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
-        // coordinate filters fetch only reactions + zaps (replies/reposts come via #e)
+        val upperAKinds = filters[2]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
+        assertTrue(1111 in upperAKinds)
+        // Lowercase #a carries reactions/zaps; uppercase #A also carries NIP-22 comments.
         assertEquals(listOf(7, 9735), filters[1]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
-        assertEquals(listOf(7, 9735), filters[2]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+        assertEquals(listOf(7, 9735, 1111), upperAKinds)
     }
 
     @Test
