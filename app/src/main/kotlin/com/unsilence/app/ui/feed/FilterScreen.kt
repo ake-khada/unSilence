@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,6 +32,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +51,12 @@ import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.White
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.SmartDisplay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -98,7 +108,7 @@ fun FilterBottomSheet(
             SectionLabel("SHOW")
             ChipRow {
                 val isAll = ShowType.ALL in showTypes
-                FilterChip("All", selected = isAll) { showTypes = setOf(ShowType.ALL) }
+                ShowFilterChip(ShowType.ALL, selected = isAll) { showTypes = setOf(ShowType.ALL) }
 
                 fun toggle(type: ShowType) {
                     val current = if (isAll) emptySet() else showTypes
@@ -107,7 +117,7 @@ fun FilterBottomSheet(
                 }
 
                 listOf(ShowType.TEXT, ShowType.IMAGES, ShowType.VIDEO, ShowType.ARTICLES).forEach { type ->
-                    FilterChip(type.label, selected = !isAll && type in showTypes) { toggle(type) }
+                    ShowFilterChip(type, selected = !isAll && type in showTypes) { toggle(type) }
                 }
             }
 
@@ -172,6 +182,55 @@ fun FilterBottomSheet(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ShowFilterChip(type: ShowType, selected: Boolean, onClick: () -> Unit) {
+    val icon = when (filterIconKind(type)) {
+        FilterIconKind.GRID -> Icons.Filled.GridView
+        FilterIconKind.TEXT -> Icons.AutoMirrored.Filled.FormatAlignLeft
+        FilterIconKind.IMAGE -> Icons.Filled.Photo
+        FilterIconKind.VIDEO -> Icons.Filled.SmartDisplay
+        FilterIconKind.ARTICLE -> Icons.AutoMirrored.Filled.Article
+    }
+    Row(
+        modifier = Modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Brand else Surface2)
+            .border(
+                width = 1.dp,
+                color = if (selected) Brand else Color.Transparent,
+                shape = RoundedCornerShape(20.dp),
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .semantics {
+                contentDescription = type.label
+                this.selected = selected
+            }
+            .padding(horizontal = if (selected) 13.dp else 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (selected) Black else White.copy(alpha = 0.82f),
+            modifier = Modifier.size(20.dp),
+        )
+        if (selected) {
+            Text(
+                text = type.label,
+                color = Black,
+                fontSize = AppType.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }

@@ -111,6 +111,7 @@ import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
 import com.unsilence.app.ui.feed.FilterBottomSheet
+import com.unsilence.app.ui.feed.isImmersiveVideoMode
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
@@ -270,8 +271,9 @@ fun AppNavigation(
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
-    val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3
-    val bottomBarShown = splashDone && barsVisible
+    val immersiveVideoMode = selectedTab == 0 && currentFilter.isImmersiveVideoMode()
+    val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3 && !immersiveVideoMode
+    val bottomBarShown = splashDone && barsVisible && !immersiveVideoMode
 
     val topBarOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
@@ -285,11 +287,12 @@ fun AppNavigation(
     )
     // Constant: top spacing moved to LazyColumn contentPadding (no animation = no jerk).
     val staticTopPadding = Sizing.topBarHeight + statusBarHeight
-    val contentBottomPadding by animateDpAsState(
+    val animatedContentBottomPadding by animateDpAsState(
         targetValue   = if (bottomBarShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
         label         = "contentBottomPadding",
     )
+    val contentBottomPadding = if (immersiveVideoMode) 0.dp else animatedContentBottomPadding
 
     // Accumulated scroll distance — requires committed drag before toggling bars.
     // Prevents jittery show/hide on micro-scrolls and the "back jerk" when
@@ -450,7 +453,7 @@ fun AppNavigation(
 
             // ── Floating compose FAB (feed tab only) ──────────────────────────
             if (selectedTab == 0) {
-                val fabVisible = splashDone && barsVisible
+                val fabVisible = splashDone && barsVisible && !immersiveVideoMode
                 AnimatedVisibility(
                     visible = fabVisible,
                     enter   = scaleIn(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),

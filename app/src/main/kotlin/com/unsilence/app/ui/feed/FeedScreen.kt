@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.IntOffset
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.summaryLabel
 import com.unsilence.app.ui.common.EmptyState
@@ -77,6 +78,7 @@ import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
+import com.unsilence.app.ui.thread.ThreadViewModel
 import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -119,6 +121,9 @@ fun FeedScreen(
     ),
     actionsViewModel: NoteActionsViewModel = hiltViewModel(
         key = "note-actions-${LocalAppSessionKey.current}",
+    ),
+    immersiveThreadViewModel: ThreadViewModel = hiltViewModel(
+        key = "immersive-thread-${LocalAppSessionKey.current}",
     ),
 ) {
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
@@ -170,6 +175,18 @@ fun FeedScreen(
     val liveArrivalIds by viewModel.liveArrivalIds.collectAsStateWithLifecycle()
     val showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY
     val filterSummary = currentFilter.summaryLabel()
+    val immersiveMode = currentFilter.isImmersiveVideoMode()
+    val immersiveItems = remember(events, immersiveMode) {
+        if (!immersiveMode) {
+            emptyList()
+        } else {
+            val rowsById = events.associateBy { it.id }
+            selectImmersiveVideoItems(events) { id ->
+                actionsViewModel.getVideoRenderModels(id).takeIf { it.isNotEmpty() }
+                    ?: rowsById[id]?.let(::buildVideoRenderModels).orEmpty()
+            }
+        }
+    }
 
     // ── Shared video playback — all wiring in one call ───────────────────────
     val videoScope = rememberVideoPlaybackScope(
@@ -298,6 +315,7 @@ fun FeedScreen(
 
         Crossfade(
             targetState = when {
+                immersiveMode -> "immersive"
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
                 !isLoadingV && events.isEmpty() && rawEventCount == 0 -> "empty"
@@ -326,6 +344,29 @@ fun FeedScreen(
                 },
         ) { screenState ->
         when (screenState) {
+            "immersive" -> {
+                ImmersiveVideoFeed(
+                    items = immersiveItems,
+                    holder = actionsViewModel.sharedPlayerHolder,
+                    thumbnailCache = actionsViewModel.videoThumbnailCache,
+                    imageDimensionCache = actionsViewModel.imageDimensionCache,
+                    callbacks = callbacks,
+                    engagement = engagement,
+                    threadViewModel = immersiveThreadViewModel,
+                    eventModelProvider = actionsViewModel::getEventModel,
+                    sensitiveMode = sensitiveMode,
+                    isLoadingMore = isLoadingMore,
+                    onLoadMore = viewModel::loadMore,
+                    onPageSettled = { row ->
+                        val index = events.indexOfFirst { it.id == row.id }
+                        if (index >= 0) {
+                            viewModel.onViewportChanged(index, index, cardWidthPx)
+                        }
+                    },
+                    onExit = { viewModel.updateFilter(FeedFilter()) },
+                )
+            }
+
             "loading" -> {
                 LoadingScreen()
             }
@@ -463,7 +504,7 @@ fun FeedScreen(
         }
         } // Crossfade
 
-        if (isRefreshing) {
+        if (isRefreshing && !immersiveMode) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -475,33 +516,35 @@ fun FeedScreen(
         }
 
         // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .offset { IntOffset(0, (staticTopPadding + tabRowOffset).roundToPx()) }
-                .fillMaxWidth()
-                .height(tabRowHeight)
-                .background(Black),
-        ) {
-            FeedContentTabs(
-                selected = contentFilter,
-                onSelect = { viewModel.setContentFilter(it) },
-            )
-        }
-        if (filterSummary != null) {
+        if (!immersiveMode) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .offset { IntOffset(0, (staticTopPadding + tabRowOffset + tabRowHeight).roundToPx()) }
+                    .offset { IntOffset(0, (staticTopPadding + tabRowOffset).roundToPx()) }
                     .fillMaxWidth()
-                    .height(filterPillHeight)
+                    .height(tabRowHeight)
                     .background(Black),
-                contentAlignment = Alignment.Center,
             ) {
-                ActiveFeedFilterPill(
-                    summary = filterSummary,
-                    onClear = { viewModel.updateFilter(FeedFilter()) },
+                FeedContentTabs(
+                    selected = contentFilter,
+                    onSelect = { viewModel.setContentFilter(it) },
                 )
+            }
+            if (filterSummary != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset { IntOffset(0, (staticTopPadding + tabRowOffset + tabRowHeight).roundToPx()) }
+                        .fillMaxWidth()
+                        .height(filterPillHeight)
+                        .background(Black),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ActiveFeedFilterPill(
+                        summary = filterSummary,
+                        onClear = { viewModel.updateFilter(FeedFilter()) },
+                    )
+                }
             }
         }
     }

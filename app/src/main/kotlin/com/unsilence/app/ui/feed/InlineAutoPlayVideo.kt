@@ -71,6 +71,7 @@ internal fun VideoThumbnailImage(
     modifier: Modifier = Modifier,
     onAspectRatioResolved: ((Float) -> Unit)? = null,
     requestAspectRatio: Float = model.aspectRatio,
+    contentScale: ContentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
 ) {
     val currentOnAspectRatioResolved by rememberUpdatedState(onAspectRatioResolved)
     var thumbnail by remember(model.videoUrl, thumbnailCache) {
@@ -98,7 +99,7 @@ internal fun VideoThumbnailImage(
         Image(
             bitmap = thumbnail!!.bitmap.asImageBitmap(),
             contentDescription = null,
-            contentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
         )
     }
@@ -107,7 +108,7 @@ internal fun VideoThumbnailImage(
         AsyncImage(
             model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = requestAspectRatio),
             contentDescription = null,
-            contentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
             onSuccess = { state ->
                 val w = state.result.image.width
