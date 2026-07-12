@@ -47,7 +47,7 @@ internal fun matchesShowTypes(
             KindOneMediaType.VIDEO -> ShowType.VIDEO in filter.showTypes
         }
         20 -> ShowType.IMAGES in filter.showTypes
-        21, 22 -> ShowType.VIDEO in filter.showTypes
+        21, 22, 34235, 34236 -> ShowType.VIDEO in filter.showTypes
         1068 -> ShowType.TEXT in filter.showTypes
         30023 -> ShowType.ARTICLES in filter.showTypes
         else -> false

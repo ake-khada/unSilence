@@ -44,8 +44,11 @@ private fun isDirectVideoUrl(url: String): Boolean =
             clean.contains(".avi", ignoreCase = true)
     }
 
+private fun isYouTubeUrl(url: String): Boolean = YOUTUBE_REGEX.matches(cleanMediaUrl(url))
+
 private fun isVideoImeta(media: ImetaMedia): Boolean =
-    media.mimeType?.startsWith("video/") == true || isDirectVideoUrl(media.url)
+    !isYouTubeUrl(media.url) &&
+        (media.mimeType?.startsWith("video/") == true || isDirectVideoUrl(media.url))
 
 private const val DEFAULT_ASPECT_RATIO = 16f / 9f
 
@@ -115,7 +118,7 @@ fun buildVideoRenderModels(
         .filter { it.isNotBlank() }
     val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinctMediaUrls()
     if (allVideoUrls.isEmpty()) return emptyList()
-    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia, effectiveKind == 22) }
+    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia, isShortFormVideoKind(effectiveKind)) }
 }
 
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
@@ -157,7 +160,7 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
     if (allVideoUrls.isEmpty()) return emptyList()
 
     return allVideoUrls.map { url ->
-        buildModelForUrl(url, imetaMedia, effectiveKind == 22)
+        buildModelForUrl(url, imetaMedia, isShortFormVideoKind(effectiveKind))
     }
 }
 

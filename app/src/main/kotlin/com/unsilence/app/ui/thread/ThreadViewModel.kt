@@ -83,9 +83,8 @@ class ThreadViewModel @Inject constructor(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
-    /** Set when the thread root is a long-form article — replies then come from the
-     *  article-comment source (kind-1 #a + kind-1111 #A), the SAME contract as the
-     *  reader, instead of the #e-only kind-1 thread index. */
+    /** Set when the thread root is supported addressable content — replies then
+     *  include kind-1111 #A roots instead of relying on the #e-only index. */
     private val coordFlow = MutableStateFlow<String?>(null)
     @Volatile private var articleCommentRelays: List<String> = emptyList()
     private val fetchedReplyParents = ConcurrentHashMap.newKeySet<String>()
@@ -194,15 +193,15 @@ class ThreadViewModel @Inject constructor(
     }
 
     /**
-     * Point the thread at [rootId]. A long-form article root switches to the
-     * article-comment contract (kind-1 #a + kind-1111 #A, same as the reader),
-     * fetching with the article's own relays merged in; anything else uses the
-     * standard #e thread fetch.
+     * Point the thread at [rootId]. Supported addressable content switches to
+     * coordinate-aware comments; anything else uses the standard #e thread fetch.
      */
     private suspend fun applyRoot(rootId: String, urls: List<String>) {
         eventIdFlow.value = rootId
         val rootEvent = memoryEventStore.getEventEntity(rootId)
-        val coord = if (rootEvent?.kind == 30023) memoryEventStore.articleCoordForEvent(rootId) else null
+        val coord = if (rootEvent?.kind in setOf(30023, 34235, 34236)) {
+            memoryEventStore.articleCoordForEvent(rootId)
+        } else null
         if (coord != null) {
             memoryEventStore.registerArticleCoord(rootId, coord)
             coordFlow.value = coord

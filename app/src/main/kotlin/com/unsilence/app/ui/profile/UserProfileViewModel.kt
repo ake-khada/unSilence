@@ -533,7 +533,8 @@ class UserProfileViewModel @Inject constructor(
         }
 
         fun kindsForTab(tab: ProfileTab): List<Int> = when (tab) {
-            ProfileTab.NOTES, ProfileTab.REPLIES -> listOf(1, 6, 16, 20, 21, 22, 1068)
+            ProfileTab.NOTES, ProfileTab.REPLIES ->
+                listOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068)
             ProfileTab.LONGFORM -> listOf(30023)
         }
     }

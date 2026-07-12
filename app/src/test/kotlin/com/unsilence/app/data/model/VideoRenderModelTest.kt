@@ -66,6 +66,16 @@ class VideoRenderModelTest {
     }
 
     @Test
+    fun `kind 16 embedded repost of addressable short keeps short-form model`() {
+        val embedded = """{"id":"short","pubkey":"${"d".repeat(64)}","kind":34236,"content":"","tags":[["d","clip"],["imeta","url https://media.divine.video/${"e".repeat(64)}","m video/mp4","dim 1080x1920"]]}"""
+
+        val model = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList()).single()
+
+        assertTrue(model.shortForm)
+        assertEquals(1080f / 1920f, model.aspectRatio, 0.01f)
+    }
+
+    @Test
     fun `imeta video mime accepts extensionless media url`() {
         val mediaUrl = "https://cdn.example/${"a".repeat(64)}"
         val tags = listOf(
@@ -84,6 +94,15 @@ class VideoRenderModelTest {
         assertEquals(mediaUrl, models[0].videoUrl)
         assertEquals(640f / 360f, models[0].aspectRatio, 0.01f)
         assertEquals("https://cdn.example/poster.jpg", models[0].posterUrl)
+    }
+
+    @Test
+    fun `YouTube imeta never enters ExoPlayer sidecar`() {
+        val tags = listOf(
+            listOf("imeta", "url https://www.youtube.com/watch?v=dQw4w9WgXcQ", "m video/mp4"),
+        )
+
+        assertTrue(buildVideoRenderModels(kind = 22, content = "", tags = tags).isEmpty())
     }
 
     @Test

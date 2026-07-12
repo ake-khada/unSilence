@@ -87,7 +87,7 @@ class ProfilePipeline @Inject constructor(
 ) {
     companion object {
         /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
-        val PROFILE_KINDS = setOf(1, 6, 16, 20, 21, 22, 1068, 30023)
+        val PROFILE_KINDS = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023)
         /**
          * Posts per engagement REQ. MUST track buildBatchedEngagementReq's invariant:
          * limit=ENGAGEMENT_BATCH_LIMIT(500) ÷ chunk = per-post event budget. At 5 →
@@ -539,10 +539,12 @@ class ProfilePipeline @Inject constructor(
         val targets = noteEvents.map { ev ->
             val model = memoryEventStore.getOrParseEventModel(ev.id)
             val id = model?.engagementId ?: ev.id
-            val coord = if (model?.effectiveKind == 30023) {
-                model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+            val coord = when (model?.effectiveKind) {
+                30023 -> model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
                     ?: memoryEventStore.articleCoordForEvent(id)
-            } else null
+                34235, 34236 -> memoryEventStore.articleCoordForEvent(id)
+                else -> null
+            }
             if (coord != null) memoryEventStore.registerArticleCoord(id, coord)
             val source = buildList {
                 addAll(ev.relaysSeen)
@@ -602,10 +604,12 @@ class ProfilePipeline @Inject constructor(
         val targets = noteEvents.map { ev ->
             val model = memoryEventStore.getOrParseEventModel(ev.id)
             val id = model?.engagementId ?: ev.id
-            val coord = if (model?.effectiveKind == 30023) {
-                model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
+            val coord = when (model?.effectiveKind) {
+                30023 -> model.article?.dTag?.let { "30023:${model.pubkey}:$it" }
                     ?: memoryEventStore.articleCoordForEvent(id)
-            } else null
+                34235, 34236 -> memoryEventStore.articleCoordForEvent(id)
+                else -> null
+            }
             if (coord != null) memoryEventStore.registerArticleCoord(id, coord)
             id to coord
         }

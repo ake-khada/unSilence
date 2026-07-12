@@ -8,12 +8,17 @@ import org.junit.Test
 class FeedFilterTest {
     @Test
     fun `all show type enables the feed kind set`() {
-        assertEquals(listOf(1, 6, 16, 20, 21, 22, 1068, 30023), FeedFilter().enabledKinds)
+        assertEquals(
+            listOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023),
+            FeedFilter().enabledKinds,
+        )
     }
 
     @Test
-    fun `default kind set keeps NIP-71 short videos`() {
+    fun `default kind set keeps regular and addressable NIP-71 videos`() {
         assertTrue(22 in FeedFilter().enabledKinds)
+        assertTrue(34235 in FeedFilter().enabledKinds)
+        assertTrue(34236 in FeedFilter().enabledKinds)
     }
 
     @Test

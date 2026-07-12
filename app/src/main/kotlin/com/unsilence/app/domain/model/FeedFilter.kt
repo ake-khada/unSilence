@@ -31,7 +31,9 @@ data class FeedFilter(
      * ViewModel handles Text vs Images vs Video within kind 1.
      */
     val enabledKinds: List<Int> get() {
-        if (ShowType.ALL in showTypes) return listOf(1, 6, 16, 20, 21, 22, 1068, 30023)
+        if (ShowType.ALL in showTypes) {
+            return listOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023)
+        }
         return buildList {
             // TEXT, IMAGES, VIDEO all need kind 1 in the SQL query
             if (ShowType.TEXT in showTypes || ShowType.IMAGES in showTypes || ShowType.VIDEO in showTypes) add(1)
@@ -40,6 +42,8 @@ data class FeedFilter(
             if (ShowType.VIDEO in showTypes) {
                 add(21)
                 add(22)
+                add(34235)
+                add(34236)
             }
             if (ShowType.ARTICLES in showTypes) add(30023)
         }.distinct()

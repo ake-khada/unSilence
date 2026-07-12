@@ -5,8 +5,9 @@ import org.junit.Test
 
 class VideoSizingTest {
     @Test
-    fun `short portrait video is cropped to bounded four by five feed frame`() {
-        assertEquals(4f / 5f, feedVideoAspectRatio(9f / 16f, shortForm = true), 0.001f)
+    fun `short portrait video keeps its native full-width frame`() {
+        assertEquals(9f / 16f, feedVideoAspectRatio(9f / 16f, shortForm = true), 0.001f)
+        assertEquals(1f / 2f, feedVideoAspectRatio(1f / 2f, shortForm = true), 0.001f)
     }
 
     @Test

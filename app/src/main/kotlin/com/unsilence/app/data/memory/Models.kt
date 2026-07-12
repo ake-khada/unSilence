@@ -208,7 +208,7 @@ data class EventEntry(val id: String, val createdAt: Long)
  * @param relayUrls When non-null, only events seen on at least one of these relays pass.
  */
 data class FeedQuery(
-    val kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 1068, 30023),
+    val kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023),
     val followedPubkeys: Set<String>? = null,
     val contentFilter: Int = 0,
     val relayUrls: Set<String>? = null,

@@ -54,6 +54,8 @@ class FeedFilterPolicyTest {
         assertTrue(matchesShowTypes(1, "https://cdn.example/cat.png", null, imagesOnly))
         assertTrue(matchesShowTypes(20, "", null, imagesOnly))
         assertTrue(matchesShowTypes(22, "", null, FeedFilter(showTypes = setOf(ShowType.VIDEO))))
+        assertTrue(matchesShowTypes(34235, "", null, FeedFilter(showTypes = setOf(ShowType.VIDEO))))
+        assertTrue(matchesShowTypes(34236, "", null, FeedFilter(showTypes = setOf(ShowType.VIDEO))))
         assertFalse(matchesShowTypes(1, "https://cdn.example/cat.png", null, textOnly))
         assertFalse(matchesShowTypes(6, "", null, imagesOnly))
     }

@@ -9,7 +9,7 @@ data class MesSizeSnapshot(
     // ── Primary store ───────────────────────────────────────────────────
     val eventCount: Int,
     val eventBytes: Long,
-    /** kind → count for content kinds (1, 6, 7, 20, 21, 22, 9734, 9735, 30023) */
+    /** kind → count for content kinds, including regular/addressable NIP-71 video. */
     val eventsByKind: Map<Int, Int>,
 
     // ── Profiles & follows ──────────────────────────────────────────────
