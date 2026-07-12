@@ -225,12 +225,12 @@ private fun EventVideoThumbnailCell(
     val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
-        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false, model.shortForm)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
-    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(initialAspect) }
+    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
         mutableStateOf(imetaAspect != null || cachedRatio != null)
     }
 
@@ -250,7 +250,7 @@ private fun EventVideoThumbnailCell(
             requestAspectRatio = displayAspect,
             onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
                 { ratio ->
-                    displayAspect = feedVideoAspectRatio(ratio, false)
+                    displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
                     hasBeenResolved = true
                 }
             } else null,

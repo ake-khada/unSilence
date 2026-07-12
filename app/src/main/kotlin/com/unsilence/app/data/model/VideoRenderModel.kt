@@ -19,6 +19,9 @@ data class VideoRenderModel(
     val posterUrl: String?,       // imeta thumb/image URL
     val widthPx: Int?,            // raw pixel width from imeta
     val heightPx: Int?,           // raw pixel height from imeta
+    val shortForm: Boolean = false,
+    val fallbackUrls: List<String> = emptyList(),
+    val durationSeconds: Double? = null,
 )
 
 private val YOUTUBE_REGEX = Regex(
@@ -89,15 +92,19 @@ fun buildVideoRenderModels(
     content: String,
     tags: List<List<String>>,
 ): List<VideoRenderModel> {
-    val (effectiveContent, imetaMedia) = if ((kind == 6 || kind == 16) && content.isNotBlank()) {
+    val (effectiveContent, imetaMedia, effectiveKind) = if ((kind == 6 || kind == 16) && content.isNotBlank()) {
         runCatching {
             val inner = NostrJson.parseToJsonElement(content).jsonObject
             val innerContent = inner["content"]?.jsonPrimitive?.content ?: content
             val innerTags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
-            innerContent to innerTags
-        }.getOrElse { content to ImetaParser.parseFromList(tags) }
+            Triple(
+                innerContent,
+                innerTags,
+                inner["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: kind,
+            )
+        }.getOrElse { Triple(content, ImetaParser.parseFromList(tags), kind) }
     } else {
-        content to ImetaParser.parseFromList(tags)
+        Triple(content, ImetaParser.parseFromList(tags), kind)
     }
 
     val youtubeStripped = YOUTUBE_REGEX.replace(effectiveContent, "")
@@ -108,22 +115,26 @@ fun buildVideoRenderModels(
         .filter { it.isNotBlank() }
     val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinctMediaUrls()
     if (allVideoUrls.isEmpty()) return emptyList()
-    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia) }
+    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia, effectiveKind == 22) }
 }
 
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
     // For kind-6 / kind-16 reposts, extract effective content AND tags from the
     // embedded inner event JSON.  The outer wrapper's tags have no imeta; using
     // them would produce zero video metadata (wrong aspect ratio, no poster URL).
-    val (effectiveContent, imetaMedia) = if ((row.kind == 6 || row.kind == 16) && row.content.isNotBlank()) {
+    val (effectiveContent, imetaMedia, effectiveKind) = if ((row.kind == 6 || row.kind == 16) && row.content.isNotBlank()) {
         runCatching {
             val inner = NostrJson.parseToJsonElement(row.content).jsonObject
             val content = inner["content"]?.jsonPrimitive?.content ?: row.content
             val tags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
-            content to tags
-        }.getOrElse { row.content to ImetaParser.parse(row.tags) }
+            Triple(
+                content,
+                tags,
+                inner["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: row.kind,
+            )
+        }.getOrElse { Triple(row.content, ImetaParser.parse(row.tags), row.kind) }
     } else {
-        row.content to ImetaParser.parse(row.tags)
+        Triple(row.content, ImetaParser.parse(row.tags), row.kind)
     }
 
     // Strip YouTube URLs first (they're web pages, not playable files)
@@ -146,11 +157,15 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
     if (allVideoUrls.isEmpty()) return emptyList()
 
     return allVideoUrls.map { url ->
-        buildModelForUrl(url, imetaMedia)
+        buildModelForUrl(url, imetaMedia, effectiveKind == 22)
     }
 }
 
-private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRenderModel {
+private fun buildModelForUrl(
+    url: String,
+    imetaMedia: List<ImetaMedia>,
+    shortForm: Boolean,
+): VideoRenderModel {
     val cleanUrl = cleanMediaUrl(url)
     val meta = imetaMedia.firstOrNull {
         mediaUrlMatches(it.url, cleanUrl) && it.width != null && it.height != null && it.height != 0
@@ -165,5 +180,8 @@ private fun buildModelForUrl(url: String, imetaMedia: List<ImetaMedia>): VideoRe
         posterUrl = poster,
         widthPx = meta?.width,
         heightPx = meta?.height,
+        shortForm = shortForm,
+        fallbackUrls = imetaForUrl?.fallbacks.orEmpty(),
+        durationSeconds = imetaForUrl?.durationSeconds,
     )
 }

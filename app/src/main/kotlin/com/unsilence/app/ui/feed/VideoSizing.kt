@@ -7,11 +7,13 @@ package com.unsilence.app.ui.feed
 internal fun feedVideoAspectRatio(
     rawAspectRatio: Float?,
     forceSquare: Boolean = false,
+    shortForm: Boolean = false,
 ): Float {
     if (forceSquare) return 1f
     val raw = rawAspectRatio?.takeIf { it > 0f } ?: (16f / 9f)
     return when {
         raw >= 1f -> raw              // landscape: use actual
-        else -> maxOf(raw, 9f / 16f)  // portrait: cap at 9:16
+        shortForm -> maxOf(raw, 4f / 5f) // shorts: bounded feed crop, native aspect in fullscreen
+        else -> maxOf(raw, 9f / 16f)  // other portrait video keeps existing behavior
     }
 }

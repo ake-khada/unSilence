@@ -123,7 +123,7 @@ object ContentParser {
         // kind-1 notes and kind-1111 comments (incl. reposted/wrapped — effectiveKind,
         // effectiveContent) get render-only leading-`>` blockquotes; else tokenize flat.
         // Pass effectiveKind (not raw kind) so a kind-6/16 repost wrapping a
-        // NIP-68 picture/video (20/21) prepends its imeta-only media. For native
+        // Native picture/video kinds (20/21/22) prepend their imeta-only media. For native
         // events effectiveKind == kind, so this is a no-op there.
         val tokenized = if (effectiveKind == 1 || effectiveKind == 1111) {
             tokenizeWithBlockquotes(parseInput, imeta, qHints, effectiveKind)
@@ -184,6 +184,7 @@ object ContentParser {
             repost = repost,
             article = article,
             warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTagsJson),
+            shortForm = effectiveKind == 22,
             customEmojis = customEmojis,
             poll = poll,
             truncated = truncated,
@@ -369,7 +370,7 @@ object ContentParser {
      *   5. http(s) URLs  (generic Link)
      *   6. plain text    (everything else)
      *
-     * For kinds 20/21 (NIP-68 picture/video), we ALSO surface imeta entries
+     * For kinds 20/21/22 (native picture/video), we ALSO surface imeta entries
      * as Image/Video segments at the head — these kinds put media in tags,
      * not content.
      */
@@ -381,8 +382,8 @@ object ContentParser {
     ): List<Segment> {
         val out = mutableListOf<Segment>()
 
-        // For NIP-68 picture/video kinds, prepend imeta-only media.
-        if (kind == 20 || kind == 21) {
+        // Native picture/video kinds put their primary media in imeta tags.
+        if (kind == 20 || kind == 21 || kind == 22) {
             for (m in imeta) {
                 val mime = m.mimeType?.lowercase() ?: ""
                 when {
@@ -395,11 +396,12 @@ object ContentParser {
                             ))
                         }
                     }
-                    kind == 21 || mime.startsWith("video/") -> {
+                    kind == 21 || kind == 22 || mime.startsWith("video/") -> {
                         val model = buildVideoRenderModelForUrl(
                             url = m.url,
                             imeta = imeta,
                             allowImetaVideo = true,
+                            shortForm = kind == 22,
                         )
                         if (model != null && out.none { it is Segment.Video && mediaUrlMatches(it.model.videoUrl, m.url) }) {
                             out.add(Segment.Video(model))
@@ -431,7 +433,11 @@ object ContentParser {
         // Precedence 3: video files
         for (m in VIDEO_EXT_REGEX.findAll(content)) {
             matches.add(Match(m.range.first, m.range.last + 1, 3) {
-                val model = buildVideoRenderModelForUrl(m.value, imeta) ?: return@Match null
+                val model = buildVideoRenderModelForUrl(
+                    url = m.value,
+                    imeta = imeta,
+                    shortForm = kind == 22,
+                ) ?: return@Match null
                 Segment.Video(model)
             })
         }
@@ -655,6 +661,7 @@ object ContentParser {
         url: String,
         imeta: List<ImetaMedia>,
         allowImetaVideo: Boolean = false,
+        shortForm: Boolean = false,
     ): VideoRenderModel? {
         val cleanUrl = cleanMediaUrl(url)
         if (cleanUrl.isBlank()) return null
@@ -671,6 +678,9 @@ object ContentParser {
             posterUrl = meta?.thumb ?: meta?.image,
             widthPx = meta?.width,
             heightPx = meta?.height,
+            shortForm = shortForm,
+            fallbackUrls = meta?.fallbacks.orEmpty(),
+            durationSeconds = meta?.durationSeconds,
         )
     }
 

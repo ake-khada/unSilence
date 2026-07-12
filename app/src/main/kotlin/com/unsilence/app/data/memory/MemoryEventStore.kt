@@ -98,7 +98,7 @@ private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
-private val CONTENT_KINDS = setOf(1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 30023, 1111)
+private val CONTENT_KINDS = setOf(1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 30023, 1111)
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
@@ -770,7 +770,7 @@ class MemoryEventStore @Inject constructor(
         when (kind) {
             0 -> d.profile = true
             3 -> d.follows = true
-            1, 6, 20, 21, 1068, 30023, 1111 -> d.feed = true
+            1, 6, 20, 21, 22, 1068, 30023, 1111 -> d.feed = true
             7, 9734, 9735 -> d.stats = true
         }
         if (kind == 7 || kind == 6 || kind == 16 || kind == 1018 || kind == 9734) d.action = true
@@ -1279,7 +1279,7 @@ class MemoryEventStore @Inject constructor(
             }
         }
         deindexArticleComment(event, dirty)
-        if (event.kind in setOf(1, 6, 16, 20, 21, 1068, 30023, 1111)) dirty.feed = true
+        if (event.kind in setOf(1, 6, 16, 20, 21, 22, 1068, 30023, 1111)) dirty.feed = true
     }
 
     private fun deindexArticleComment(event: NostrEvent, dirty: InsertDirty) {
@@ -2343,6 +2343,7 @@ class MemoryEventStore @Inject constructor(
             1018 to 1000,   // poll responses (reconstructible)
             20 to 500,      // pictures
             21 to 500,      // videos
+            22 to 500,      // short-form videos
             9734 to 250,    // zap requests (reconstructible)
             9735 to 250,    // zap receipts (reconstructible)
             30023 to 500,   // articles
@@ -3707,7 +3708,7 @@ class MemoryEventStore @Inject constructor(
     fun userFeedFlow(
         pubkey: String,
         contentFilter: Int = 0,
-        kinds: Set<Int> = setOf(1, 6, 16, 30023),
+        kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 1068, 30023),
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
         // No _statsSignal: stats changes don't alter feed membership/order, and
@@ -5688,7 +5689,7 @@ class MemoryEventStore @Inject constructor(
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
-        if (event.kind in setOf(1, 6, 16, 20, 21)) {
+        if (event.kind in setOf(1, 6, 16, 20, 21, 22)) {
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
             val models = com.unsilence.app.data.model.buildVideoRenderModels(
                 event.kind, event.content, event.tags,

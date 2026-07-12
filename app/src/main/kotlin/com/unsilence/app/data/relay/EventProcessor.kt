@@ -70,7 +70,7 @@ private const val DEDUP_TRIM = 2_000
  *     startsWith() call. EOSE, OK, NOTICE, CLOSED never reach the JSON parser.
  *
  *  3. PRIORITY LANES — two channels:
- *       HOT  (cap 500): kinds 1, 6, 20, 21, 30023 — feed content, flushed every 100 ms.
+ *       HOT  (cap 500): kinds 1, 6, 20, 21, 22, 30023 — feed content, flushed every 100 ms.
  *       COLD (cap 500): kinds 0, 7, 9735           — background data, flushed every 2 s.
  *
  *  4. BATCHED WRITES — drainer coroutines collect from their channel, then call
@@ -206,7 +206,7 @@ class EventProcessor @Inject constructor(
 
     // ── 3. Priority channels ──────────────────────────────────────────────────
 
-    /** HOT lane: feed content (kind 1, 6, 20, 21, 30023). Flushed every 100 ms.
+    /** HOT lane: feed content (kind 1, 6, 20, 21, 22, 30023). Flushed every 100 ms.
      *  Capacity 500: initial load from 19 relays × 500 limit = up to 9 500 kind 1 events
      *  can burst in before the first drain. trySend drops silently, so we size generously. */
     private val hotChannel  = Channel<NostrEvent>(capacity = 500)
@@ -356,7 +356,7 @@ class EventProcessor @Inject constructor(
         if (dto.id != eventId) return null
         val (replyToId, rootId) = when (dto.kind) {
             1111 -> parseNip22Threading(dto.tags)
-            1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(dto.tags)
+            1, 6, 16, 9734, 9735, 20, 21, 22, 30023 -> parseNip10Threading(dto.tags)
             else -> Pair(null, null)
         }
         val event = NostrEvent(
@@ -414,7 +414,7 @@ class EventProcessor @Inject constructor(
         // uppercase root scope and lowercase parent scope, not NIP-10 markers.
         val (replyToId, rootId) = when (dto.kind) {
             1111 -> parseNip22Threading(tags)
-            1, 6, 16, 9734, 9735, 20, 21, 30023 -> parseNip10Threading(tags)
+            1, 6, 16, 9734, 9735, 20, 21, 22, 30023 -> parseNip10Threading(tags)
             else -> Pair(null, null)
         }
 
@@ -484,11 +484,11 @@ class EventProcessor @Inject constructor(
         // kind-1111 (NIP-22 comments) MUST be channeled: remote comments authored
         // by others reach MES only through this lane (Subscription doesn't insert;
         // local writes + legacy kind-1 had other paths). The feed filter's `kinds`
-        // (1,6,16,20,21,30023) excludes 1111, so it never leaks into Notes/replies —
+        // (1,6,16,20,21,22,30023) excludes 1111, so it never leaks into Notes/replies —
         // it surfaces only in the article reader (commentIdsByCoord) + notifications.
-        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 30023, 1111)
+        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 30023, 1111)
         if (shouldChannel) {
-            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 || dto.kind == 21 || dto.kind == 1068 || dto.kind == 30023 || dto.kind == 1111
+            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 || dto.kind == 21 || dto.kind == 22 || dto.kind == 1068 || dto.kind == 30023 || dto.kind == 1111
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)
@@ -625,7 +625,7 @@ class EventProcessor @Inject constructor(
         // Pre-compute media metadata at insert time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
         for (event in eventList) {
-            if (event.kind in setOf(1, 6, 16, 20, 21)) {
+            if (event.kind in setOf(1, 6, 16, 20, 21, 22)) {
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
                 val models = buildVideoRenderModels(event.kind, event.content, event.tags)
                 memoryEventStore.putVideoRenderModels(event.id, models)
