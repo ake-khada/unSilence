@@ -73,36 +73,62 @@ internal fun wotRank(lookup: WotLookup?): Int? =
 internal fun wotVerifiedFollowers(lookup: WotLookup?): Long? =
     (lookup as? WotLookup.Scored)?.assertion?.verifiedFollowers
 
+private data class WotSortKeys(
+    val rank: Int,
+    val verifiedFollowers: Long,
+)
+
+private fun snapshotWotSortKeys(
+    users: List<UserEntity>,
+    lookup: (String) -> WotLookup?,
+): Map<String, WotSortKeys> =
+    users.asSequence()
+        .map(UserEntity::pubkey)
+        .distinct()
+        .associateWith { pubkey ->
+            val snapshot = lookup(pubkey)
+            WotSortKeys(
+                rank = wotRank(snapshot) ?: Int.MIN_VALUE,
+                verifiedFollowers = wotVerifiedFollowers(snapshot) ?: Long.MIN_VALUE,
+            )
+        }
+
 internal fun sortPeopleForSearch(
     users: List<UserEntity>,
     query: String,
     lookup: (String) -> WotLookup?,
-): List<UserEntity> =
-    users.sortedWith(
+): List<UserEntity> {
+    val keys = snapshotWotSortKeys(users, lookup)
+    return users.sortedWith(
         compareByDescending<UserEntity> { identitySearchMatchTier(it, query) }
-            .thenByDescending { wotRank(lookup(it.pubkey)) ?: Int.MIN_VALUE }
-            .thenByDescending { wotVerifiedFollowers(lookup(it.pubkey)) ?: Long.MIN_VALUE }
+            .thenByDescending { keys.getValue(it.pubkey).rank }
+            .thenByDescending { keys.getValue(it.pubkey).verifiedFollowers }
             .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
     )
+}
 
 internal fun sortPeopleByWotFollowers(
     users: List<UserEntity>,
     lookup: (String) -> WotLookup?,
-): List<UserEntity> =
-    users.sortedWith(
-        compareByDescending<UserEntity> { wotVerifiedFollowers(lookup(it.pubkey)) ?: Long.MIN_VALUE }
-            .thenByDescending { wotRank(lookup(it.pubkey)) ?: Int.MIN_VALUE }
+): List<UserEntity> {
+    val keys = snapshotWotSortKeys(users, lookup)
+    return users.sortedWith(
+        compareByDescending<UserEntity> { keys.getValue(it.pubkey).verifiedFollowers }
+            .thenByDescending { keys.getValue(it.pubkey).rank }
             .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
     )
+}
 
 internal fun sortMentionsByWotRank(
     users: List<UserEntity>,
     lookup: (String) -> WotLookup?,
-): List<UserEntity> =
-    users.sortedWith(
-        compareByDescending<UserEntity> { wotRank(lookup(it.pubkey)) ?: Int.MIN_VALUE }
+): List<UserEntity> {
+    val keys = snapshotWotSortKeys(users, lookup)
+    return users.sortedWith(
+        compareByDescending<UserEntity> { keys.getValue(it.pubkey).rank }
             .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
     )
+}
 
 fun identitySearchMatchTier(user: UserEntity, query: String): Int {
     val q = query.trim().lowercase()
