@@ -4868,10 +4868,9 @@ class MemoryEventStore @Inject constructor(
     // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
 
     suspend fun saveSnapshotBinary(out: DataOutputStream) {
-        // Two-pass: serialize each section to a ByteArrayOutputStream, then
-        // write the header (with computed offsets) + concatenated sections.
-        // Memory cost: ~2× snapshot size peak. For typical 5MB snapshots
-        // that's 10MB peak — acceptable for the save path.
+        // Serialize each section once, compute offsets from the live buffer sizes,
+        // then stream those buffers directly. This keeps peak memory near the
+        // snapshot size instead of duplicating 15-20MB into contiguous arrays.
 
         val followsBuf = ByteArrayOutputStream(8 * 1024)
         DataOutputStream(followsBuf).use { d ->
@@ -5071,17 +5070,11 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        val followsBytes = followsBuf.toByteArray()
-        val eventsBytes = eventsBuf.toByteArray()
-        val aggregatesBytes = aggregatesBuf.toByteArray()
-        val relayHealthBytes = relayHealthBuf.toByteArray()
-        val timelinesBytes = timelinesBuf.toByteArray()
-
         val followsOffset = SNAPSHOT_HEADER_SIZE
-        val eventsOffset = followsOffset + followsBytes.size
-        val aggregatesOffset = eventsOffset + eventsBytes.size
-        val relayHealthOffset = aggregatesOffset + aggregatesBytes.size
-        val timelinesOffset = relayHealthOffset + relayHealthBytes.size
+        val eventsOffset = followsOffset + followsBuf.size()
+        val aggregatesOffset = eventsOffset + eventsBuf.size()
+        val relayHealthOffset = aggregatesOffset + aggregatesBuf.size()
+        val timelinesOffset = relayHealthOffset + relayHealthBuf.size()
 
         // Header
         out.write(SNAPSHOT_BINARY_MAGIC)
@@ -5099,11 +5092,11 @@ class MemoryEventStore @Inject constructor(
         out.writeStr(ownPubkey ?: "")
 
         // Sections in offset order.
-        out.write(followsBytes)
-        out.write(eventsBytes)
-        out.write(aggregatesBytes)
-        out.write(relayHealthBytes)
-        out.write(timelinesBytes)
+        followsBuf.writeTo(out)
+        eventsBuf.writeTo(out)
+        aggregatesBuf.writeTo(out)
+        relayHealthBuf.writeTo(out)
+        timelinesBuf.writeTo(out)
 
         // V15 (appended after timelines; not in the informational offset table) —
         // own outgoing private-zap anon pubkeys, for cross-session self-recognition.
