@@ -28,6 +28,29 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "ProfilePipeline"
+internal const val MAX_PROFILE_ENGAGEMENT_RELAYS = 12
+
+internal fun profileNetworkDemandAllowed(
+    networkState: NetworkState,
+    isNetworkDown: Boolean,
+): Boolean = networkState == NetworkState.ONLINE && !isNetworkDown
+
+internal fun selectProfileEngagementRelays(
+    preferredRelays: List<String>,
+    sourceRelaysByEvent: List<List<String>>,
+    maxRelays: Int = MAX_PROFILE_ENGAGEMENT_RELAYS,
+): List<String> {
+    if (maxRelays <= 0) return emptyList()
+    val preferred = preferredRelays.mapNotNull(::normalizeRelayUrl).distinct()
+    val sourceCoverage = sourceRelaysByEvent
+        .flatMap { relays -> relays.mapNotNull(::normalizeRelayUrl).distinct() }
+        .groupingBy { it }
+        .eachCount()
+    val rankedSources = sourceCoverage.entries
+        .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+        .map { it.key }
+    return (preferred + rankedSources).distinct().take(maxRelays)
+}
 
 /** How the pipeline anchors events against MES eviction. */
 enum class AnchorPolicy {
@@ -58,6 +81,8 @@ class ProfilePipeline @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val userRepository: UserRepository,
     private val relayPreferencesStore: RelayPreferencesStore,
+    private val relayCapabilitiesStore: RelayCapabilitiesStore,
+    private val networkMonitor: NetworkMonitor,
 ) {
     companion object {
         /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
@@ -140,6 +165,7 @@ class ProfilePipeline @Inject constructor(
     ) {
         val startMs = System.currentTimeMillis()
         Log.d(TAG, "loadProfile: ${pubkey.take(8)}… isOwn=$isOwn anchor=$anchorPolicy")
+        if (!profileDemandAvailable(pubkey, "start")) return
 
         // ── Step 1: Resolve relays ─────────────────────────────────────
         val writeRelays = resolveWriteRelays(pubkey)
@@ -153,6 +179,7 @@ class ProfilePipeline @Inject constructor(
             memoryEventStore.userEvents(pubkey, PROFILE_KINDS, 2500)
         }
         Log.d(TAG, "Step2: ${noteEvents.size} notes for ${pubkey.take(8)}…")
+        if (!profileDemandAvailable(pubkey, "refs")) return
 
         // ── Step 3: Ref hydration ──────────────────────────────────────
         val refIds = try {
@@ -162,6 +189,7 @@ class ProfilePipeline @Inject constructor(
             emptySet()
         }
         Log.d(TAG, "Step3: ${refIds.size} refs hydrated for ${pubkey.take(8)}…")
+        if (!profileDemandAvailable(pubkey, "engagement")) return
 
         // ── Step 4: Engagement batch ───────────────────────────────────
         val noteIds = noteEvents.map { it.id }
@@ -179,6 +207,7 @@ class ProfilePipeline @Inject constructor(
         // reactions/reposts/zaps. Step 5 ensures the "I reacted to this" UI
         // state is reliable by querying the viewer's write relays specifically.
         if (!isOwn) {
+            if (!profileDemandAvailable(pubkey, "own-engagement")) return
             try {
                 fetchOwnEngagement(noteEvents)
             } catch (e: Exception) {
@@ -189,6 +218,17 @@ class ProfilePipeline @Inject constructor(
 
         val elapsed = System.currentTimeMillis() - startMs
         Log.d(TAG, "loadProfile: ${pubkey.take(8)}… completed in ${elapsed}ms (${noteEvents.size} notes, ${refIds.size} refs)")
+    }
+
+    private fun profileDemandAvailable(pubkey: String, stage: String): Boolean {
+        val allowed = profileNetworkDemandAllowed(
+            networkState = networkMonitor.state.value,
+            isNetworkDown = relayCapabilitiesStore.isNetworkDown,
+        )
+        if (!allowed) {
+            Log.w(TAG, "PROFILE-DEMAND-SKIP: ${pubkey.take(8)}… stage=$stage network unavailable")
+        }
+        return allowed
     }
 
     /**
@@ -204,6 +244,10 @@ class ProfilePipeline @Inject constructor(
         val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkey)
         val ttlFloor = System.currentTimeMillis() / 1000 - MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS
         if (cached != null && cachedAt != null && cachedAt > ttlFloor) return cached
+        if (!profileNetworkDemandAllowed(networkMonitor.state.value, relayCapabilitiesStore.isNetworkDown)) {
+            Log.w(TAG, "PROFILE-DEMAND-SKIP: ${pubkey.take(8)}… stage=follower-count network unavailable")
+            return cached
+        }
 
         val newDeferred = pipelineScope.async(start = CoroutineStart.LAZY) {
             val filter = buildJsonObject {
@@ -506,8 +550,11 @@ class ProfilePipeline @Inject constructor(
         }
 
         val readRelays = relayPreferencesStore.indexerRelayUrlsSnapshot() + writeRelays
-        val sourceRelays = targets.flatMap { it.third }
-        val targetUrls = (readRelays + sourceRelays).mapNotNull { normalizeRelayUrl(it) }.distinct()
+        val targetUrls = selectProfileEngagementRelays(
+            preferredRelays = readRelays,
+            sourceRelaysByEvent = targets.map { it.third },
+        )
+        Log.d(TAG, "Step4: relay fan-out capped to ${targetUrls.size}/$MAX_PROFILE_ENGAGEMENT_RELAYS")
 
         // Chunk small (per-post budget invariant) — REQ via the shared builder so
         // profile and feed paths emit identical #e + #a + #A filters (incl. kind 16).
@@ -515,6 +562,10 @@ class ProfilePipeline @Inject constructor(
         Log.d(TAG, "Step4: ${noteEvents.size} notes → ${chunks.size} chunks")
 
         for ((index, chunk) in chunks.withIndex()) {
+            if (!profileNetworkDemandAllowed(networkMonitor.state.value, relayCapabilitiesStore.isNetworkDown)) {
+                Log.w(TAG, "PROFILE-DEMAND-SKIP: stage=engagement-chunk network unavailable")
+                break
+            }
             val subId = "prof-eng-${System.nanoTime()}"
             val ids = chunk.map { it.first }
             val coords = chunk.mapNotNull { it.second }
@@ -560,6 +611,10 @@ class ProfilePipeline @Inject constructor(
         Log.d(TAG, "Step5: ${noteEvents.size} notes → ${chunks.size} chunks (viewer=${ownPk.take(8)}…)")
 
         for ((index, chunk) in chunks.withIndex()) {
+            if (!profileNetworkDemandAllowed(networkMonitor.state.value, relayCapabilitiesStore.isNetworkDown)) {
+                Log.w(TAG, "PROFILE-DEMAND-SKIP: stage=own-engagement-chunk network unavailable")
+                break
+            }
             val subId = "prof-own-eng-${System.nanoTime()}"
             val ids = chunk.map { it.first }
             val coords = chunk.mapNotNull { it.second }

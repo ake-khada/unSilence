@@ -1086,9 +1086,13 @@ class RelayPool @Inject constructor(
         val prev = lastOpen.get()
         if (now - prev < MIN_EPHEMERAL_GAP_NS) {
             Log.d(TAG, "Ephemeral rate-limited: $url")
+            subIds.forEach { recordOneShotRelayCoverage(it, url) }
             return
         }
-        if (!lastOpen.compareAndSet(prev, now)) return // CAS race — another caller won
+        if (!lastOpen.compareAndSet(prev, now)) {
+            subIds.forEach { recordOneShotRelayCoverage(it, url) }
+            return // CAS race — another caller won
+        }
 
         val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
         try {
@@ -1142,6 +1146,9 @@ class RelayPool @Inject constructor(
             if (logInfo) Log.i(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
             else Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
         } finally {
+            // A failed connection or a relay that omits EOSE is still complete from
+            // the caller's perspective. Coverage is idempotent for real EOSEs.
+            subIds.forEach { recordOneShotRelayCoverage(it, url) }
             conn.close()
         }
     }
