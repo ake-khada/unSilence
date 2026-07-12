@@ -237,6 +237,38 @@ class WotSurfacePolicyTest {
     }
 
     @Test
+    fun `all WoT sorts snapshot hostile lookup values before comparing`() {
+        val users = (1..32).map { index ->
+            UserEntity(
+                pubkey = index.toString(16).padStart(64, '0'),
+                displayName = "User $index",
+            )
+        }.reversed()
+        val expected = users.sortedByDescending { it.pubkey.toInt(16) }.map { it.pubkey }
+        val sorters = listOf<(List<UserEntity>, (String) -> WotLookup?) -> List<UserEntity>>(
+            { input, lookup -> sortPeopleForSearch(input, "User", lookup) },
+            { input, lookup -> sortPeopleByWotFollowers(input, lookup) },
+            { input, lookup -> sortMentionsByWotRank(input, lookup) },
+        )
+
+        for (sorter in sorters) {
+            val calls = mutableMapOf<String, Int>()
+            val result = sorter(users) { pubkey ->
+                val invocation = (calls[pubkey] ?: 0) + 1
+                calls[pubkey] = invocation
+                val base = pubkey.toInt(16)
+                scored(
+                    rank = base + invocation * 1_000,
+                    followers = (base + invocation * 1_000).toLong(),
+                )
+            }
+
+            assertEquals(expected, result.map { it.pubkey })
+            assertTrue("Each pubkey must be looked up exactly once", calls.values.all { it == 1 })
+        }
+    }
+
+    @Test
     fun `feed subjects include cached parent and quoted authors`() {
         val rowAuthor = hex("a")
         val parentAuthor = hex("b")

@@ -92,6 +92,9 @@ class ProfileViewModel @Inject constructor(
     private val _uploadingBanner = MutableStateFlow(false)
     val uploadingBanner: StateFlow<Boolean> = _uploadingBanner.asStateFlow()
 
+    /** Init coroutines write this field, so it must be initialized before any init block. */
+    val followerCount = MutableStateFlow<Long?>(null)
+
     init {
         viewModelScope.launch { blossomServersStore.initialize() }
     }
@@ -258,9 +261,6 @@ class ProfileViewModel @Inject constructor(
         memoryEventStore.followsFlow(pk).map { it.size }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
     } ?: MutableStateFlow(0)
-
-    /** Approximate follower count from NIP-45 COUNT, cached in MES. */
-    val followerCount = MutableStateFlow<Long?>(null)
 
     // ── User actions ─────────────────────────────────────────────────────
 
