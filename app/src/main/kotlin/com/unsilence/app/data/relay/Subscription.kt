@@ -26,6 +26,7 @@ private const val TAG = "Subscription"
 private const val EOSE_QUIESCENCE_MS = 2_500L   // silence after ≥1 event ⇒ backfill done ⇒ flip live
 private const val EOSE_CEILING_MS    = 30_000L  // relay accepted REQ but sent nothing at all
 private const val EOSE_POLL_MS       = 1_250L  // coarse — quiescence needs 2.5s of silence; finer polling is wasted wakeups
+private const val RELAY_REPLAY_DEBOUNCE_MS = 1_000L
 
 /**
  * Low-level Nostr REQ subscription primitive.
@@ -107,6 +108,8 @@ class Subscription @Inject constructor(
     private val seqCounter = AtomicLong(0)
     private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
     private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val lastReplayAt = ConcurrentHashMap<String, Long>()
+    private val rateLimitSkipLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     init {
         // Replay persistent subs when a relay reconnects.
@@ -273,21 +276,48 @@ class Subscription @Inject constructor(
      * reconnected. Resets that relay's EOSE/CLOSED tracking so the fresh
      * connection gets a clean cycle. Called from the [relayPool] reconnect flow.
      */
-    fun resumeRelay(url: String) {
+    fun resumeRelay(url: String, nowMs: Long = System.currentTimeMillis()) {
         val normalized = normalizeRelayUrl(url) ?: return
         if (relayCapabilitiesStore.shouldSkip(normalized)) return
         if (transport.isAuthUnavailable(normalized)) return
+        if (transport.isRateLimited(normalized)) {
+            if (rateLimitSkipLogged.add(normalized)) {
+                Log.w(TAG, "resumeRelay $normalized: skipped during rate-limit cooldown")
+            }
+            return
+        }
+        rateLimitSkipLogged.remove(normalized)
+
+        val matching = subs.values.filter { state ->
+            !state.isPaused && normalized in state.urls
+        }
+        if (matching.isEmpty()) {
+            Log.w(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
+            return
+        }
+        if (!claimReplayWindow(normalized, nowMs)) return
+
         var count = 0
-        for (state in subs.values) {
-            if (state.isPaused) continue
-            if (normalized !in state.urls) continue
+        for (state in matching) {
             state.eosedRelays.remove(normalized)
             state.closedRelays.remove(normalized)
             transport.sendToRelay(normalized, state.reqPayload)
             count++
         }
-        if (count > 0) Log.w(TAG, "resumeRelay $normalized: replayed $count sub(s)")
-        else Log.w(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
+        Log.w(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+    }
+
+    private fun claimReplayWindow(url: String, nowMs: Long): Boolean {
+        var claimed = false
+        lastReplayAt.compute(url) { _, previous ->
+            if (previous == null || nowMs - previous >= RELAY_REPLAY_DEBOUNCE_MS) {
+                claimed = true
+                nowMs
+            } else {
+                previous
+            }
+        }
+        return claimed
     }
 
     // ── Internals ───────────────────────────────────────────────────────────

@@ -59,6 +59,16 @@ private const val MAX_PROFILE_FALLBACK_RELAYS = 8
 /** Wait for EventProcessor cold-lane flush (2s batch cycle) + margin.
  *  Must track EventProcessor.drainCold's 2s timeout — if that changes, update here. */
 private const val COLD_LANE_FLUSH_MS = 2_500L
+private const val RECONNECT_HEALTHY_WINDOW_MS = 30_000L
+
+internal fun isRateLimitedClosedReason(reason: String): Boolean =
+    reason.contains("rate-limit", ignoreCase = true) ||
+        reason.contains("too many", ignoreCase = true)
+
+internal fun shouldResubAfterClosed(reason: String, isOneShot: Boolean): Boolean =
+    !isOneShot &&
+        !reason.trimStart().startsWith("auth-required", ignoreCase = true) &&
+        !isRateLimitedClosedReason(reason)
 
 /** A search result correlated with the token of the search session that produced it. */
 data class SearchResult(val token: Long, val eventId: String)
@@ -128,6 +138,8 @@ class RelayPool @Inject constructor(
      *  failure surface. Populated by [updateOutboxAllowlist] after kind-10002 is fetched. */
     @Volatile private var outboxAllowlist: Set<String> = emptySet()
     private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
+    /** Retained across short-lived successful sockets; cleared only after a healthy window. */
+    private val reconnectAttempts = ConcurrentHashMap<String, Int>()
     /** Cached blocked relay URLs, refreshed before each connect(). */
     @Volatile private var blockedUrls: Set<String> = emptySet()
 
@@ -435,6 +447,11 @@ class RelayPool @Inject constructor(
         return System.currentTimeMillis() >= state.cooldownUntil.get()
     }
 
+    override fun isRateLimited(url: String): Boolean {
+        val normalized = normalizeRelayUrl(url) ?: return false
+        return !isRelayOutOfCooldown(normalized)
+    }
+
     private fun canSendToRelay(url: String): Boolean {
         val state = rateLimiters.getOrPut(url) { RateLimitState() }
         val now = System.currentTimeMillis()
@@ -458,9 +475,16 @@ class RelayPool @Inject constructor(
 
     private fun markRelayRateLimited(url: String) {
         val state = rateLimiters.getOrPut(url) { RateLimitState() }
-        val until = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
-        state.cooldownUntil.set(until)
-        Log.w(TAG, "Relay $url marked for cooldown until ${java.util.Date(until)} (rate-limited)")
+        val now = System.currentTimeMillis()
+        while (true) {
+            val existingUntil = state.cooldownUntil.get()
+            if (now < existingUntil) return
+            val until = now + RATE_LIMIT_COOLDOWN_MS
+            if (state.cooldownUntil.compareAndSet(existingUntil, until)) {
+                Log.w(TAG, "Relay $url marked for cooldown until ${java.util.Date(until)} (rate-limited)")
+                return
+            }
+        }
     }
 
     /**
@@ -1284,8 +1308,7 @@ class RelayPool @Inject constructor(
                                     }
                                 }
                             }
-                        } else if (reason.contains("rate-limit", ignoreCase = true) ||
-                               reason.contains("too many", ignoreCase = true)) {
+                        } else if (isRateLimitedClosedReason(reason)) {
                             markRelayRateLimited(conn.url)
                             Log.w(TAG, "CLOSED rate-limited $category sub '$closedSubId' on ${conn.url}: $reason")
                         } else {
@@ -1295,8 +1318,8 @@ class RelayPool @Inject constructor(
                         // (still active in Subscription), emit reconnect signal so
                         // Subscription.resumeRelay re-issues the REQ. Skip one-shot and
                         // auth-required (already handled above).
-                        if (!isOneShotSubscription(closedSubId) &&
-                            !reason.startsWith("auth-required")) {
+                        val isOneShot = isOneShotSubscription(closedSubId)
+                        if (shouldResubAfterClosed(reason, isOneShot)) {
                             val activeIds = runCatching { activeSubsSource.get().activeSubIds() }
                                 .getOrDefault(emptySet())
                             if (closedSubId in activeIds) {
@@ -1306,7 +1329,7 @@ class RelayPool @Inject constructor(
                         }
                         // A CLOSED relay won't send EOSE — release its slot and
                         // count it as done for coverage so it doesn't force a full timeout.
-                        if (isOneShotSubscription(closedSubId)) {
+                        if (isOneShot) {
                             releaseOneShotForRelay(closedSubId, conn.url)
                             recordOneShotRelayCoverage(closedSubId, conn.url)
                         }
@@ -3923,13 +3946,14 @@ class RelayPool @Inject constructor(
      * Reconnect a single relay with exponential backoff.
      * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
      */
-    private fun reconnectWithBackoff(url: String, attempt: Int = 0) {
+    private fun reconnectWithBackoff(url: String, attempt: Int = reconnectAttempts[url] ?: 0) {
         // Only block reconnect for permanent policy rejections (restricted).
         // Transport strikes heal on successful connection — let the 8-attempt
         // backoff handle transient failures without the strike system killing it.
         val caps = relayCapabilitiesStore.get(url)
         if (caps?.restricted == true) {
             Log.w(TAG, "Skipping reconnect for restricted relay $url")
+            reconnectAttempts.remove(url)
             connections.remove(url)?.close()
             return
         }
@@ -3941,6 +3965,7 @@ class RelayPool @Inject constructor(
         }
         val guard = reconnecting.getOrPut(url) { AtomicBoolean(false) }
         if (!guard.compareAndSet(false, true)) return
+        reconnectAttempts[url] = attempt
 
         scope.launch {
             try {
@@ -3982,6 +4007,9 @@ class RelayPool @Inject constructor(
 
                 if (conn.state.value == RelayState.CONNECTED) {
                     guard.set(false)
+                    // A WebSocket open is not proof of recovery. Preserve/increase the
+                    // backoff if it flaps, and reset only after a healthy connection window.
+                    reconnectAttempts[url] = (attempt + 1).coerceAtMost(8)
                     updateConnectionStates()
                     _onRelayReconnected.tryEmit(url)
                     // Resend persistent own-mute-live subscription if this relay carries it
@@ -3993,6 +4021,13 @@ class RelayPool @Inject constructor(
                         liveNotifSubReq?.let { conn.send(it) }
                     }
                     scope.launch { listenForEvents(conn) }
+                    scope.launch {
+                        delay(RECONNECT_HEALTHY_WINDOW_MS)
+                        if (connections[url] === conn && conn.state.value == RelayState.CONNECTED) {
+                            reconnectAttempts.remove(url)
+                            Log.d(TAG, "Reconnect backoff reset after healthy window: $url")
+                        }
+                    }
                     Log.w(TAG, "Reconnected $url (attempt=$attempt)")
                 } else {
                     guard.set(false)

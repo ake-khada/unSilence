@@ -23,4 +23,7 @@ interface RelayTransport {
 
     /** True when the relay has been marked auth-unavailable this session. */
     fun isAuthUnavailable(url: String): Boolean = false
+
+    /** True while the relay is inside a server-triggered rate-limit cooldown. */
+    fun isRateLimited(url: String): Boolean = false
 }
