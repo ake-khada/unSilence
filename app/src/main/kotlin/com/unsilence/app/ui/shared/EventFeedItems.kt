@@ -410,7 +410,7 @@ internal fun ThreadParentCard(
 }
 
 @Composable
-private fun EventFeedItem(
+internal fun EventFeedItem(
     row: FeedRow,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
