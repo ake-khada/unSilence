@@ -220,7 +220,7 @@ class ProfileViewModel @Inject constructor(
                 }
             }
 
-            // Fetch follower count via NIP-45 (MES-cached, deduped in ProfilePipeline)
+            // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
             viewModelScope.launch(Dispatchers.IO) {
                 profilePipeline.fetchFollowerCount(pubkeyHex)?.let { followerCount.value = it }
             }

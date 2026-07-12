@@ -282,5 +282,5 @@ private class NetworkTrendingTransport(
                 put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
             },
             timeoutMs = 2_500L,
-        )
+        )?.takeUnless(Nip45CountResult::limited)?.count
 }

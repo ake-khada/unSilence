@@ -46,8 +46,42 @@ class ConnectionsPolicyTest {
     }
 
     @Test
-    fun `follower count takes maximum successful relay response`() {
-        assertEquals(120L, maxFollowerCount(listOf(100L, null, 120L)))
+    fun `follower count takes maximum honest relay response`() {
+        assertEquals(
+            120L,
+            maxFollowerCount(
+                listOf(
+                    Nip45CountResult(100L, limited = false),
+                    Nip45CountResult(10_000L, limited = true),
+                    null,
+                    Nip45CountResult(120L, limited = false),
+                ),
+            ),
+        )
+        assertNull(maxFollowerCount(listOf(Nip45CountResult(500L, limited = true))))
         assertNull(maxFollowerCount(listOf(null, null)))
+    }
+
+    @Test
+    fun `follower count formatting rounds before selecting the unit`() {
+        val cases = mapOf(
+            0L to "0",
+            42L to "42",
+            99L to "99",
+            100L to "~100",
+            286L to "~300",
+            365L to "~350",
+            975L to "~1k",
+            990L to "~1k",
+            25_870L to "~25.9k",
+            199_068L to "~199.1k",
+            10_000L to "~10k",
+            999_949L to "~999.9k",
+            1_234_567L to "~1.23M",
+        )
+
+        cases.forEach { (count, expected) ->
+            assertEquals("count=$count", expected, formatFollowerCount(count))
+        }
     }
 }

@@ -68,6 +68,7 @@ import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.relay.formatFollowerCount
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -446,7 +447,7 @@ fun ProfileScreen(
                     Spacer(Modifier.size(Spacing.large))
                     StatLabel(
                         label = "Followers",
-                        value = followerCount?.let { "~${it.toCompactSats()}" } ?: "—",
+                        value = followerCount?.let(::formatFollowerCount) ?: "—",
                         onClick = { onConnectionsClick(ConnectionsTab.Followers) },
                     )
                 }
