@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.followsViewer
 import com.unsilence.app.data.relay.nextFollowersCursor
+import com.unsilence.app.data.relay.ProfilePipeline
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.wotRank
 import com.unsilence.app.data.repository.UserRepository
@@ -44,6 +45,7 @@ data class ConnectionsUiState(
     val loadingMore: Boolean = false,
     val hasMoreFollowers: Boolean = true,
     val loadFailed: Boolean = false,
+    val followerCount: Long? = null,
 )
 
 private data class ConnectionMembership(
@@ -59,6 +61,7 @@ private data class ConnectionsLoading(
     val moreFollowers: Boolean,
     val hasMoreFollowers: Boolean,
     val failedTab: ConnectionsTab?,
+    val followerCount: Long?,
 )
 
 @HiltViewModel
@@ -66,6 +69,7 @@ class ConnectionsViewModel @Inject constructor(
     keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
+    private val profilePipeline: ProfilePipeline,
     private val userRepository: UserRepository,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
 ) : ViewModel() {
@@ -79,6 +83,7 @@ class ConnectionsViewModel @Inject constructor(
     private val loadingMoreFollowers = MutableStateFlow(false)
     private val hasMoreFollowers = MutableStateFlow(true)
     private val failedTab = MutableStateFlow<ConnectionsTab?>(null)
+    private val followerCount = MutableStateFlow<Long?>(null)
     private var followersCursor: Long? = null
     private var initializedKey: Pair<String, ConnectionsTab>? = null
     private val followerVerificationMutex = Mutex()
@@ -104,8 +109,9 @@ class ConnectionsViewModel @Inject constructor(
         loadingFollowers,
         loadingMoreFollowers,
         hasMoreFollowers,
-    ) { following, followers, moreFollowers, hasMore ->
-        ConnectionsLoading(following, followers, moreFollowers, hasMore, null)
+        followerCount,
+    ) { following, followers, moreFollowers, hasMore, count ->
+        ConnectionsLoading(following, followers, moreFollowers, hasMore, null, count)
     }
 
     private val loadingState = combine(baseLoadingState, failedTab) { loading, failed ->
@@ -147,6 +153,7 @@ class ConnectionsViewModel @Inject constructor(
             loadingMore = loading.moreFollowers,
             hasMoreFollowers = loading.hasMoreFollowers,
             loadFailed = loading.failedTab == membership.tab,
+            followerCount = loading.followerCount,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ConnectionsUiState())
 
@@ -158,7 +165,12 @@ class ConnectionsViewModel @Inject constructor(
         selectedTab.value = initialTab
         followersCursor = null
         followerPubkeys.value = emptySet()
+        followerCount.value = null
         hasMoreFollowers.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            followerCount.value = profilePipeline.fetchFollowerCount(pubkey)
+        }
 
         viewModelScope.launch {
             memoryEventStore.followsFlow(pubkey).collect { followingPubkeys.value = it }

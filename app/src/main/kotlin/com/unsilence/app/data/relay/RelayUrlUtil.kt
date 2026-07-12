@@ -63,7 +63,8 @@ const val ANTIPRIMAL_RELAY_URL = "wss://antiprimal.net"
 /** Independent COUNT indexes. Results are approximate; callers take the maximum. */
 val FOLLOWER_COUNT_RELAY_URLS = listOf(
     ANTIPRIMAL_RELAY_URL,
-    "wss://purplepag.es",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
 )
 
 /** Broad kind-3 indexes used for follower candidate discovery and verification. */

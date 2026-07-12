@@ -32,10 +32,12 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.PaginatedFetchResult
@@ -69,6 +71,25 @@ internal fun shouldResubAfterClosed(reason: String, isOneShot: Boolean): Boolean
     !isOneShot &&
         !reason.trimStart().startsWith("auth-required", ignoreCase = true) &&
         !isRateLimitedClosedReason(reason)
+
+internal data class ParsedNip45Count(
+    val subId: String,
+    val result: Nip45CountResult,
+)
+
+internal fun parseNip45CountFrame(raw: String): ParsedNip45Count? = runCatching {
+    val frame = NostrJson.parseToJsonElement(raw).jsonArray
+    if (frame.size < 3 || frame[0].jsonPrimitive.content != "COUNT") return@runCatching null
+    val body = frame[2].jsonObject
+    val count = body["count"]?.jsonPrimitive?.longOrNull ?: return@runCatching null
+    ParsedNip45Count(
+        subId = frame[1].jsonPrimitive.content,
+        result = Nip45CountResult(
+            count = count,
+            limited = body["limited"]?.jsonPrimitive?.booleanOrNull == true,
+        ),
+    )
+}.getOrNull()
 
 /** A search result correlated with the token of the search session that produced it. */
 data class SearchResult(val token: Long, val eventId: String)
@@ -226,7 +247,7 @@ class RelayPool @Inject constructor(
         }
     }
 
-    private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Long?>>()
+    private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Nip45CountResult?>>()
     /** One-shot REQ callbacks that return the first EVENT's raw tags JSON. */
     internal val eventTagsCallbacks = ConcurrentHashMap<String, CompletableDeferred<String?>>()
     /** Per-subId EOSE completion signal. Callers register before dispatch, await after.
@@ -1526,30 +1547,21 @@ class RelayPool @Inject constructor(
         }
     }
 
-    /**
-     * Handle a NIP-45 COUNT response: ["COUNT","sub-id",{"count":N}]
-     */
+    /** Handle a NIP-45 COUNT response, retaining its integrity-significant limited flag. */
     private fun handleCount(raw: String) {
-        try {
-            val arr = NostrJson.parseToJsonElement(raw).jsonArray
-            val subId = arr[1].jsonPrimitive.content
-            val countObj = arr[2].jsonObject
-            val count = countObj["count"]?.jsonPrimitive?.long
-            countCallbacks.remove(subId)?.complete(count)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse COUNT response: ${e.message}")
-        }
+        val parsed = parseNip45CountFrame(raw) ?: return
+        countCallbacks.remove(parsed.subId)?.complete(parsed.result)
     }
 
     /**
      * NIP-45 COUNT query: send a COUNT request to a single relay and wait for the response.
-     * Returns the count, or null if the relay doesn't support NIP-45 or times out.
+     * Returns the count and NIP-45 limited flag, or null if unsupported or timed out.
      */
-    suspend fun sendCount(
+    internal suspend fun sendCount(
         relayUrl: String,
         filter: JsonObject,
         timeoutMs: Long = 10_000L,
-    ): Long? =
+    ): Nip45CountResult? =
         withContext(Dispatchers.IO) {
             val subId = "count-${System.nanoTime()}"
             try {
@@ -1561,7 +1573,7 @@ class RelayPool @Inject constructor(
 
                 val conn = connections[relayUrl] ?: return@withContext null
 
-                val deferred = CompletableDeferred<Long?>()
+                val deferred = CompletableDeferred<Nip45CountResult?>()
                 countCallbacks[subId] = deferred
 
                 conn.send(countRequest)

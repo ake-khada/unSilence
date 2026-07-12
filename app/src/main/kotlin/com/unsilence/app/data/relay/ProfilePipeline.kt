@@ -83,6 +83,7 @@ class ProfilePipeline @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
     private val networkMonitor: NetworkMonitor,
+    private val primalCacheClient: PrimalCacheClient,
 ) {
     companion object {
         /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
@@ -232,13 +233,13 @@ class ProfilePipeline @Inject constructor(
     }
 
     /**
-     * Approximate follower count via NIP-45 COUNT across independent indexes,
-     * cached in MES with [MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS].
+     * Exact follower count from Primal cache, falling back to non-limited NIP-45
+     * responses across independent indexes. Cached in MES with
+     * [MemoryEventStore.FOLLOWER_COUNT_TTL_SECONDS].
      *
-     * Centralized here because the antiprimal connect uses `forceEvict = true` —
-     * concurrent runs from ProfileViewModel and UserProfileViewModel could evict
-     * each other's connection mid-flight. Per-pubkey in-flight dedup shares one
-     * result among concurrent callers.
+     * Centralized here so profile surfaces share the same cache request and any
+     * RelayPool fallback work. Per-pubkey in-flight dedup shares one result among
+     * concurrent callers.
      */
     suspend fun fetchFollowerCount(pubkey: String): Long? {
         val (cached, cachedAt) = memoryEventStore.getFollowerCount(pubkey)
@@ -250,22 +251,24 @@ class ProfilePipeline @Inject constructor(
         }
 
         val newDeferred = pipelineScope.async(start = CoroutineStart.LAZY) {
-            val filter = buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+            val count = primalCacheClient.fetchFollowerCount(pubkey) ?: run {
+                val filter = buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                    put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                }
+                coroutineScope {
+                    FOLLOWER_COUNT_RELAY_URLS.map { relayUrl ->
+                        async {
+                            relayPool.connectAndAwait(
+                                listOf(relayUrl),
+                                timeoutMs = 3_000,
+                                forceEvict = true,
+                            )
+                            relayPool.sendCount(relayUrl = relayUrl, filter = filter)
+                        }
+                    }.awaitAll()
+                }.let(::maxFollowerCount)
             }
-            val count = coroutineScope {
-                FOLLOWER_COUNT_RELAY_URLS.map { relayUrl ->
-                    async {
-                        relayPool.connectAndAwait(
-                            listOf(relayUrl),
-                            timeoutMs = 3_000,
-                            forceEvict = true,
-                        )
-                        relayPool.sendCount(relayUrl = relayUrl, filter = filter)
-                    }
-                }.awaitAll()
-            }.let(::maxFollowerCount)
             if (count != null) memoryEventStore.cacheFollowerCount(pubkey, count)
             count
         }

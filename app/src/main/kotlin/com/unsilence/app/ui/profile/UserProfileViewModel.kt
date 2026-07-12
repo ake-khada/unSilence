@@ -277,7 +277,7 @@ class UserProfileViewModel @Inject constructor(
             userRepository.fetchProfilesWithFanout(listOf(pubkey))
         }
 
-        // Fetch follower count via NIP-45 COUNT (MES-cached, deduped in ProfilePipeline)
+        // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
         viewModelScope.launch(Dispatchers.IO) {
             profilePipeline.fetchFollowerCount(pubkey)?.let { followerCount.value = it }
         }
