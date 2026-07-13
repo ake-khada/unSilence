@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
@@ -225,13 +226,13 @@ private fun EventVideoThumbnailCell(
     val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
-        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false, model.shortForm)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(initialAspect) }
-    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
-        mutableStateOf(imetaAspect != null || cachedRatio != null)
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
+    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+        mutableStateOf(forceSquare || cachedRatio != null)
     }
 
     Box(
@@ -248,10 +249,17 @@ private fun EventVideoThumbnailCell(
             thumbnailCache = thumbnailCache,
             modifier = Modifier.matchParentSize(),
             requestAspectRatio = displayAspect,
+            // A square mosaic is the sole card-surface crop exception.
+            contentScale = if (forceSquare) ContentScale.Crop else ContentScale.Fit,
             onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
                 { ratio ->
-                    displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
-                    hasBeenResolved = true
+                    if (!hasBeenResolved) {
+                        val resolvedAspect = feedVideoAspectRatio(ratio)
+                        if (shouldCorrectVideoAspectRatio(displayAspect, resolvedAspect)) {
+                            displayAspect = resolvedAspect
+                        }
+                        hasBeenResolved = true
+                    }
                 }
             } else null,
         )

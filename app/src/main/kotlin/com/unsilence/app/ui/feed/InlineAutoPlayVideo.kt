@@ -71,7 +71,7 @@ internal fun VideoThumbnailImage(
     modifier: Modifier = Modifier,
     onAspectRatioResolved: ((Float) -> Unit)? = null,
     requestAspectRatio: Float = model.aspectRatio,
-    contentScale: ContentScale = if (model.shortForm) ContentScale.Fit else ContentScale.Crop,
+    contentScale: ContentScale = ContentScale.Fit,
 ) {
     val currentOnAspectRatioResolved by rememberUpdatedState(onAspectRatioResolved)
     var thumbnail by remember(model.videoUrl, thumbnailCache) {
@@ -138,20 +138,19 @@ fun VideoPreviewCard(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
 ) {
-    // Use imeta dimensions as authoritative aspect ratio when available.
-    // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
+    // A cached decoded ratio is stronger evidence than publisher-supplied imeta.
     val imetaAspect = model.imetaAspectRatio
     val cachedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val initialAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
-        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio, false, model.shortForm)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
+        !forceSquare && cachedRatio != null -> feedVideoAspectRatio(cachedRatio)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(initialAspect) }
-    // Track whether ratio has been resolved from a real source (imeta or MMR).
-    // Allow ONE update from default → resolved, then lock permanently.
-    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
-        mutableStateOf(imetaAspect != null || cachedRatio != null)
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(initialAspect) }
+    // Decoded cache data is already authoritative. Imeta/default ratios get one
+    // material correction from the thumbnail decoder, then lock to avoid jitter.
+    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+        mutableStateOf(forceSquare || cachedRatio != null)
     }
 
     Box(
@@ -167,10 +166,17 @@ fun VideoPreviewCard(
             model = model,
             thumbnailCache = thumbnailCache,
             modifier = Modifier.matchParentSize(),
+            requestAspectRatio = displayAspect,
+            contentScale = if (forceSquare) ContentScale.Crop else ContentScale.Fit,
             onAspectRatioResolved = if (!hasBeenResolved && !forceSquare) {
                 { ratio ->
-                    displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
-                    hasBeenResolved = true
+                    if (!hasBeenResolved) {
+                        val resolvedAspect = feedVideoAspectRatio(ratio)
+                        if (shouldCorrectVideoAspectRatio(displayAspect, resolvedAspect)) {
+                            displayAspect = resolvedAspect
+                        }
+                        hasBeenResolved = true
+                    }
                 }
             } else null,
         )
@@ -216,20 +222,18 @@ fun InlineVideoPlayer(
     thumbnailCache: VideoThumbnailCache? = null,
     isFullscreen: Boolean = false,
 ) {
-    // Use imeta dimensions as authoritative aspect ratio when available.
-    // Only fall back to bitmap/cache aspect ratio if imeta has no dimensions.
+    // A cached decoded ratio is stronger evidence than publisher-supplied imeta.
     val imetaAspect = model.imetaAspectRatio
     val resolvedRatio = thumbnailCache?.resolvedAspectRatios?.get(model.videoUrl)
     val baseAspect = when {
-        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare, model.shortForm)
-        !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio, false, model.shortForm)
-        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare, model.shortForm)
+        !forceSquare && resolvedRatio != null -> feedVideoAspectRatio(resolvedRatio)
+        imetaAspect != null -> feedVideoAspectRatio(imetaAspect, forceSquare)
+        else -> feedVideoAspectRatio(model.aspectRatio, forceSquare)
     }
-    var displayAspect by remember(model.videoUrl, forceSquare, model.shortForm) { mutableStateOf(baseAspect) }
-    // Track whether ratio has been resolved from a real source (imeta or MMR).
-    // Allow ONE update from default → resolved, then lock permanently.
-    var hasBeenResolved by remember(model.videoUrl, forceSquare, model.shortForm) {
-        mutableStateOf(imetaAspect != null || resolvedRatio != null)
+    var displayAspect by remember(model.videoUrl, forceSquare) { mutableStateOf(baseAspect) }
+    // Player dimensions may correct imeta/default once when the mismatch is visible.
+    var hasBeenResolved by remember(model.videoUrl, forceSquare) {
+        mutableStateOf(forceSquare || resolvedRatio != null)
     }
 
     var isFirstFrameRendered by remember(model.videoUrl) {
@@ -242,7 +246,7 @@ fun InlineVideoPlayer(
     }
 
     // Listen for first rendered frame + actual video dimensions
-    DisposableEffect(exoPlayer, model.videoUrl, forceSquare, model.shortForm) {
+    DisposableEffect(exoPlayer, model.videoUrl, forceSquare) {
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 isFirstFrameRendered = true
@@ -259,9 +263,12 @@ fun InlineVideoPlayer(
                     if (exoPlayer.hasRenderableFrameFor(model.videoUrl)) {
                         isFirstFrameRendered = true
                     }
-                    // Allow ONE update from default → resolved for unresolved videos
+                    // Allow one material correction, then lock to avoid layout jitter.
                     if (!hasBeenResolved && !forceSquare) {
-                        displayAspect = feedVideoAspectRatio(ratio, false, model.shortForm)
+                        val resolvedAspect = feedVideoAspectRatio(ratio)
+                        if (shouldCorrectVideoAspectRatio(displayAspect, resolvedAspect)) {
+                            displayAspect = resolvedAspect
+                        }
                         hasBeenResolved = true
                     }
                 }
@@ -286,6 +293,8 @@ fun InlineVideoPlayer(
                 model = model,
                 thumbnailCache = thumbnailCache,
                 modifier = Modifier.matchParentSize(),
+                requestAspectRatio = displayAspect,
+                contentScale = if (forceSquare) ContentScale.Crop else ContentScale.Fit,
                 // Layout locked — no resize after first compose
                 onAspectRatioResolved = null,
             )
@@ -300,11 +309,7 @@ fun InlineVideoPlayer(
                     useController = false
                     setKeepContentOnPlayerReset(true)
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    resizeMode = if (model.shortForm) {
-                        AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    } else {
-                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    }
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
             onReset = { view ->
@@ -318,11 +323,7 @@ fun InlineVideoPlayer(
             update = { view ->
                 view.player = if (!isFullscreen) exoPlayer else null
                 view.setOnClickListener { onOpenFullscreen() }
-                view.resizeMode = if (model.shortForm) {
-                    AspectRatioFrameLayout.RESIZE_MODE_FIT
-                } else {
-                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                }
+                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
             modifier = Modifier
