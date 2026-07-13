@@ -22,3 +22,15 @@ internal fun shouldCorrectVideoAspectRatio(assumed: Float, resolved: Float): Boo
     if (!assumed.isFinite() || assumed <= 0f || !resolved.isFinite() || resolved <= 0f) return false
     return abs(resolved - assumed) / assumed > VIDEO_ASPECT_CORRECTION_THRESHOLD
 }
+
+/** Media3's displayed aspect includes non-square pixels, not just decoded width / height. */
+internal fun decodedVideoAspectRatio(
+    width: Int,
+    height: Int,
+    pixelWidthHeightRatio: Float = 1f,
+): Float? {
+    if (width <= 0 || height <= 0 || !pixelWidthHeightRatio.isFinite() || pixelWidthHeightRatio <= 0f) {
+        return null
+    }
+    return width.toFloat() * pixelWidthHeightRatio / height
+}
