@@ -5,19 +5,23 @@ import org.junit.Test
 
 class VideoSizingTest {
     @Test
-    fun `short portrait video keeps its native full-width frame`() {
-        assertEquals(9f / 16f, feedVideoAspectRatio(9f / 16f, shortForm = true), 0.001f)
-        assertEquals(1f / 2f, feedVideoAspectRatio(1f / 2f, shortForm = true), 0.001f)
+    fun `every portrait video keeps its native full-width frame`() {
+        listOf(9f / 16f, 1f / 2f, 9f / 21f, 0.25f).forEach { ratio ->
+            assertEquals(ratio, feedVideoAspectRatio(ratio), 0.001f)
+        }
     }
 
     @Test
-    fun `normal portrait video keeps existing nine by sixteen frame`() {
-        assertEquals(9f / 16f, feedVideoAspectRatio(9f / 16f), 0.001f)
+    fun `landscape fallback and square grid sizing remain stable`() {
+        assertEquals(16f / 9f, feedVideoAspectRatio(16f / 9f), 0.001f)
+        assertEquals(16f / 9f, feedVideoAspectRatio(null), 0.001f)
+        assertEquals(1f, feedVideoAspectRatio(9f / 21f, forceSquare = true), 0.001f)
     }
 
     @Test
-    fun `short landscape and square grid sizing remain unchanged`() {
-        assertEquals(16f / 9f, feedVideoAspectRatio(16f / 9f, shortForm = true), 0.001f)
-        assertEquals(1f, feedVideoAspectRatio(9f / 16f, forceSquare = true, shortForm = true), 0.001f)
+    fun `aspect correction requires a material mismatch`() {
+        assertEquals(false, shouldCorrectVideoAspectRatio(1f, 1.02f))
+        assertEquals(true, shouldCorrectVideoAspectRatio(1f, 1.021f))
+        assertEquals(true, shouldCorrectVideoAspectRatio(9f / 16f, 1f / 2f))
     }
 }
