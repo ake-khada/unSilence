@@ -6,6 +6,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.PowerManager
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -36,7 +44,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +61,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -82,7 +93,6 @@ import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
@@ -92,6 +102,12 @@ import kotlinx.coroutines.delay
 private const val IMMERSIVE_OWNER_ID = "feed-immersive"
 private const val LOAD_MORE_DISTANCE = 3
 private const val PROGRESS_POLL_MS = 250L
+private const val SOUNDWAVE_FIRST_BASE_DP = 8f
+private const val SOUNDWAVE_CENTER_BASE_DP = 14f
+private const val SOUNDWAVE_LAST_BASE_DP = 6f
+private const val SOUNDWAVE_FIRST_DURATION_MS = 900
+private const val SOUNDWAVE_CENTER_DURATION_MS = 1_100
+private const val SOUNDWAVE_LAST_DURATION_MS = 1_300
 private val VIDEO_CORNER_RADIUS = 6.dp
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -173,7 +189,7 @@ internal fun ImmersiveVideoFeed(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                renderedVideoUrl = null
+                if (shouldClearRenderedFrame(reason)) renderedVideoUrl = null
             }
         }
         player.addListener(listener)
@@ -319,12 +335,14 @@ internal fun ImmersiveVideoFeed(
             ImmersiveAuthorBar(
                 item = item,
                 callbacks = callbacks,
+                playing = !paused && !settledItemBlocked,
                 onOpenSheet = { sheetEventId = item.row.id },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
-            PlaybackProgressHairline(
+            PlaybackProgressComet(
                 player = player,
                 eventId = item.row.id,
+                videoUrl = item.video.videoUrl,
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
@@ -505,6 +523,7 @@ private fun VideoCornerMasks(
 private fun ImmersiveAuthorBar(
     item: ImmersiveVideoItem,
     callbacks: EventActionCallbacks,
+    playing: Boolean,
     onOpenSheet: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -545,7 +564,10 @@ private fun ImmersiveAuthorBar(
             .navigationBarsPadding()
             .padding(horizontal = Spacing.medium, vertical = Spacing.medium),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             AvatarImage(
                 pubkey = row.pubkey,
                 picture = profile?.picture ?: row.authorPicture,
@@ -557,38 +579,119 @@ private fun ImmersiveAuthorBar(
                     .clickable { callbacks.onAuthorClick(row.pubkey) },
             )
             Spacer(Modifier.width(Spacing.small))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = displayName,
-                        color = White,
-                        fontSize = AppType.body,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    val lookup = callbacks.wotLookup?.invoke(row.pubkey)
-                    if (lookup is WotLookup.Scored) {
-                        Spacer(Modifier.width(Spacing.small))
-                        WotInlineLabel(assertion = lookup.assertion, prefix = "")
-                    }
-                }
-                if (caption.isNotBlank()) {
-                    Text(
-                        text = caption,
-                        color = White.copy(alpha = 0.86f),
-                        fontSize = AppType.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = displayName,
+                    color = White,
+                    fontSize = AppType.body,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                val lookup = callbacks.wotLookup?.invoke(row.pubkey)
+                if (lookup is WotLookup.Scored) {
+                    Spacer(Modifier.width(Spacing.small))
+                    WotInlineLabel(assertion = lookup.assertion, prefix = "")
                 }
             }
-            Icon(
-                Icons.Filled.KeyboardArrowUp,
-                contentDescription = "Show engagement",
-                tint = White,
+            SoundwaveGlyph(
+                playing = playing,
+                modifier = Modifier.size(34.dp),
             )
         }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = Spacing.small)
+                .height(20.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            if (caption.isNotBlank()) {
+                Text(
+                    text = caption,
+                    color = White.copy(alpha = 0.86f),
+                    fontSize = AppType.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SoundwaveGlyph(
+    playing: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.semantics { contentDescription = "Show engagement" },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (playing) AnimatedSoundwaveBars() else SoundwaveBars()
+    }
+}
+
+@Composable
+private fun AnimatedSoundwaveBars() {
+    val transition = rememberInfiniteTransition(label = "soundwave")
+    val firstHeight = transition.animateFloat(
+        initialValue = SOUNDWAVE_FIRST_BASE_DP - 3f,
+        targetValue = SOUNDWAVE_FIRST_BASE_DP + 3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(SOUNDWAVE_FIRST_DURATION_MS, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "soundwave-first",
+    )
+    val centerHeight = transition.animateFloat(
+        initialValue = SOUNDWAVE_CENTER_BASE_DP - 3f,
+        targetValue = SOUNDWAVE_CENTER_BASE_DP + 3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(SOUNDWAVE_CENTER_DURATION_MS, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "soundwave-center",
+    )
+    val lastHeight = transition.animateFloat(
+        initialValue = SOUNDWAVE_LAST_BASE_DP - 3f,
+        targetValue = SOUNDWAVE_LAST_BASE_DP + 3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(SOUNDWAVE_LAST_DURATION_MS, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "soundwave-last",
+    )
+    SoundwaveBars(firstHeight, centerHeight, lastHeight)
+}
+
+@Composable
+private fun SoundwaveBars(
+    firstHeightState: State<Float>? = null,
+    centerHeightState: State<Float>? = null,
+    lastHeightState: State<Float>? = null,
+) {
+    Canvas(modifier = Modifier.width(12.5.dp).height(20.dp)) {
+        val barWidth = 2.5.dp.toPx()
+        val stride = 5.dp.toPx()
+
+        fun drawBar(index: Int, heightDp: Float, alpha: Float) {
+            val heightPx = heightDp.dp.toPx()
+            drawRoundRect(
+                color = White.copy(alpha = alpha),
+                topLeft = Offset(index * stride, size.height - heightPx),
+                size = Size(barWidth, heightPx),
+                cornerRadius = CornerRadius(barWidth / 2f),
+            )
+        }
+
+        drawBar(0, firstHeightState?.value ?: SOUNDWAVE_FIRST_BASE_DP, 0.7f)
+        drawBar(1, centerHeightState?.value ?: SOUNDWAVE_CENTER_BASE_DP, 0.85f)
+        drawBar(2, lastHeightState?.value ?: SOUNDWAVE_LAST_BASE_DP, 0.65f)
     }
 }
 
@@ -612,34 +715,63 @@ private fun ImmersiveIconButton(
 }
 
 @Composable
-private fun PlaybackProgressHairline(
+private fun PlaybackProgressComet(
     player: ExoPlayer,
     eventId: String,
+    videoUrl: String,
     modifier: Modifier = Modifier,
 ) {
     var progress by remember(eventId) { mutableFloatStateOf(0f) }
-    LaunchedEffect(player, eventId) {
+    var durationKnown by remember(eventId) { mutableStateOf(false) }
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(PROGRESS_POLL_MS.toInt(), easing = LinearEasing),
+        label = "video-progress",
+    )
+    LaunchedEffect(player, eventId, videoUrl) {
         while (true) {
-            val duration = player.duration.takeIf { it > 0 } ?: 0L
-            progress = if (duration > 0) {
+            val currentUrl = player.currentMediaItem?.localConfiguration?.uri?.toString()
+            val duration = player.duration.takeIf { currentUrl == videoUrl && it > 0 }
+            durationKnown = duration != null
+            progress = if (duration != null) {
                 (player.currentPosition.toFloat() / duration).coerceIn(0f, 1f)
             } else 0f
             delay(PROGRESS_POLL_MS)
         }
     }
-    Box(
+    Canvas(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .height(2.dp)
-            .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(1.dp)),
+            .height(4.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(progress)
-                .height(2.dp)
-                .background(Brand, RoundedCornerShape(1.dp)),
+        if (!durationKnown) return@Canvas
+        val radius = 2.dp.toPx()
+        val tailHeight = 2.dp.toPx()
+        val dotX = radius + animatedProgress * (size.width - radius * 2f)
+        val tailStart = (dotX - 24.dp.toPx()).coerceAtLeast(0f)
+        val tailWidth = dotX - tailStart
+        if (tailWidth > 0f) {
+            drawRoundRect(
+                brush = Brush.horizontalGradient(
+                    colorStops = arrayOf(
+                        0f to Color.Transparent,
+                        0.7f to White.copy(alpha = 0.12f),
+                        1f to White.copy(alpha = 0.3f),
+                    ),
+                    startX = tailStart,
+                    endX = dotX,
+                ),
+                topLeft = Offset(tailStart, (size.height - tailHeight) / 2f),
+                size = Size(tailWidth, tailHeight),
+                cornerRadius = CornerRadius(tailHeight / 2f),
+            )
+        }
+        drawCircle(
+            color = White.copy(alpha = 0.9f),
+            radius = radius,
+            center = Offset(dotX, size.height / 2f),
         )
     }
 }

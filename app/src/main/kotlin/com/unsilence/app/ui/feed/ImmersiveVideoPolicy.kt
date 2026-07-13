@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import androidx.media3.common.Player
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.domain.model.FeedFilter
@@ -14,6 +15,9 @@ internal data class ImmersiveVideoItem(
 
 internal fun FeedFilter.isImmersiveVideoMode(): Boolean =
     showTypes == setOf(ShowType.VIDEO)
+
+internal fun shouldClearRenderedFrame(reason: Int): Boolean =
+    reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
 
 /**
  * Select only directly playable video rows. VideoRenderModel deliberately excludes
