@@ -128,10 +128,10 @@ class ThreadViewModelInvariantsTest {
     // ── Depth cap ────────────────────────────────────────────────────────────
 
     @Test
-    fun `depth is capped at 8`() {
+    fun `depth is capped at 10`() {
         val focused = "root"
-        // Chain: root -> d1 -> ... -> d9.
-        val replies = (1..9).map { depth ->
+        // Chain: root -> d1 -> ... -> d11.
+        val replies = (1..11).map { depth ->
             row(
                 id = "d$depth",
                 replyToId = if (depth == 1) focused else "d${depth - 1}",
@@ -140,8 +140,8 @@ class ThreadViewModelInvariantsTest {
         }
         val result = walkThread(focused, replies)
 
-        assertEquals(9, result.size)
-        assertEquals((1..8).toList() + 8, result.map { it.depth })
+        assertEquals(11, result.size)
+        assertEquals((1..10).toList() + 10, result.map { it.depth })
     }
 
     // ── Three-node cycle ─────────────────────────────────────────────────────
