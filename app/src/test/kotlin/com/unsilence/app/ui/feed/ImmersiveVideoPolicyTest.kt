@@ -72,6 +72,36 @@ class ImmersiveVideoPolicyTest {
     }
 
     @Test
+    fun `immersive session membership is append-only`() {
+        val initial = listOf(item("b", 4), item("c", 3))
+
+        assertEquals(
+            listOf("a", "b"),
+            mergeImmersiveItems(emptyList(), listOf(item("a", 5), item("a", 5), item("b", 4)))
+                .map { it.row.id },
+        )
+        assertEquals(
+            listOf("b", "c"),
+            mergeImmersiveItems(initial, listOf(item("a", 5), item("b", 4), item("c", 3)))
+                .map { it.row.id },
+        )
+        assertEquals(
+            listOf("b", "c", "d", "e"),
+            mergeImmersiveItems(
+                initial,
+                listOf(item("a", 5), item("b", 4), item("c", 3), item("d", 2), item("e", 1)),
+            ).map { it.row.id },
+        )
+        assertEquals(
+            listOf("b", "c", "d"),
+            mergeImmersiveItems(
+                initial,
+                listOf(item("b", 4), item("c", 3), item("d", 2), item("d", 2)),
+            ).map { it.row.id },
+        )
+    }
+
+    @Test
     fun `filter icon mapping is exhaustive and stable`() {
         assertEquals(FilterIconKind.GRID, filterIconKind(ShowType.ALL))
         assertEquals(FilterIconKind.TEXT, filterIconKind(ShowType.TEXT))
@@ -101,5 +131,10 @@ class ImmersiveVideoPolicyTest {
         replyCount = 0,
         repostCount = 0,
         zapCount = 0,
+    )
+
+    private fun item(id: String, createdAt: Long) = ImmersiveVideoItem(
+        row = row(id, 22).copy(createdAt = createdAt),
+        video = video.copy(videoUrl = "https://media.example/$id"),
     )
 }

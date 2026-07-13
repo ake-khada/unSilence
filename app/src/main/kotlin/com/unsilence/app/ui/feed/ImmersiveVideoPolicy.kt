@@ -20,6 +20,29 @@ internal fun shouldClearRenderedFrame(reason: Int): Boolean =
     reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
 
 /**
+ * Keep an immersive session stable while the live feed mutates. Existing rows
+ * never move or disappear; only novel rows after the oldest shared row append.
+ */
+internal fun mergeImmersiveItems(
+    current: List<ImmersiveVideoItem>,
+    incoming: List<ImmersiveVideoItem>,
+): List<ImmersiveVideoItem> {
+    if (current.isEmpty()) return incoming.distinctBy { it.row.id }
+    if (incoming.isEmpty()) return current
+
+    val currentIds = current.asSequence().map { it.row.id }.toHashSet()
+    val oldestSharedIndex = incoming.indexOfLast { it.row.id in currentIds }
+    if (oldestSharedIndex < 0) return current
+
+    val appends = incoming.asSequence()
+        .drop(oldestSharedIndex + 1)
+        .filter { it.row.id !in currentIds }
+        .distinctBy { it.row.id }
+        .toList()
+    return if (appends.isEmpty()) current else current + appends
+}
+
+/**
  * Select only directly playable video rows. VideoRenderModel deliberately excludes
  * YouTube page URLs, so a YouTube-only kind-1 post never enters the pager.
  */
