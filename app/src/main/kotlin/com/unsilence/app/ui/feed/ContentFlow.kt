@@ -54,9 +54,9 @@ private const val COLLAPSED_CARD_CHROME_DP = 104f
  * After each text run, OG preview cards render for links in that run (up to
  * [MAX_OG_CARDS] total per note).
  *
- * [nestDepth] controls quote nesting. At depth 0 (top-level cards), quotes
- * render as full QuoteCards. QuoteCard increments depth before calling
- * ContentFlow recursively. At depth >= 1, QuoteCards render text-only.
+ * [nestDepth] controls quote nesting. The first two quote levels render full
+ * content, the third is compact text, and deeper content becomes a terminal
+ * continuation chip. QuoteCard increments depth before recursing.
  */
 @Composable
 internal fun ContentFlow(
