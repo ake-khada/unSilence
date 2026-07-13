@@ -28,7 +28,6 @@ import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
-import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.settings.SettingsStore
@@ -54,13 +53,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
-import com.vitorpamplona.quartz.nip10Notes.TextNoteEvent
-import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
-import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
-import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -142,16 +135,19 @@ enum class RelayPublishStatus { Pending, Accepted, Rejected, TimedOut }
 sealed interface SendState {
     data object Composing : SendState
     data class Confirming(
-        val isReply: Boolean,
-        val previewContent: String,
-        val previewTagsJson: String,
+        val payloadState: PublishPayloadState,
+        val payload: PublishPayload,
         val notifyCandidates: List<NotifyCandidate>,
         val notifyActive: Set<String>,
     ) : SendState
     data class Publishing(
         val statuses: Map<String, RelayPublishStatus>,
+        val confirmation: Confirming,
     ) : SendState
-    data class Failed(val reason: String) : SendState
+    data class Failed(
+        val reason: String,
+        val confirmation: Confirming,
+    ) : SendState
     data object Sent : SendState
 }
 
@@ -415,6 +411,10 @@ class ComposeViewModel @Inject constructor(
     private val _pendingEmojiInsert = MutableStateFlow<Pair<String, String>?>(null) // (blockId, text)
     val pendingEmojiInsert: StateFlow<Pair<String, String>?> = _pendingEmojiInsert.asStateFlow()
 
+    // Picker selections are payload data, not just editor text. Retain their URLs so
+    // an emoji-set hydration/replacement race cannot publish an untagged shortcode.
+    private val _selectedEmojiUrls = MutableStateFlow<Map<String, String>>(emptyMap())
+
     fun consumeEmojiInsert() { _pendingEmojiInsert.value = null }
 
     val resolvedEmojis: StateFlow<List<CustomEmoji>> =
@@ -435,7 +435,7 @@ class ComposeViewModel @Inject constructor(
     fun closeEmojiPicker() { _emojiPickerOpen.value = false }
 
     fun selectEmoji(emoji: CustomEmoji) {
-        val normalized = normalizeShortcode(emoji.shortcode) ?: run {
+        val normalized = normalizeComposeShortcode(emoji.shortcode) ?: run {
             closeEmojiPicker()
             return
         }
@@ -443,6 +443,7 @@ class ComposeViewModel @Inject constructor(
         val blockId = _focusedBlockId.value
             ?: _blocks.value.firstOrNull { it is ComposeBlock.Text }?.id
             ?: return
+        _selectedEmojiUrls.update { it + (normalized to emoji.url) }
         _pendingEmojiInsert.value = blockId to insertText
         closeEmojiPicker()
     }
@@ -487,6 +488,7 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun restoreDraft(draft: Draft) {
+        _selectedEmojiUrls.value = emptyMap()
         val restored = draft.blocks.map { block ->
             when (block) {
                 is DraftBlock.Text -> ComposeBlock.Text(block.content)
@@ -860,6 +862,7 @@ class ComposeViewModel @Inject constructor(
         _mentionQuery.value = ""
         _emojiPickerOpen.value = false
         _pendingEmojiInsert.value = null
+        _selectedEmojiUrls.value = emptyMap()
         _isSensitive.value = false
         _blocks.value = listOf(ComposeBlock.Text(""))
         _pollDraft.value = PollDraft()
@@ -1020,43 +1023,31 @@ class ComposeViewModel @Inject constructor(
         if (!canPublish.value) return
 
         val current = _blocks.value
-        val content = buildPreviewContent(current, isReply)
-        val tags = buildPreviewTags(current, isReply)
-        val tagsJsonStr = tagsToJson(tags.map { it.toList() })
-        val candidates = buildNotifyCandidates(current, isReply)
+        val payloadState = capturePublishPayloadState(
+            blocks = current,
+            isReply = isReply,
+            createdAt = System.currentTimeMillis() / 1000L,
+        ) ?: return
+        val candidates = buildNotifyCandidates(payloadState)
+        val active = candidates.mapTo(linkedSetOf()) { it.pubkey }
+        val activePayloadState = payloadState.copy(activeNotifyPubkeys = active)
 
         _sendState.value = SendState.Confirming(
-            isReply = isReply,
-            previewContent = content,
-            previewTagsJson = tagsJsonStr,
+            payloadState = activePayloadState,
+            payload = buildPublishPayload(activePayloadState),
             notifyCandidates = candidates,
-            notifyActive = candidates.map { it.pubkey }.toSet(),
+            notifyActive = active,
         )
     }
 
     fun confirmPublish() {
         val state = _sendState.value as? SendState.Confirming ?: return
-        when {
-            articleCommentTarget != null -> publishArticleComment(state.notifyActive)
-            state.isReply                -> publishReply(state.notifyActive)
-            _pollDraft.value.enabled     -> publishPoll(state.notifyActive)
-            else                         -> publishNote(state.notifyActive)
-        }
+        publishPayload(state)
     }
 
     fun retryPublish() {
         val state = _sendState.value as? SendState.Failed ?: return
-        // Re-enter Composing then re-request — blocks + reply/comment state intact
-        _sendState.value = SendState.Composing
-        val isReply = replyToEventId != null || replyToRow != null || articleCommentTarget != null
-        requestPublish(isReply)
-        val confirming = _sendState.value as? SendState.Confirming ?: return
-        when {
-            articleCommentTarget != null -> publishArticleComment(confirming.notifyActive)
-            confirming.isReply           -> publishReply(confirming.notifyActive)
-            _pollDraft.value.enabled     -> publishPoll(confirming.notifyActive)
-            else                         -> publishNote(confirming.notifyActive)
-        }
+        publishPayload(state.confirmation)
     }
 
     fun toggleNotify(pubkey: String) {
@@ -1065,43 +1056,138 @@ class ComposeViewModel @Inject constructor(
             state.notifyActive - pubkey
         else
             state.notifyActive + pubkey
-        _sendState.value = state.copy(notifyActive = newActive)
+        val updatedPayloadState = state.payloadState.copy(activeNotifyPubkeys = newActive)
+        _sendState.value = state.copy(
+            payloadState = updatedPayloadState,
+            payload = buildPublishPayload(updatedPayloadState),
+            notifyActive = newActive,
+        )
+    }
+
+    private fun capturePublishPayloadState(
+        blocks: List<ComposeBlock>,
+        isReply: Boolean,
+        createdAt: Long,
+    ): PublishPayloadState? {
+        val publishBlocks = blocks.mapNotNull { block ->
+            when (block) {
+                is ComposeBlock.Text -> PublishBlock.Text(block.content)
+                is ComposeBlock.Attachment -> {
+                    val blob = (block.state as? AttachmentState.Uploaded)?.blob
+                        ?: return@mapNotNull null
+                    PublishBlock.Media(
+                        PublishMedia(
+                            url = blob.url,
+                            mimeType = blob.mimeType,
+                            sha256 = blob.sha256,
+                            sizeBytes = blob.sizeBytes,
+                            width = blob.dimensions?.first,
+                            height = blob.dimensions?.second,
+                            blurhash = blob.blurhash,
+                            thumbnailUrl = blob.thumbnailUrl,
+                            durationMs = blob.durationMs,
+                        )
+                    )
+                }
+            }
+        }
+
+        val target = when {
+            articleCommentTarget != null -> PublishTarget.ArticleComment(articleCommentTarget!!)
+            isReply -> {
+                val parent = replyToRow ?: return null
+                PublishTarget.Reply(
+                    rootEventId = parent.rootId ?: parent.id,
+                    parentEventId = parent.id,
+                    parentPubkey = parent.pubkey,
+                )
+            }
+            _pollDraft.value.enabled -> {
+                val poll = _pollDraft.value
+                PublishTarget.Poll(
+                    PublishPoll(
+                        options = poll.options.map { PublishPollOption(it.id, it.label) },
+                        responseRelays = pollResponseRelays(),
+                        multipleChoice = poll.multipleChoice,
+                        durationSeconds = poll.durationSeconds,
+                    )
+                )
+            }
+            else -> {
+                val quote = quoteEventId?.let { eventId ->
+                    val author = quoteRow?.pubkey
+                    val hint = quoteRelayHintRaw(eventId)
+                    val normalizedHint = hint.takeIf { it.isNotBlank() }?.let {
+                        runCatching {
+                            com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer.normalize(it)
+                        }.getOrNull()
+                    }
+                    val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
+                        .create(eventId, author, null, normalizedHint)
+                    PublishQuote(
+                        eventId = eventId,
+                        authorPubkey = author,
+                        relayHint = hint,
+                        inlineReference = "nostr:$nevent",
+                    )
+                }
+                PublishTarget.Note(quote)
+            }
+        }
+
+        val knownEmojis = buildList {
+            addAll(pubkeyHex?.let(memoryEventStore::resolvedEmojisFor).orEmpty())
+            // This is the same hydrated snapshot currently rendered by the picker.
+            addAll(resolvedEmojis.value)
+        }
+        val customEmojis = composeEmojiUrls(
+            knownEmojis = knownEmojis,
+            selectedEmojis = _selectedEmojiUrls.value,
+        )
+
+        return PublishPayloadState(
+            createdAt = createdAt,
+            blocks = publishBlocks,
+            target = target,
+            mentionPubkeys = extractPublishMentionPubkeys(publishContent(publishBlocks)),
+            activeNotifyPubkeys = emptySet(),
+            customEmojis = customEmojis,
+            isSensitive = _isSensitive.value,
+        )
     }
 
     private fun buildNotifyCandidates(
-        blocks: List<ComposeBlock>,
-        isReply: Boolean,
+        state: PublishPayloadState,
     ): List<NotifyCandidate> {
         val ownPubkey = pubkeyHex ?: ""
         val candidates = mutableListOf<NotifyCandidate>()
         val seen = mutableSetOf(ownPubkey)
 
-        val articleComment = articleCommentTarget
-        if (articleComment != null) {
-            // NIP-22 P/p (article author + parent author) are protocol-mandated and
-            // ALWAYS published — they're not optional toggles, so don't list them
-            // (listing would let the user "turn off" a tag we still send → a lie).
-            seen.add(articleComment.articlePubkey)
-            articleComment.parentPubkey?.let { seen.add(it) }
-        } else if (isReply) {
-            val parent = replyToRow
-            if (parent != null && parent.pubkey !in seen) {
-                candidates.add(buildCandidate(parent.pubkey, NotifySource.ReplyParent))
-                seen.add(parent.pubkey)
+        when (val target = state.target) {
+            is PublishTarget.ArticleComment -> {
+                // NIP-22 P/p tags are protocol-mandated and are not user toggles.
+                seen += target.target.articlePubkey
+                target.target.parentPubkey?.let(seen::add)
             }
-        } else {
-            val quoted = quoteRow?.pubkey
-            if (quoted != null && quoted !in seen) {
-                candidates.add(buildCandidate(quoted, NotifySource.QuoteAuthor))
-                seen.add(quoted)
+            is PublishTarget.Reply -> {
+                if (target.parentPubkey !in seen) {
+                    candidates += buildCandidate(target.parentPubkey, NotifySource.ReplyParent)
+                    seen += target.parentPubkey
+                }
             }
+            is PublishTarget.Note -> target.quote?.authorPubkey?.let { quoted ->
+                if (quoted !in seen) {
+                    candidates += buildCandidate(quoted, NotifySource.QuoteAuthor)
+                    seen += quoted
+                }
+            }
+            is PublishTarget.Poll -> Unit
         }
 
-        val content = blocksToContent(blocks)
-        extractMentionPubkeys(content).forEach { pk ->
+        state.mentionPubkeys.forEach { pk ->
             if (pk !in seen) {
-                candidates.add(buildCandidate(pk, NotifySource.Mention))
-                seen.add(pk)
+                candidates += buildCandidate(pk, NotifySource.Mention)
+                seen += pk
             }
         }
         return candidates
@@ -1131,95 +1217,7 @@ class ComposeViewModel @Inject constructor(
             ?: memoryEventStore.relayHintsForEvent(qId).firstOrNull()
             ?: ""
 
-    /** Same hint as a Quartz NormalizedRelayUrl for the inline nostr:nevent
-     *  builder; null when absent or unparseable (normalize can throw). */
-    private fun quoteRelayHintNormalized(qId: String): com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl? =
-        quoteRelayHintRaw(qId).takeIf { it.isNotBlank() }?.let {
-            runCatching {
-                com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer.normalize(it)
-            }.getOrNull()
-        }
-
-    private fun buildPreviewContent(blocks: List<ComposeBlock>, isReply: Boolean): String {
-        // Article comments carry their reference in tags (NIP-22), not inline.
-        if (articleCommentTarget != null) return blocksToContent(blocks)
-        var content = blocksToContent(blocks)
-        val qId = quoteEventId
-        val quotedAuthor = quoteRow?.pubkey
-        if (!isReply && qId != null) {
-            val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
-                .create(qId, quotedAuthor, null, quoteRelayHintNormalized(qId))
-            content = if (content.isBlank()) "nostr:$nevent"
-                else "$content\n\nnostr:$nevent"
-        }
-        return content
-    }
-
-    private fun buildPreviewTags(blocks: List<ComposeBlock>, isReply: Boolean): List<Array<String>> {
-        val tags = mutableListOf<Array<String>>()
-        val existingPTags = mutableSetOf<String>()
-        tags.addAll(blocksToImetaTags(blocks))
-        if (!isReply && _pollDraft.value.enabled) {
-            tags.addAll(buildPollTags(_pollDraft.value))
-        }
-        articleCommentTarget?.let { target ->
-            // NIP-22 kind-1111 article comment tags.
-            tags.addAll(Nip22Tags.articleComment(target))
-            existingPTags.add(target.articlePubkey)
-            target.parentPubkey?.let { existingPTags.add(it) }
-            val content = blocksToContent(blocks)
-            extractMentionPubkeys(content).forEach { pk -> if (pk !in existingPTags) tags.add(arrayOf("p", pk)) }
-            tags.addAll(extractEmojiTags(content))
-            tags.addAll(extractHashtags(content))
-            if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
-            return tags
-        }
-        if (isReply) {
-            val parent = replyToRow ?: return tags
-            val threadRootId = parent.rootId ?: parent.id
-            tags.add(arrayOf("e", threadRootId, "", "root"))
-            if (parent.id != threadRootId) {
-                tags.add(arrayOf("e", parent.id, "", "reply"))
-            }
-            tags.add(arrayOf("p", parent.pubkey))
-            existingPTags.add(parent.pubkey)
-        } else {
-            val qId = quoteEventId
-            val quotedAuthor = quoteRow?.pubkey
-            if (qId != null) {
-                tags.add(arrayOf("q", qId, quoteRelayHintRaw(qId), quotedAuthor ?: ""))
-                if (quotedAuthor != null) {
-                    tags.add(arrayOf("p", quotedAuthor))
-                    existingPTags.add(quotedAuthor)
-                }
-            }
-        }
-        // Add p-tags for @mentions in content
-        val content = blocksToContent(blocks)
-        extractMentionPubkeys(content).forEach { pk ->
-            if (pk !in existingPTags) tags.add(arrayOf("p", pk))
-        }
-        // Add emoji tags for :shortcode: tokens
-        tags.addAll(extractEmojiTags(content))
-        // Add t-tags for #hashtags (NIP-12)
-        tags.addAll(extractHashtags(content))
-        if (_isSensitive.value) tags.add(arrayOf("content-warning", ""))
-        return tags
-    }
-
     // ── Publishing ──────────────────────────────────────────────────────────
-
-    private fun buildPollTags(
-        poll: PollDraft,
-        createdAt: Long = System.currentTimeMillis() / 1000L,
-    ): List<Array<String>> = buildList {
-        poll.options.filter { it.label.isNotBlank() }.take(10).forEach { option ->
-            add(arrayOf("option", option.id, option.label.trim()))
-        }
-        pollResponseRelays().forEach { add(arrayOf("relay", it)) }
-        add(arrayOf("polltype", if (poll.multipleChoice) "multiplechoice" else "singlechoice"))
-        poll.durationSeconds?.let { add(arrayOf("endsAt", (createdAt + it).toString())) }
-    }
 
     private fun pollResponseRelays(): List<String> {
         val ownPk = pubkeyHex.orEmpty()
@@ -1230,97 +1228,25 @@ class ComposeViewModel @Inject constructor(
             .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS.take(6) }
     }
 
-    private fun publishPoll(activeNotifyPubkeys: Set<String>) {
+    private fun publishPayload(confirmation: SendState.Confirming) {
         publishError = null
         viewModelScope.launch {
-            val current = _blocks.value
-            val poll = _pollDraft.value
-            val finalContent = blocksToContent(current)
-            val createdAt = System.currentTimeMillis() / 1000L
-            val tagList = buildList {
-                addAll(buildPollTags(poll, createdAt))
-                addAll(blocksToImetaTags(current))
-                extractMentionPubkeys(finalContent).forEach { pk ->
-                    if (pk in activeNotifyPubkeys) add(arrayOf("p", pk))
-                }
-                addAll(extractEmojiTags(finalContent))
-                addAll(extractHashtags(finalContent))
-                if (_isSensitive.value) add(arrayOf("content-warning", ""))
-            }
-            val signed = signingManager.sign(EventTemplate<Event>(
-                createdAt = createdAt,
-                kind = 1068,
-                tags = tagList.toTypedArray(),
-                content = finalContent,
-            )) ?: run {
-                _sendState.value = SendState.Failed("Signing failed - check your key or Amber connection")
+            val payload = confirmation.payload
+            val signed = signingManager.sign(payload.toEventTemplate()) ?: run {
+                _sendState.value = SendState.Failed(
+                    reason = "Signing failed - check your key or Amber connection",
+                    confirmation = confirmation,
+                )
                 return@launch
             }
 
-            publishAndTrack(signed.id, toEventJson(signed), null, null) {
-                val parsedTags = signed.tags.map { it.toList() }
-                memoryEventStore.insert(NostrEvent(
-                    id = signed.id,
-                    pubkey = signed.pubKey,
-                    kind = signed.kind,
-                    content = signed.content,
-                    createdAt = signed.createdAt,
-                    tags = parsedTags,
-                    tagsJson = tagsToJson(parsedTags),
-                    sig = signed.sig,
-                    relayUrl = "local",
-                    replyToId = null,
-                    rootId = null,
-                    hasContentWarning = _isSensitive.value,
-                    contentWarningReason = null,
-                    firstSeenAt = System.currentTimeMillis(),
-                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                ))
-                relayPool.refreshOwnNotificationSubscription(signed.pubKey)
-            }
-        }
-    }
-
-    private fun publishReply(activeNotifyPubkeys: Set<String>) {
-        val parent = replyToRow ?: return
-        publishError = null
-        viewModelScope.launch {
-            val current = _blocks.value
-            val threadRootId = parent.rootId ?: parent.id
-            val replyToId = parent.id
-            val replyToPubkey = parent.pubkey
-
-            val finalContent = blocksToContent(current)
-            val imetaTags = blocksToImetaTags(current)
-
-            val mentionPubkeys = extractMentionPubkeys(finalContent)
-            val emojiTags = extractEmojiTags(finalContent)
-            val hashtagTags = extractHashtags(finalContent)
-            val template = TextNoteEvent.build(note = finalContent, createdAt = System.currentTimeMillis() / 1000L) {
-                add(arrayOf("e", threadRootId, "", "root"))
-                if (replyToId != threadRootId) {
-                    add(arrayOf("e", replyToId, "", "reply"))
-                }
-                if (replyToPubkey in activeNotifyPubkeys) {
-                    add(arrayOf("p", replyToPubkey))
-                }
-                mentionPubkeys.forEach { pk ->
-                    if (pk != replyToPubkey && pk in activeNotifyPubkeys) {
-                        add(arrayOf("p", pk))
-                    }
-                }
-                imetaTags.forEach { add(it) }
-                emojiTags.forEach { add(it) }
-                hashtagTags.forEach { add(it) }
-                if (_isSensitive.value) add(arrayOf("content-warning", ""))
-            }
-            val signed = signingManager.sign(template) ?: run {
-                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
-                return@launch
-            }
-
-            val eventJson = toEventJson(signed)
-            publishAndTrack(signed.id, eventJson, replyToId, threadRootId) {
+            publishAndTrack(
+                eventId = signed.id,
+                eventJson = toEventJson(signed),
+                replyToId = payload.replyToId,
+                rootId = payload.rootId,
+                confirmation = confirmation,
+            ) {
                 val nowMs = System.currentTimeMillis()
                 val parsedTags = signed.tags.map { it.toList() }
                 memoryEventStore.insert(
@@ -1334,155 +1260,17 @@ class ComposeViewModel @Inject constructor(
                         tagsJson = tagsToJson(parsedTags),
                         sig = signed.sig,
                         relayUrl = "local",
-                        replyToId = replyToId,
-                        rootId = threadRootId,
-                        hasContentWarning = _isSensitive.value,
+                        replyToId = payload.replyToId,
+                        rootId = payload.rootId,
+                        hasContentWarning = payload.hasContentWarning,
                         contentWarningReason = null,
                         firstSeenAt = nowMs,
                         relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
                     )
                 )
-            }
-        }
-    }
-
-    /** Publish a NIP-22 (kind-1111) comment on a long-form article. Distinct from
-     *  publishReply (kind-1 #e replies) — article comments use A/K/P + a/e/k/p. */
-    private fun publishArticleComment(activeNotifyPubkeys: Set<String>) {
-        val target = articleCommentTarget ?: return
-        publishError = null
-        viewModelScope.launch {
-            val current = _blocks.value
-            val finalContent = blocksToContent(current)
-            val imetaTags = blocksToImetaTags(current)
-            val mentionPubkeys = extractMentionPubkeys(finalContent)
-            val emojiTags = extractEmojiTags(finalContent)
-            val hashtagTags = extractHashtags(finalContent)
-
-            val protocolPTags = buildSet {
-                add(target.articlePubkey)
-                target.parentPubkey?.let { add(it) }
-            }
-            val tagList = buildList {
-                addAll(Nip22Tags.articleComment(target))   // A/K/P + a/e/k/p (protocol)
-                addAll(imetaTags)
-                mentionPubkeys.forEach { pk ->
-                    if (pk !in protocolPTags && pk in activeNotifyPubkeys) add(arrayOf("p", pk))
+                if (payload.kind == 1068) {
+                    relayPool.refreshOwnNotificationSubscription(signed.pubKey)
                 }
-                emojiTags.forEach { add(it) }
-                hashtagTags.forEach { add(it) }
-                if (_isSensitive.value) add(arrayOf("content-warning", ""))
-            }
-
-            val template = EventTemplate<Event>(
-                createdAt = System.currentTimeMillis() / 1000L,
-                kind      = 1111,
-                tags      = tagList.toTypedArray(),
-                content   = finalContent,
-            )
-            val signed = signingManager.sign(template) ?: run {
-                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
-                return@launch
-            }
-
-            // rootId = article (the thread root); replyToId = parent comment, or the
-            // article for a top-level comment — so MES threads + the comment list update.
-            val rootId = target.articleId
-            val replyToId = target.parentId ?: target.articleId
-            val eventJson = toEventJson(signed)
-            publishAndTrack(signed.id, eventJson, replyToId, rootId) {
-                val nowMs = System.currentTimeMillis()
-                val parsedTags = signed.tags.map { it.toList() }
-                memoryEventStore.insert(
-                    NostrEvent(
-                        id = signed.id,
-                        pubkey = signed.pubKey,
-                        kind = signed.kind,
-                        content = signed.content,
-                        createdAt = signed.createdAt,
-                        tags = parsedTags,
-                        tagsJson = tagsToJson(parsedTags),
-                        sig = signed.sig,
-                        relayUrl = "local",
-                        replyToId = replyToId,
-                        rootId = rootId,
-                        hasContentWarning = _isSensitive.value,
-                        contentWarningReason = null,
-                        firstSeenAt = nowMs,
-                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                    )
-                )
-            }
-        }
-    }
-
-    private fun publishNote(activeNotifyPubkeys: Set<String>) {
-        publishError = null
-        viewModelScope.launch {
-            val current = _blocks.value
-            var finalContent = blocksToContent(current)
-            val imetaTags = blocksToImetaTags(current)
-
-            // Append nostr:nevent reference for quote posts
-            val qId = quoteEventId
-            val quotedAuthor = quoteRow?.pubkey
-            if (qId != null) {
-                val nevent = com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
-                    .create(qId, quotedAuthor, null, quoteRelayHintNormalized(qId))
-                finalContent = if (finalContent.isBlank()) "nostr:$nevent"
-                    else "$finalContent\n\nnostr:$nevent"
-            }
-
-            val mentionPubkeys = extractMentionPubkeys(finalContent)
-            val emojiTags = extractEmojiTags(finalContent)
-            val hashtagTags = extractHashtags(finalContent)
-            val existingPTags = mutableSetOf<String>()
-            val template = TextNoteEvent.build(note = finalContent) {
-                imetaTags.forEach { add(it) }
-                if (qId != null) {
-                    add(arrayOf("q", qId, quoteRelayHintRaw(qId), quotedAuthor ?: ""))
-                    if (quotedAuthor != null && quotedAuthor in activeNotifyPubkeys) {
-                        add(arrayOf("p", quotedAuthor))
-                        existingPTags.add(quotedAuthor)
-                    }
-                }
-                mentionPubkeys.forEach { pk ->
-                    if (pk !in existingPTags && pk in activeNotifyPubkeys) {
-                        add(arrayOf("p", pk))
-                    }
-                }
-                emojiTags.forEach { add(it) }
-                hashtagTags.forEach { add(it) }
-                if (_isSensitive.value) add(arrayOf("content-warning", ""))
-            }
-            val signed = signingManager.sign(template) ?: run {
-                _sendState.value = SendState.Failed("Signing failed — check your key or Amber connection")
-                return@launch
-            }
-
-            val eventJson = toEventJson(signed)
-            publishAndTrack(signed.id, eventJson, null, null) {
-                val nowMs = System.currentTimeMillis()
-                val parsedTags = signed.tags.map { it.toList() }
-                memoryEventStore.insert(
-                    NostrEvent(
-                        id = signed.id,
-                        pubkey = signed.pubKey,
-                        kind = signed.kind,
-                        content = signed.content,
-                        createdAt = signed.createdAt,
-                        tags = parsedTags,
-                        tagsJson = tagsToJson(parsedTags),
-                        sig = signed.sig,
-                        relayUrl = "local",
-                        replyToId = null,
-                        rootId = null,
-                        hasContentWarning = _isSensitive.value,
-                        contentWarningReason = null,
-                        firstSeenAt = nowMs,
-                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                    )
-                )
             }
         }
     }
@@ -1496,6 +1284,7 @@ class ComposeViewModel @Inject constructor(
         eventJson: String,
         replyToId: String?,
         rootId: String?,
+        confirmation: SendState.Confirming,
         insertIntoMes: suspend () -> Unit,
     ) {
         val ownPk = pubkeyHex ?: ""
@@ -1512,7 +1301,10 @@ class ComposeViewModel @Inject constructor(
         // Enter Publishing state with all relays Pending
         val statusMap = ConcurrentHashMap<String, RelayPublishStatus>()
         writeRelays.forEach { statusMap[it] = RelayPublishStatus.Pending }
-        _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+        _sendState.value = SendState.Publishing(
+            statuses = HashMap(statusMap),
+            confirmation = confirmation,
+        )
 
         // Register OK callback before sending
         relayPool.registerPublishCallback(eventId) { relayUrl, success, message ->
@@ -1523,7 +1315,10 @@ class ComposeViewModel @Inject constructor(
                 (if (!statusMap.containsKey(key)) " (non-target relay)" else ""))
             if (statusMap.containsKey(key)) {
                 statusMap[key] = if (success) RelayPublishStatus.Accepted else RelayPublishStatus.Rejected
-                _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+                _sendState.value = SendState.Publishing(
+                    statuses = HashMap(statusMap),
+                    confirmation = confirmation,
+                )
             }
         }
 
@@ -1552,7 +1347,10 @@ class ComposeViewModel @Inject constructor(
                     statusMap[url] = RelayPublishStatus.TimedOut
                 }
             }
-            _sendState.value = SendState.Publishing(statuses = HashMap(statusMap))
+            _sendState.value = SendState.Publishing(
+                statuses = HashMap(statusMap),
+                confirmation = confirmation,
+            )
 
             val acceptedCount = statusMap.values.count { it == RelayPublishStatus.Accepted }
             Log.w(TAG, "PUBLISH verdict: $acceptedCount/${writeRelays.size} accepted " +
@@ -1562,134 +1360,19 @@ class ComposeViewModel @Inject constructor(
                 // Brief pause to show final state
                 delay(800)
                 _blocks.value = listOf(ComposeBlock.Text(""))
+                _selectedEmojiUrls.value = emptyMap()
                 _pollDraft.value = PollDraft()
                 published = true
                 _sendState.value = SendState.Sent
             } else {
-                _sendState.value = SendState.Failed("No relays accepted the event")
+                _sendState.value = SendState.Failed(
+                    reason = "No relays accepted the event",
+                    confirmation = confirmation,
+                )
             }
         } finally {
             relayPool.unregisterPublishCallback(eventId)
         }
     }
 
-    // ── Block → content/tags ────────────────────────────────────────────────
-
-    private fun blocksToContent(blocks: List<ComposeBlock>): String {
-        val parts = blocks.mapNotNull { block ->
-            when (block) {
-                is ComposeBlock.Text ->
-                    block.content.takeIf { it.isNotBlank() }
-                is ComposeBlock.Attachment ->
-                    (block.state as? AttachmentState.Uploaded)?.blob?.url
-            }
-        }
-        return parts.joinToString("\n\n")
-    }
-
-    private val NOSTR_MENTION_REGEX = Regex("nostr:n(?:pub|profile)1[a-z0-9]+", RegexOption.IGNORE_CASE)
-
-    /** Extract pubkeys from nostr:npub/nprofile URIs in content text. */
-    private fun extractMentionPubkeys(content: String): Set<String> {
-        val pubkeys = mutableSetOf<String>()
-        NOSTR_MENTION_REGEX.findAll(content).forEach { match ->
-            val bech32 = match.value.removePrefix("nostr:")
-            runCatching {
-                when (val entity = Nip19Parser.uriToRoute(bech32)?.entity) {
-                    is NPub -> pubkeys.add(entity.hex)
-                    is NProfile -> pubkeys.add(entity.hex)
-                    else -> {}
-                }
-            }
-        }
-        return pubkeys
-    }
-
-    /** Extract ["emoji", shortcode, url] tags for resolved :shortcode: tokens in content. */
-    private fun extractEmojiTags(content: String): List<Array<String>> {
-        val pk = pubkeyHex ?: return emptyList()
-        val resolved = memoryEventStore.resolvedEmojisFor(pk)
-        if (resolved.isEmpty()) return emptyList()
-        // Key by normalized shortcode so content tokens (already normalized
-        // at insert time) match against the original emoji set.
-        val byNormalized = resolved
-            .mapNotNull { emoji ->
-                normalizeShortcode(emoji.shortcode)?.let { norm -> norm to emoji }
-            }
-            .toMap()
-        val tags = mutableListOf<Array<String>>()
-        val seen = mutableSetOf<String>()
-        var i = 0
-        while (i < content.length) {
-            if (content[i] == ':' && i + 2 < content.length) {
-                val end = content.indexOf(':', i + 1)
-                if (end > i + 1) {
-                    val shortcode = content.substring(i + 1, end)
-                    val emoji = byNormalized[shortcode]
-                    if (emoji != null && seen.add(shortcode)) {
-                        tags.add(arrayOf("emoji", shortcode, emoji.url))
-                    }
-                    i = end + 1
-                    continue
-                }
-            }
-            i++
-        }
-        return tags
-    }
-
-    /** NIP-30 requires shortcodes to be [a-zA-Z0-9_]+. Normalize by
-     *  replacing whitespace/hyphens/dots with underscores and stripping
-     *  all other non-conforming chars. Empty result returns null. */
-    private fun normalizeShortcode(raw: String): String? {
-        val normalized = buildString {
-            for (c in raw) {
-                when {
-                    c.isLetterOrDigit() -> append(c)
-                    c.isWhitespace() || c == '-' || c == '.' || c == '_' -> append('_')
-                    // Drop everything else (punctuation, emoji, etc.)
-                }
-            }
-        }
-        return normalized.takeIf { it.isNotEmpty() }
-    }
-
-    /**
-     * Extract ["t", value] tags for NIP-12 hashtags in content.
-     * Shares the structural tokenizer with ContentParser so URL-fragment
-     * exclusion is consistent between display and publish.
-     * Values are lowercased per NIP-12 convention and deduplicated.
-     */
-    private fun extractHashtags(content: String): List<Array<String>> {
-        val seen = mutableSetOf<String>()
-        val tags = mutableListOf<Array<String>>()
-        for ((_, _, tag) in ContentParser.findHashtags(content)) {
-            val lower = tag.lowercase()
-            if (seen.add(lower)) {
-                tags.add(arrayOf("t", lower))
-            }
-        }
-        return tags
-    }
-
-    private fun blocksToImetaTags(blocks: List<ComposeBlock>): List<Array<String>> {
-        return blocks
-            .filterIsInstance<ComposeBlock.Attachment>()
-            .mapNotNull { (it.state as? AttachmentState.Uploaded)?.blob }
-            .map { blob ->
-                buildList {
-                    add("imeta")
-                    add("url ${blob.url}")
-                    add("m ${blob.mimeType}")
-                    add("x ${blob.sha256}")
-                    add("size ${blob.sizeBytes}")
-                    blob.dimensions?.let { (w, h) -> add("dim ${w}x${h}") }
-                    blob.blurhash?.let { add("blurhash $it") }
-                    blob.thumbnailUrl?.let { add("thumb $it") }
-                    blob.durationMs?.let { ms ->
-                        if (ms > 0) add("duration ${ms / 1000}")
-                    }
-                }.toTypedArray()
-            }
-    }
 }

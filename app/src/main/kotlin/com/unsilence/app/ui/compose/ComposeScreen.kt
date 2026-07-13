@@ -272,7 +272,7 @@ fun ComposeScreen(
             }
 
             // ── Reply context strip (cyan left border) ────────────────────────
-            if (isReply && replyToRow != null) {
+            if (isReply && replyToRow != null && !isConfirming) {
                 val parentName = replyToRow.authorDisplayName?.takeIf { it.isNotBlank() }
                     ?: replyToRow.authorName?.takeIf { it.isNotBlank() }
                     ?: "${replyToRow.pubkey.take(6)}…${replyToRow.pubkey.takeLast(4)}"
@@ -676,20 +676,20 @@ fun ComposeScreen(
                 }
 
                 is SendState.Confirming -> {
-                    // ── Preview via ContentFlow ─────────────────────────────
-                    val previewModel = remember(state) {
+                    // The card renders the exact immutable payload that will be signed.
+                    val previewModel = remember(state.payload) {
                         runCatching {
                             ContentParser.parse(
                                 id = "preview",
                                 pubkey = pubkeyHex ?: "",
-                                kind = if (pollDraft.enabled) 1068 else 1,
-                                content = state.previewContent,
-                                tagsJson = state.previewTagsJson,
-                                createdAt = System.currentTimeMillis() / 1000,
+                                kind = state.payload.kind,
+                                content = state.payload.content,
+                                tagsJson = state.payload.tagsJson(),
+                                createdAt = state.payload.createdAt,
                                 relayUrl = "",
-                                replyToId = effectiveReplyToEventId,
-                                rootId = null,
-                                hasContentWarning = false,
+                                replyToId = state.payload.replyToId,
+                                rootId = state.payload.rootId,
+                                hasContentWarning = state.payload.hasContentWarning,
                                 contentWarningReason = null,
                             )
                         }.getOrNull()
@@ -701,7 +701,37 @@ fun ComposeScreen(
                             .weight(1f)
                             .verticalScroll(rememberScrollState()),
                     ) {
-                        if (isSensitive) {
+                        state.payload.threadedReplyTargetId()?.let {
+                            val replyPubkey = when (val target = state.payloadState.target) {
+                                is PublishTarget.Reply -> target.parentPubkey
+                                is PublishTarget.ArticleComment ->
+                                    target.target.parentPubkey ?: target.target.articlePubkey
+                                else -> null
+                            }
+                            val replyName = replyToRow?.let { parent ->
+                                parent.authorDisplayName?.takeIf(String::isNotBlank)
+                                    ?: parent.authorName?.takeIf(String::isNotBlank)
+                                    ?: "${parent.pubkey.take(6)}…${parent.pubkey.takeLast(4)}"
+                            } ?: state.notifyCandidates
+                                .firstOrNull { it.source == NotifySource.ReplyParent }
+                                ?.displayName
+                                ?.takeIf(String::isNotBlank)
+                                ?: replyPubkey?.let { "${it.take(6)}…${it.takeLast(4)}" }
+                                ?: "note"
+                            Text(
+                                text = "Replying to @${replyName.removePrefix("@")}",
+                                color = BrandDeep,
+                                fontSize = AppType.caption,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(
+                                    horizontal = Spacing.medium,
+                                    vertical = Spacing.small,
+                                ),
+                            )
+                        }
+                        if (state.payload.hasContentWarning) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
