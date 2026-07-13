@@ -160,7 +160,7 @@ fun SearchScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
-    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
+    val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
 
     // ── Action failure snackbar ──────────────────────────────────────────────
     LaunchedEffect(Unit) {

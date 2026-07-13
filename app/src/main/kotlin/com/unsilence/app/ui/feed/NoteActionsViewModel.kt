@@ -52,6 +52,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -301,6 +302,14 @@ class NoteActionsViewModel @Inject constructor(
     /** Pinned emoji shortcodes (DataStore-backed). */
     val pinnedEmojiShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
 
+    /** Reacts to both pin changes and late kind-30030/10030 emoji-set hydration. */
+    val pinnedEmojis: StateFlow<List<CustomEmoji>> = pubkeyHex?.let { pk ->
+        pinnedEmojisFlow(
+            pinnedShortcodes = settingsStore.pinnedEmojiShortcodes,
+            resolvedEmojis = memoryEventStore.resolvedEmojisFlow(pk),
+        ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    } ?: MutableStateFlow(emptyList())
+
     /** Toggle pin state for a shortcode. */
     fun togglePinnedEmoji(shortcode: String) {
         viewModelScope.launch {
@@ -310,24 +319,19 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
-    /** Resolve pinned shortcodes to full CustomEmoji objects (for quick strip). */
-    fun getPinnedEmojis(): List<CustomEmoji> {
-        val pinned = settingsStore.pinnedEmojiShortcodes.value
-        if (pinned.isEmpty()) return emptyList()
-        val all = getSubscribedEmojis()
-        val byShortcode = all.associateBy { it.shortcode }
-        return pinned.mapNotNull { byShortcode[it] }
-    }
-
     /**
      * Set of event IDs the current user has reacted to.
      * MES re-emits via _actionSignal on every kind-7 insert.
      */
-    val reactedEventIds: StateFlow<Set<String>> =
+    private val storedReactedEventIds: StateFlow<Set<String>> =
         pubkeyHex?.let { pk ->
             memoryEventStore.reactedEventIdsFlow(pk)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
         } ?: MutableStateFlow(emptySet())
+    private val pendingReactionIds = MutableStateFlow<Set<String>>(emptySet())
+    val reactedEventIds: StateFlow<Set<String>> =
+        combine(storedReactedEventIds, pendingReactionIds) { stored, pending -> stored + pending }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     /**
      * Set of event IDs the current user has reposted.
@@ -441,8 +445,14 @@ class NoteActionsViewModel @Inject constructor(
         emoji: String = "+",
         customEmojiUrl: String? = null,
     ) {
+        val defaultReaction = emoji == "+" && customEmojiUrl == null
+        if (defaultReaction && eventId in pendingReactionIds.value) return
+        val addingDefaultReaction = defaultReaction && !hasOwnReactionForTarget(eventId)
+        if (addingDefaultReaction) {
+            pendingReactionIds.value = pendingReactionIds.value + eventId
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            if (emoji == "+" && customEmojiUrl == null && hasOwnReactionForTarget(eventId)) {
+            if (defaultReaction && !addingDefaultReaction && hasOwnReactionForTarget(eventId)) {
                 deleteOwnReaction(eventId, eventPubkey)
                 return@launch
             }
@@ -465,15 +475,27 @@ class NoteActionsViewModel @Inject constructor(
                 content   = emoji,
             )
             val signed = signingManager.sign(template) ?: run {
+                if (addingDefaultReaction) {
+                    pendingReactionIds.value = pendingReactionIds.value - eventId
+                }
                 _actionError.tryEmit("React failed — signing rejected (check Amber permissions)")
                 return@launch
             }
 
-            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, null))
-
             // Optimistic insert → MES actor-index updates → reactedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed))
             snapshotScheduler.scheduleImmediate()
+            if (addingDefaultReaction) clearPendingReactionWhenStored(eventId)
+            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, null))
+        }
+    }
+
+    private fun clearPendingReactionWhenStored(eventId: String) {
+        viewModelScope.launch {
+            withTimeoutOrNull(2_000L) {
+                storedReactedEventIds.filter { eventId in it }.first()
+            }
+            pendingReactionIds.value = pendingReactionIds.value - eventId
         }
     }
 
@@ -524,11 +546,10 @@ class NoteActionsViewModel @Inject constructor(
                 return@launch
             }
 
-            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, relayHint))
-
             // Optimistic insert → MES actor-index updates → repostedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
             snapshotScheduler.scheduleImmediate()
+            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, relayHint))
         }
     }
 
@@ -637,9 +658,9 @@ class NoteActionsViewModel @Inject constructor(
             return
         }
 
-        relayPool.publish(toEventJson(signed), relayTargets)
         memoryEventStore.insert(signedEventToNostrEvent(signed))
         snapshotScheduler.scheduleImmediate()
+        relayPool.publish(toEventJson(signed), relayTargets)
     }
 
     fun zap(eventId: String, eventPubkey: String, relayUrl: String, request: ZapRequest) {

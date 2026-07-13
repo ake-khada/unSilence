@@ -161,9 +161,7 @@ fun FeedScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
-    // Keep one immutable list instance until the pin set actually changes.
-    // A fresh list on unrelated screen recompositions invalidates every card.
-    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
+    val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
 
     // ── Action failure snackbar ──────────────────────────────────────────────
     LaunchedEffect(Unit) {

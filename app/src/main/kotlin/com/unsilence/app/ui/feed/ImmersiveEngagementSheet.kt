@@ -109,7 +109,7 @@ internal fun ImmersiveEngagementSheet(
     val authorProfile = collectProfileAsState(model.pubkey, callbacks.profileFlow)
     val zapEnabled = authorProfile == null || !authorProfile.lud16.isNullOrBlank()
     var drawerOpen by remember(model.engagementId) { mutableStateOf(false) }
-    val pinnedEmojis = remember(callbacks) { callbacks.pinnedEmojis() }
+    val pinnedEmojis = callbacks.pinnedEmojis()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

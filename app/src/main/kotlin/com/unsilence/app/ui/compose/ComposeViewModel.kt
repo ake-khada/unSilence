@@ -1488,8 +1488,8 @@ class ComposeViewModel @Inject constructor(
     }
 
     /**
-     * Shared publish-and-track: broadcasts to write relays, enters Publishing state,
-     * tracks per-relay OK responses with 6s timeout, then inserts into MES on success.
+     * Shared publish-and-track: inserts the signed event locally first, then publishes
+     * to write relays and tracks per-relay OK responses with a 6s timeout.
      */
     private suspend fun publishAndTrack(
         eventId: String,
@@ -1528,6 +1528,10 @@ class ComposeViewModel @Inject constructor(
         }
 
         try {
+            // The signature is authoritative local data. Insert before any network wait so
+            // feed/thread flows update immediately; relay failure remains surfaced below.
+            withContext(Dispatchers.IO) { insertIntoMes() }
+
             // Publish to the user's own write relays only — connectAndAwait handles any
             // that aren't open (bypassing the degraded defer, explicit user intent). No
             // more spraying note content to every open socket. (H20c)
@@ -1554,8 +1558,6 @@ class ComposeViewModel @Inject constructor(
             Log.w(TAG, "PUBLISH verdict: $acceptedCount/${writeRelays.size} accepted " +
                 "(event=$eventId, statuses=${statusMap.values.groupingBy { it }.eachCount()})")
             if (acceptedCount > 0) {
-                // Insert into MES for local state
-                withContext(Dispatchers.IO) { insertIntoMes() }
                 deleteCurrentDraft()
                 // Brief pause to show final state
                 delay(800)
