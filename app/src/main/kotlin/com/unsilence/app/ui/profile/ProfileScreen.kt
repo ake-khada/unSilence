@@ -199,7 +199,7 @@ fun ProfileScreen(
             zapFlash = zapFlash,
         )
     }
-    val pinnedEmojis = remember(pinnedShortcodes) { actionsViewModel.getPinnedEmojis() }
+    val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
     val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis, wotLookups, feedWotDisplayMode) { EventActionCallbacks(
         onNoteClick = onNoteClick,
         onComment = onComment,

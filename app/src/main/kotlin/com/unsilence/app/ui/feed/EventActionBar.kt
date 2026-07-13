@@ -10,10 +10,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,10 +25,9 @@ import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,7 +49,6 @@ import com.unsilence.app.ui.common.LocalOpenZapSettings
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
@@ -60,7 +60,7 @@ import kotlinx.coroutines.launch
 /**
  * Full-width engagement action bar: chevron · reply · repost/quote · react · zap · share.
  *
- * Owns the repost dropdown, zap picker/wallet dialogs, and share intent.
+ * Owns the repost strip, zap picker/wallet dialogs, and share intent.
  * Consumes engagement state and action callbacks directly.
  */
 @Composable
@@ -104,7 +104,7 @@ internal fun EventActionBar(
     val defaultZapAmount = firstPreset?.amountSats ?: 21L
     val defaultZapMessage = firstPreset?.message
     val defaultIsPrivate = prefs.defaultPrivate
-    var showRepostMenu    by remember { mutableStateOf(false) }
+    var showRepostStrip   by remember { mutableStateOf(false) }
     var showZapPicker     by remember { mutableStateOf(false) }
 
     var zapFlashTrigger by remember { mutableIntStateOf(0) }
@@ -137,25 +137,41 @@ internal fun EventActionBar(
                     count              = repostCount,
                     contentDescription = "Reposts",
                     highlighted        = hasReposted,
-                    onClick            = { showRepostMenu = true },
+                    onClick            = { showRepostStrip = true },
                 )
-                DropdownMenu(
-                    expanded         = showRepostMenu,
-                    onDismissRequest = { showRepostMenu = false },
-                    modifier         = Modifier.background(Black),
+                AnchoredActionStrip(
+                    expanded = showRepostStrip,
+                    onDismissRequest = { showRepostStrip = false },
                 ) {
-                    DropdownMenuItem(
-                        text    = { Text(if (hasReposted) "Undo boost" else "Boost", color = Color.White, fontSize = AppType.body) },
-                        onClick = {
-                            onRepost()
-                            showRepostMenu = false
-                            showSnackbar(if (hasReposted) "Boost removed" else "Boosted")
-                        },
-                    )
-                    DropdownMenuItem(
-                        text    = { Text("Quote", color = Color.White, fontSize = AppType.body) },
-                        onClick = { onQuote(noteId); showRepostMenu = false },
-                    )
+                    ActionQuickStrip {
+                        RepostStripTile(
+                            icon = Icons.Filled.Repeat,
+                            label = if (hasReposted) "Undo" else "Boost",
+                            onClick = {
+                                dispatchRepostStripAction(
+                                    RepostStripAction.BOOST,
+                                    noteId,
+                                    onRepost,
+                                    onQuote,
+                                )
+                                showRepostStrip = false
+                                showSnackbar(if (hasReposted) "Boost removed" else "Boosted")
+                            },
+                        )
+                        RepostStripTile(
+                            icon = Icons.Filled.FormatQuote,
+                            label = "Quote",
+                            onClick = {
+                                dispatchRepostStripAction(
+                                    RepostStripAction.QUOTE,
+                                    noteId,
+                                    onRepost,
+                                    onQuote,
+                                )
+                                showRepostStrip = false
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -207,6 +223,37 @@ internal fun EventActionBar(
             },
             onDismiss = { showZapPicker = false },
         )
+    }
+}
+
+@Composable
+private fun RepostStripTile(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    ActionQuickStripTile(
+        contentDescription = label,
+        onClick = onClick,
+        modifier = Modifier.width(64.dp).height(44.dp),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = ActionTint,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = label,
+                color = ActionTint,
+                fontSize = AppType.footnote,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -294,24 +341,21 @@ internal fun EventReactButton(
             }
         }
 
-        if (showStrip) {
-            androidx.compose.ui.window.Popup(
-                alignment = Alignment.BottomCenter,
-                onDismissRequest = { showStrip = false },
-                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
-            ) {
-                EmojiQuickStrip(
-                    pinnedEmojis = pinnedEmojis,
-                    onSelect = { emoji ->
-                        onSelectEmoji(emoji)
-                        showStrip = false
-                    },
-                    onOpenFullPicker = {
-                        showStrip = false
-                        onOpenFullPicker()
-                    },
-                )
-            }
+        AnchoredActionStrip(
+            expanded = showStrip,
+            onDismissRequest = { showStrip = false },
+        ) {
+            EmojiQuickStrip(
+                pinnedEmojis = pinnedEmojis,
+                onSelect = { emoji ->
+                    onSelectEmoji(emoji)
+                    showStrip = false
+                },
+                onOpenFullPicker = {
+                    showStrip = false
+                    onOpenFullPicker()
+                },
+            )
         }
     }
 }

@@ -114,9 +114,7 @@ fun ThreadScreen(
     var showFullEmojiPicker by remember { mutableStateOf(false) }
     val openEmojiSettings = com.unsilence.app.ui.common.LocalOpenEmojiSettings.current
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
-    // Resolved once per screen recomposition — getPinnedEmojis() allocates a
-    // fresh list per call, which defeats Compose skipping when called per card.
-    val pinnedEmojis = actionsViewModel.getPinnedEmojis()
+    val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
     val pollActions = remember(actionsViewModel) { actionsViewModel.pollActionCallbacks() }
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width

@@ -170,8 +170,7 @@ fun LazyListScope.eventFeedItems(
     eventModelProvider: ((String) -> EventModel?)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
-    // Resolve once per items-builder pass — getPinnedEmojis() allocates a fresh
-    // list per call, which defeats Compose skipping when invoked per item.
+    // Resolve the screen-collected immutable snapshot once per items-builder pass.
     val pinnedEmojis = callbacks.pinnedEmojis()
     items(
         items = events,
