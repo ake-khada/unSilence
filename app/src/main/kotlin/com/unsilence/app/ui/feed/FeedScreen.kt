@@ -310,12 +310,35 @@ fun FeedScreen(
             .fillMaxSize()
             .background(Black),
     ) {
-        // ── Swipe left/right to switch Notes ↔ Conversations ──────────
-        val swipeDrag = remember { mutableFloatStateOf(0f) }
+        if (immersiveMode) {
+            // Hard composition boundary: the card list must not remain hit-testable
+            // behind the immersive SurfaceView during a Crossfade transition.
+            ImmersiveVideoFeed(
+                items = immersiveItems,
+                holder = actionsViewModel.sharedPlayerHolder,
+                thumbnailCache = actionsViewModel.videoThumbnailCache,
+                imageDimensionCache = actionsViewModel.imageDimensionCache,
+                callbacks = callbacks,
+                engagement = engagement,
+                threadViewModel = immersiveThreadViewModel,
+                eventModelProvider = actionsViewModel::getEventModel,
+                sensitiveMode = sensitiveMode,
+                isLoadingMore = isLoadingMore,
+                onLoadMore = viewModel::loadMore,
+                onPageSettled = { row ->
+                    val index = events.indexOfFirst { it.id == row.id }
+                    if (index >= 0) {
+                        viewModel.onViewportChanged(index, index, cardWidthPx)
+                    }
+                },
+                onExit = { viewModel.updateFilter(FeedFilter()) },
+            )
+        } else {
+            // ── Swipe left/right to switch Notes ↔ Conversations ──────────
+            val swipeDrag = remember { mutableFloatStateOf(0f) }
 
-        Crossfade(
+            Crossfade(
             targetState = when {
-                immersiveMode -> "immersive"
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
                 !isLoadingV && events.isEmpty() && rawEventCount == 0 -> "empty"
@@ -344,29 +367,6 @@ fun FeedScreen(
                 },
         ) { screenState ->
         when (screenState) {
-            "immersive" -> {
-                ImmersiveVideoFeed(
-                    items = immersiveItems,
-                    holder = actionsViewModel.sharedPlayerHolder,
-                    thumbnailCache = actionsViewModel.videoThumbnailCache,
-                    imageDimensionCache = actionsViewModel.imageDimensionCache,
-                    callbacks = callbacks,
-                    engagement = engagement,
-                    threadViewModel = immersiveThreadViewModel,
-                    eventModelProvider = actionsViewModel::getEventModel,
-                    sensitiveMode = sensitiveMode,
-                    isLoadingMore = isLoadingMore,
-                    onLoadMore = viewModel::loadMore,
-                    onPageSettled = { row ->
-                        val index = events.indexOfFirst { it.id == row.id }
-                        if (index >= 0) {
-                            viewModel.onViewportChanged(index, index, cardWidthPx)
-                        }
-                    },
-                    onExit = { viewModel.updateFilter(FeedFilter()) },
-                )
-            }
-
             "loading" -> {
                 LoadingScreen()
             }
@@ -503,6 +503,7 @@ fun FeedScreen(
             }
         }
         } // Crossfade
+        }
 
         if (isRefreshing && !immersiveMode) {
             Box(

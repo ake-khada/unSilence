@@ -18,8 +18,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -128,9 +131,16 @@ internal fun ImmersiveVideoFeed(
     onPageSettled: (com.unsilence.app.data.memory.FeedRow) -> Unit,
     onExit: () -> Unit,
 ) {
-    if (items.isEmpty()) {
+    var sessionItems by remember {
+        mutableStateOf(mergeImmersiveItems(emptyList(), items))
+    }
+    LaunchedEffect(items) {
+        sessionItems = mergeImmersiveItems(sessionItems, items)
+    }
+
+    if (sessionItems.isEmpty()) {
         BackHandler(onBack = onExit)
-        Box(modifier = Modifier.fillMaxSize().background(Black)) {
+        Box(modifier = Modifier.fillMaxSize().background(Black).consumeUnclaimedTaps()) {
             Text(
                 text = "No playable videos match",
                 color = TextSecondary,
@@ -155,7 +165,7 @@ internal fun ImmersiveVideoFeed(
     }
 
     val player = holder.player
-    val pagerState = rememberPagerState(pageCount = { items.size })
+    val pagerState = rememberPagerState(pageCount = { sessionItems.size })
     val flingBehavior = PagerDefaults.flingBehavior(
         state = pagerState,
         pagerSnapDistance = PagerSnapDistance.atMost(1),
@@ -164,7 +174,7 @@ internal fun ImmersiveVideoFeed(
     var paused by remember { mutableStateOf(false) }
     var renderedVideoUrl by remember { mutableStateOf<String?>(null) }
     var sheetEventId by remember { mutableStateOf<String?>(null) }
-    var anchoredEventId by remember { mutableStateOf(items.first().row.id) }
+    var anchoredEventId by remember { mutableStateOf(sessionItems.first().row.id) }
     var revealedSensitiveIds by remember { mutableStateOf(emptySet<String>()) }
     val isPowerSaveMode = rememberPowerSaveMode()
 
@@ -213,7 +223,7 @@ internal fun ImmersiveVideoFeed(
         player.volume = if (muted) 0f else 1f
     }
 
-    val settledItem = items.getOrNull(pagerState.settledPage)
+    val settledItem = sessionItems.getOrNull(pagerState.settledPage)
     val settledItemBlocked = settledItem?.row?.let { row ->
         sensitiveMode == SensitiveContentMode.BLUR &&
             row.hasContentWarning && row.id !in revealedSensitiveIds
@@ -246,8 +256,9 @@ internal fun ImmersiveVideoFeed(
     }
 
     // Preserve the viewed event when live inserts prepend rows to the filtered feed.
-    LaunchedEffect(items.map { it.row.id }) {
-        val anchoredIndex = items.indexOfFirst { it.row.id == anchoredEventId }
+    LaunchedEffect(sessionItems.map { it.row.id }) {
+        if (pagerState.isScrollInProgress) return@LaunchedEffect
+        val anchoredIndex = sessionItems.indexOfFirst { it.row.id == anchoredEventId }
         if (anchoredIndex >= 0 && anchoredIndex != pagerState.currentPage) {
             pagerState.scrollToPage(anchoredIndex)
         }
@@ -255,23 +266,23 @@ internal fun ImmersiveVideoFeed(
 
     val preloadIndex = immersivePreloadIndex(
         currentIndex = pagerState.settledPage,
-        itemCount = items.size,
+        itemCount = sessionItems.size,
         isPowerSaveMode = isPowerSaveMode,
     )
-    LaunchedEffect(preloadIndex, items) {
-        val next = preloadIndex?.let(items::getOrNull) ?: return@LaunchedEffect
+    LaunchedEffect(preloadIndex, sessionItems) {
+        val next = preloadIndex?.let(sessionItems::getOrNull) ?: return@LaunchedEffect
         // Decoder-free warm-up: MMR extracts and releases one scaled first frame,
         // priming the media URL while keeping the thermal/decoder budget bounded.
         thumbnailCache.getThumbnail(next.video.videoUrl)
     }
 
-    LaunchedEffect(pagerState.settledPage, items.size, isLoadingMore) {
-        if (!isLoadingMore && pagerState.settledPage >= items.size - 1 - LOAD_MORE_DISTANCE) {
+    LaunchedEffect(pagerState.settledPage, sessionItems.size, isLoadingMore) {
+        if (!isLoadingMore && pagerState.settledPage >= sessionItems.size - 1 - LOAD_MORE_DISTANCE) {
             onLoadMore()
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Black)) {
+    Box(modifier = Modifier.fillMaxSize().background(Black).consumeUnclaimedTaps()) {
         VerticalPager(
             state = pagerState,
             flingBehavior = flingBehavior,
@@ -279,7 +290,7 @@ internal fun ImmersiveVideoFeed(
             userScrollEnabled = sheetEventId == null,
             modifier = Modifier.fillMaxSize(),
         ) { page ->
-            val item = items[page]
+            val item = sessionItems[page]
             val active = page == pagerState.settledPage
             val blocked = sensitiveMode == SensitiveContentMode.BLUR &&
                 item.row.hasContentWarning && item.row.id !in revealedSensitiveIds
@@ -348,7 +359,7 @@ internal fun ImmersiveVideoFeed(
         }
     }
 
-    val sheetItem = sheetEventId?.let { id -> items.firstOrNull { it.row.id == id } }
+    val sheetItem = sheetEventId?.let { id -> sessionItems.firstOrNull { it.row.id == id } }
     if (sheetItem != null) {
         ImmersiveEngagementSheet(
             item = sheetItem,
@@ -362,6 +373,13 @@ internal fun ImmersiveVideoFeed(
             sensitiveMode = sensitiveMode,
             onDismiss = { sheetEventId = null },
         )
+    }
+}
+
+private fun Modifier.consumeUnclaimedTaps(): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = true)
+        waitForUpOrCancellation()?.consume()
     }
 }
 
