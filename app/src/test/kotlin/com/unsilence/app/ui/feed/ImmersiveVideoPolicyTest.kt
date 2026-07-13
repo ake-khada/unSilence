@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import androidx.media3.common.Player
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.domain.model.FeedFilter
@@ -26,6 +27,18 @@ class ImmersiveVideoPolicyTest {
         assertFalse(
             FeedFilter(showTypes = setOf(ShowType.VIDEO, ShowType.IMAGES)).isImmersiveVideoMode(),
         )
+    }
+
+    @Test
+    fun `only repeat transitions preserve the rendered frame`() {
+        listOf(
+            Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT to false,
+            Player.MEDIA_ITEM_TRANSITION_REASON_AUTO to true,
+            Player.MEDIA_ITEM_TRANSITION_REASON_SEEK to true,
+            Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED to true,
+        ).forEach { (reason, expected) ->
+            assertEquals("reason=$reason", expected, shouldClearRenderedFrame(reason))
+        }
     }
 
     @Test
