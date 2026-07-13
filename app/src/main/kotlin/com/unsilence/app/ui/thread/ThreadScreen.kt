@@ -62,12 +62,12 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.FeedDivider
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
@@ -310,11 +310,7 @@ fun ThreadScreen(
                                     feedWotDisplayMode  = feedWotDisplayMode,
                                     pollActions         = pollActions,
                                 )
-                                HorizontalDivider(
-                                    color     = BorderFaint,
-                                    thickness = 1.dp,
-                                    modifier  = Modifier.padding(horizontal = Spacing.medium),
-                                )
+                                FeedDivider()
                             }
                         }
 
@@ -410,6 +406,7 @@ fun ThreadScreen(
                                         pollActions         = pollActions,
                                     )
                                 }
+                                FeedDivider()
                             }
                         }
                     }

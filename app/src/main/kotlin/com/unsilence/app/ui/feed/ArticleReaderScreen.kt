@@ -73,6 +73,7 @@ import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
+import com.unsilence.app.ui.shared.FeedDivider
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
@@ -85,7 +86,6 @@ import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -672,7 +672,7 @@ fun ArticleReaderScreen(
                                 pollActions           = pollActions,
                             )
                             }
-                            HorizontalDivider(color = BorderFaint)
+                            FeedDivider()
                         }
                     }
                 }
