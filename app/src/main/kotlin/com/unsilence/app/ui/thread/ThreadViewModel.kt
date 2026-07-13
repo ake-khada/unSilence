@@ -134,14 +134,14 @@ class ThreadViewModel @Inject constructor(
                     val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
                         .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
 
-                    // DFS flatten with depth (cap at 6), visited set prevents
+                    // DFS flatten with bounded depth; visited set prevents
                     // stack overflow from circular reply chains (malicious or bridged)
                     val flatList = mutableListOf<DepthRow>()
                     val visited = mutableSetOf<String>()
                     fun walk(parentId: String, depth: Int) {
                         childrenOf[parentId]?.forEach { row ->
                             if (visited.add(row.id)) {
-                                flatList.add(DepthRow(row, depth.coerceAtMost(6)))
+                                flatList.add(DepthRow(row, depth.coerceAtMost(MAX_REPLY_DEPTH)))
                                 walk(row.id, depth + 1)
                             }
                         }

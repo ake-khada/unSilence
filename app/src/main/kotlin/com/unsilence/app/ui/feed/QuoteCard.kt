@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -67,8 +68,8 @@ private data class QuoteResolution(
  * When the quoted event has a cached EventModel in MES, it is reused;
  * otherwise ContentParser.parse() is called on-the-fly from EventEntity fields.
  *
- * At [nestDepth] >= 1, renders text-only (no media, no further nested quotes)
- * to prevent infinite recursion and keep deeply nested quotes compact.
+ * The first two quote levels render full content. The third renders a compact
+ * author-and-text summary, while deeper content stops at a continuation chip.
  *
  * Tap handling: a [pointerInput] gesture waits for an unconsumed UP event.
  * Interactive children (LinkAnnotation for mentions/links/hashtags) consume
@@ -102,6 +103,15 @@ internal fun QuoteCard(
     modifier: Modifier = Modifier,
     nestDepth: Int = 0,
 ) {
+    val renderMode = quoteRenderMode(nestDepth)
+    if (renderMode == QuoteRenderMode.CONTINUATION) {
+        QuoteChainContinuationChip(
+            onClick = { onNoteClick(segment.eventId) },
+            modifier = modifier,
+        )
+        return
+    }
+
     val quoteData by produceState(QuoteResolution(), segment.eventId, segment.hints) {
         val ev = lookupEvent?.invoke(segment.eventId, segment.hints)
         if (ev == null) {
@@ -154,11 +164,27 @@ internal fun QuoteCard(
         return
     }
 
+    val quotePadding = when (nestDepth) {
+        0 -> Spacing.medium
+        1 -> Spacing.small
+        else -> Spacing.micro
+    }
+    val quoteCornerRadius = when (nestDepth) {
+        0 -> 12.dp
+        1 -> 8.dp
+        else -> 5.dp
+    }
+    val avatarSize = when (nestDepth) {
+        0 -> 24.dp
+        1 -> 20.dp
+        else -> 18.dp
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
-            .clip(RoundedCornerShape(12.dp))
+            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(quoteCornerRadius))
+            .clip(RoundedCornerShape(quoteCornerRadius))
             .pointerInput(segment.eventId) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -169,7 +195,7 @@ internal fun QuoteCard(
                     }
                 }
             }
-            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            .padding(quotePadding),
     ) {
         val loadedEvent = quoteData.event
         val liveAuthor = loadedEvent?.pubkey?.let { pubkey ->
@@ -187,8 +213,8 @@ internal fun QuoteCard(
                     AvatarImage(
                         pubkey        = loadedEvent.pubkey,
                         picture       = author?.picture,
-                        modifier      = Modifier.size(24.dp),
-                        sizeDp        = 24.dp,
+                        modifier      = Modifier.size(avatarSize),
+                        sizeDp        = avatarSize,
                         lookupProfile = lookupProfile,
                         profileFlow   = profileFlow,
                     )
@@ -217,7 +243,7 @@ internal fun QuoteCard(
                 com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
                     mode = sensitiveMode, sensitive = targetSensitive, reason = targetReason,
                 ) {
-                if (eventModel != null && nestDepth < 1) {
+                if (eventModel != null && renderMode == QuoteRenderMode.FULL) {
                     // Full source-order rendering via ContentFlow (same pipeline as top-level cards)
                     ContentFlow(
                         model               = eventModel,
@@ -250,10 +276,19 @@ internal fun QuoteCard(
                         nestDepth           = nestDepth + 1,
                     )
                 } else if (eventModel != null) {
-                    // Max nesting reached: text-only from segments (no media, no nested quotes)
+                    // Compact third level: text only. A deeper quote is represented
+                    // locally so its event is never resolved or fetched here.
                     val textSegments = remember(eventModel.segments) {
                         eventModel.segments.filter {
-                            it is Segment.Text || it is Segment.MentionPubkey
+                            it is Segment.Text ||
+                                it is Segment.MentionPubkey ||
+                                it is Segment.Link ||
+                                it is Segment.Hashtag
+                        }
+                    }
+                    val hasDeeperQuote = remember(eventModel.segments) {
+                        eventModel.segments.any {
+                            it is Segment.QuoteEvent || it is Segment.QuoteAddress
                         }
                     }
                     if (textSegments.isNotEmpty()) {
@@ -262,8 +297,14 @@ internal fun QuoteCard(
                             lookupProfile = lookupProfile,
                             onAuthorClick = onAuthorClick,
                             onTextClick   = { onNoteClick(segment.eventId) },
-                            maxLines      = 4,
+                            maxLines      = 2,
                             overflow      = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (hasDeeperQuote) {
+                        Spacer(Modifier.height(Spacing.micro))
+                        QuoteChainContinuationChip(
+                            onClick = { onNoteClick(segment.eventId) },
                         )
                     }
                 } else {
@@ -308,7 +349,7 @@ internal fun QuoteCard(
             // Loading skeleton (bounded ≤5s by lookupEvent timeout)
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(24.dp).clip(CircleShape).background(Surface1))
+                    Box(Modifier.size(avatarSize).clip(CircleShape).background(Surface1))
                     Spacer(Modifier.width(6.dp))
                     Box(Modifier.width(100.dp).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
                 }
@@ -318,5 +359,36 @@ internal fun QuoteCard(
                 Box(Modifier.fillMaxWidth(0.7f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Surface1))
             }
         }
+    }
+}
+
+@Composable
+private fun QuoteChainContinuationChip(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(5.dp))
+            .background(SurfaceVariant)
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.small, vertical = Spacing.micro),
+    ) {
+        Text(
+            text = "Quote chain continues",
+            color = TextSecondary,
+            fontSize = AppType.footnote,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(Spacing.micro))
+        Icon(
+            imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(14.dp),
+        )
     }
 }

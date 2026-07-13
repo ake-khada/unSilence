@@ -52,7 +52,7 @@ class ThreadViewModelInvariantsTest {
         fun walk(parentId: String, depth: Int) {
             childrenOf[parentId]?.forEach { row ->
                 if (visited.add(row.id)) {
-                    flatList.add(DepthRow(row, depth.coerceAtMost(6)))
+                    flatList.add(DepthRow(row, depth.coerceAtMost(MAX_REPLY_DEPTH)))
                     walk(row.id, depth + 1)
                 }
             }
@@ -128,30 +128,20 @@ class ThreadViewModelInvariantsTest {
     // ── Depth cap ────────────────────────────────────────────────────────────
 
     @Test
-    fun `depth is capped at 6`() {
+    fun `depth is capped at 8`() {
         val focused = "root"
-        // Chain: root -> d1 -> d2 -> d3 -> d4 -> d5 -> d6 -> d7 -> d8
-        val replies = listOf(
-            row("d1", replyToId = focused, createdAt = 100),
-            row("d2", replyToId = "d1", createdAt = 200),
-            row("d3", replyToId = "d2", createdAt = 300),
-            row("d4", replyToId = "d3", createdAt = 400),
-            row("d5", replyToId = "d4", createdAt = 500),
-            row("d6", replyToId = "d5", createdAt = 600),
-            row("d7", replyToId = "d6", createdAt = 700),
-            row("d8", replyToId = "d7", createdAt = 800),
-        )
+        // Chain: root -> d1 -> ... -> d9.
+        val replies = (1..9).map { depth ->
+            row(
+                id = "d$depth",
+                replyToId = if (depth == 1) focused else "d${depth - 1}",
+                createdAt = depth * 100L,
+            )
+        }
         val result = walkThread(focused, replies)
 
-        assertEquals(8, result.size)
-        assertEquals(1, result[0].depth) // d1
-        assertEquals(2, result[1].depth) // d2
-        assertEquals(3, result[2].depth) // d3
-        assertEquals(4, result[3].depth) // d4
-        assertEquals(5, result[4].depth) // d5
-        assertEquals(6, result[5].depth) // d6
-        assertEquals(6, result[6].depth) // d7 — capped
-        assertEquals(6, result[7].depth) // d8 — capped
+        assertEquals(9, result.size)
+        assertEquals((1..8).toList() + 8, result.map { it.depth })
     }
 
     // ── Three-node cycle ─────────────────────────────────────────────────────

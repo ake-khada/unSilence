@@ -329,7 +329,7 @@ fun ThreadScreen(
                             items(state.replies, key = { it.row.id }) { depthRow ->
                                 val reply = depthRow.row
                                 val depth = depthRow.depth
-                                val indent = (depth * 12).dp
+                                val indent = replyIndentDp(depth).dp
                                 val lineColor = Color.White.copy(alpha = 0.10f)
 
                                 Box(
@@ -337,7 +337,7 @@ fun ThreadScreen(
                                         .fillMaxWidth()
                                         .drawBehind {
                                             for (d in 1..depth) {
-                                                val x = (d * 12).dp.toPx()
+                                                val x = replyIndentDp(d).dp.toPx()
                                                 drawLine(
                                                     color       = lineColor,
                                                     start       = Offset(x, 0f),
