@@ -5,15 +5,17 @@ import org.junit.Test
 
 class ReplyIndentPolicyTest {
     @Test
-    fun `reply indents converge and pin at depth eight`() {
+    fun `reply indents use eight dp steps through depth ten`() {
         val expected = mapOf(
             0 to 0,
-            1 to 12,
-            6 to 72,
-            7 to 80,
-            8 to 85,
-            9 to 85,
-            100 to 85,
+            1 to 8,
+            6 to 48,
+            7 to 56,
+            8 to 64,
+            9 to 72,
+            10 to 80,
+            11 to 80,
+            100 to 80,
         )
 
         expected.forEach { (depth, indent) ->
