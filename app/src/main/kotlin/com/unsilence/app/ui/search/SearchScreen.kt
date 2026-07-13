@@ -88,6 +88,7 @@ import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.FeedDivider
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.PostActionsHost
@@ -470,7 +471,7 @@ fun SearchScreen(
                                         impersonationRisk = state.impersonationRisks[user.pubkey],
                                         onClick = { onAuthorClickDismiss(user.pubkey) },
                                     )
-                                    HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
+                                    FeedDivider()
                                 }
                             }
                             eventFeedItems(
@@ -504,7 +505,7 @@ fun SearchScreen(
                                     impersonationRisk = state.impersonationRisks[user.pubkey],
                                     onClick = { onAuthorClickDismiss(user.pubkey) },
                                 )
-                                HorizontalDivider(color = BorderFaint, thickness = 0.5.dp)
+                                FeedDivider()
                             }
                         }
                     }
