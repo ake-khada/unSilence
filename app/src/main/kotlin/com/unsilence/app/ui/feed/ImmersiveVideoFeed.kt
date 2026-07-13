@@ -396,6 +396,29 @@ private fun ImmersiveVideoPage(
     onTogglePlayback: () -> Unit,
     onLongPress: () -> Unit,
 ) {
+    var renderedAspect by remember(item.video.videoUrl) {
+        mutableFloatStateOf(
+            thumbnailCache.resolvedAspectRatios[item.video.videoUrl] ?: item.video.aspectRatio,
+        )
+    }
+
+    // Imeta dimensions are advisory. Once this item's first frame is on screen,
+    // use Media3's actual display ratio so the corner mask matches PlayerView's FIT bounds.
+    LaunchedEffect(active, frameReady, player, item.video.videoUrl) {
+        val currentUrl = player.currentMediaItem?.localConfiguration?.uri?.toString()
+        if (!active || !frameReady || currentUrl != item.video.videoUrl) return@LaunchedEffect
+        val size = player.videoSize
+        val decodedAspect = decodedVideoAspectRatio(
+            size.width,
+            size.height,
+            size.pixelWidthHeightRatio,
+        ) ?: return@LaunchedEffect
+        thumbnailCache.resolvedAspectRatios[item.video.videoUrl] = decodedAspect
+        if (shouldCorrectVideoAspectRatio(renderedAspect, decodedAspect)) {
+            renderedAspect = decodedAspect
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Black), contentAlignment = Alignment.Center) {
         VideoThumbnailImage(
             model = item.video,
@@ -438,7 +461,7 @@ private fun ImmersiveVideoPage(
             }
         }
         VideoCornerMasks(
-            aspectRatio = item.video.aspectRatio,
+            aspectRatio = renderedAspect,
             modifier = Modifier.fillMaxSize(),
         )
         Box(

@@ -24,4 +24,12 @@ class VideoSizingTest {
         assertEquals(true, shouldCorrectVideoAspectRatio(1f, 1.021f))
         assertEquals(true, shouldCorrectVideoAspectRatio(9f / 16f, 1f / 2f))
     }
+
+    @Test
+    fun `decoded aspect includes pixel shape and rejects invalid frames`() {
+        assertEquals(16f / 9f, decodedVideoAspectRatio(1920, 1080)!!, 0.001f)
+        assertEquals(1.25f, decodedVideoAspectRatio(720, 576)!!, 0.001f)
+        assertEquals(1.5f, decodedVideoAspectRatio(720, 576, 1.2f)!!, 0.001f)
+        assertEquals(null, decodedVideoAspectRatio(0, 1080))
+    }
 }

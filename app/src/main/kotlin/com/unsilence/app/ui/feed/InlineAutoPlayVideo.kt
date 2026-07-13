@@ -257,8 +257,11 @@ fun InlineVideoPlayer(
                 }
             }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                if (videoSize.width > 0 && videoSize.height > 0) {
-                    val ratio = videoSize.width.toFloat() / videoSize.height
+                decodedVideoAspectRatio(
+                    videoSize.width,
+                    videoSize.height,
+                    videoSize.pixelWidthHeightRatio,
+                )?.let { ratio ->
                     thumbnailCache?.resolvedAspectRatios?.put(model.videoUrl, ratio)
                     if (exoPlayer.hasRenderableFrameFor(model.videoUrl)) {
                         isFirstFrameRendered = true
