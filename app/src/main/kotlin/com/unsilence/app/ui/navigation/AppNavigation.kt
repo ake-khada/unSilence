@@ -150,6 +150,12 @@ private val NavUnselected = Text3
 
 private data class NavTab(val icon: ImageVector, val contentDescription: String)
 
+private data class ThreadDestination(
+    val eventId: String,
+    val relayHints: List<String> = emptyList(),
+    val openArticleOnLoad: Boolean = false,
+)
+
 private val TABS = listOf(
     NavTab(Icons.Outlined.Home,          "Home"),
     NavTab(Icons.Outlined.Search,        "Search"),
@@ -189,7 +195,7 @@ fun AppNavigation(
     var showRelaySettings    by remember { mutableStateOf(false) }
     var relayDetailUrl       by remember { mutableStateOf<String?>(null) }
     var showDiscovery        by remember { mutableStateOf(false) }
-    var threadEventId        by remember { mutableStateOf<String?>(null) }
+    var threadDestination    by remember { mutableStateOf<ThreadDestination?>(null) }
     var replyToEventId       by remember { mutableStateOf<String?>(null) }
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
@@ -206,7 +212,7 @@ fun AppNavigation(
         // Clear any open overlays (thread / user profile) so the search tab isn't
         // hidden behind them when a hashtag is tapped from inside one (incl. the
         // article reader hosted there).
-        threadEventId = null
+        threadDestination = null
         userProfilePubkey = null
         hashtagSearchQuery = "#$tag"
         selectedTab = 1
@@ -229,6 +235,7 @@ fun AppNavigation(
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$sessionKey")
     val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$sessionKey")
     val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
+    val deepLinkVm: DeepLinkNavigationViewModel = hiltViewModel(key = "deep-links-$sessionKey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
@@ -241,6 +248,51 @@ fun AppNavigation(
     val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
     val hasNewNotifications by notifViewModel.hasNewNotifications.collectAsStateWithLifecycle()
     val zapPreferences      by zapSettingsVm.preferences.collectAsStateWithLifecycle()
+    val pendingDeepLink     by deepLinkVm.pendingTarget.collectAsStateWithLifecycle()
+    val pendingDeepLinkFailure by deepLinkVm.pendingFailure.collectAsStateWithLifecycle()
+
+    LaunchedEffect(pendingDeepLinkFailure) {
+        if (pendingDeepLinkFailure && deepLinkVm.consumeFailure()) {
+            showSnackbar("Couldn't open link")
+        }
+    }
+
+    LaunchedEffect(pendingDeepLink) {
+        val target = pendingDeepLink ?: return@LaunchedEffect
+        if (!deepLinkVm.consume(target)) return@LaunchedEffect
+
+        showCompose = false
+        replyToEventId = null
+        quoteNoteId = null
+        connectionsTarget = null
+        when (target) {
+            is DeepLinkTarget.Profile -> {
+                deepLinkVm.prefetchProfile(target)
+                threadDestination = null
+                userProfilePubkey = target.pubkey
+            }
+            is DeepLinkTarget.Note -> {
+                userProfilePubkey = null
+                threadDestination = ThreadDestination(
+                    eventId = target.eventId,
+                    relayHints = target.relayHints,
+                )
+            }
+            is DeepLinkTarget.Address -> {
+                val eventId = deepLinkVm.resolveAddress(target)
+                if (eventId == null) {
+                    showSnackbar("Couldn't open link")
+                } else {
+                    userProfilePubkey = null
+                    threadDestination = ThreadDestination(
+                        eventId = eventId,
+                        relayHints = target.relayHints,
+                        openArticleOnLoad = target.kind == 30023,
+                    )
+                }
+            }
+        }
+    }
 
     // Build the ordered feed list for the carousel
     val feedList = remember(hasFollows, pinnedRelays, userSets, feedType) {
@@ -349,7 +401,7 @@ fun AppNavigation(
                         scrollToTopTrigger = scrollToTopTrigger,
                         topBarShown        = topBarShown,
                         staticTopPadding   = staticTopPadding,
-                        onNoteClick        = { eventId -> threadEventId = eventId },
+                        onNoteClick        = { eventId -> threadDestination = ThreadDestination(eventId) },
                         onComment          = { eventId -> replyToEventId = eventId },
                         onAuthorClick      = onAuthorClick,
                         onHashtagClick     = onHashtagClick,
@@ -359,7 +411,7 @@ fun AppNavigation(
                     )
                     1    -> Box(Modifier.padding(top = statusBarHeight)) {
                         SearchScreen(
-                            onNoteClick   = { eventId -> threadEventId = eventId },
+                            onNoteClick   = { eventId -> threadDestination = ThreadDestination(eventId) },
                             onComment     = { eventId -> replyToEventId = eventId },
                             onAuthorClick = onAuthorClick,
                             onHashtagClick = onHashtagClick,
@@ -370,7 +422,7 @@ fun AppNavigation(
                         )
                     }
                     2    -> NotificationsScreen(
-                        onNoteClick      = { eventId -> threadEventId = eventId },
+                        onNoteClick      = { eventId -> threadDestination = ThreadDestination(eventId) },
                         onProfileClick   = onAuthorClick,
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
@@ -378,7 +430,7 @@ fun AppNavigation(
                     3    -> ProfileScreen(
                         onLogout = onLogout,
                         onBack = { selectedTab = 0 },
-                        onNoteClick = { eventId -> threadEventId = eventId },
+                        onNoteClick = { eventId -> threadDestination = ThreadDestination(eventId) },
                         onComment = { eventId -> replyToEventId = eventId },
                         onAuthorClick = onAuthorClick,
                         onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
@@ -637,7 +689,7 @@ fun AppNavigation(
                 UserProfileScreen(
                     pubkey        = pubkey,
                     onDismiss     = { userProfilePubkey = null },
-                    onNoteClick   = { eventId -> threadEventId = eventId },
+                    onNoteClick   = { eventId -> threadDestination = ThreadDestination(eventId) },
                     onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
                     onConnectionsClick = { tab -> connectionsTarget = pubkey to tab },
@@ -660,15 +712,17 @@ fun AppNavigation(
 
             // ── Thread overlay ────────────────────────────────────────────────
             // Must come AFTER user profile so it renders on top when both are visible
-            threadEventId?.let { eventId ->
-                key(eventId) {
+            threadDestination?.let { destination ->
+                key(destination.eventId) {
                     ThreadScreen(
-                        eventId       = eventId,
-                        onDismiss     = { threadEventId = null },
+                        eventId       = destination.eventId,
+                        relayHints    = destination.relayHints,
+                        openArticleOnLoad = destination.openArticleOnLoad,
+                        onDismiss     = { threadDestination = null },
                         onQuote       = { noteId -> quoteNoteId = noteId },
                         onComment     = { replyEventId -> replyToEventId = replyEventId },
                         onAuthorClick = { pubkey ->
-                            threadEventId = null      // dismiss thread so profile is visible
+                            threadDestination = null  // dismiss thread so profile is visible
                             userProfilePubkey = pubkey
                         },
                         onHashtagClick = onHashtagClick,

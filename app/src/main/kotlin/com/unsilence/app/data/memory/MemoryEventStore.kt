@@ -3021,6 +3021,26 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    /** Latest locally-known event id for an addressable coordinate. */
+    fun eventIdForAddress(kind: Int, pubkey: String, dTag: String): String? =
+        idsByPubkey[pubkey]
+            .orEmpty()
+            .asSequence()
+            .mapNotNull(eventsById::get)
+            .filter { event ->
+                event.kind == kind && event.tags.any { tag ->
+                    tag.size >= 2 && tag[0] == "d" && tag[1] == dTag
+                }
+            }
+            .maxWithOrNull(compareBy<NostrEvent> { it.createdAt }.thenBy { it.id })
+            ?.id
+
+    fun eventIdForAddressFlow(kind: Int, pubkey: String, dTag: String): Flow<String?> =
+        _feedSignal
+            .map { eventIdForAddress(kind, pubkey, dTag) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
     /**
      * The source of truth for coordinate-rooted comments and descendants.
      * NIP-22 kind-1111 (uppercase `A`, filtered to kind 1111 so stale legacy

@@ -19,6 +19,7 @@ import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import kotlinx.coroutines.launch
 import com.unsilence.app.ui.onboarding.RootScreen
+import com.unsilence.app.ui.navigation.DeepLinkRouter
 import com.unsilence.app.ui.theme.UnsilenceTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -30,6 +31,7 @@ class MainActivity : FragmentActivity() {
     @Inject lateinit var relayPreferencesStore: RelayPreferencesStore
     @Inject lateinit var appBootstrapper: AppBootstrapper
     @Inject lateinit var keyManager: KeyManager
+    @Inject lateinit var deepLinkRouter: DeepLinkRouter
 
     // Launcher for automatic Amber re-authorize when bootstrap detects
     // missing NIP-44 permissions. Runs round-trip self-test on success.
@@ -66,6 +68,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        handleDeepLinkIntent(intent)
 
         // Debug: set sensitive content mode via intent extra
         // adb shell am start -n com.unsilence.app/.MainActivity --es sensitive_mode blur
@@ -110,5 +113,16 @@ class MainActivity : FragmentActivity() {
                 RootScreen()
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLinkIntent(intent)
+    }
+
+    private fun handleDeepLinkIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        intent.dataString?.let(deepLinkRouter::submit)
     }
 }

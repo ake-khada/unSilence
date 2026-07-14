@@ -3813,15 +3813,25 @@ class RelayPool @Inject constructor(
      * One-shot; CLOSE after EOSE.
      */
     suspend fun fetchArticleByCoord(rawRelayUrls: List<String>, author: String, dTag: String) {
+        fetchAddressByCoord(rawRelayUrls, kind = 30023, author = author, dTag = dTag)
+    }
+
+    /** Fetch one addressable event revision by its NIP-33 coordinate. */
+    suspend fun fetchAddressByCoord(
+        rawRelayUrls: List<String>,
+        kind: Int,
+        author: String,
+        dTag: String,
+    ) {
         if (author.isBlank()) return
         val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
         if (relayUrls.isEmpty()) return
-        val subId = "article-addr-${System.currentTimeMillis()}"
+        val subId = "address-${System.currentTimeMillis()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(30023)) })
+                put("kinds", buildJsonArray { add(JsonPrimitive(kind)) })
                 put("authors", buildJsonArray { add(JsonPrimitive(author)) })
                 put("#d", buildJsonArray { add(JsonPrimitive(dTag)) })
                 put("limit", JsonPrimitive(2))
