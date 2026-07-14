@@ -216,7 +216,7 @@ class ThreadViewModel @Inject constructor(
         }
     }
 
-    fun loadThread(eventId: String) {
+    fun loadThread(eventId: String, relayHints: List<String> = emptyList()) {
         tappedId = eventId
         // Clear stale state immediately — prevents flash of old thread content
         _uiState.value = ThreadUiState(loading = true)
@@ -227,8 +227,18 @@ class ThreadViewModel @Inject constructor(
                 .mapNotNull { normalizeRelayUrl(it.url) }
             val blockedRelays = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
 
-            // Best-guess root from local MES — instant, no network
-            val event = memoryEventStore.getEventEntity(eventId)
+            // External nevent hints are load-bearing when the event is absent from
+            // MES: fetchEventById can open an ephemeral hinted connection, while the
+            // broader thread fetch below only uses already-pooled connections.
+            var event = memoryEventStore.getEventEntity(eventId)
+            if (event == null && relayHints.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    relayPool.fetchEventById(eventId, relayHints, bypassDedup = true)
+                }
+                event = memoryEventStore.getEventEntity(eventId)
+            }
+
+            // Best-guess root from local MES — instant for normal in-app taps.
             val bestGuessRoot = event?.rootId ?: event?.replyToId ?: eventId
 
             // Resolve relays based on the thread root's author. If we don't
@@ -236,7 +246,7 @@ class ThreadViewModel @Inject constructor(
             val rootAuthorPubkey = event?.pubkey
                 ?: memoryEventStore.getEventEntity(bestGuessRoot)?.pubkey
 
-            val urls = if (rootAuthorPubkey != null) {
+            val resolvedUrls = if (rootAuthorPubkey != null) {
                 outboxResolver.resolveEngagementRelays(
                     authorPubkey = rootAuthorPubkey,
                     ownReadRelays = ownReadRelays,
@@ -245,6 +255,7 @@ class ThreadViewModel @Inject constructor(
             } else {
                 ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
             }
+            val urls = (relayHints + resolvedUrls).distinct()
 
             if (eventIdFlow.value == bestGuessRoot) return@launch
 

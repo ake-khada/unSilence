@@ -79,6 +79,8 @@ import kotlinx.coroutines.flow.sample
 @Composable
 fun ThreadScreen(
     eventId: String,
+    relayHints: List<String> = emptyList(),
+    openArticleOnLoad: Boolean = false,
     onDismiss: () -> Unit,
     onQuote: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -93,7 +95,7 @@ fun ThreadScreen(
 ) {
     BackHandler(onBack = onDismiss)
     DisposableEffect(Unit) { onDispose { viewModel.clearThread() } }
-    LaunchedEffect(eventId) { viewModel.loadThread(eventId) }
+    LaunchedEffect(eventId, relayHints) { viewModel.loadThread(eventId, relayHints) }
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
@@ -119,6 +121,11 @@ fun ThreadScreen(
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var didScrollToFocus by remember { mutableStateOf(false) }
+
+    LaunchedEffect(openArticleOnLoad, state.focusedNote?.id) {
+        val focused = state.focusedNote
+        if (openArticleOnLoad && focused?.kind == 30023) articleRow = focused
+    }
 
     // Single engagement snapshot for ALL cards in the thread — same remember
     // keys as the previous per-item snapshots, built once instead of N+1 times.
