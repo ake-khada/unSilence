@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.model.ContentParser
+import com.unsilence.app.data.model.eventAddressableCoordinate
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
@@ -68,6 +69,81 @@ sealed interface PublishTarget {
 
     @Immutable
     data class ArticleComment(val target: ArticleCommentTarget) : PublishTarget
+
+    @Immutable
+    data class VideoComment(val target: VideoCommentTarget) : PublishTarget
+}
+
+/** Pure reply-kind decision shared by compose capture and golden tests. */
+internal fun buildReplyPublishTarget(
+    rootEventId: String,
+    parentEventId: String,
+    parentPubkey: String,
+    parentKind: Int,
+    parentRelayHint: String?,
+    parentTags: List<List<String>>,
+): PublishTarget {
+    if (parentKind in setOf(21, 22, 34235, 34236)) {
+        val dTag = parentTags
+            .firstOrNull { it.size >= 2 && it[0] == "d" }
+            ?.getOrNull(1)
+        return PublishTarget.VideoComment(
+            VideoCommentTarget(
+                rootEventId = parentEventId,
+                rootCoord = if (parentKind == 34235 || parentKind == 34236) {
+                    eventAddressableCoordinate(parentKind, parentPubkey, dTag)
+                } else null,
+                rootKind = parentKind,
+                rootPubkey = parentPubkey,
+                rootRelayHint = parentRelayHint,
+            )
+        )
+    }
+
+    if (parentKind == 1111) {
+        val rootKind = parentTags
+            .firstOrNull { it.size >= 2 && it[0] == "K" }
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.takeIf { it in setOf(21, 22, 34235, 34236) }
+        if (rootKind != null) {
+            val rootEventTag = parentTags.firstOrNull { it.size >= 2 && it[0] == "E" }
+            val rootCoordTag = parentTags.firstOrNull { it.size >= 2 && it[0] == "A" }
+            val rootProfileTag = parentTags.firstOrNull { it.size >= 2 && it[0] == "P" }
+            val rootCoord = rootCoordTag?.getOrNull(1)
+            val rootVideoId = rootEventTag?.getOrNull(1)
+            val hasRootReference = when (rootKind) {
+                21, 22 -> rootVideoId != null
+                else -> rootCoord != null
+            }
+            val rootPubkey = rootProfileTag?.getOrNull(1)
+                ?: rootCoord?.split(':', limit = 3)?.getOrNull(1)
+            if (hasRootReference && rootPubkey != null) {
+                val rootHint = rootCoordTag?.getOrNull(2)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: rootEventTag?.getOrNull(2)?.takeIf { it.isNotBlank() }
+                return PublishTarget.VideoComment(
+                    VideoCommentTarget(
+                        rootEventId = rootVideoId,
+                        rootCoord = rootCoord,
+                        rootKind = rootKind,
+                        rootPubkey = rootPubkey,
+                        rootRelayHint = rootHint,
+                        parentId = parentEventId,
+                        parentKind = parentKind,
+                        parentPubkey = parentPubkey,
+                        parentRelayHint = parentRelayHint,
+                    )
+                )
+            }
+        }
+    }
+
+    return PublishTarget.Reply(
+        rootEventId = rootEventId,
+        parentEventId = parentEventId,
+        parentPubkey = parentPubkey,
+    )
 }
 
 /** Immutable editor snapshot used to create or deliberately regenerate a payload. */
@@ -106,7 +182,7 @@ data class PublishPayload(
             1 -> tags.any {
                 it.firstOrNull() == "e" && it.getOrNull(3) in setOf("root", "reply")
             }
-            1111 -> tags.any { it.firstOrNull() == "A" } &&
+            1111 -> tags.any { it.firstOrNull() in setOf("A", "E") } &&
                 tags.any { it.firstOrNull() in setOf("a", "e") }
             else -> false
         }
@@ -231,6 +307,31 @@ fun buildPublishPayload(state: PublishPayloadState): PublishPayload {
                 tags = tags,
                 replyToId = article.parentId ?: article.articleId,
                 rootId = article.articleId,
+            )
+        }
+
+        is PublishTarget.VideoComment -> {
+            val video = target.target
+            val tags = Nip22Tags.videoComment(video)
+                .mapTo(mutableListOf()) { it.toList() }
+            tags += imetaTags
+            appendContentTags(
+                tags = tags,
+                content = baseContent,
+                state = state,
+                existingPTags = buildSet {
+                    add(video.rootPubkey)
+                    video.parentPubkey?.let(::add)
+                },
+            )
+            val parentId = video.parentId ?: video.rootEventId
+            PublishPayload(
+                createdAt = state.createdAt,
+                kind = 1111,
+                content = baseContent,
+                tags = tags,
+                replyToId = parentId,
+                rootId = video.rootEventId,
             )
         }
     }

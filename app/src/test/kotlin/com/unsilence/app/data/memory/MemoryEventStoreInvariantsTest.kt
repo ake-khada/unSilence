@@ -2365,6 +2365,8 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "grepost1", pubkey = "alice", kind = 16, replyToId = "root2", rootId = "root2", createdAt = 105))
         store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
             tags = listOf(listOf("d", "slug"))))
+        store.insert(event(id = "comment1", pubkey = "alice", kind = 1111, createdAt = 106,
+            tags = listOf(listOf("A", "34236:video-author:clip"))))
 
         store.userFeedFlow("alice", contentFilter = 1).test {
             val rows = awaitItem()
@@ -2376,12 +2378,13 @@ class MemoryEventStoreInvariantsTest {
             assertTrue("grepost1 included (kind-16 in Notes tab)", "grepost1" in ids)
             assertFalse("reply1 excluded", "reply1" in ids)
             assertFalse("article1 excluded", "article1" in ids)
+            assertFalse("NIP-22 comment excluded", "comment1" in ids)
             cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun `userFeedFlow contentFilter=2 returns kind-1 replies only (not kind-6, not kind-30023)`() = runTest {
+    fun `userFeedFlow contentFilter=2 returns kind-1 replies and NIP-22 comments`() = runTest {
         store.insert(event(id = "root1", pubkey = "alice", kind = 1, createdAt = 100))
         store.insert(event(id = "reply1", pubkey = "alice", kind = 1, replyToId = "root1", rootId = "root1", createdAt = 101))
         store.insert(event(id = "reply2", pubkey = "alice", kind = 1, replyToId = "root1", createdAt = 102))
@@ -2390,16 +2393,40 @@ class MemoryEventStoreInvariantsTest {
         store.insert(event(id = "grepost1", pubkey = "alice", kind = 16, replyToId = "root1", rootId = "root1", createdAt = 105))
         store.insert(event(id = "article1", pubkey = "alice", kind = 30023, createdAt = 104,
             tags = listOf(listOf("d", "slug"))))
+        store.insert(event(id = "comment1", pubkey = "alice", kind = 1111, createdAt = 106,
+            tags = listOf(listOf("A", "34236:video-author:clip"))))
 
         store.userFeedFlow("alice", contentFilter = 2).test {
             val rows = awaitItem()
             val ids = rows.map { it.id }
-            assertEquals(2, rows.size)
+            assertEquals(3, rows.size)
             assertTrue("reply1 included", "reply1" in ids)
             assertTrue("reply2 included", "reply2" in ids)
+            assertTrue("coordinate-only NIP-22 comment included", "comment1" in ids)
             assertFalse("grepost1 (kind-16 repost) excluded from replies", "grepost1" in ids)
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun `coordinate-only NIP-22 row resolves parent when addressable target arrives`() {
+        val coordinate = "34236:video-author:clip"
+        store.insert(event(
+            id = "comment1",
+            pubkey = "alice",
+            kind = 1111,
+            tags = listOf(listOf("A", coordinate), listOf("a", coordinate)),
+        ))
+        assertNull(store.feedRowsByIds(setOf("comment1")).single().rootId)
+
+        store.insert(event(
+            id = "video1",
+            pubkey = "video-author",
+            kind = 34236,
+            tags = listOf(listOf("d", "clip")),
+        ))
+
+        assertEquals("video1", store.feedRowsByIds(setOf("comment1")).single().rootId)
     }
 
     @Test

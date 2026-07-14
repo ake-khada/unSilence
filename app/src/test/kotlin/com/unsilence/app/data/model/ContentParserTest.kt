@@ -563,7 +563,7 @@ class ContentParserTest {
     fun `DiVine addressable short parses extensionless live imeta shape`() {
         val mediaUrl = "https://media.divine.video/${"a".repeat(64)}"
         val posterUrl = "https://media.divine.video/${"b".repeat(64)}"
-        val tags = """[["d","divine-video"],["imeta","url $mediaUrl","m video/mp4","image $posterUrl","dim 1080x1920","size 46000000","x ${"c".repeat(64)}","blurhash U8D+4n"]]"""
+        val tags = """[["d","divine-video"],["imeta","url $mediaUrl","m video/mp4","image $posterUrl","dim 1080x1920","size 46000000","duration 232","x ${"c".repeat(64)}","blurhash U8D+4n"]]"""
 
         val model = parse("", kind = 34236, tagsJson = tags)
 
@@ -573,6 +573,9 @@ class ContentParserTest {
         assertEquals(mediaUrl, video.model.videoUrl)
         assertEquals(1080f / 1920f, video.model.aspectRatio, 0.01f)
         assertEquals(posterUrl, video.model.posterUrl)
+        assertEquals("video/mp4", video.model.mimeType)
+        assertEquals(46_000_000L, video.model.sizeBytes)
+        assertEquals(232.0, video.model.durationSeconds!!, 0.001)
     }
 
     @Test

@@ -53,4 +53,29 @@ class Nip22TagsTest {
         assertNotNull(tags.tag("a")) // addressable parent still present
         assertArrayEquals(arrayOf("A", "30023:pk:slug", ""), tags.tag("A"))
     }
+
+    @Test
+    fun `video comments use event scope for kind 21 and coordinate scope for kind 34236`() {
+        val eventTags = Nip22Tags.videoComment(
+            VideoCommentTarget(
+                rootEventId = "vid", rootCoord = null, rootKind = 21,
+                rootPubkey = "pk", rootRelayHint = "wss://r",
+            )
+        )
+        assertArrayEquals(arrayOf("E", "vid", "wss://r", "pk"), eventTags.tag("E"))
+        assertArrayEquals(arrayOf("e", "vid", "wss://r", "pk"), eventTags.tag("e"))
+        assertArrayEquals(arrayOf("K", "21"), eventTags.tag("K"))
+        assertArrayEquals(arrayOf("k", "21"), eventTags.tag("k"))
+
+        val coord = "34236:pk:clip"
+        val addressTags = Nip22Tags.videoComment(
+            VideoCommentTarget(
+                rootEventId = "vid", rootCoord = coord, rootKind = 34236,
+                rootPubkey = "pk",
+            )
+        )
+        assertArrayEquals(arrayOf("A", coord, ""), addressTags.tag("A"))
+        assertArrayEquals(arrayOf("a", coord, ""), addressTags.tag("a"))
+        assertNull(addressTags.tag("E"))
+    }
 }

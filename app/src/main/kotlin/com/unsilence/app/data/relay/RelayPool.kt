@@ -65,7 +65,23 @@ private const val RECONNECT_HEALTHY_WINDOW_MS = 30_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
-    listOf(0, 1, 6, 7, 20, 21, 22, 34235, 34236, 1068, 30023)
+    listOf(0, 1, 6, 7, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
+
+internal fun buildCommentParentsReq(subId: String, parentIds: List<String>): String =
+    buildJsonArray {
+        add(JsonPrimitive("REQ"))
+        add(JsonPrimitive(subId))
+        add(buildJsonObject {
+            put("ids", buildJsonArray {
+                parentIds.distinct().take(200).forEach { add(JsonPrimitive(it)) }
+            })
+            put("kinds", buildJsonArray {
+                add(JsonPrimitive(1))
+                add(JsonPrimitive(1111))
+            })
+            put("limit", JsonPrimitive(200))
+        })
+    }.toString()
 
 internal fun isRateLimitedClosedReason(reason: String): Boolean =
     reason.contains("rate-limit", ignoreCase = true) ||
@@ -3336,6 +3352,7 @@ class RelayPool @Inject constructor(
                     add(JsonPrimitive(20))
                     add(JsonPrimitive(21))
                     add(JsonPrimitive(22))
+                    add(JsonPrimitive(1111))
                     add(JsonPrimitive(34235))
                     add(JsonPrimitive(34236))
                     add(JsonPrimitive(1068))
@@ -3728,12 +3745,15 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // Replies (kind 1 referencing this event)
+        // Replies: legacy kind 1 plus NIP-22 comments on event-addressed videos.
         val repliesReq = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive("thread-replies-$ts"))
             add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(1)) })
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(1))
+                    add(JsonPrimitive(1111))
+                })
                 put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
                 put("limit", JsonPrimitive(200))
             })
@@ -3871,6 +3891,24 @@ class RelayPool @Inject constructor(
     }
 
     /**
+     * Hydrate direct parents missing from a coordinate-scoped NIP-22 result. Relay
+     * indexes can return a child from `#A` while its parent lives only on the source
+     * relay. Until this exact-id fetch lands, the UI keeps the orphan visible at root.
+     */
+    suspend fun fetchCommentParents(rawRelayUrls: List<String>, parentIds: List<String>) {
+        if (parentIds.isEmpty()) return
+        val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        if (relayUrls.isEmpty()) return
+        val subId = "comment-parents-${System.currentTimeMillis()}"
+        val req = buildCommentParentsReq(subId, parentIds)
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
+        if (!eosed) cleanupOneShotSub(subId)
+    }
+
+    /**
      * Fetch posts by a single author, including regular and addressable NIP-71 video kinds.
      * One-shot subscription — CLOSE is sent after EOSE.
      */
@@ -3886,14 +3924,7 @@ class RelayPool @Inject constructor(
                 // 30023 deliberately absent — user-longform below is the sole
                 // kind-30023 path (own limit so kind-1 doesn't crowd articles out).
                 put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(20))
-                    add(JsonPrimitive(21))
-                    add(JsonPrimitive(22))
-                    add(JsonPrimitive(34235))
-                    add(JsonPrimitive(34236))
-                    add(JsonPrimitive(1068))
+                    PROFILE_NOTE_REPLY_EVENT_KINDS.forEach { add(JsonPrimitive(it)) }
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
                 put("limit", JsonPrimitive(200))
@@ -3944,14 +3975,7 @@ class RelayPool @Inject constructor(
             add(JsonPrimitive(subId))
             add(buildJsonObject {
                 put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(6))
-                    add(JsonPrimitive(20))
-                    add(JsonPrimitive(21))
-                    add(JsonPrimitive(22))
-                    add(JsonPrimitive(34235))
-                    add(JsonPrimitive(34236))
-                    add(JsonPrimitive(1068))
+                    PROFILE_NOTE_REPLY_EVENT_KINDS.forEach { add(JsonPrimitive(it)) }
                     add(JsonPrimitive(30023))
                 })
                 put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })

@@ -49,4 +49,19 @@ class Nip22ThreadingTest {
         assertEquals(null, replyToId)
         assertEquals(null, rootId)
     }
+
+    @Test
+    fun `top-level kind-21 comment uses its lowercase event parent as thread root`() {
+        val (replyToId, rootId) = parseNip22Threading(
+            listOf(
+                listOf("E", "video-id"),
+                listOf("K", "21"),
+                listOf("e", "video-id"),
+                listOf("k", "21"),
+            )
+        )
+
+        assertEquals("video-id", replyToId)
+        assertEquals("video-id", rootId)
+    }
 }

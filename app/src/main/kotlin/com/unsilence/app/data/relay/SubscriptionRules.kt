@@ -45,6 +45,7 @@ object SubscriptionRules {
         "article-addr-",
         "poll-responses-",
         "comment-replies-",
+        "comment-parents-",
         "emoji-list-",
         "emoji-set-",
         "emoji-discover-",

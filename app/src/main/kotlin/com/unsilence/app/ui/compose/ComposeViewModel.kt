@@ -1096,10 +1096,14 @@ class ComposeViewModel @Inject constructor(
             articleCommentTarget != null -> PublishTarget.ArticleComment(articleCommentTarget!!)
             isReply -> {
                 val parent = replyToRow ?: return null
-                PublishTarget.Reply(
+                val parentTags = memoryEventStore.getNostrEvent(parent.id)?.tags.orEmpty()
+                buildReplyPublishTarget(
                     rootEventId = parent.rootId ?: parent.id,
                     parentEventId = parent.id,
                     parentPubkey = parent.pubkey,
+                    parentKind = parent.kind,
+                    parentRelayHint = parent.relayUrl.takeIf { it.isNotBlank() },
+                    parentTags = parentTags,
                 )
             }
             _pollDraft.value.enabled -> {
@@ -1167,6 +1171,11 @@ class ComposeViewModel @Inject constructor(
             is PublishTarget.ArticleComment -> {
                 // NIP-22 P/p tags are protocol-mandated and are not user toggles.
                 seen += target.target.articlePubkey
+                target.target.parentPubkey?.let(seen::add)
+            }
+            is PublishTarget.VideoComment -> {
+                // NIP-22 P/p tags are protocol scope, not optional notifications.
+                seen += target.target.rootPubkey
                 target.target.parentPubkey?.let(seen::add)
             }
             is PublishTarget.Reply -> {

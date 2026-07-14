@@ -249,6 +249,127 @@ class ComposePublishPayloadTest {
         assertEquals("comment-id", payload.threadedReplyTargetId())
     }
 
+    @Test
+    fun `kind-21 video reply publishes canonical nip22 E scopes`() {
+        val pubkey = "e".repeat(64)
+        val target = buildReplyPublishTarget(
+            rootEventId = "video-id",
+            parentEventId = "video-id",
+            parentPubkey = pubkey,
+            parentKind = 21,
+            parentRelayHint = "wss://relay.example",
+            parentTags = emptyList(),
+        )
+        val expected = PublishPayload(
+            createdAt = CREATED_AT,
+            kind = 1111,
+            content = "video reply",
+            tags = listOf(
+                listOf("E", "video-id", "wss://relay.example", pubkey),
+                listOf("K", "21"),
+                listOf("P", pubkey, "wss://relay.example"),
+                listOf("e", "video-id", "wss://relay.example", pubkey),
+                listOf("k", "21"),
+                listOf("p", pubkey, "wss://relay.example"),
+            ),
+            replyToId = "video-id",
+            rootId = "video-id",
+        )
+
+        assertGolden(
+            state(
+                blocks = listOf(PublishBlock.Text("video reply")),
+                target = target,
+            ),
+            expected,
+        )
+        assertEquals("video-id", expected.threadedReplyTargetId())
+    }
+
+    @Test
+    fun `kind-34236 video reply publishes canonical nip22 A scopes`() {
+        val pubkey = "f".repeat(64)
+        val coordinate = "34236:$pubkey:clip"
+        val target = buildReplyPublishTarget(
+            rootEventId = "video-id",
+            parentEventId = "video-id",
+            parentPubkey = pubkey,
+            parentKind = 34236,
+            parentRelayHint = "wss://relay.example",
+            parentTags = listOf(listOf("d", "clip")),
+        )
+        val expected = PublishPayload(
+            createdAt = CREATED_AT,
+            kind = 1111,
+            content = "divine reply",
+            tags = listOf(
+                listOf("A", coordinate, "wss://relay.example"),
+                listOf("K", "34236"),
+                listOf("P", pubkey, "wss://relay.example"),
+                listOf("a", coordinate, "wss://relay.example"),
+                listOf("k", "34236"),
+                listOf("p", pubkey, "wss://relay.example"),
+            ),
+            replyToId = "video-id",
+            rootId = "video-id",
+        )
+
+        assertGolden(
+            state(
+                blocks = listOf(PublishBlock.Text("divine reply")),
+                target = target,
+            ),
+            expected,
+        )
+        assertEquals("video-id", expected.threadedReplyTargetId())
+    }
+
+    @Test
+    fun `reply to a video comment preserves the video root and direct parent`() {
+        val rootPubkey = "1".repeat(64)
+        val parentPubkey = "2".repeat(64)
+        val coordinate = "34236:$rootPubkey:clip"
+        val target = buildReplyPublishTarget(
+            rootEventId = "unused-root-id",
+            parentEventId = "comment-id",
+            parentPubkey = parentPubkey,
+            parentKind = 1111,
+            parentRelayHint = "wss://comment.example",
+            parentTags = listOf(
+                listOf("A", coordinate, "wss://video.example"),
+                listOf("K", "34236"),
+                listOf("P", rootPubkey, "wss://video.example"),
+            ),
+        )
+        val payload = buildPublishPayload(
+            state(
+                blocks = listOf(PublishBlock.Text("nested reply")),
+                target = target,
+            )
+        )
+
+        assertEquals(1111, payload.kind)
+        assertTrue(payload.tags.contains(listOf("A", coordinate, "wss://video.example")))
+        assertTrue(payload.tags.contains(listOf("e", "comment-id", "wss://comment.example", parentPubkey)))
+        assertTrue(payload.tags.contains(listOf("k", "1111")))
+        assertEquals("comment-id", payload.replyToId)
+    }
+
+    @Test
+    fun `ordinary reply target remains kind-1`() {
+        val target = buildReplyPublishTarget(
+            rootEventId = "root-id",
+            parentEventId = "note-id",
+            parentPubkey = "3".repeat(64),
+            parentKind = 1,
+            parentRelayHint = null,
+            parentTags = emptyList(),
+        )
+
+        assertTrue(target is PublishTarget.Reply)
+        assertEquals(1, buildPublishPayload(state(listOf(PublishBlock.Text("reply")), target)).kind)
+    }
+
     private fun state(
         blocks: List<PublishBlock>,
         target: PublishTarget = PublishTarget.Note(),

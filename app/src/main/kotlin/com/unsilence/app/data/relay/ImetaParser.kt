@@ -12,6 +12,7 @@ data class ImetaMedia(
     val image: String?,  // NIP-92 poster image for video entries
     val fallbacks: List<String> = emptyList(),
     val durationSeconds: Double? = null,
+    val sizeBytes: Long? = null,
 )
 
 object ImetaParser {
@@ -61,6 +62,7 @@ object ImetaParser {
                 .distinct()
                 .toList(),
             durationSeconds = first("duration")?.toDoubleOrNull()?.takeIf { it >= 0.0 },
+            sizeBytes = first("size")?.toLongOrNull()?.takeIf { it > 0L },
         )
     }
 

@@ -72,6 +72,47 @@ class ImmersiveVideoPolicyTest {
     }
 
     @Test
+    fun `resilient startup is limited to metadata-proven high bitrate media`() {
+        val divine = video.copy(
+            sizeBytes = 6_557_078L,
+            durationSeconds = 6.0,
+            mimeType = "video/mp4",
+        )
+        val normal = video.copy(sizeBytes = 3_000_000L, durationSeconds = 10.0)
+
+        assertEquals(8_742_770L, estimatedVideoBitrateBps(divine.sizeBytes, divine.durationSeconds))
+        assertEquals(1_500L, resilientStartupBufferMs(divine))
+        assertTrue(shouldDeferImmersivePreload(divine))
+        assertEquals(0L, resilientStartupBufferMs(normal))
+        assertFalse(shouldDeferImmersivePreload(normal))
+        assertEquals(0L, resilientStartupBufferMs(video))
+    }
+
+    @Test
+    fun `resilient startup boundaries are deterministic`() {
+        assertEquals(
+            0L,
+            resilientStartupBufferMs(
+                video.copy(sizeBytes = 499_999L, durationSeconds = 1.0),
+            ),
+        )
+        assertEquals(
+            500L,
+            resilientStartupBufferMs(
+                video.copy(sizeBytes = 500_000L, durationSeconds = 1.0),
+            ),
+        )
+        assertEquals(
+            MAX_RESILIENT_STARTUP_BUFFER_MS,
+            resilientStartupBufferMs(
+                video.copy(sizeBytes = 20_000_000L, durationSeconds = 20.0),
+            ),
+        )
+        assertNull(estimatedVideoBitrateBps(null, 1.0))
+        assertNull(estimatedVideoBitrateBps(1L, 0.0))
+    }
+
+    @Test
     fun `immersive session membership is append-only`() {
         val initial = listOf(item("b", 4), item("c", 3))
 

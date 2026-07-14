@@ -8,6 +8,10 @@ import com.unsilence.app.domain.model.ShowType
 
 private val IMMERSIVE_VIDEO_KINDS = setOf(1, 21, 22, 34235, 34236)
 
+internal const val HIGH_BITRATE_VIDEO_BPS = 4_000_000L
+internal const val MAX_RESILIENT_STARTUP_BUFFER_MS = 1_500L
+private const val MIN_RESILIENT_STARTUP_BUFFER_MS = 500L
+
 internal data class ImmersiveVideoItem(
     val row: FeedRow,
     val video: VideoRenderModel,
@@ -63,6 +67,36 @@ internal fun immersivePreloadIndex(
     if (isPowerSaveMode || currentIndex !in 0 until itemCount) return null
     return (currentIndex + 1).takeIf { it < itemCount }
 }
+
+/**
+ * Imeta size and duration let the player distinguish CDN-hostile camera media
+ * from already-compressed feed video without hard-coding a relay or host.
+ */
+internal fun estimatedVideoBitrateBps(sizeBytes: Long?, durationSeconds: Double?): Long? {
+    if (sizeBytes == null || sizeBytes <= 0L || durationSeconds == null || durationSeconds <= 0.0) {
+        return null
+    }
+    return ((sizeBytes.toDouble() * 8.0) / durationSeconds)
+        .takeIf { it.isFinite() && it <= Long.MAX_VALUE.toDouble() }
+        ?.toLong()
+}
+
+/**
+ * Hold proven high-bitrate media until half of a short clip (at most 1.5
+ * seconds) is buffered. Ordinary feed uploads retain the fast 500 ms path.
+ */
+internal fun resilientStartupBufferMs(video: VideoRenderModel): Long {
+    val bitrate = estimatedVideoBitrateBps(video.sizeBytes, video.durationSeconds)
+    if (bitrate == null || bitrate < HIGH_BITRATE_VIDEO_BPS) return 0L
+    val halfDurationMs = (video.durationSeconds!! * 500.0).toLong()
+    return halfDurationMs.coerceIn(
+        MIN_RESILIENT_STARTUP_BUFFER_MS,
+        MAX_RESILIENT_STARTUP_BUFFER_MS,
+    )
+}
+
+internal fun shouldDeferImmersivePreload(video: VideoRenderModel): Boolean =
+    resilientStartupBufferMs(video) > 0L
 
 internal enum class FilterIconKind {
     GRID,

@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -49,6 +50,26 @@ data class ThreadUiState(
     val loading: Boolean = true,
     val focusedReplyId: String? = null,
 )
+
+/**
+ * Coordinate queries prove every supplied row belongs to the same thread. If a
+ * relay returns a child before its parent, attach that orphan to the root until
+ * the missing parent arrives instead of counting a comment that cannot render.
+ */
+internal fun threadProjectionParentId(
+    replyToId: String?,
+    rootId: String?,
+    focusedId: String,
+    availableReplyIds: Set<String>,
+    coordinateScoped: Boolean,
+): String {
+    val parentId = replyToId ?: rootId ?: return focusedId
+    return if (
+        coordinateScoped &&
+        parentId != focusedId &&
+        parentId !in availableReplyIds
+    ) focusedId else parentId
+}
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -83,11 +104,10 @@ class ThreadViewModel @Inject constructor(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
-    /** Set when the thread root is supported addressable content — replies then
-     *  include kind-1111 #A roots instead of relying on the #e-only index. */
-    private val coordFlow = MutableStateFlow<String?>(null)
     @Volatile private var articleCommentRelays: List<String> = emptyList()
-    private val fetchedReplyParents = ConcurrentHashMap.newKeySet<String>()
+    private val fetchedArticleCoords = ConcurrentHashMap.newKeySet<String>()
+    private val fetchedReplyDescendants = ConcurrentHashMap.newKeySet<String>()
+    private val fetchedMissingParents = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var tappedId: String? = null
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -100,10 +120,30 @@ class ThreadViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            combine(eventIdFlow.filterNotNull(), coordFlow) { id, coord -> id to coord }
+            eventIdFlow.filterNotNull()
+                .flatMapLatest { id ->
+                    // A repost target can arrive after the drawer opens. Re-evaluate
+                    // its coordinate on every feed insert so the thread promotes from
+                    // #e lookup to #A lookup without requiring a page-away/page-back.
+                    memoryEventStore.feedSignalFlow
+                        .map { id to memoryEventStore.articleCoordForEvent(id) }
+                        .distinctUntilChanged()
+                }
                 .flatMapLatest { (id, coord) ->
-                    if (coord != null) memoryEventStore.articleCommentsFlow(coord).map { Triple(id, true, it) }
-                    else memoryEventStore.threadFeedRowFlow(id).map { Triple(id, false, it) }
+                    if (coord != null) {
+                        val relays = (
+                            articleCommentRelays +
+                                (memoryEventStore.getNostrEvent(id)?.relaysSeen ?: emptySet()) +
+                                memoryEventStore.relayHintsForEvent(id)
+                            ).distinct()
+                        articleCommentRelays = relays
+                        if (fetchedArticleCoords.add(coord) && relays.isNotEmpty()) {
+                            viewModelScope.launch { relayPool.fetchArticleComments(relays, coord) }
+                        }
+                        memoryEventStore.articleCommentsFlow(coord).map { Triple(id, true, it) }
+                    } else {
+                        memoryEventStore.threadFeedRowFlow(id).map { Triple(id, false, it) }
+                    }
                 }
                 .collect { (focusedId, articleMode, rows) ->
                     // Article mode: the focused article isn't in the comment list, and
@@ -116,7 +156,7 @@ class ThreadViewModel @Inject constructor(
                     val replyRows = if (articleMode) {
                         rows.filter { it.id != focusedId && (it.kind == 1 || it.kind == 1111) }
                     } else {
-                        rows.filter { it.id != focusedId && it.kind == 1 }
+                        rows.filter { it.id != focusedId && (it.kind == 1 || it.kind == 1111) }
                     }
 
                     // Comment cards need live engagement — hydrate, same as the reader.
@@ -124,14 +164,36 @@ class ThreadViewModel @Inject constructor(
                     // tag) so nested replies show; dedupe so it can't loop.
                     if (articleMode && rows.isNotEmpty()) {
                         cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
-                        val novel = rows.map { it.id }.filter { fetchedReplyParents.add(it) }
+                        val rowIds = rows.mapTo(HashSet(rows.size)) { it.id }
+                        val missingParents = rows.asSequence()
+                            .mapNotNull { it.replyToId }
+                            .filter { it != focusedId && it !in rowIds }
+                            .filter { memoryEventStore.getEventEntity(it) == null }
+                            .filter { fetchedMissingParents.add(it) }
+                            .toList()
+                        if (missingParents.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
+                            viewModelScope.launch {
+                                relayPool.fetchCommentParents(articleCommentRelays, missingParents)
+                            }
+                        }
+
+                        val novel = rows.map { it.id }.filter { fetchedReplyDescendants.add(it) }
                         if (novel.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
                             viewModelScope.launch { relayPool.fetchCommentReplies(articleCommentRelays, novel) }
                         }
                     }
 
                     // Build parent→children map
-                    val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
+                    val availableReplyIds = replyRows.mapTo(HashSet(replyRows.size)) { it.id }
+                    val childrenOf = replyRows.groupBy { row ->
+                        threadProjectionParentId(
+                            replyToId = row.replyToId,
+                            rootId = row.rootId,
+                            focusedId = focusedId,
+                            availableReplyIds = availableReplyIds,
+                            coordinateScoped = articleMode,
+                        )
+                    }
                         .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
 
                     // DFS flatten with bounded depth; visited set prevents
@@ -184,9 +246,10 @@ class ThreadViewModel @Inject constructor(
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
         eventIdFlow.value = null
-        coordFlow.value = null
         articleCommentRelays = emptyList()
-        fetchedReplyParents.clear()
+        fetchedArticleCoords.clear()
+        fetchedReplyDescendants.clear()
+        fetchedMissingParents.clear()
         tappedId = null
         _wotSubjects.value = emptySet()
         _uiState.value = ThreadUiState()
@@ -197,29 +260,30 @@ class ThreadViewModel @Inject constructor(
      * coordinate-aware comments; anything else uses the standard #e thread fetch.
      */
     private suspend fun applyRoot(rootId: String, urls: List<String>) {
-        eventIdFlow.value = rootId
+        if (eventIdFlow.value != rootId) {
+            fetchedArticleCoords.clear()
+            fetchedReplyDescendants.clear()
+            fetchedMissingParents.clear()
+        }
         val rootEvent = memoryEventStore.getEventEntity(rootId)
         val coord = if (rootEvent?.kind in setOf(30023, 34235, 34236)) {
             memoryEventStore.articleCoordForEvent(rootId)
         } else null
+        articleCommentRelays = (urls +
+            (memoryEventStore.getNostrEvent(rootId)?.relaysSeen ?: emptySet()) +
+            memoryEventStore.relayHintsForEvent(rootId)).distinct()
         if (coord != null) {
             memoryEventStore.registerArticleCoord(rootId, coord)
-            coordFlow.value = coord
-            val relays = (urls +
-                (memoryEventStore.getNostrEvent(rootId)?.relaysSeen ?: emptySet()) +
-                memoryEventStore.relayHintsForEvent(rootId)).distinct()
-            articleCommentRelays = relays
-            relayPool.fetchArticleComments(relays, coord)
         } else {
-            coordFlow.value = null
             relayPool.fetchThread(urls, rootId)
         }
+        // Set last: the reactive collector observes a fully registered coordinate
+        // and complete relay set on its first emission.
+        eventIdFlow.value = rootId
     }
 
     fun loadThread(eventId: String, relayHints: List<String> = emptyList()) {
         tappedId = eventId
-        // Clear stale state immediately — prevents flash of old thread content
-        _uiState.value = ThreadUiState(loading = true)
         viewModelScope.launch {
             val ownPubkey = pubkeyHex ?: ""
             val ownReadRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
@@ -258,6 +322,10 @@ class ThreadViewModel @Inject constructor(
             val urls = (relayHints + resolvedUrls).distinct()
 
             if (eventIdFlow.value == bestGuessRoot) return@launch
+
+            // Clear stale state only after confirming this is a different thread.
+            // Clearing before the same-root early return strands the drawer in Loading.
+            _uiState.value = ThreadUiState(loading = true)
 
             applyRoot(bestGuessRoot, urls)
 
