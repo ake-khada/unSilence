@@ -699,7 +699,7 @@ internal fun parseNip22Threading(tags: List<List<String>>): Pair<String?, String
 
     return when {
         parentId == null -> Pair(null, null)
-        parentKind == 30023 -> Pair(parentId, parentId)
+        parentKind == 30023 || parentKind == 21 || parentKind == 22 -> Pair(parentId, parentId)
         parentKind == 1111 -> Pair(parentId, null)
         else -> Pair(parentId, null)
     }

@@ -72,6 +72,7 @@ internal fun ImmersiveEngagementSheet(
     imageDimensionCache: ImageDimensionCache,
     sensitiveMode: SensitiveContentMode,
     onDismiss: () -> Unit,
+    onReply: (String) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val density = LocalDensity.current
@@ -86,7 +87,7 @@ internal fun ImmersiveEngagementSheet(
         threadViewModel.loadThread(model.navigateId)
     }
 
-    val replyCallbacks = remember(callbacks, threadViewModel, threadWotLookups) {
+    val replyCallbacks = remember(callbacks, threadViewModel, threadWotLookups, onReply) {
         callbacks.copy(
             profileFlow = threadViewModel::profileFlow,
             statsFlow = threadViewModel::statsFlow,
@@ -95,6 +96,7 @@ internal fun ImmersiveEngagementSheet(
             reactionsForEvent = threadViewModel::reactionsForEvent,
             wotLookup = { pubkey -> threadWotLookups[pubkey] },
             onWotSubjectsVisible = {},
+            onComment = onReply,
         )
     }
 
@@ -183,7 +185,7 @@ internal fun ImmersiveEngagementSheet(
                         drawerOpen = drawerOpen,
                         onChevronTap = { drawerOpen = !drawerOpen },
                         onNoteClick = { callbacks.onNoteClick(model.navigateId) },
-                        onComment = { callbacks.onComment(model.navigateId) },
+                        onComment = { onReply(model.navigateId) },
                         onReact = { callbacks.react(model.engagementId, model.pubkey, "+", null) },
                         onReactLongPress = {
                             callbacks.onReactLongPress?.invoke(model.engagementId, model.pubkey)
@@ -280,7 +282,7 @@ internal fun ImmersiveEngagementSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Surface2)
-                    .clickable { callbacks.onComment(model.navigateId) }
+                    .clickable { onReply(model.navigateId) }
                     .padding(horizontal = Spacing.medium, vertical = 12.dp),
             ) {
                 androidx.compose.foundation.layout.Row(

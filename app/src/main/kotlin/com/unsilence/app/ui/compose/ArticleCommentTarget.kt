@@ -17,6 +17,19 @@ data class ArticleCommentTarget(
     val parentRelayHint: String? = null,
 )
 
+/** Root and parent scope for a NIP-22 comment on a NIP-71 video. */
+data class VideoCommentTarget(
+    val rootEventId: String?,
+    val rootCoord: String?,
+    val rootKind: Int,
+    val rootPubkey: String,
+    val rootRelayHint: String? = null,
+    val parentId: String? = null,
+    val parentKind: Int? = null,
+    val parentPubkey: String? = null,
+    val parentRelayHint: String? = null,
+)
+
 /**
  * Pure NIP-22 tag construction for kind-1111 article comments — extracted for
  * unit testing. See https://github.com/nostr-protocol/nips/blob/master/22.md
@@ -49,6 +62,39 @@ object Nip22Tags {
             tags.add(arrayOf("e", target.parentId, pHint, target.parentPubkey.orEmpty()))
             tags.add(arrayOf("k", (target.parentKind ?: 1111).toString()))
             target.parentPubkey?.let { tags.add(arrayOf("p", it, pHint)) }
+        }
+        return tags
+    }
+
+    /** NIP-22 scopes for event-addressed (21/22) and coordinate-addressed videos. */
+    fun videoComment(target: VideoCommentTarget): List<Array<String>> {
+        require(target.rootKind in setOf(21, 22, 34235, 34236))
+        val tags = mutableListOf<Array<String>>()
+        val rootHint = target.rootRelayHint.orEmpty()
+        val coordinate = target.rootCoord
+
+        if (coordinate != null) {
+            tags.add(arrayOf("A", coordinate, rootHint))
+        } else {
+            val rootId = requireNotNull(target.rootEventId)
+            tags.add(arrayOf("E", rootId, rootHint, target.rootPubkey))
+        }
+        tags.add(arrayOf("K", target.rootKind.toString()))
+        tags.add(arrayOf("P", target.rootPubkey, rootHint))
+
+        if (target.parentId == null) {
+            if (coordinate != null) {
+                tags.add(arrayOf("a", coordinate, rootHint))
+            } else {
+                tags.add(arrayOf("e", requireNotNull(target.rootEventId), rootHint, target.rootPubkey))
+            }
+            tags.add(arrayOf("k", target.rootKind.toString()))
+            tags.add(arrayOf("p", target.rootPubkey, rootHint))
+        } else {
+            val parentHint = target.parentRelayHint.orEmpty()
+            tags.add(arrayOf("e", target.parentId, parentHint, target.parentPubkey.orEmpty()))
+            tags.add(arrayOf("k", (target.parentKind ?: 1111).toString()))
+            target.parentPubkey?.let { tags.add(arrayOf("p", it, parentHint)) }
         }
         return tags
     }

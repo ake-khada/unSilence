@@ -86,8 +86,8 @@ class ProfilePipeline @Inject constructor(
     private val primalCacheClient: PrimalCacheClient,
 ) {
     companion object {
-        /** Kinds fetched for profile notes (notes + reposts + generic reposts + pictures + videos + articles). */
-        val PROFILE_KINDS = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023)
+        /** Kinds fetched for profile content, including NIP-22 comments for the Replies tab. */
+        val PROFILE_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023
         /**
          * Posts per engagement REQ. MUST track buildBatchedEngagementReq's invariant:
          * limit=ENGAGEMENT_BATCH_LIMIT(500) ÷ chunk = per-post event budget. At 5 →

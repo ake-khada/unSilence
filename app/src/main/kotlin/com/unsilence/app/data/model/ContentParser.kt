@@ -695,6 +695,8 @@ object ContentParser {
             shortForm = shortForm,
             fallbackUrls = meta?.fallbacks.orEmpty(),
             durationSeconds = meta?.durationSeconds,
+            mimeType = meta?.mimeType,
+            sizeBytes = meta?.sizeBytes,
         )
     }
 

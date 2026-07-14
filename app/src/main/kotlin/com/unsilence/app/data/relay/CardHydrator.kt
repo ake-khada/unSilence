@@ -1224,6 +1224,7 @@ internal fun buildBatchedEngagementReq(
         add(buildJsonObject {
             put("kinds", buildJsonArray {
                 add(JsonPrimitive(1))   // replies
+                add(JsonPrimitive(1111)) // NIP-22 comments on event-addressed videos
                 add(JsonPrimitive(6))   // note reposts
                 add(JsonPrimitive(16))  // generic reposts (NIP-18) — count toward repost totals
                 add(JsonPrimitive(7))   // reactions

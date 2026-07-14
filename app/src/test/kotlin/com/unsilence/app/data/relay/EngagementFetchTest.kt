@@ -40,7 +40,7 @@ class EngagementFetchTest {
 
         val filter = parsed[2].jsonObject
         val kinds = filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
-        assertEquals(listOf(1, 6, 16, 7, 9735), kinds)
+        assertEquals(listOf(1, 1111, 6, 16, 7, 9735), kinds)
 
         val eTags = filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(listOf("evt-1", "evt-2"), eTags)
@@ -76,8 +76,26 @@ class EngagementFetchTest {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"))
         val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!
             .jsonArray.map { it.jsonPrimitive.content.toInt() }
-        // 1 reply, 6 note-repost, 16 generic-repost, 7 reaction, 9735 zap
-        assertEquals(listOf(1, 6, 16, 7, 9735), kinds)
+        // 1/1111 replies, 6 note-repost, 16 generic-repost, 7 reaction, 9735 zap
+        assertEquals(listOf(1, 1111, 6, 16, 7, 9735), kinds)
+    }
+
+    @Test
+    fun `comment parent request fetches exact kind 1 and 1111 ids`() {
+        val req = buildCommentParentsReq("comment-parents-test", listOf("parent", "parent", "other"))
+        val frame = Json.parseToJsonElement(req).jsonArray
+        val filter = frame[2].jsonObject
+
+        assertEquals("REQ", frame[0].jsonPrimitive.content)
+        assertEquals("comment-parents-test", frame[1].jsonPrimitive.content)
+        assertEquals(
+            listOf("parent", "other"),
+            filter["ids"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+        assertEquals(
+            listOf(1, 1111),
+            filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() },
+        )
     }
 
     // ── engagementFreshnessInterval ─────────────────────────────────────
@@ -128,6 +146,11 @@ class EngagementFetchTest {
         // own-eng- has its own prefix — eng- should not catch it via startsWith
         // (both should match, but via different prefixes)
         assertTrue(SubscriptionRules.isOneShotSubscription("own-eng-12345"))
+    }
+
+    @Test
+    fun `comment parent fetch is one-shot`() {
+        assertTrue(SubscriptionRules.isOneShotSubscription("comment-parents-12345"))
     }
 
     // ── MES engagementCapped ────────────────────────────────────────────

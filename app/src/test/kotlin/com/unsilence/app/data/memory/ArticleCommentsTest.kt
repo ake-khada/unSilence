@@ -1,6 +1,8 @@
 package com.unsilence.app.data.memory
 
 import com.unsilence.app.data.auth.MuteKeyProvider
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -213,5 +215,91 @@ class ArticleCommentsTest {
         store.insert(event(id = "newer", kind = 1111, createdAt = 2000, tags = listOf(listOf("A", coord))))
         store.insert(event(id = "older", kind = 1111, createdAt = 1000, tags = listOf(listOf("A", coord))))
         assertEquals(listOf("older", "newer"), store.articleCommentsFlow(coord).first().map { it.id })
+    }
+
+    @Test
+    fun `optimistic addressable-video comment is immediately visible by coordinate`() = runTest {
+        val videoPubkey = "a".repeat(64)
+        val videoCoord = "34236:$videoPubkey:clip"
+        store.insert(
+            event(
+                id = "video", pubkey = videoPubkey, kind = 34236,
+                tags = listOf(listOf("d", "clip")),
+            )
+        )
+        store.insert(
+            NostrEvent(
+                id = "comment", pubkey = "b".repeat(64), kind = 1111, content = "nice",
+                createdAt = 1001,
+                tags = listOf(
+                    listOf("A", videoCoord), listOf("K", "34236"),
+                    listOf("a", videoCoord), listOf("k", "34236"),
+                ),
+                tagsJson = "[]", sig = "sig", relayUrl = "local",
+                replyToId = "video", rootId = "video",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),
+            )
+        )
+
+        assertEquals(listOf("comment"), store.articleCommentsFlow(videoCoord).first().map { it.id })
+        assertEquals(1, store.replyCount("video"))
+    }
+
+    @Test
+    fun `active addressable comment collector emits optimistic insert`() = runTest {
+        val videoPubkey = "a".repeat(64)
+        val videoCoord = "34236:$videoPubkey:clip"
+        store.insert(
+            event(
+                id = "video", pubkey = videoPubkey, kind = 34236,
+                tags = listOf(listOf("d", "clip")),
+            )
+        )
+        val update = async(start = CoroutineStart.UNDISPATCHED) {
+            store.articleCommentsFlow(videoCoord).first { rows ->
+                rows.any { it.id == "comment" }
+            }
+        }
+
+        store.insert(
+            NostrEvent(
+                id = "comment", pubkey = "b".repeat(64), kind = 1111, content = "nice",
+                createdAt = 1001,
+                tags = listOf(
+                    listOf("A", videoCoord), listOf("K", "34236"),
+                    listOf("a", videoCoord), listOf("k", "34236"),
+                ),
+                tagsJson = "[]", sig = "sig", relayUrl = "local",
+                replyToId = "video", rootId = "video",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),
+            )
+        )
+
+        assertEquals(listOf("comment"), update.await().map { it.id })
+    }
+
+    @Test
+    fun `kind-21 nip22 comment joins the normal event thread and count`() = runTest {
+        val videoPubkey = "a".repeat(64)
+        store.insert(event(id = "video", pubkey = videoPubkey, kind = 21))
+        store.insert(
+            NostrEvent(
+                id = "comment", pubkey = "b".repeat(64), kind = 1111, content = "nice",
+                createdAt = 1001,
+                tags = listOf(
+                    listOf("E", "video"), listOf("K", "21"),
+                    listOf("e", "video"), listOf("k", "21"),
+                ),
+                tagsJson = "[]", sig = "sig", relayUrl = "local",
+                replyToId = "video", rootId = "video",
+                hasContentWarning = false, contentWarningReason = null,
+                firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),
+            )
+        )
+
+        assertEquals(listOf("video", "comment"), store.threadFeedRowFlow("video").first().map { it.id })
+        assertEquals(1, store.replyCount("video"))
     }
 }

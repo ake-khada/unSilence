@@ -173,6 +173,7 @@ internal fun ImmersiveVideoFeed(
     var muted by remember { mutableStateOf(false) }
     var paused by remember { mutableStateOf(false) }
     var renderedVideoUrl by remember { mutableStateOf<String?>(null) }
+    var startupReadyEventId by remember { mutableStateOf<String?>(null) }
     var sheetEventId by remember { mutableStateOf<String?>(null) }
     var anchoredEventId by remember { mutableStateOf(sessionItems.first().row.id) }
     var revealedSensitiveIds by remember { mutableStateOf(emptySet<String>()) }
@@ -188,6 +189,7 @@ internal fun ImmersiveVideoFeed(
             player.playWhenReady = false
             player.volume = 0f
             player.repeatMode = Player.REPEAT_MODE_ALL
+            holder.clearImmersivePreloads()
             holder.releaseOwnership(IMMERSIVE_OWNER_ID)
         }
     }
@@ -240,18 +242,32 @@ internal fun ImmersiveVideoFeed(
         if (settledItemBlocked) {
             player.playWhenReady = false
             paused = true
+            startupReadyEventId = null
             return@LaunchedEffect
         }
         holder.claim(IMMERSIVE_OWNER_ID)
         val currentUrl = player.currentMediaItem?.localConfiguration?.uri?.toString()
-        if (currentUrl != item.video.videoUrl || player.mediaItemCount == 0) {
+        val currentEventId = player.currentMediaItem?.mediaId
+        if (
+            currentUrl != item.video.videoUrl ||
+            currentEventId != item.row.id ||
+            player.mediaItemCount == 0
+        ) {
             renderedVideoUrl = null
+            startupReadyEventId = null
+            player.playWhenReady = false
             player.stop()
             player.clearMediaItems()
-            player.setMediaItem(MediaItem.fromUri(item.video.videoUrl))
-            player.prepare()
+            holder.setImmersiveMediaItem(item.row.id, item.video)
+            val stillCurrent = awaitStartupBuffer(
+                player = player,
+                expectedEventId = item.row.id,
+                targetBufferMs = resilientStartupBufferMs(item.video),
+            )
+            if (!stillCurrent) return@LaunchedEffect
         }
         paused = false
+        startupReadyEventId = item.row.id
         player.playWhenReady = true
     }
 
@@ -269,11 +285,40 @@ internal fun ImmersiveVideoFeed(
         itemCount = sessionItems.size,
         isPowerSaveMode = isPowerSaveMode,
     )
-    LaunchedEffect(preloadIndex, sessionItems) {
-        val next = preloadIndex?.let(sessionItems::getOrNull) ?: return@LaunchedEffect
-        // Decoder-free warm-up: MMR extracts and releases one scaled first frame,
-        // priming the media URL while keeping the thermal/decoder budget bounded.
-        thumbnailCache.getThumbnail(next.video.videoUrl)
+    val preloadItem = preloadIndex?.let(sessionItems::getOrNull)
+    LaunchedEffect(
+        settledItem?.row?.id,
+        startupReadyEventId,
+        preloadIndex,
+        preloadItem?.row?.id,
+        isPowerSaveMode,
+    ) {
+        val current = settledItem ?: return@LaunchedEffect
+        if (startupReadyEventId != current.row.id) return@LaunchedEffect
+        if (
+            !isPowerSaveMode &&
+            preloadItem != null &&
+            shouldDeferImmersivePreload(current.video)
+        ) {
+            // A high-bitrate current item gets the connection exclusively until
+            // it is complete. Starting the next request sooner can starve the
+            // playing stream on constrained single-origin video hosts.
+            while (player.currentMediaItem?.mediaId == current.row.id && player.playerError == null) {
+                val durationMs = player.duration
+                if (durationMs > 0L && player.bufferedPosition >= durationMs - PROGRESS_POLL_MS) break
+                delay(PROGRESS_POLL_MS)
+            }
+            if (player.currentMediaItem?.mediaId != current.row.id) return@LaunchedEffect
+        }
+        holder.updateImmersivePreload(
+            currentIndex = pagerState.settledPage,
+            currentEventId = current.row.id,
+            currentVideo = current.video,
+            nextIndex = preloadIndex,
+            nextEventId = preloadItem?.row?.id,
+            nextVideo = preloadItem?.video,
+            enabled = !isPowerSaveMode,
+        )
     }
 
     LaunchedEffect(pagerState.settledPage, sessionItems.size, isLoadingMore) {
@@ -372,8 +417,28 @@ internal fun ImmersiveVideoFeed(
             imageDimensionCache = imageDimensionCache,
             sensitiveMode = sensitiveMode,
             onDismiss = { sheetEventId = null },
+            onReply = { eventId ->
+                sheetEventId = null
+                callbacks.onComment(eventId)
+            },
         )
     }
+}
+
+private suspend fun awaitStartupBuffer(
+    player: ExoPlayer,
+    expectedEventId: String,
+    targetBufferMs: Long,
+): Boolean {
+    if (targetBufferMs <= 0L) return player.currentMediaItem?.mediaId == expectedEventId
+    while (player.currentMediaItem?.mediaId == expectedEventId && player.playerError == null) {
+        val bufferedAheadMs = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        val durationMs = player.duration
+        val fullyBuffered = durationMs > 0L && player.bufferedPosition >= durationMs
+        if (bufferedAheadMs >= targetBufferMs || fullyBuffered) return true
+        delay(50L)
+    }
+    return false
 }
 
 private fun Modifier.consumeUnclaimedTaps(): Modifier = pointerInput(Unit) {

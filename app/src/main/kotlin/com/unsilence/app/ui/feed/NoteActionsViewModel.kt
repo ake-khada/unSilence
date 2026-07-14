@@ -26,6 +26,7 @@ import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.data.model.eventAddressableCoordinate
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
@@ -458,15 +459,18 @@ class NoteActionsViewModel @Inject constructor(
             }
             val nowSeconds = System.currentTimeMillis() / 1000L
 
-            val baseTags = arrayOf(
-                arrayOf("e", eventId),
-                arrayOf("p", eventPubkey),
+            val target = memoryEventStore.getNostrEvent(eventId)
+            val targetDTag = target?.tags
+                ?.firstOrNull { it.size >= 2 && it[0] == "d" }
+                ?.getOrNull(1)
+            val tags = buildReactionTags(
+                targetId = eventId,
+                targetPubkey = eventPubkey,
+                targetKind = target?.kind,
+                targetDTag = targetDTag,
+                emoji = emoji,
+                customEmojiUrl = customEmojiUrl,
             )
-            // NIP-25 + NIP-30: custom emoji reactions include an ["emoji", shortcode, url] tag
-            val tags = if (customEmojiUrl != null) {
-                val shortcode = emoji.removePrefix(":").removeSuffix(":")
-                baseTags + arrayOf(arrayOf("emoji", shortcode, customEmojiUrl))
-            } else baseTags
 
             val template = EventTemplate<ReactionEvent>(
                 createdAt = nowSeconds,
@@ -945,6 +949,28 @@ internal fun buildPollResponseTags(
     }.toTypedArray()
 }
 
+/** NIP-25 reaction tags, including target kind and address when locally known. */
+internal fun buildReactionTags(
+    targetId: String,
+    targetPubkey: String,
+    targetKind: Int?,
+    targetDTag: String?,
+    emoji: String = "+",
+    customEmojiUrl: String? = null,
+): Array<Array<String>> = buildList {
+    add(arrayOf("e", targetId))
+    add(arrayOf("p", targetPubkey))
+    targetKind?.let { kind ->
+        add(arrayOf("k", kind.toString()))
+        eventAddressableCoordinate(kind, targetPubkey, targetDTag)?.let { coordinate ->
+            add(arrayOf("a", coordinate))
+        }
+    }
+    if (customEmojiUrl != null) {
+        add(arrayOf("emoji", emoji.removePrefix(":").removeSuffix(":"), customEmojiUrl))
+    }
+}.toTypedArray()
+
 /** The repost kind + tags for a target, per NIP-18. Pure (unit-tested). */
 internal data class RepostDescriptor(val kind: Int, val tags: Array<Array<String>>) {
     // data class with Array — equals/hashCode unused by callers/tests (we assert on
@@ -957,20 +983,13 @@ internal fun buildDeletionRequestTags(events: List<NostrEvent>): Array<Array<Str
     val tags = mutableListOf<Array<String>>()
     events.distinctBy { it.id }.forEach { tags.add(arrayOf("e", it.id)) }
     events.map { it.kind }.distinct().forEach { tags.add(arrayOf("k", it.toString())) }
-    events.mapNotNull(::deletionAddressableCoordinate)
+    events.mapNotNull { event ->
+        val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1)
+        eventAddressableCoordinate(event.kind, event.pubkey, dTag)
+    }
         .distinct()
         .forEach { tags.add(arrayOf("a", it)) }
     return tags.toTypedArray()
-}
-
-private fun deletionAddressableCoordinate(event: NostrEvent): String? {
-    if (event.kind !in 10000..39999) return null
-    val dTag = if (event.kind in 30000..39999) {
-        event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1).orEmpty()
-    } else {
-        ""
-    }
-    return "${event.kind}:${event.pubkey}:$dTag"
 }
 
 /**

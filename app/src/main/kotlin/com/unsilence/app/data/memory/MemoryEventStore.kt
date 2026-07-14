@@ -33,6 +33,7 @@ import java.io.DataOutputStream
 import java.io.IOException
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.NostrFilter
+import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KIND_SET
 import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
@@ -987,14 +988,13 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleNip22Comment(event: NostrEvent, dirty: InsertDirty) {
-        // Article-root counts come from articleCommentIds(coord), which is also the
-        // rendered list source. This handler counts ONLY replies to another
-        // kind-1111 comment, so the parent comment card can show its reply count.
+        // Addressable-root counts come from articleCommentIds(coord). Event-addressed
+        // video roots (21/22) and kind-1111 parents use the ordinary id counter.
         val parentKind = event.tags
             .firstOrNull { it.size >= 2 && it[0] == "k" }
             ?.getOrNull(1)
             ?.toIntOrNull()
-        if (parentKind != 1111) return
+        if (parentKind !in setOf(21, 22, 1111)) return
 
         val parentId = event.replyToId
             ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
@@ -1014,7 +1014,7 @@ class MemoryEventStore @Inject constructor(
                 .firstOrNull { it.size >= 2 && it[0] == "k" }
                 ?.getOrNull(1)
                 ?.toIntOrNull()
-            if (parentKind != 1111) continue
+            if (parentKind !in setOf(21, 22, 1111)) continue
             val parentId = event.replyToId
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
                 ?: continue
@@ -1275,6 +1275,9 @@ class MemoryEventStore @Inject constructor(
             addressableCoordinate(event)?.let { coord ->
                 articleIdByCoord.remove(coord)
                 articleCoordById.remove(event.id)
+                commentIdsByCoord[coord]?.forEach { commentId ->
+                    feedRowCache.remove(commentId)
+                }
             }
         }
         deindexArticleComment(event, dirty)
@@ -2956,6 +2959,9 @@ class MemoryEventStore @Inject constructor(
     fun registerArticleCoord(eventId: String, coord: String) {
         val novel = articleCoordById.put(eventId, coord) != coord
         articleIdByCoord[coord] = eventId
+        // A coordinate-only NIP-22 comment can now project its parent event id.
+        // Drop any rows built before the addressable target arrived.
+        commentIdsByCoord[coord]?.forEach(feedRowCache::remove)
         if (novel) {
             statsUpdatedAt[eventId] = maxOf(
                 statsUpdatedAt[eventId] ?: 0L,
@@ -3285,8 +3291,8 @@ class MemoryEventStore @Inject constructor(
      *
      * contentFilter semantics (match FeedQuery contract):
      *   0 = all: all kinds in the set, no filter
-     *   1 = notes only: kind-1 roots (no replies, no kind-6, no kind-30023)
-     *   2 = replies only: kind-1 with replyToId or rootId (no kind-6, no kind-30023)
+     *   1 = notes only: roots/reposts, excluding replies and NIP-22 comments
+     *   2 = replies only: kind-1 replies plus all NIP-22 kind-1111 comments
      */
     private fun userFeedEvents(
         pubkey: String,
@@ -3303,8 +3309,11 @@ class MemoryEventStore @Inject constructor(
                 (it.kind == 1 && it.replyToId == null && it.rootId == null) ||
                     it.kind == 6 || it.kind == 16 || it.kind == 1068
             }
-            // Replies tab: kind-1 replies only (has replyToId or rootId)
-            2 -> events.filter { it.kind == 1 && (it.replyToId != null || it.rootId != null) }
+            // NIP-22 addressable comments can have only A/a tags and no event-id parent.
+            2 -> events.filter {
+                it.kind == 1111 ||
+                    (it.kind == 1 && (it.replyToId != null || it.rootId != null))
+            }
             else -> events
         }
 
@@ -3722,7 +3731,7 @@ class MemoryEventStore @Inject constructor(
     fun userFeedFlow(
         pubkey: String,
         contentFilter: Int = 0,
-        kinds: Set<Int> = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 30023),
+        kinds: Set<Int> = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023,
         limit: Int = 200,
     ): Flow<List<FeedRow>> =
         // No _statsSignal: stats changes don't alter feed membership/order, and
@@ -4574,6 +4583,14 @@ class MemoryEventStore @Inject constructor(
         val fields = cachedProfileFields(event.pubkey)
         val zap = zapStats(statsId)
 
+        val projectedRootId = event.rootId ?: if (event.kind == 1111) {
+            event.tags.firstOrNull { tag ->
+                tag.size >= 2 && tag[0] == "A"
+            }?.get(1)?.let(articleIdByCoord::get)
+        } else {
+            null
+        }
+
         val row = FeedRow(
             id = event.id,
             pubkey = event.pubkey,
@@ -4583,7 +4600,7 @@ class MemoryEventStore @Inject constructor(
             tags = event.tagsJson,
             relayUrl = event.relayUrl,
             replyToId = event.replyToId,
-            rootId = event.rootId,
+            rootId = projectedRootId,
             hasContentWarning = event.hasContentWarning,
             contentWarningReason = event.contentWarningReason,
             zapTotalSats = zap.totalSats,

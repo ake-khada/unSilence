@@ -148,7 +148,7 @@ class ProfileViewModel @Inject constructor(
             if (events.isEmpty()) return@combine emptyList()
             val displayed = events.asSequence()
                 .filterNot { memoryEventStore.isDeleted(it) }
-                .filter { matchesContentFilter(it, cf) }
+                .filter { matchesProfileContentFilter(it, cf) }
                 .take(FEED_DISPLAY_CAP)
                 .toList()
             if (displayed.isEmpty()) return@combine emptyList()
@@ -327,7 +327,7 @@ class ProfileViewModel @Inject constructor(
         currentHandle?.close()
         currentHandle = null
 
-        val kinds = kindsForTab(tab)
+        val kinds = profileKindsForTab(tab)
         val cached = memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
         val writeRelays = memoryEventStore.writeRelaysFor(pubkey)
             .ifEmpty { GLOBAL_RELAY_URLS }
@@ -442,17 +442,6 @@ class ProfileViewModel @Inject constructor(
     private fun getWriteRelayUrls(pubkey: String): List<String> =
         memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
 
-    private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean {
-        // kind-6 AND kind-16 reposts carry a rootId (the reposted event) → roots, not replies.
-        val isRepostKind = evt.kind == 6 || evt.kind == 16
-        return when (cf) {
-            FeedContentFilter.NOTES_ONLY ->
-                isRepostKind || (evt.replyToId == null && evt.rootId == null)
-            FeedContentFilter.REPLIES_ONLY ->
-                !isRepostKind && (evt.replyToId != null || evt.rootId != null)
-        }
-    }
-
     override fun onCleared() {
         currentHandle?.close()
         currentHandle = null
@@ -472,10 +461,5 @@ class ProfileViewModel @Inject constructor(
             ProfileTab.LONGFORM -> SubGroup.LONGFORM
         }
 
-        fun kindsForTab(tab: ProfileTab): List<Int> = when (tab) {
-            ProfileTab.NOTES, ProfileTab.REPLIES ->
-                listOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068)
-            ProfileTab.LONGFORM -> listOf(30023)
-        }
     }
 }

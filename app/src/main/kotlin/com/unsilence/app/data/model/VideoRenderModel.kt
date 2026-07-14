@@ -22,6 +22,8 @@ data class VideoRenderModel(
     val shortForm: Boolean = false,
     val fallbackUrls: List<String> = emptyList(),
     val durationSeconds: Double? = null,
+    val mimeType: String? = null,
+    val sizeBytes: Long? = null,
 )
 
 private val YOUTUBE_REGEX = Regex(
@@ -186,5 +188,7 @@ private fun buildModelForUrl(
         shortForm = shortForm,
         fallbackUrls = imetaForUrl?.fallbacks.orEmpty(),
         durationSeconds = imetaForUrl?.durationSeconds,
+        mimeType = imetaForUrl?.mimeType,
+        sizeBytes = imetaForUrl?.sizeBytes,
     )
 }
