@@ -2,6 +2,7 @@ package com.unsilence.app.data.relay
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -44,12 +45,14 @@ private val KEY_SENSITIVE_CONTENT_MODE = stringPreferencesKey("sensitive_content
 private val KEY_WOT_PROVIDER_PUBKEY = stringPreferencesKey("wot_provider_pubkey")
 private val KEY_WOT_PROVIDER_RELAY = stringPreferencesKey("wot_provider_relay")
 private val KEY_WOT_PROVIDER_SOURCE = stringPreferencesKey("wot_provider_source")
+private val KEY_WOT_PREFS_OWNER = stringPreferencesKey("wot_prefs_owner")
 private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
 private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
 private val KEY_FEED_WOT_DISPLAY_MODE = stringPreferencesKey("feed_wot_display_mode")
 private val KEY_GLOBAL_FEED_LENS = stringPreferencesKey("global_feed_lens")
 private val KEY_HASHTAG_CAP = intPreferencesKey("hashtag_cap")
 private const val HASHTAG_CAP_OFF = 0
+private const val ACCOUNT_WOT_PREFS_PREFIX = "account_wot_prefs_"
 
 enum class WotProviderSource {
     DEFAULT,
@@ -63,12 +66,20 @@ data class WotProviderPrefs(
     val source: WotProviderSource,
 )
 
+internal fun shouldResetWotPrefs(storedOwner: String?, currentPubkey: String): Boolean =
+    storedOwner != null && !storedOwner.trim().equals(currentPubkey.trim(), ignoreCase = true)
+
 @Singleton
-class RelayPreferencesStore @Inject constructor(
-    @ApplicationContext private val context: Context,
+class RelayPreferencesStore internal constructor(
+    private val dataStore: DataStore<Preferences>,
+    private val scope: CoroutineScope,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val dataStore get() = context.relayPrefs
+    @Inject
+    constructor(@ApplicationContext context: Context) : this(
+        dataStore = context.relayPrefs,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    )
+
     private val editMutex = Mutex()
 
     // ─── Indexer URLs ───────────────────────────────────────────────────────
@@ -145,15 +156,50 @@ class RelayPreferencesStore @Inject constructor(
     suspend fun wotProviderPrefsSuspending(): WotProviderPrefs =
         dataStore.data.first().toWotProviderPrefs()
 
-    suspend fun setWotProvider(pubkey: String, relay: String, source: WotProviderSource) {
-        val normalizedPubkey = normalizeHexPubkey(pubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY
-        val normalizedRelay = normalizeRelayUrl(relay) ?: DEFAULT_WOT_RELAY
-        dataStore.edit { prefs ->
-            prefs[KEY_WOT_PROVIDER_PUBKEY] = normalizedPubkey
-            prefs[KEY_WOT_PROVIDER_RELAY] = normalizedRelay
-            prefs[KEY_WOT_PROVIDER_SOURCE] = source.name
+    /**
+     * Selects the provider preferences owned by [currentPubkey] before bootstrap reads them.
+     *
+     * Only the provider declaration and its fetch stamps are identity-scoped. Feed filters,
+     * the Global lens, display mode, and relay selections intentionally remain device UX prefs.
+     */
+    suspend fun ensureWotPrefsOwner(currentPubkey: String): WotProviderPrefs = editMutex.withLock {
+        val normalizedCurrent = requireNotNull(normalizeHexPubkey(currentPubkey)) {
+            "WoT preferences owner must be a 64-character hex pubkey"
         }
+        dataStore.edit { prefs ->
+            val storedOwner = prefs[KEY_WOT_PREFS_OWNER]
+            if (shouldResetWotPrefs(storedOwner, normalizedCurrent)) {
+                // Preserve the outgoing account's declaration so a later relogin restores it.
+                normalizeHexPubkey(storedOwner)?.let { owner ->
+                    prefs.writeAccountWotProviderPrefs(owner, prefs.toWotProviderPrefs())
+                }
+
+                // A first-seen identity always starts on NosFabrica. Returning identities get
+                // their own declaration, never the account that happened to use the device last.
+                val selected = prefs.accountWotProviderPrefs(normalizedCurrent)
+                    ?: defaultWotProviderPrefs()
+                prefs.writeActiveWotProviderPrefs(selected)
+                prefs.remove(KEY_LAST_WOT_FETCH)
+                prefs.remove(KEY_LAST_WOT_TARGETS_HASH)
+            }
+
+            prefs[KEY_WOT_PREFS_OWNER] = normalizedCurrent
+            prefs.writeAccountWotProviderPrefs(normalizedCurrent, prefs.toWotProviderPrefs())
+        }.toWotProviderPrefs()
     }
+
+    suspend fun setWotProvider(pubkey: String, relay: String, source: WotProviderSource) =
+        editMutex.withLock {
+            val normalizedPubkey = normalizeHexPubkey(pubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY
+            val normalizedRelay = normalizeRelayUrl(relay) ?: DEFAULT_WOT_RELAY
+            val provider = WotProviderPrefs(normalizedPubkey, normalizedRelay, source)
+            dataStore.edit { prefs ->
+                prefs.writeActiveWotProviderPrefs(provider)
+                normalizeHexPubkey(prefs[KEY_WOT_PREFS_OWNER])?.let { owner ->
+                    prefs.writeAccountWotProviderPrefs(owner, provider)
+                }
+            }
+        }
 
     suspend fun lastWotFetchAt(): Long =
         dataStore.data.first()[KEY_LAST_WOT_FETCH] ?: 0L
@@ -270,6 +316,37 @@ class RelayPreferencesStore @Inject constructor(
         )
     }
 
+    private fun defaultWotProviderPrefs(): WotProviderPrefs =
+        WotProviderPrefs(
+            pubkey = DEFAULT_WOT_PROVIDER_PUBKEY,
+            relay = DEFAULT_WOT_RELAY,
+            source = WotProviderSource.DEFAULT,
+        )
+
+    private fun MutablePreferences.writeActiveWotProviderPrefs(provider: WotProviderPrefs) {
+        this[KEY_WOT_PROVIDER_PUBKEY] = provider.pubkey
+        this[KEY_WOT_PROVIDER_RELAY] = provider.relay
+        this[KEY_WOT_PROVIDER_SOURCE] = provider.source.name
+    }
+
+    private fun MutablePreferences.writeAccountWotProviderPrefs(
+        owner: String,
+        provider: WotProviderPrefs,
+    ) {
+        this[accountWotProviderPubkeyKey(owner)] = provider.pubkey
+        this[accountWotProviderRelayKey(owner)] = provider.relay
+        this[accountWotProviderSourceKey(owner)] = provider.source.name
+    }
+
+    private fun Preferences.accountWotProviderPrefs(owner: String): WotProviderPrefs? {
+        val pubkey = normalizeHexPubkey(this[accountWotProviderPubkeyKey(owner)]) ?: return null
+        val relay = normalizeRelayUrl(this[accountWotProviderRelayKey(owner)] ?: return null) ?: return null
+        val source = WotProviderSource.entries.firstOrNull {
+            it.name == this[accountWotProviderSourceKey(owner)]
+        } ?: return null
+        return WotProviderPrefs(pubkey = pubkey, relay = relay, source = source)
+    }
+
     private fun prefsWotSource(raw: String?): WotProviderSource =
         WotProviderSource.entries.firstOrNull { it.name == raw } ?: WotProviderSource.DEFAULT
 
@@ -279,3 +356,12 @@ class RelayPreferencesStore @Inject constructor(
         return normalized.takeIf { value -> value.all { it in '0'..'9' || it in 'a'..'f' } }
     }
 }
+
+private fun accountWotProviderPubkeyKey(owner: String) =
+    stringPreferencesKey("$ACCOUNT_WOT_PREFS_PREFIX${owner}_pubkey")
+
+private fun accountWotProviderRelayKey(owner: String) =
+    stringPreferencesKey("$ACCOUNT_WOT_PREFS_PREFIX${owner}_relay")
+
+private fun accountWotProviderSourceKey(owner: String) =
+    stringPreferencesKey("$ACCOUNT_WOT_PREFS_PREFIX${owner}_source")
