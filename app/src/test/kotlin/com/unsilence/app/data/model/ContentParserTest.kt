@@ -66,6 +66,49 @@ class ContentParserTest {
         assertTrue(model.segments.isEmpty())
     }
 
+    @Test
+    fun `blank kind 1 exposes hashtag tags for inspection and muting`() {
+        val model = parse(
+            content = "",
+            tagsJson = """[["t","miasma-peer"],["multiaddr","/ip4/127.0.0.1/tcp/4100"]]""",
+        )
+
+        assertEquals(listOf(Segment.Hashtag("miasma-peer")), model.segments)
+    }
+
+    @Test
+    fun `tag-only hashtag fallback is normalized deduplicated and bounded`() {
+        val tagsJson = """[
+            ["t","Nostr"],
+            ["t","nostr"],
+            ["t","#bitcoin"],
+            ["t","bad tag"],
+            ["t","three"],
+            ["t","four"],
+            ["t","five"],
+            ["t","six"]
+        ]""".trimIndent()
+
+        assertEquals(
+            listOf("Nostr", "bitcoin", "three", "four", "five"),
+            ContentParser.tagOnlyHashtags(tagsJson),
+        )
+    }
+
+    @Test
+    fun `tag-only fallback does not alter nonblank notes or other kinds`() {
+        val tagsJson = """[["t","miasma-peer"]]"""
+
+        assertEquals(listOf(Segment.Text("Body")), parse("Body", tagsJson = tagsJson).segments)
+        assertTrue(parse("", kind = 1111, tagsJson = tagsJson).segments.isEmpty())
+    }
+
+    @Test
+    fun `malformed tag-only metadata is ignored`() {
+        assertTrue(ContentParser.tagOnlyHashtags("""["bad",["t",{}],["t"]]""").isEmpty())
+        assertTrue(ContentParser.tagOnlyHashtags("not-json").isEmpty())
+    }
+
     // ── Image URLs ──────────────────────────────────────────────────────────
 
     @Test
