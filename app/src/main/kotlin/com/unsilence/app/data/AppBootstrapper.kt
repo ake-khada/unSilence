@@ -162,6 +162,10 @@ class AppBootstrapper @Inject constructor(
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
         claimAccountOwner(pubkeyHex)
+        // Provider declarations are identity claims. Select/reset the session owner's
+        // declaration before EventProcessor, snapshot restore, or a fetch can observe it.
+        val sessionWotPrefs = relayPreferencesStore.ensureWotPrefsOwner(pubkeyHex)
+        memoryEventStore.setActiveWotProvider(sessionWotPrefs.pubkey, sessionWotPrefs.relay)
         eventProcessor.start()
 
         // Once per login: clear ProfilePipeline session state so the own-post
