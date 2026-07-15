@@ -46,4 +46,25 @@ class FollowerCountProtocolTest {
         assertFalse(exact?.result?.limited == true)
         assertNull(parseNip45CountFrame("garbage"))
     }
+
+    @Test
+    fun `Primal explore people parser follows paging order and tolerates garbage`() {
+        val pubkeyA = "a".repeat(64)
+        val pubkeyB = "b".repeat(64)
+        val frames = listOf(
+            "garbage",
+            """["EVENT","people",{"kind":0,"pubkey":"$pubkeyA","content":"{\"name\":\"Alice\",\"picture\":\"https://a.example/avatar\"}"}]""",
+            """["EVENT","people",{"kind":0,"pubkey":"$pubkeyB","content":"{\"display_name\":\"Bob\"}"}]""",
+            """["EVENT","people",{"kind":10000133,"content":"{\"$pubkeyA\":42,\"$pubkeyB\":99}"}]""",
+            """["EVENT","people",{"kind":10000113,"content":"{\"elements\":[\"$pubkeyB\",\"$pubkeyA\"]}"}]""",
+        )
+
+        val parsed = parsePrimalSuggestedProfiles(frames)
+
+        assertEquals(listOf(pubkeyB, pubkeyA), parsed.map { it.pubkey })
+        assertEquals("Bob", parsed[0].displayName)
+        assertEquals(99L, parsed[0].followerCount)
+        assertEquals("Alice", parsed[1].name)
+        assertEquals(42L, parsed[1].followerCount)
+    }
 }

@@ -120,6 +120,19 @@ class KeyManagerCacheTest {
         assertEquals("Amber pubkey returned directly (no derivation)", amberPubHex, km.getPublicKeyHex())
     }
 
+    @Test
+    fun `graph completion persists empty outcome until follows exist`() {
+        val km = createKeyManager()
+
+        km.completeGraphOnboarding(hasFollows = false)
+        assertTrue(km.isGraphKnownEmpty())
+        assertTrue(km.isGraphOnboardingCompleted())
+
+        km.completeGraphOnboarding(hasFollows = true)
+        assertFalse(km.isGraphKnownEmpty())
+        assertTrue(km.isGraphOnboardingCompleted())
+    }
+
     /** Minimal SharedPreferences stub — all reads return null/false/0. */
     private class StubSharedPreferences : SharedPreferences {
         private val data = mutableMapOf<String, Any?>()
@@ -129,7 +142,7 @@ class KeyManagerCacheTest {
         override fun getInt(key: String?, defValue: Int) = defValue
         override fun getLong(key: String?, defValue: Long) = defValue
         override fun getFloat(key: String?, defValue: Float) = defValue
-        override fun getBoolean(key: String?, defValue: Boolean) = defValue
+        override fun getBoolean(key: String?, defValue: Boolean) = data[key] as? Boolean ?: defValue
         override fun getStringSet(key: String?, dv: MutableSet<String>?) = dv
         override fun edit(): SharedPreferences.Editor = StubEditor(data)
         override fun registerOnSharedPreferenceChangeListener(l: SharedPreferences.OnSharedPreferenceChangeListener?) {}

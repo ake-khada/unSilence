@@ -80,10 +80,13 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.foundation.lazy.items
+import com.unsilence.app.ui.common.LogoMark
 
 /** Auto-page when the last visible item is within this distance of the
  *  end of the list (excluding the load-more sentinel). 5 rows is roughly
@@ -111,6 +114,8 @@ fun FeedScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onQuote: (String) -> Unit = {},
+    showFindPeopleEmptyState: Boolean = false,
+    onFindPeople: () -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(
         key = "feed-${LocalAppSessionKey.current}",
     ),
@@ -339,6 +344,8 @@ fun FeedScreen(
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
                 !isLoadingV && events.isEmpty() && trustedGlobalHydrating -> "trust_loading"
+                !isLoadingV && events.isEmpty() && currentFeedType is FeedType.Following &&
+                    showFindPeopleEmptyState -> "empty_following"
                 !isLoadingV && events.isEmpty() && rawEventCount == 0 -> "empty"
                 !isLoadingV && events.isEmpty() && rawEventCount > 0 -> "filtered_empty"
                 else -> "content"
@@ -371,6 +378,10 @@ fun FeedScreen(
 
             "trust_loading" -> {
                 LoadingScreen()
+            }
+
+            "empty_following" -> {
+                EmptyFollowingGraphState(onFindPeople = onFindPeople)
             }
 
             "empty" -> {
@@ -629,6 +640,43 @@ fun FeedScreen(
             },
             categories = actionsViewModel.getSubscribedEmojisBySet(),
         )
+    }
+}
+
+@Composable
+private fun EmptyFollowingGraphState(onFindPeople: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = Spacing.xl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        LogoMark(sizeDp = 76.dp, static = true)
+        Text(
+            text = "Your feed is waiting",
+            color = White,
+            fontSize = AppType.subheading,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = Spacing.medium),
+        )
+        Text(
+            text = "Follow a few people to make this space yours.",
+            color = TextSecondary,
+            fontSize = AppType.body,
+            modifier = Modifier.padding(top = Spacing.small),
+        )
+        Button(
+            onClick = onFindPeople,
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Brand,
+                contentColor = Black,
+            ),
+            modifier = Modifier.padding(top = Spacing.large),
+        ) {
+            Text("Find your people", fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 

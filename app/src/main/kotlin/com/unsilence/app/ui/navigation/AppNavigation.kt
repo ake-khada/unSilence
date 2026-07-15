@@ -115,6 +115,7 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.GraphLanding
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
@@ -128,6 +129,8 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.notifications.NotificationsViewModel
+import com.unsilence.app.ui.onboarding.StartYourGraphScreen
+import com.unsilence.app.ui.onboarding.StartYourGraphViewModel
 import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.profile.ConnectionsScreen
@@ -216,6 +219,7 @@ fun AppNavigation(
     var showEmojiSettings    by remember { mutableStateOf(false) }
     var showZapSettings      by remember { mutableStateOf(false) }
     var hashtagSearchQuery   by remember { mutableStateOf<String?>(null) }
+    var showStartGraph       by remember { mutableStateOf(false) }
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
@@ -247,12 +251,12 @@ fun AppNavigation(
     val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$sessionKey")
     val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
     val deepLinkVm: DeepLinkNavigationViewModel = hiltViewModel(key = "deep-links-$sessionKey")
+    val startGraphVm: StartYourGraphViewModel = hiltViewModel(key = "start-graph-$sessionKey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
     val relayHealth   by relayManagementVm.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
-    val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val globalFeedLens by feedViewModel.globalFeedLens.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
@@ -262,6 +266,30 @@ fun AppNavigation(
     val zapPreferences      by zapSettingsVm.preferences.collectAsStateWithLifecycle()
     val pendingDeepLink     by deepLinkVm.pendingTarget.collectAsStateWithLifecycle()
     val pendingDeepLinkFailure by deepLinkVm.pendingFailure.collectAsStateWithLifecycle()
+    val startGraphState by startGraphVm.uiState.collectAsStateWithLifecycle()
+    val startGraphAutoOpen by startGraphVm.autoOpen.collectAsStateWithLifecycle()
+    val showEmptyFollowingEntry by startGraphVm.showEmptyFollowingEntry.collectAsStateWithLifecycle()
+
+    LaunchedEffect(startGraphAutoOpen) {
+        if (startGraphAutoOpen) {
+            showStartGraph = true
+            startGraphVm.consumeAutoOpen()
+        }
+    }
+
+    LaunchedEffect(startGraphVm) {
+        startGraphVm.landingEvents.collect { landing ->
+            showStartGraph = false
+            selectedTab = 0
+            when (landing) {
+                GraphLanding.FOLLOWING -> feedViewModel.setFeedType(FeedType.Following)
+                GraphLanding.GLOBAL_TRUSTED -> {
+                    feedViewModel.setGlobalFeedLens(GlobalFeedLens.TRUSTED)
+                    feedViewModel.setFeedType(FeedType.Global)
+                }
+            }
+        }
+    }
 
     LaunchedEffect(pendingDeepLinkFailure) {
         if (pendingDeepLinkFailure && deepLinkVm.consumeFailure()) {
@@ -394,6 +422,11 @@ fun AppNavigation(
                         onAuthorClick      = onAuthorClick,
                         onHashtagClick     = onHashtagClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                        showFindPeopleEmptyState = showEmptyFollowingEntry,
+                        onFindPeople = {
+                            startGraphVm.open()
+                            showStartGraph = true
+                        },
                         viewModel          = feedViewModel,
                         actionsViewModel   = noteActionsVm,
                     )
@@ -584,7 +617,6 @@ fun AppNavigation(
             if (showFeedSheet) {
                 FeedSelectorSheet(
                     feedType        = feedType,
-                    hasFollows      = hasFollows,
                     userSets        = userSets,
                     pinnedRelays    = pinnedRelays,
                     relayHealth     = relayHealth,
@@ -735,6 +767,17 @@ fun AppNavigation(
                         noteActionsVm.refreshNwcConfigured()
                     },
                     vm = zapSettingsVm,
+                )
+            }
+
+            if (showStartGraph) {
+                StartYourGraphScreen(
+                    state = startGraphState,
+                    onTogglePack = startGraphVm::togglePack,
+                    onTogglePerson = startGraphVm::togglePerson,
+                    onPersonVisible = startGraphVm::requestVisiblePerson,
+                    onDone = startGraphVm::finish,
+                    onRetry = startGraphVm::retry,
                 )
             }
 
@@ -1093,7 +1136,6 @@ private fun NotifFilterCarousel(
 @Composable
 private fun FeedSelectorSheet(
     feedType: FeedType,
-    hasFollows: Boolean,
     userSets: List<RelaySet>,
     pinnedRelays: List<FeedType.SingleRelay>,
     relayHealth: Map<String, RelayHealthInfo>,
@@ -1172,7 +1214,7 @@ private fun FeedSelectorSheet(
         Column(modifier = Modifier.padding(bottom = 28.dp)) {
             // ── Core feeds ──
             SectionLabel("Feeds")
-            if (hasFollows || feedType is FeedType.Following) SheetItem("Following", FeedType.Following)
+            SheetItem("Following", FeedType.Following)
             SheetItem("Global", FeedType.Global)
 
             // ── Pinned relays ──

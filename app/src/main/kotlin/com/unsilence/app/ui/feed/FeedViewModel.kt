@@ -823,6 +823,10 @@ class FeedViewModel @Inject constructor(
                     _feedType.value = FeedType.Following
                     _coldStartState.value = ColdStartState.READY_FOLLOWING
                     feedTrace { "cold-start: ${snapshotFollows.size} follows in snapshot -> Following" }
+                } else if (keyManager.isGraphKnownEmpty()) {
+                    _feedType.value = FeedType.Global
+                    _coldStartState.value = ColdStartState.READY_GLOBAL
+                    feedTrace { "cold-start: completed empty graph -> Global" }
                 } else {
                     // Slow path: wait for bootstrap's authoritative kind-3 attempt.
                     // Do not flash Global while follows are still unknown; keep the

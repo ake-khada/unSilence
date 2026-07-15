@@ -17,6 +17,9 @@ private const val PREFS_FILE      = "unsilence_keys"
 private const val KEY_PRIV_HEX    = "priv_hex"
 private const val KEY_PUB_HEX     = "pub_hex"
 private const val KEY_SIGNER_TYPE = "signer_type"
+private const val KEY_GRAPH_ONBOARDING_PENDING = "graph_onboarding_pending"
+private const val KEY_GRAPH_ONBOARDING_COMPLETED = "graph_onboarding_completed"
+private const val KEY_GRAPH_KNOWN_EMPTY = "graph_known_empty"
 private const val SIGNER_AMBER    = "AMBER"
 
 /** Minimal interface for mute-list decrypt — allows test construction without Android Context. */
@@ -52,6 +55,25 @@ class KeyManager @Inject constructor(
     /** Returns true if the user is logged in (either internal key or Amber). */
     fun hasKey(): Boolean = prefs.contains(KEY_PRIV_HEX) || prefs.contains(KEY_PUB_HEX)
 
+    /** True only for an identity created in unSilence whose graph step is unfinished. */
+    fun isGraphOnboardingPending(): Boolean =
+        prefs.getBoolean(KEY_GRAPH_ONBOARDING_PENDING, false)
+
+    fun isGraphKnownEmpty(): Boolean = prefs.getBoolean(KEY_GRAPH_KNOWN_EMPTY, false)
+    fun isGraphOnboardingCompleted(): Boolean =
+        prefs.getBoolean(KEY_GRAPH_ONBOARDING_COMPLETED, false)
+
+    fun completeGraphOnboarding(hasFollows: Boolean) {
+        prefs.edit()
+            .remove(KEY_GRAPH_ONBOARDING_PENDING)
+            .putBoolean(KEY_GRAPH_ONBOARDING_COMPLETED, true)
+            .apply {
+                if (hasFollows) remove(KEY_GRAPH_KNOWN_EMPTY)
+                else putBoolean(KEY_GRAPH_KNOWN_EMPTY, true)
+            }
+            .apply()
+    }
+
     /** Returns the stored private key as a 64-char lowercase hex string, or null. Null in Amber mode. */
     override fun getPrivateKeyHex(): String? = prefs.getString(KEY_PRIV_HEX, null)
 
@@ -80,6 +102,9 @@ class KeyManager @Inject constructor(
             .putString(KEY_PRIV_HEX, hexKey.lowercase())
             .remove(KEY_PUB_HEX)
             .remove(KEY_SIGNER_TYPE)
+            .remove(KEY_GRAPH_ONBOARDING_PENDING)
+            .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
+            .remove(KEY_GRAPH_KNOWN_EMPTY)
             .commit()
     }
 
@@ -95,6 +120,9 @@ class KeyManager @Inject constructor(
             .putString(KEY_PRIV_HEX, keyPair.privKey!!.toHexKey())
             .remove(KEY_PUB_HEX)
             .remove(KEY_SIGNER_TYPE)
+            .putBoolean(KEY_GRAPH_ONBOARDING_PENDING, true)
+            .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
+            .remove(KEY_GRAPH_KNOWN_EMPTY)
             .commit()
         val pubHex = keyPair.pubKey.toHexKey()
         cachedPubKeyHex = pubHex
@@ -144,6 +172,9 @@ class KeyManager @Inject constructor(
             .putString(KEY_PUB_HEX, hex.lowercase())
             .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
             .remove(KEY_PRIV_HEX)
+            .remove(KEY_GRAPH_ONBOARDING_PENDING)
+            .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
+            .remove(KEY_GRAPH_KNOWN_EMPTY)
             .commit()
     }
 
@@ -155,6 +186,9 @@ class KeyManager @Inject constructor(
             .remove(KEY_PRIV_HEX)
             .remove(KEY_PUB_HEX)
             .remove(KEY_SIGNER_TYPE)
+            .remove(KEY_GRAPH_ONBOARDING_PENDING)
+            .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
+            .remove(KEY_GRAPH_KNOWN_EMPTY)
             .commit()
     }
 }
