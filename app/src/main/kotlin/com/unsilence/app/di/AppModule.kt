@@ -3,6 +3,11 @@ package com.unsilence.app.di
 import android.content.ContentResolver
 import android.content.Context
 import androidx.core.util.AtomicFile
+import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -23,8 +28,12 @@ annotation class MediaClient
 @Retention(AnnotationRetention.BINARY)
 annotation class ImageClient
 
+private const val VIDEO_CACHE_DIRECTORY = "video-cache"
+private const val VIDEO_CACHE_MAX_BYTES = 200L * 1024L * 1024L
+
 @Module
 @InstallIn(SingletonComponent::class)
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 object AppModule {
 
     @Provides
@@ -53,6 +62,25 @@ object AppModule {
             .pingInterval(0, TimeUnit.SECONDS) // no keep-alive needed for media HTTP
             .build()
     }
+
+    @Provides
+    @Singleton
+    fun provideVideoCache(@ApplicationContext context: Context): SimpleCache =
+        SimpleCache(
+            File(context.cacheDir, VIDEO_CACHE_DIRECTORY),
+            LeastRecentlyUsedCacheEvictor(VIDEO_CACHE_MAX_BYTES),
+            StandaloneDatabaseProvider(context),
+        )
+
+    @Provides
+    @Singleton
+    fun provideMediaDataSourceFactory(
+        videoCache: SimpleCache,
+        @MediaClient mediaClient: OkHttpClient,
+    ): CacheDataSource.Factory = CacheDataSource.Factory()
+        .setCache(videoCache)
+        .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(mediaClient))
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     @Provides
     @Singleton
