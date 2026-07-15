@@ -62,6 +62,8 @@ private const val MAX_PROFILE_FALLBACK_RELAYS = 8
  *  Must track EventProcessor.drainCold's 2s timeout — if that changes, update here. */
 private const val COLD_LANE_FLUSH_MS = 2_500L
 private const val RECONNECT_HEALTHY_WINDOW_MS = 30_000L
+private const val FOLLOW_PACK_RELAY_LIMIT = 6
+private const val FOLLOW_PACK_RELAY_TIMEOUT_MS = 8_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
@@ -2330,6 +2332,95 @@ class RelayPool @Inject constructor(
             if (results.none { it.totalPages > 0 }) allChunksResponded = false
         }
         return allChunksResponded
+    }
+
+    /**
+     * Fetch verified NIP-51 starter packs without admitting kind 39089 to feed lanes.
+     * Each endpoint gets a small share of the global budget; callers apply the
+     * addressable latest-per-(author,d) projection before rendering.
+     */
+    suspend fun fetchFollowPackEvents(
+        relayUrls: Collection<String>,
+        limit: Int = FOLLOW_PACK_FETCH_LIMIT,
+    ): List<NostrEvent> {
+        val targets = relayUrls.asSequence()
+            .mapNotNull(::normalizeRelayUrl)
+            .distinct()
+            .filter { it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
+            .take(FOLLOW_PACK_RELAY_LIMIT)
+            .toList()
+        if (targets.isEmpty() || limit <= 0) return emptyList()
+
+        val perRelayLimit = ((limit + targets.size - 1) / targets.size + 3)
+            .coerceIn(4, limit)
+        val fetched = coroutineScope {
+            targets.map { relayUrl ->
+                async { fetchFollowPacksFromRelay(relayUrl, perRelayLimit) }
+            }.awaitAll().flatten()
+        }
+
+        val byId = LinkedHashMap<String, NostrEvent>(fetched.size)
+        fetched.sortedByDescending(NostrEvent::createdAt).forEach { event ->
+            val existing = byId[event.id]
+            if (existing == null) byId[event.id] = event
+            else existing.relaysSeen.addAll(event.relaysSeen)
+        }
+        return byId.values.take(limit)
+    }
+
+    private suspend fun fetchFollowPacksFromRelay(
+        relayUrl: String,
+        limit: Int,
+    ): List<NostrEvent> {
+        val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
+        return try {
+            conn.connect()
+            val state = withTimeoutOrNull(3_000L) {
+                conn.state.first {
+                    it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+                }
+            }
+            if (state != RelayState.CONNECTED) return emptyList()
+
+            val subId = "follow-packs-${System.nanoTime()}"
+            val request = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(FOLLOW_PACK_KIND)) })
+                    put("limit", JsonPrimitive(limit))
+                })
+            }.toString()
+            if (!conn.send(request)) return emptyList()
+
+            val events = ArrayList<NostrEvent>(limit)
+            withTimeoutOrNull(FOLLOW_PACK_RELAY_TIMEOUT_MS) {
+                while (events.size < limit) {
+                    val raw = conn.messages.receive()
+                    when {
+                        raw.startsWith("[\"EVENT\"") -> {
+                            processor.parseAndVerify(raw, relayUrl)
+                                ?.takeIf { it.kind == FOLLOW_PACK_KIND }
+                                ?.let(events::add)
+                        }
+                        raw.startsWith("[\"EOSE\"") && extractEoseSubId(raw) == subId -> break
+                        raw.startsWith("[\"CLOSED\"") && raw.contains("\"$subId\"") -> break
+                    }
+                }
+            }
+            conn.send(buildJsonArray {
+                add(JsonPrimitive("CLOSE"))
+                add(JsonPrimitive(subId))
+            }.toString())
+            events
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Log.w(TAG, "Follow-pack fetch failed on $relayUrl: ${e.message}")
+            emptyList()
+        } finally {
+            conn.close()
+        }
     }
 
     // ── Relay health fetch orchestrators ──────────────────────────────────
