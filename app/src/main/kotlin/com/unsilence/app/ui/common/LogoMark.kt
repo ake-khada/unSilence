@@ -32,6 +32,7 @@ fun LogoMark(
     modifier: Modifier = Modifier,
     sizeDp: Dp = 88.dp,
     color: Color = Brand,
+    firstBarColor: Color? = null,
     static: Boolean = false,
 ) {
     val barColor = color
@@ -81,9 +82,9 @@ fun LogoMark(
             floatArrayOf(146f, 82f, 8f, 36f),
             floatArrayOf(160f, 90f, 8f, 20f),
         )
-        for (bar in bars) {
+        for ((index, bar) in bars.withIndex()) {
             drawRect(
-                color = barColor,
+                color = if (index == 0) firstBarColor ?: barColor else barColor,
                 topLeft = Offset(bar[0] * s, bar[1] * s),
                 size = Size(bar[2] * s, bar[3] * s),
             )

@@ -7,7 +7,6 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -25,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -55,7 +53,7 @@ import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.domain.model.FeedFilter
-import com.unsilence.app.domain.model.summaryLabel
+import com.unsilence.app.domain.model.GlobalFeedLens
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -72,10 +70,8 @@ import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
-import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
-import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.White
 import com.unsilence.app.ui.thread.ThreadViewModel
@@ -83,7 +79,6 @@ import androidx.compose.foundation.layout.padding
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
-import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -128,6 +123,10 @@ fun FeedScreen(
 ) {
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
     val currentFilter by viewModel.filterFlow.collectAsStateWithLifecycle()
+    val currentFeedType by viewModel.feedType.collectAsStateWithLifecycle()
+    val globalFeedLens by viewModel.globalFeedLens.collectAsStateWithLifecycle()
+    val trustedHiddenCount by viewModel.trustedHiddenCount.collectAsStateWithLifecycle()
+    val globalDropCounters by viewModel.globalFeedDropCounters.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds   by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
     val zappedIds     by actionsViewModel.zappedEventIds.collectAsStateWithLifecycle()
@@ -172,8 +171,9 @@ fun FeedScreen(
     val events = feedEvents
     val liveArrivalIds by viewModel.liveArrivalIds.collectAsStateWithLifecycle()
     val showThreadParents = contentFilter == FeedContentFilter.REPLIES_ONLY
-    val filterSummary = currentFilter.summaryLabel()
     val immersiveMode = currentFilter.isImmersiveVideoMode()
+    val trustedGlobalHydrating = currentFeedType is FeedType.Global &&
+        globalFeedLens == GlobalFeedLens.TRUSTED && globalDropCounters.pendingAuthors > 0
     val immersiveItems = remember(events, immersiveMode) {
         if (!immersiveMode) {
             emptyList()
@@ -282,14 +282,13 @@ fun FeedScreen(
 
     // Tab row: constant height, slides via offset (no height-collapse jerk)
     val tabRowHeight = 48.dp
-    val filterPillHeight = if (filterSummary != null) 36.dp else 0.dp
-    val totalTopPadding = staticTopPadding + tabRowHeight + filterPillHeight
+    val totalTopPadding = staticTopPadding + tabRowHeight
     val tabRowOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(totalTopPadding + 8.dp),
         animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
         label         = "tabRowOffset",
     )
-    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight + filterPillHeight
+    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight
     val refreshLineProgress = remember { Animatable(0f) }
     LaunchedEffect(isRefreshing) {
         if (isRefreshing) {
@@ -339,6 +338,7 @@ fun FeedScreen(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
+                !isLoadingV && events.isEmpty() && trustedGlobalHydrating -> "trust_loading"
                 !isLoadingV && events.isEmpty() && rawEventCount == 0 -> "empty"
                 !isLoadingV && events.isEmpty() && rawEventCount > 0 -> "filtered_empty"
                 else -> "content"
@@ -366,6 +366,10 @@ fun FeedScreen(
         ) { screenState ->
         when (screenState) {
             "loading" -> {
+                LoadingScreen()
+            }
+
+            "trust_loading" -> {
                 LoadingScreen()
             }
 
@@ -416,6 +420,22 @@ fun FeedScreen(
                         eventModelProvider = actionsViewModel::getEventModel,
                         sensitiveMode = sensitiveMode,
                     )
+
+                    if (currentFeedType is FeedType.Global &&
+                        globalFeedLens == GlobalFeedLens.TRUSTED && trustedHiddenCount > 0
+                    ) {
+                        item(key = "trusted-global-footer") {
+                            Text(
+                                text = "Trusted hides $trustedHiddenCount unscored or spam-shaped notes \u00B7 local filter",
+                                color = TextSecondary,
+                                fontSize = AppType.caption,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.large, vertical = Spacing.medium),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            )
+                        }
+                    }
 
                     // "Load more" button at the end of the current batch.
                     // Transitions to a spinner while loading.
@@ -529,22 +549,6 @@ fun FeedScreen(
                     onSelect = { viewModel.setContentFilter(it) },
                 )
             }
-            if (filterSummary != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset { IntOffset(0, (staticTopPadding + tabRowOffset + tabRowHeight).roundToPx()) }
-                        .fillMaxWidth()
-                        .height(filterPillHeight)
-                        .background(Black),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    ActiveFeedFilterPill(
-                        summary = filterSummary,
-                        onClear = { viewModel.updateFilter(FeedFilter()) },
-                    )
-                }
-            }
         }
     }
 
@@ -624,43 +628,6 @@ fun FeedScreen(
                 emojiReactTarget = null
             },
             categories = actionsViewModel.getSubscribedEmojisBySet(),
-        )
-    }
-}
-
-@Composable
-private fun ActiveFeedFilterPill(
-    summary: String,
-    onClear: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(Surface2)
-            .border(
-                width = 1.dp,
-                color = Brand.copy(alpha = 0.55f),
-                shape = RoundedCornerShape(16.dp),
-            )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-            ) { onClear() }
-            .padding(horizontal = Spacing.medium, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = summary,
-            color = Brand,
-            fontSize = AppType.caption,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Icon(
-            imageVector = Icons.Filled.Close,
-            contentDescription = "Clear filter",
-            tint = Brand,
-            modifier = Modifier.size(12.dp),
         )
     }
 }

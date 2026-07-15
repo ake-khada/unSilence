@@ -32,6 +32,8 @@ private const val MAX_PARSE_CHARS = 20_000
 // Long-form (kind-30023) input cap + the tail marker now live in shared ParseLimits
 // (reused by the native markdown parser). The SEGMENT cap still applies to every kind.
 private const val MAX_SEGMENTS = 150
+private const val MAX_TAG_ONLY_HASHTAGS = 5
+private const val MAX_TAG_ONLY_HASHTAG_CHARS = 80
 
 internal fun isNip71VideoKind(kind: Int): Boolean =
     kind == 21 || kind == 22 || kind == 34235 || kind == 34236
@@ -141,7 +143,16 @@ object ContentParser {
         // collapse into one top-level segment and bypass the draw-bound (H-spam).
         val (capped, segmentTruncated) = capSegmentsFlat(tokenized, MAX_SEGMENTS)
         val truncated = inputTruncated || segmentTruncated
-        val segments = if (truncated) capped + Segment.Text(ParseLimits.TRUNCATION_MARKER) else tokenized
+        val parsedSegments =
+            if (truncated) capped + Segment.Text(ParseLimits.TRUNCATION_MARKER) else tokenized
+        // Some bot/protocol events abuse kind 1 as a tag-only envelope. Raw mode must
+        // remain inspectable: expose bounded `t` tags as ordinary hashtags so users can
+        // identify and mute the pattern even when the sender rotates pubkeys.
+        val segments = if (kind == 1 && effectiveContent.isBlank() && parsedSegments.isEmpty()) {
+            tagOnlyHashtags(effectiveTagsJson).map { Segment.Hashtag(it) }
+        } else {
+            parsedSegments
+        }
 
         // Permanent field probe — fires JUST UNDER the caps (and whenever truncation
         // actually triggers) so we keep seeing near-pathological content and can tune
@@ -771,6 +782,33 @@ object ContentParser {
     }
 
     // ── Tag helpers ──────────────────────────────────────────────────────
+
+    internal fun tagOnlyHashtags(tagsJson: String): List<String> {
+        if (!tagsJson.contains("\"t\"")) return emptyList()
+        return runCatching {
+            val seen = HashSet<String>()
+            buildList {
+                for (tag in NostrJson.parseToJsonElement(tagsJson).jsonArray) {
+                    val cells = runCatching { tag.jsonArray }.getOrNull() ?: continue
+                    val key = cells.getOrNull(0)
+                        ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+                    if (key != "t") continue
+                    val value = cells.getOrNull(1)
+                        ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+                        ?.trim()
+                        ?.trimStart('#')
+                        ?.takeIf { candidate ->
+                            candidate.isNotEmpty() &&
+                                candidate.length <= MAX_TAG_ONLY_HASHTAG_CHARS &&
+                                candidate.none { it.isWhitespace() || it.isISOControl() }
+                        }
+                        ?: continue
+                    if (seen.add(value.lowercase())) add(value)
+                    if (size >= MAX_TAG_ONLY_HASHTAGS) break
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
 
     private fun extractFirstETagId(tagsJson: String): String? = runCatching {
         val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray

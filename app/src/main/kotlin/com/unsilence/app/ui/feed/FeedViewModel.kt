@@ -39,6 +39,7 @@ import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.domain.model.GlobalFeedLens
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +64,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 private const val TAG = "FeedVM"
@@ -77,10 +79,7 @@ sealed class FeedType {
     data object Following : FeedType()
     data class  RelaySet(val dTag: String, val name: String) : FeedType()
     class SingleRelay private constructor(val url: String, val label: String) : FeedType() {
-        val displayLabel: String get() = when {
-            url.contains("antiprimal.net/hot") -> "Popular"
-            else -> label
-        }
+        val displayLabel: String get() = label
 
         override fun equals(other: Any?): Boolean =
             other is SingleRelay && url == other.url && label == other.label
@@ -93,15 +92,11 @@ sealed class FeedType {
             // Single choke point: every SingleRelay url is canonicalized (normalizeRelayUrl strips
             // the trailing slash + scheme). Without this, a favorited relay (MES-normalized, no
             // slash) and the same relay from Browse (wss://nos.lol/) compare unequal — breaking
-            // the carousel active-pill highlight and the transient-browse dedup. Normalize once,
+            // source selection and transient-browse dedup. Normalize once,
             // here, not in scattered comparisons.
             operator fun invoke(url: String, label: String): SingleRelay =
                 SingleRelay(normalizeRelayUrl(url) ?: url, label)
         }
-    }
-
-    companion object {
-        val Popular = SingleRelay("wss://antiprimal.net/hot", "Popular")
     }
 }
 
@@ -120,7 +115,7 @@ enum class FeedContentFilter(val value: Int) {
  *     isLoading, isLoadingMore (mirrors Jumble NoteList component state)
  *   - Actions: setFeedType, setContentFilter, updateFilter,
  *     onViewportChanged, onDotTapped, loadMore, refresh
- *   - pinnedRelays = the user's kind-10012 favorites (carousel single-relay feeds)
+ *   - pinnedRelays = the user's kind-10012 favorite relay feeds
  */
 @OptIn(FlowPreview::class)
 @HiltViewModel
@@ -177,6 +172,42 @@ class FeedViewModel @Inject constructor(
     private val _authUnavailableRelay = MutableStateFlow<String?>(null)
     val authUnavailableRelay: StateFlow<String?> = _authUnavailableRelay.asStateFlow()
 
+    // -- Feed type + Global lens (must be before feedRows) --------------------
+
+    private val _feedType = MutableStateFlow<FeedType>(
+        if (keyManager.getPublicKeyHex() != null) FeedType.Following else FeedType.Global,
+    )
+    val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
+
+    val globalFeedLens: StateFlow<GlobalFeedLens> =
+        relayPreferencesStore.globalFeedLensFlow()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
+
+    private val globalFeedPolicy = GlobalFeedPolicy()
+    private val trustedSweepRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    private val _globalFeedDropCounters = MutableStateFlow(GlobalFeedDropCounters())
+    internal val globalFeedDropCounters: StateFlow<GlobalFeedDropCounters> =
+        _globalFeedDropCounters.asStateFlow()
+    private val _trustedHiddenCount = MutableStateFlow(0)
+    val trustedHiddenCount: StateFlow<Int> = _trustedHiddenCount.asStateFlow()
+
+    fun setFeedType(type: FeedType) {
+        val restored = restoreFeedTypeOrGlobal(type)
+        feedTrace { "setFeedType: ${_feedType.value} → $restored" }
+        _authUnavailableRelay.value = null
+        _feedType.value = restored
+        if (_coldStartState.value == ColdStartState.LOADING) {
+            _coldStartState.value = if (restored is FeedType.Following)
+                ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
+        }
+    }
+
+    fun setGlobalFeedLens(lens: GlobalFeedLens) {
+        if (lens == globalFeedLens.value) return
+        viewModelScope.launch { relayPreferencesStore.setGlobalFeedLens(lens) }
+    }
+
     fun clearLiveArrival(id: String) {
         _liveArrivalIds.update { it - id }
     }
@@ -205,7 +236,22 @@ class FeedViewModel @Inject constructor(
         relayPreferencesStore.sensitiveContentModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, SensitiveContentMode.BLUR)
 
-    private val eventsWithFilter = combine(_events, _filter) { events, filter -> events to filter }
+    private data class FeedProjectionInput(
+        val events: List<NostrEvent>,
+        val filter: FeedFilter,
+        val type: FeedType,
+        val lens: GlobalFeedLens,
+    )
+
+    private val eventsWithFilter = combine(
+        _events,
+        _filter,
+        _feedType,
+        globalFeedLens,
+        memoryEventStore.wotSignalFlow,
+    ) { events, filter, type, lens, _ ->
+        FeedProjectionInput(events, filter, type, lens)
+    }
     private val feedSafetyFlow = combine(
         memoryEventStore.ownMuteListFlow(),
         relayPreferencesStore.hashtagCapFlow(),
@@ -220,15 +266,19 @@ class FeedViewModel @Inject constructor(
             eventsWithFilter,
             _contentFilter,
             feedSafetyFlow,
-        ) { eventFilterPair, cf, safety ->
-            val (events, filter) = eventFilterPair
+        ) { input, cf, safety ->
+            val events = input.events
+            val filter = input.filter
             if (events.isEmpty()) {
                 feedRowCache.evictAll()
+                _globalFeedDropCounters.value = GlobalFeedDropCounters()
+                _trustedHiddenCount.value = 0
+                requestTrustedCandidateSweep(emptyList())
                 return@combine emptyList()
             }
             val hideSensitive = safety.sensitiveMode == SensitiveContentMode.HIDE
             val nowSec = System.currentTimeMillis() / 1000L
-            val preActivityCandidates = events.asSequence()
+            val baseCandidates = events.asSequence()
                 .filterNot { memoryEventStore.isDeleted(it) }
                 .filter { !isMuted(it, safety.muteList) }
                 .filter { !exceedsHashtagCap(it, safety.hashtagCap) }
@@ -236,6 +286,21 @@ class FeedViewModel @Inject constructor(
                 .filter { matchesContentFilter(it, cf) }
                 .filter { !hideSensitive || !it.hasContentWarning }
                 .toList()
+
+            val policyMode = feedPolicyMode(input.type, input.lens)
+            val trustedGlobal = policyMode == FeedPolicyMode.TRUSTED
+            val policyProjection = globalFeedPolicy.project(
+                candidates = baseCandidates,
+                applyHeuristics = policyMode != FeedPolicyMode.NONE,
+                trustLookup = if (trustedGlobal) memoryEventStore::wotFor else null,
+            )
+            _globalFeedDropCounters.value = policyProjection.counters
+            _trustedHiddenCount.value = if (trustedGlobal) policyProjection.counters.total else 0
+            requestTrustedCandidateSweep(
+                if (trustedGlobal) policyProjection.pendingAuthorPubkeys else emptyList(),
+            )
+
+            val preActivityCandidates = policyProjection.accepted
             requestActivityCandidateSweep(filter, preActivityCandidates)
 
             val displayed = preActivityCandidates.asSequence()
@@ -316,23 +381,6 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    // -- Feed type -------------------------------------------------------------
-
-    private val _feedType = MutableStateFlow<FeedType>(
-        if (keyManager.getPublicKeyHex() != null) FeedType.Following else FeedType.Global,
-    )
-    val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
-
-    fun setFeedType(type: FeedType) {
-        feedTrace { "setFeedType: ${_feedType.value} → $type" }
-        _authUnavailableRelay.value = null
-        _feedType.value = type
-        if (_coldStartState.value == ColdStartState.LOADING) {
-            _coldStartState.value = if (type is FeedType.Following)
-                ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
-        }
-    }
-
     // -- Content filter --------------------------------------------------------
 
     fun setContentFilter(f: FeedContentFilter) {
@@ -369,7 +417,6 @@ class FeedViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
 
-    private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
             wotLookupSnapshot(subjects, memoryEventStore::wotFor)
@@ -420,7 +467,11 @@ class FeedViewModel @Inject constructor(
     val pinnedRelays: StateFlow<List<FeedType.SingleRelay>> =
         keyManager.getPublicKeyHex()?.let { pk ->
             memoryEventStore.favoriteRelayConfigsFlow(pk)
-                .map { favs -> favs.mapNotNull { it.url }.map { url -> FeedType.SingleRelay(url, feedRelayLabel(url)) } }
+                .map { favs ->
+                    favs.mapNotNull { it.url }
+                        .filterNot(::isLegacyPopularRelay)
+                        .map { url -> FeedType.SingleRelay(url, feedRelayLabel(url)) }
+                }
                 // Eagerly (see userSetsFlow): never lapse, so the end-of-restore config-signal
                 // bump isn't lost during cold-start.
                 .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -567,6 +618,7 @@ class FeedViewModel @Inject constructor(
         // Pre-load MES cached events for instant render (mirrors Jumble's
         // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
         lastActivitySweepKey = null
+        if (resetView) resetTrustedCandidateSweep()
         val cachedEvents = loadCachedEvents(key.type, key.filter)
         if (resetView) {
             _events.value = cachedEvents
@@ -1050,6 +1102,20 @@ class FeedViewModel @Inject constructor(
         cardHydrator.hydrateEngagement(rows, first = 0, last = rows.lastIndex)
     }
 
+    private fun requestTrustedCandidateSweep(pendingAuthors: List<String>) {
+        val subjects = pendingAuthors.take(TRUSTED_SWEEP_CANDIDATE_LIMIT)
+        if (subjects.isEmpty()) {
+            resetTrustedCandidateSweep()
+            return
+        }
+        val newlyRequested = subjects.filter { trustedSweepRequested.add(it) }
+        if (newlyRequested.isEmpty()) return
+        _wotSubjects.update { current -> current + newlyRequested }
+        wotHydrationCoalescer.requestHydration(newlyRequested)
+    }
+
+    private fun resetTrustedCandidateSweep() = trustedSweepRequested.clear()
+
     // ── Mute / Report actions ──────────────────────────────────────────────
 
     fun muteUser(pubkey: String): MuteResult = muteListRepository.muteUser(pubkey)
@@ -1111,6 +1177,7 @@ class FeedViewModel @Inject constructor(
         const val VIEWPORT_SIZE = 8
         const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
         const val ACTIVITY_SWEEP_CANDIDATE_LIMIT = 150
+        const val TRUSTED_SWEEP_CANDIDATE_LIMIT = 150
         const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
         /** Debounce window — collapses frantic mashing, not deliberate retries. */

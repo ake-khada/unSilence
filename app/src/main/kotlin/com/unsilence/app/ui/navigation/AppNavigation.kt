@@ -7,11 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
@@ -22,7 +18,6 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,8 +43,19 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.outlined.EditNote
+import androidx.compose.material.icons.outlined.GppBad
+import androidx.compose.material.icons.outlined.GppGood
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
@@ -82,6 +88,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -93,6 +100,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -106,11 +115,14 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.feed.FeedScreen
 import com.unsilence.app.ui.feed.FeedType
 import com.unsilence.app.ui.feed.FeedViewModel
 import com.unsilence.app.ui.feed.FilterBottomSheet
+import com.unsilence.app.ui.feed.FilterIconKind
+import com.unsilence.app.ui.feed.filterIconKind
 import com.unsilence.app.ui.feed.isImmersiveVideoMode
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.notifications.NotifFilter
@@ -130,21 +142,21 @@ import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.settings.ZapSettingsViewModel
+import com.unsilence.app.domain.model.GlobalFeedLens
+import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
-import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
-import com.unsilence.app.ui.theme.Warn
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import com.unsilence.app.ui.theme.Zap
 import com.unsilence.app.ui.thread.ThreadScreen
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 private val NavUnselected = Text3
 
@@ -223,9 +235,8 @@ fun AppNavigation(
     // captured the old user's pubkey at init and never re-initializes.
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$sessionKey")
     val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$sessionKey")
-    // Browse a relay's feed (§05 detail footer): make it the active feed WITHOUT pinning it
-    // (browsing is transient — the relay shows in the carousel only while active, see feedList),
-    // dismiss the relay overlays, and drop to the feed tab.
+    // Browse a relay's feed (§05 detail footer): make it active WITHOUT pinning it.
+    // The source pill names this transient relay until the user switches away.
     val onBrowseRelayFeed: (String, String) -> Unit = { url, lbl ->
         feedViewModel.setFeedType(FeedType.SingleRelay(url, lbl))
         relayDetailUrl = null
@@ -243,6 +254,7 @@ fun AppNavigation(
     val relayHealth   by relayManagementVm.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
     val hasFollows    by feedViewModel.hasFollows.collectAsStateWithLifecycle()
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
+    val globalFeedLens by feedViewModel.globalFeedLens.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val hasNewTopPost by feedViewModel.showDot.collectAsStateWithLifecycle()
     val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
@@ -294,31 +306,6 @@ fun AppNavigation(
         }
     }
 
-    // Build the ordered feed list for the carousel
-    val feedList = remember(hasFollows, pinnedRelays, userSets, feedType) {
-        buildList {
-            if (hasFollows || feedType is FeedType.Following) add(FeedType.Following to "Following")
-            add(FeedType.Global to "Global")
-            add(FeedType.Popular to "Popular")
-            for (relay in pinnedRelays) {
-                if (relay.url == FeedType.Popular.url) continue
-                add(relay as FeedType to relay.displayLabel)
-            }
-            userSets.forEach { set ->
-                val name = set.title ?: set.dTag
-                add(FeedType.RelaySet(set.dTag, name) as FeedType to name)
-            }
-            // Transient "Browse this relay" feed: a SingleRelay we're viewing that isn't pinned
-            // appears in the carousel ONLY while it's active — switching feeds recomputes the
-            // list and drops it (it never becomes a permanent favorite).
-            val ft = feedType
-            if (ft is FeedType.SingleRelay && ft.url != FeedType.Popular.url &&
-                pinnedRelays.none { it.url == ft.url }) {
-                add(ft as FeedType to ft.displayLabel)
-            }
-        }
-    }
-
     val density = LocalDensity.current
     val statusBarHeight = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
     val navBarHeight    = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
@@ -326,9 +313,10 @@ fun AppNavigation(
     val immersiveVideoMode = selectedTab == 0 && currentFilter.isImmersiveVideoMode()
     val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3 && !immersiveVideoMode
     val bottomBarShown = splashDone && barsVisible && !immersiveVideoMode
+    val activeTopBarHeight = if (selectedTab == 0) 68.dp else Sizing.topBarHeight
 
     val topBarOffset by animateDpAsState(
-        targetValue   = if (topBarShown) 0.dp else -(Sizing.topBarHeight + statusBarHeight + 8.dp),
+        targetValue   = if (topBarShown) 0.dp else -(activeTopBarHeight + statusBarHeight + 8.dp),
         animationSpec = animSpec,
         label         = "topBarOffset",
     )
@@ -338,7 +326,7 @@ fun AppNavigation(
         label         = "bottomBarOffset",
     )
     // Constant: top spacing moved to LazyColumn contentPadding (no animation = no jerk).
-    val staticTopPadding = Sizing.topBarHeight + statusBarHeight
+    val staticTopPadding = activeTopBarHeight + statusBarHeight
     val animatedContentBottomPadding by animateDpAsState(
         targetValue   = if (bottomBarShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
         animationSpec = animSpec,
@@ -451,55 +439,40 @@ fun AppNavigation(
                     .fillMaxWidth()
                     .background(Black)
                     .statusBarsPadding()
-                    .height(Sizing.topBarHeight),
+                    .height(activeTopBarHeight),
                 contentAlignment = Alignment.Center,
             ) {
-                // Layered layout for true centering
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium),
-                ) {
-                    // Left: app logo mark (52dp = next golden-ratio step from 32)
-                    // Offset left by 8dp to align waveform visual start with card edges
-                    LogoMark(
-                        sizeDp = Spacing.xxl,
-                        static = false,
+                if (selectedTab == 2) {
+                    // Notification header keeps its established 52dp geometry.
+                    Box(
                         modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .offset(x = (-8).dp),
-                    )
-
-                    if (selectedTab == 2) {
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.medium),
+                    ) {
+                        LogoMark(
+                            sizeDp = Spacing.xxl,
+                            static = false,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .offset(x = (-8).dp),
+                        )
                         // Center: notification filter carousel
                         NotifFilterCarousel(
                             current = notifFilter,
                             onChanged = { notifViewModel.setFilter(it) },
                             modifier = Modifier.align(Alignment.Center),
                         )
-                    } else {
-                        // Center: feed carousel
-                        FeedCarousel(
-                            feedList = feedList,
-                            currentFeedType = feedType,
-                            relayHealth = relayHealth,
-                            onFeedChanged = { feedViewModel.setFeedType(it) },
-                            onTap = { showFeedSheet = true },
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-
-                        // Right: filter icon (24dp — lone icon needs more mass
-                        // to balance the 52dp logo mark on the opposite side)
-                        Icon(
-                            imageVector        = Icons.Filled.Tune,
-                            contentDescription = "Filter",
-                            tint               = if (currentFilter.isNonDefault) Brand else Color.White.copy(alpha = 0.7f),
-                            modifier           = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(24.dp)
-                                .clickable { showFilter = true },
-                        )
                     }
+                } else {
+                    UnifiedFeedHeader(
+                        feedType = feedType,
+                        lens = globalFeedLens,
+                        filter = currentFilter,
+                        onLogoClick = { scrollToTopTrigger++ },
+                        onSourceClick = { showFeedSheet = true },
+                        onLensToggle = feedViewModel::setGlobalFeedLens,
+                        onFilterClick = { showFilter = true },
+                    )
                 }
             }
 
@@ -774,205 +747,245 @@ fun AppNavigation(
     } // CompositionLocalProvider
 }
 
-// ── Feed carousel ─────────────────────────────────────────────────────────
-//
-// Vertical pager with infinite scroll that shows adjacent feed names peeking
-// in above and below, scaling and fading as they move away from center.
-// Tap opens the sheet; swipe cycles feeds with a smooth drum-roller feel.
+// ── Unified feed header ──────────────────────────────────────────────────
 
 @Composable
-private fun FeedCarousel(
-    feedList: List<Pair<FeedType, String>>,
-    currentFeedType: FeedType,
-    relayHealth: Map<String, RelayHealthInfo>,
-    onFeedChanged: (FeedType) -> Unit,
-    onTap: () -> Unit,
-    modifier: Modifier = Modifier,
+private fun UnifiedFeedHeader(
+    feedType: FeedType,
+    lens: GlobalFeedLens,
+    filter: FeedFilter,
+    onLogoClick: () -> Unit,
+    onSourceClick: () -> Unit,
+    onLensToggle: (GlobalFeedLens) -> Unit,
+    onFilterClick: () -> Unit,
 ) {
-    if (feedList.isEmpty()) return
-
-    val realCount = feedList.size
-
-    // Single feed — static label, no pager
-    if (realCount == 1) {
-        Text(
-            text = feedList[0].second,
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = modifier
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onTap,
-                ),
-        )
-        return
-    }
-
-    val currentIdx = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-    val currentFeedInList = currentIdx >= 0
-
-    // Infinite scroll via large virtual page count centered at the current feed
-    val virtualCount = realCount * 10_000
-    val middleBase = (virtualCount / 2 / realCount) * realCount
-    val initialPage = middleBase + currentIdx.coerceAtLeast(0)
-
-    val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
-
-    // Recenter pager when feed list changes (follow/unfollow, relay set add/remove)
-    // to prevent mod(realCount) pointing to the wrong feed after virtualCount changes.
-    LaunchedEffect(realCount) {
-        val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-        if (targetReal < 0) return@LaunchedEffect
-        val newMiddle = (virtualCount / 2 / realCount) * realCount
-        pagerState.scrollToPage(newMiddle + targetReal)
-    }
-
-    // Pager settled on a new page → update the ViewModel
-    LaunchedEffect(pagerState.settledPage, currentFeedInList) {
-        if (!currentFeedInList) return@LaunchedEffect
-        val realIdx = pagerState.settledPage.mod(realCount)
-        val settled = feedList.getOrNull(realIdx)?.first ?: return@LaunchedEffect
-        if (!feedTypeMatches(settled, currentFeedType)) {
-            onFeedChanged(settled)
-        }
-    }
-
-    // External change (sheet selection) → scroll pager to match
-    LaunchedEffect(currentFeedType, currentFeedInList) {
-        if (!currentFeedInList) return@LaunchedEffect
-        val targetReal = feedList.indexOfFirst { feedTypeMatches(it.first, currentFeedType) }
-        if (targetReal < 0) return@LaunchedEffect
-        val currentReal = pagerState.currentPage.mod(realCount)
-        if (targetReal != currentReal) {
-            pagerState.animateScrollToPage(pagerState.currentPage + (targetReal - currentReal))
-        }
-    }
-
-    val pageHeightDp = 26.dp
-    val coroutineScope = rememberCoroutineScope()
-    var engaged by remember { mutableStateOf(false) }
-
-    // Health dot for the active feed (only for SingleRelay)
-    val activeRelayUrl = (currentFeedType as? FeedType.SingleRelay)?.url
-    val activeHealth = activeRelayUrl?.let { url ->
-        relayHealth[url] ?: normalizeRelayUrl(url)?.let { relayHealth[it] }
+    val elements = feedHeaderElements(feedType, lens, filter)
+    val lensAccent = when (elements.lens) {
+        GlobalFeedLens.TRUSTED -> Mint
+        GlobalFeedLens.RAW -> Zap
+        null -> Brand
     }
 
     Box(
-        modifier = modifier
-            .height(pageHeightDp * 1.7f)
-            .widthIn(min = 80.dp, max = 160.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (engaged) Brand.copy(alpha = 0.06f) else Color.Transparent, RoundedCornerShape(10.dp))
-            .pointerInput(pagerState) {
-                val longPressTimeout = viewConfiguration.longPressTimeoutMillis
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-
-                    // Wait for finger lift (tap) or timeout (long press)
-                    val liftedBeforeTimeout = withTimeoutOrNull(longPressTimeout) {
-                        waitForUpOrCancellation()
-                    }
-
-                    if (liftedBeforeTimeout != null) {
-                        // Finger lifted before timeout → TAP
-                        onTap()
-                    } else {
-                        // Long press reached → enter drag mode
-                        engaged = true
-                        try {
-                            do {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull() ?: break
-                                if (change.pressed) {
-                                    val dragY = change.positionChange().y
-                                    change.consume()
-                                    coroutineScope.launch {
-                                        pagerState.scrollBy(-dragY)
-                                    }
-                                } else {
-                                    break
-                                }
-                            } while (true)
-                        } finally {
-                            engaged = false
-                            coroutineScope.launch {
-                                pagerState.animateScrollToPage(pagerState.currentPage)
-                            }
-                        }
-                    }
-                }
-            },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp),
         contentAlignment = Alignment.Center,
     ) {
-        VerticalPager(
-            state = pagerState,
-            pageSize = PageSize.Fixed(pageHeightDp),
-            beyondViewportPageCount = 1,
-            userScrollEnabled = false,
+        FeedHeaderHairline(lensAccent)
+        Row(
             modifier = Modifier
-                .height(pageHeightDp * 1.7f)
-                .fillMaxWidth(),
-        ) { page ->
-            val realIdx = page.mod(realCount)
-
-            Box(
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.large),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LogoMark(
+                sizeDp = Spacing.xxl,
+                static = false,
+                firstBarColor = lensAccent,
                 modifier = Modifier
-                    .height(pageHeightDp)
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        val pageOffset = ((pagerState.currentPage - page) +
-                            pagerState.currentPageOffsetFraction).absoluteValue
-                        alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
-                        val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
-                        scaleX = scale
-                        scaleY = scale
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    // Health dot — only for the active relay feed page
-                    if (activeHealth != null && feedTypeMatches(feedList[realIdx].first, currentFeedType)) {
-                        val dotColor = when {
-                            activeHealth.score == null -> Text3
-                            activeHealth.score!! >= 70 -> Mint
-                            activeHealth.score!! >= 40 -> Warn
-                            else -> Like
-                        }
-                        val breathAlpha = rememberInfiniteTransition(label = "dot")
-                            .animateFloat(
-                                initialValue = 0.55f,
-                                targetValue  = 1f,
-                                animationSpec = infiniteRepeatable(
-                                    animation = tween(2000, easing = FastOutSlowInEasing),
-                                    repeatMode = RepeatMode.Reverse,
-                                ),
-                                label = "dotAlpha",
-                            )
-                        Box(
-                            Modifier
-                                .size(5.dp)
-                                .graphicsLayer { alpha = breathAlpha.value }
-                                .background(dotColor, CircleShape)
+                    .semantics { contentDescription = "Scroll feed to top" }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onLogoClick,
+                    ),
+            )
+            FeedSourcePill(
+                label = elements.sourceLabel,
+                onClick = onSourceClick,
+            )
+            elements.lens?.let { activeLens ->
+                FeedTrustChip(
+                    lens = activeLens,
+                    onClick = {
+                        onLensToggle(
+                            if (activeLens == GlobalFeedLens.TRUSTED) GlobalFeedLens.RAW
+                            else GlobalFeedLens.TRUSTED,
                         )
-                        Spacer(Modifier.width(Spacing.micro))
-                    }
-                    Text(
-                        text = feedList[realIdx].second,
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                    },
+                )
             }
+            FeedFormatAction(
+                activeShowTypes = elements.activeShowTypes,
+                contentDescription = elements.formatContentDescription,
+                filterActive = filter.isNonDefault,
+                onClick = onFilterClick,
+            )
         }
+    }
+}
+
+@Composable
+private fun FeedHeaderHairline(accent: Color) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        0f to Color.Transparent,
+                        0.3f to Color.White.copy(alpha = 0.10f),
+                        0.7f to Color.White.copy(alpha = 0.10f),
+                        1f to Color.Transparent,
+                    ),
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .offset(x = 68.dp)
+                .width(40.dp)
+                .height(1.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        0f to accent.copy(alpha = 0.62f),
+                        1f to Color.Transparent,
+                    ),
+                ),
+        )
+    }
+}
+
+@Composable
+private fun FeedSourcePill(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .height(32.dp)
+            .widthIn(max = 118.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Surface1)
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(16.dp))
+            .semantics { contentDescription = "Feed source: $label. Tap to change" }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(start = 10.dp, end = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.micro),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Icon(
+            imageVector = Icons.Filled.ExpandMore,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun FeedTrustChip(
+    lens: GlobalFeedLens,
+    onClick: () -> Unit,
+) {
+    val trusted = lens == GlobalFeedLens.TRUSTED
+    val accent = if (trusted) Mint else Zap
+    val description = if (trusted) {
+        "Trusted lens — tap for raw"
+    } else {
+        "Raw feed — tap for trusted"
+    }
+    Row(
+        modifier = Modifier
+            .height(32.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(accent.copy(alpha = 0.12f))
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+            .semantics { contentDescription = description }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(horizontal = if (trusted) 7.dp else 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.micro),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = if (trusted) Icons.Outlined.GppGood else Icons.Outlined.GppBad,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(17.dp),
+        )
+        if (!trusted) {
+            Text(
+                text = "Raw",
+                color = accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FeedFormatAction(
+    activeShowTypes: List<ShowType>,
+    contentDescription: String?,
+    filterActive: Boolean,
+    onClick: () -> Unit,
+) {
+    // Keep an unstyled launcher at Show=All; otherwise the new header would make
+    // the filter sheet unreachable. Active time/activity-only filters tint it too.
+    val formatActive = activeShowTypes.isNotEmpty()
+    val icon = if (!formatActive) {
+        Icons.Filled.Tune
+    } else if (activeShowTypes.size > 1) {
+        Icons.Filled.GridView
+    } else {
+        when (filterIconKind(activeShowTypes.single())) {
+            FilterIconKind.GRID -> Icons.Filled.GridView
+            FilterIconKind.TEXT -> Icons.AutoMirrored.Filled.FormatAlignLeft
+            FilterIconKind.IMAGE -> Icons.Filled.Photo
+            FilterIconKind.VIDEO -> Icons.Filled.SmartDisplay
+            FilterIconKind.ARTICLE -> Icons.AutoMirrored.Filled.Article
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(if (filterActive) Brand.copy(alpha = 0.14f) else Black)
+            .then(
+                if (filterActive) Modifier.border(1.dp, Brand.copy(alpha = 0.48f), CircleShape)
+                else Modifier,
+            )
+            .semantics {
+                this.contentDescription = contentDescription
+                    ?: if (filterActive) "Active feed filters" else "Open feed filters"
+            }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (filterActive) Brand else Color.White.copy(alpha = 0.68f),
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
@@ -1112,31 +1125,34 @@ private fun FeedSelectorSheet(
                 .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .background(if (selected) Brand else Color(0xFF333333), CircleShape),
-            )
-            Spacer(Modifier.width(14.dp))
             Text(
                 text       = label,
                 color      = if (selected) Brand else Color(0xFFDDDDDD),
                 fontSize   = 15.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines   = 1,
+                overflow   = TextOverflow.Ellipsis,
                 modifier   = Modifier.weight(1f),
             )
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = "Selected",
+                    tint = Brand,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 
     @Composable
     fun SectionLabel(text: String) {
-        Text(
-            text = text.uppercase(),
-            color = Text3,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 1.sp,
-            modifier = Modifier.padding(start = 32.dp, top = 16.dp, bottom = 4.dp),
+            Text(
+                text = text.uppercase(),
+                color = Text3,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 32.dp, top = 16.dp, bottom = 4.dp),
         )
     }
 
@@ -1158,12 +1174,11 @@ private fun FeedSelectorSheet(
             SectionLabel("Feeds")
             if (hasFollows || feedType is FeedType.Following) SheetItem("Following", FeedType.Following)
             SheetItem("Global", FeedType.Global)
-            SheetItem("Popular", FeedType.Popular)
 
             // ── Pinned relays ──
-            val visiblePinned = pinnedRelays.filter { it.url != FeedType.Popular.url }
+            val visiblePinned = pinnedRelays
             if (visiblePinned.isNotEmpty()) {
-                SectionLabel("Favorite Relays")
+                SectionLabel("Favorites")
                 for (relay in visiblePinned) {
                     val selected = isSelected(relay)
                     val healthScore = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.score
@@ -1192,8 +1207,19 @@ private fun FeedSelectorSheet(
                             color      = if (selected) Brand else Color(0xFFDDDDDD),
                             fontSize   = 15.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines   = 1,
+                            overflow   = TextOverflow.Ellipsis,
                             modifier   = Modifier.weight(1f),
                         )
+                        if (selected) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = "Selected",
+                                tint = Brand,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(Spacing.small))
+                        }
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Remove favorite",
@@ -1232,7 +1258,12 @@ private fun FeedSelectorSheet(
                     .padding(horizontal = 16.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("+", color = Brand, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = Brand,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(Modifier.width(14.dp))
                 Text("New Relay Set", color = Brand, fontSize = 14.sp)
             }
@@ -1246,9 +1277,14 @@ private fun FeedSelectorSheet(
                     .padding(horizontal = 16.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("\u2699", color = Text3, fontSize = 14.sp)
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = null,
+                    tint = Text3,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(Modifier.width(14.dp))
-                Text("Manage Relays", color = Color(0xFF999999), fontSize = 14.sp)
+                Text("Manage relays", color = Color(0xFF999999), fontSize = 14.sp)
             }
         }
     }

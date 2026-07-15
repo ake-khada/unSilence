@@ -14,6 +14,8 @@ import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.domain.model.GlobalFeedLens
+import com.unsilence.app.domain.model.parseGlobalFeedLens
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +47,7 @@ private val KEY_WOT_PROVIDER_SOURCE = stringPreferencesKey("wot_provider_source"
 private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
 private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
 private val KEY_FEED_WOT_DISPLAY_MODE = stringPreferencesKey("feed_wot_display_mode")
+private val KEY_GLOBAL_FEED_LENS = stringPreferencesKey("global_feed_lens")
 private val KEY_HASHTAG_CAP = intPreferencesKey("hashtag_cap")
 private const val HASHTAG_CAP_OFF = 0
 
@@ -182,6 +185,15 @@ class RelayPreferencesStore @Inject constructor(
 
     suspend fun setFeedWotDisplayMode(mode: FeedWotDisplayMode) {
         dataStore.edit { prefs -> prefs[KEY_FEED_WOT_DISPLAY_MODE] = mode.name }
+    }
+
+    fun globalFeedLensFlow(): Flow<GlobalFeedLens> =
+        dataStore.data
+            .map { prefs -> parseGlobalFeedLens(prefs[KEY_GLOBAL_FEED_LENS]) }
+            .distinctUntilChanged()
+
+    suspend fun setGlobalFeedLens(lens: GlobalFeedLens) {
+        dataStore.edit { prefs -> prefs[KEY_GLOBAL_FEED_LENS] = lens.name }
     }
 
     // ─── Pinned Relays ──────────────────────────────────────────────────────
