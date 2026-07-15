@@ -27,6 +27,7 @@ data class WotProviderOptionState(
     val enabled: Boolean,
     val subtitle: String,
     val actionHint: String? = null,
+    val selectionExplanation: String? = null,
 )
 
 data class WotProviderRegistryDraft(
@@ -51,8 +52,12 @@ fun deriveWotProviderOptions(
     ownProvider: WotProviderDescriptor?,
     encryptedOwnProviderAvailable: Boolean,
 ): List<WotProviderOptionState> {
+    val ownDeclaresDefault = ownProvider?.let(::isDefaultWotProvider) == true
     val ownSubtitle = when {
-        ownProvider != null -> "Provider ${shortProviderPubkey(ownProvider.providerPubkey)} · ${ownProvider.relayHint}"
+        ownProvider != null -> buildString {
+            append("Provider ${shortProviderPubkey(ownProvider.providerPubkey)} · ${ownProvider.relayHint}")
+            if (ownDeclaresDefault) append(" · currently declares the default provider")
+        }
         encryptedOwnProviderAvailable -> "Encrypted provider list found"
         else -> "No provider list (kind 10040) found"
     }
@@ -61,7 +66,7 @@ fun deriveWotProviderOptions(
             source = WotProviderSource.DEFAULT,
             selected = prefs.source == WotProviderSource.DEFAULT,
             enabled = true,
-            subtitle = "straycat's grapevine · default",
+            subtitle = "NosFabrica grapevine · default",
         ),
         WotProviderOptionState(
             source = WotProviderSource.OWN_10040,
@@ -72,6 +77,11 @@ fun deriveWotProviderOptions(
                 ownProvider != null -> null
                 encryptedOwnProviderAvailable -> "Decrypt"
                 else -> "Set up"
+            },
+            selectionExplanation = if (ownDeclaresDefault) {
+                "Your list points at the default provider — set a custom provider and publish to make it yours."
+            } else {
+                null
             },
         ),
         WotProviderOptionState(
@@ -87,6 +97,9 @@ fun deriveWotProviderOptions(
         ),
     )
 }
+
+fun isDefaultWotProvider(provider: WotProviderDescriptor): Boolean =
+    provider.providerPubkey.equals(DEFAULT_WOT_PROVIDER_PUBKEY, ignoreCase = true)
 
 fun wotProviderDescriptorFromTags(
     tags: List<List<String>>,

@@ -71,6 +71,7 @@ import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.WotProviderOptionState
 import com.unsilence.app.data.relay.WotProviderSource
+import com.unsilence.app.data.relay.isDefaultWotProvider
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.theme.AppType
@@ -157,7 +158,7 @@ fun SocialGraphScreen(
                         )
                     }
                 }
-                item { ProvenanceBanner(state.prefs.source) }
+                item { ProvenanceBanner(state) }
                 item { StandingCard(state.ownStanding) }
                 item {
                     CoverageCard(
@@ -188,12 +189,16 @@ fun SocialGraphScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
                     Text(
-                        text = "This publishes your active WoT provider publicly.",
+                        text = "This publishes exactly this provider in your public kind 10040 list.",
                         color = TextSecondary,
                         fontSize = AppType.bodySmall,
                     )
                     MetricRow("Provider", shortNpub(state.activeProvider.providerPubkey))
                     MetricRow("Relay", state.activeProvider.relayHint)
+                    MetricRow(
+                        "Default provider",
+                        if (isDefaultWotProvider(state.activeProvider)) "Yes · NosFabrica" else "No",
+                    )
                 }
             },
             confirmButton = {
@@ -459,7 +464,7 @@ private fun ProviderOptionRow(
                 text = option.subtitle,
                 color = Text3,
                 fontSize = AppType.caption,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -535,8 +540,11 @@ private fun SocialGraphTextField(
 }
 
 @Composable
-private fun ProvenanceBanner(source: WotProviderSource) {
-    val text = when (source) {
+private fun ProvenanceBanner(state: SocialGraphUiState) {
+    val selectedExplanation = state.selectorOptions
+        .firstOrNull { it.selected }
+        ?.selectionExplanation
+    val text = selectedExplanation ?: when (state.prefs.source) {
         WotProviderSource.DEFAULT ->
             "Ranks are seen from the NosFabrica seed's vantage point, not yours. Switch to your grapevine for personal scores."
         WotProviderSource.OWN_10040 ->
