@@ -66,6 +66,46 @@ class WotSettingsPolicyTest {
     }
 
     @Test
+    fun `selector derivation surfaces whether own declaration is the default provider`() {
+        val default = defaultWotProviderDescriptor()
+        val ownPrefs = WotProviderPrefs(
+            pubkey = default.providerPubkey,
+            relay = default.relayHint,
+            source = WotProviderSource.OWN_10040,
+        )
+
+        val sameAsDefault = deriveWotProviderOptions(
+            prefs = ownPrefs,
+            ownProvider = default.copy(relayHint = "wss://registry.example.com"),
+            encryptedOwnProviderAvailable = false,
+        )
+        val defaultOption = sameAsDefault.first { it.source == WotProviderSource.DEFAULT }
+        val sameOwnOption = sameAsDefault.first { it.source == WotProviderSource.OWN_10040 }
+        assertEquals("NosFabrica grapevine · default", defaultOption.subtitle)
+        assertTrue(sameOwnOption.subtitle.endsWith("· currently declares the default provider"))
+        assertEquals(
+            "Your list points at the default provider — set a custom provider and publish to make it yours.",
+            sameOwnOption.selectionExplanation,
+        )
+
+        val customOwnOption = deriveWotProviderOptions(
+            prefs = ownPrefs.copy(pubkey = "2".repeat(64)),
+            ownProvider = WotProviderDescriptor("2".repeat(64), "wss://nip85.example.com", updatedAt = 10),
+            encryptedOwnProviderAvailable = false,
+        ).first { it.source == WotProviderSource.OWN_10040 }
+        assertFalse(customOwnOption.subtitle.contains("currently declares the default provider"))
+        assertNull(customOwnOption.selectionExplanation)
+
+        val absentOwnOption = deriveWotProviderOptions(
+            prefs = ownPrefs,
+            ownProvider = null,
+            encryptedOwnProviderAvailable = false,
+        ).first { it.source == WotProviderSource.OWN_10040 }
+        assertEquals("No provider list (kind 10040) found", absentOwnOption.subtitle)
+        assertNull(absentOwnOption.selectionExplanation)
+    }
+
+    @Test
     fun `encrypted 10040 JSON parser accepts tag list and list of tags`() {
         val provider = "2".repeat(64)
 
