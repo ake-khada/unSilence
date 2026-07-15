@@ -3,16 +3,14 @@ package com.unsilence.app.ui.feed
 import android.content.Context
 import android.util.Log
 import androidx.media3.common.MediaItem
-import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import com.unsilence.app.data.model.VideoRenderModel
-import com.unsilence.app.di.MediaClient
 import dagger.hilt.android.qualifiers.ApplicationContext
-import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -24,7 +22,7 @@ private const val NO_PRELOAD_INDEX = -1
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class SharedPlayerHolder @Inject constructor(
     @ApplicationContext private val context: Context,
-    @MediaClient private val mediaClient: OkHttpClient,
+    private val mediaDataSourceFactory: CacheDataSource.Factory,
 ) {
     private var _player: ExoPlayer? = null
     private var _preloadManager: DefaultPreloadManager? = null
@@ -41,9 +39,7 @@ class SharedPlayerHolder @Inject constructor(
         )
         .build()
 
-    private val mediaSourceFactory = DefaultMediaSourceFactory(
-        OkHttpDataSource.Factory(mediaClient)
-    )
+    private val mediaSourceFactory = DefaultMediaSourceFactory(mediaDataSourceFactory)
 
     val player: ExoPlayer
         get() {
