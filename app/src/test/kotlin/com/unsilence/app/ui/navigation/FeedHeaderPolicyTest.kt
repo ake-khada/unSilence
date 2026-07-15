@@ -12,6 +12,47 @@ import org.junit.Test
 
 class FeedHeaderPolicyTest {
     @Test
+    fun `pull stretch tracks threshold fraction and clamps beyond it`() {
+        assertEquals(1f, pullStretchFactor(0f), 0.0001f)
+        assertEquals(1.3f, pullStretchFactor(0.5f), 0.0001f)
+        assertEquals(1.6f, pullStretchFactor(1f), 0.0001f)
+        assertEquals(1.6f, pullStretchFactor(2f), 0.0001f)
+        assertEquals(1f, pullStretchFactor(-1f), 0.0001f)
+    }
+
+    @Test
+    fun `reduced motion disables continuous stretch and refresh sweep motion`() {
+        assertTrue(feedHeaderMotionEnabled(isPowerSaveMode = false, animatorDurationScale = 1f))
+        assertFalse(feedHeaderMotionEnabled(isPowerSaveMode = true, animatorDurationScale = 1f))
+        assertFalse(feedHeaderMotionEnabled(isPowerSaveMode = false, animatorDurationScale = 0f))
+
+        assertEquals(1f, effectivePullStretchFactor(0.99f, motionEnabled = false), 0.0001f)
+        assertEquals(1.6f, effectivePullStretchFactor(1f, motionEnabled = false), 0.0001f)
+        assertEquals(1.3f, effectivePullStretchFactor(0.5f, motionEnabled = true), 0.0001f)
+        assertEquals(1_400, REFRESH_SWEEP_PERIOD_MS)
+    }
+
+    @Test
+    fun `lens tint animates only between trusted and raw`() {
+        assertTrue(
+            shouldAnimateLensTransition(
+                previous = GlobalFeedLens.TRUSTED,
+                current = GlobalFeedLens.RAW,
+                motionEnabled = true,
+            ),
+        )
+        assertFalse(shouldAnimateLensTransition(null, GlobalFeedLens.TRUSTED, motionEnabled = true))
+        assertFalse(shouldAnimateLensTransition(GlobalFeedLens.RAW, null, motionEnabled = true))
+        assertFalse(
+            shouldAnimateLensTransition(
+                previous = GlobalFeedLens.TRUSTED,
+                current = GlobalFeedLens.RAW,
+                motionEnabled = false,
+            ),
+        )
+    }
+
+    @Test
     fun `global exposes trust while following and relay sources do not`() {
         val trusted = feedHeaderElements(FeedType.Global, GlobalFeedLens.TRUSTED, FeedFilter())
         val raw = feedHeaderElements(FeedType.Global, GlobalFeedLens.RAW, FeedFilter())

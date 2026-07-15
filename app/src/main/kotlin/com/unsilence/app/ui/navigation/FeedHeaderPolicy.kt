@@ -6,6 +6,11 @@ import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.domain.model.label
 import com.unsilence.app.ui.feed.FeedType
 
+internal const val PULL_STRETCH_MAX_FACTOR = 1.6f
+internal const val REFRESH_SWEEP_PERIOD_MS = 1_400
+internal const val REFRESH_SWEEP_SEGMENT_FRACTION = 0.18f
+internal const val LENS_TINT_TRANSITION_MS = 300
+
 internal data class FeedHeaderElements(
     val sourceLabel: String,
     val lens: GlobalFeedLens?,
@@ -46,3 +51,26 @@ internal fun feedHeaderElements(
         activeShowTypes = activeShowTypes,
     )
 }
+
+internal fun pullStretchFactor(fraction: Float): Float =
+    1f + (PULL_STRETCH_MAX_FACTOR - 1f) * fraction.coerceIn(0f, 1f)
+
+internal fun feedHeaderMotionEnabled(
+    isPowerSaveMode: Boolean,
+    animatorDurationScale: Float,
+): Boolean = !isPowerSaveMode && animatorDurationScale > 0f
+
+internal fun effectivePullStretchFactor(
+    fraction: Float,
+    motionEnabled: Boolean,
+): Float = when {
+    motionEnabled -> pullStretchFactor(fraction)
+    fraction >= 1f -> PULL_STRETCH_MAX_FACTOR
+    else -> 1f
+}
+
+internal fun shouldAnimateLensTransition(
+    previous: GlobalFeedLens?,
+    current: GlobalFeedLens?,
+    motionEnabled: Boolean,
+): Boolean = motionEnabled && previous != null && current != null && previous != current

@@ -33,6 +33,7 @@ fun LogoMark(
     sizeDp: Dp = 88.dp,
     color: Color = Brand,
     firstBarColor: Color? = null,
+    barHeightScale: Float = 1f,
     static: Boolean = false,
 ) {
     val barColor = color
@@ -82,11 +83,13 @@ fun LogoMark(
             floatArrayOf(146f, 82f, 8f, 36f),
             floatArrayOf(160f, 90f, 8f, 20f),
         )
+        val resolvedBarHeightScale = barHeightScale.coerceIn(1f, 1.6f)
         for ((index, bar) in bars.withIndex()) {
+            val scaledHeight = bar[3] * resolvedBarHeightScale
             drawRect(
                 color = if (index == 0) firstBarColor ?: barColor else barColor,
-                topLeft = Offset(bar[0] * s, bar[1] * s),
-                size = Size(bar[2] * s, bar[3] * s),
+                topLeft = Offset(bar[0] * s, (100f - scaledHeight / 2f) * s),
+                size = Size(bar[2] * s, scaledHeight * s),
             )
         }
 

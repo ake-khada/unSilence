@@ -1,10 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.PowerManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -72,7 +67,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -94,6 +88,7 @@ import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.WotInlineLabel
+import com.unsilence.app.ui.common.rememberPowerSaveMode
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Spacing
@@ -880,21 +875,4 @@ private fun PlaybackProgressComet(
             center = Offset(dotX, size.height / 2f),
         )
     }
-}
-
-@Composable
-private fun rememberPowerSaveMode(): Boolean {
-    val context = LocalContext.current
-    val powerManager = remember(context) { context.getSystemService(PowerManager::class.java) }
-    var enabled by remember { mutableStateOf(powerManager?.isPowerSaveMode == true) }
-    DisposableEffect(context, powerManager) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                enabled = powerManager?.isPowerSaveMode == true
-            }
-        }
-        context.registerReceiver(receiver, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
-        onDispose { runCatching { context.unregisterReceiver(receiver) } }
-    }
-    return enabled
 }
