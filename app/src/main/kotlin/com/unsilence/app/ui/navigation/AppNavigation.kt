@@ -2,7 +2,17 @@ package com.unsilence.app.ui.navigation
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -75,6 +85,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -111,7 +122,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.LogoMark
+import com.unsilence.app.ui.common.rememberAnimatorDurationScale
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberPowerSaveMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -220,6 +233,10 @@ fun AppNavigation(
     var showZapSettings      by remember { mutableStateOf(false) }
     var hashtagSearchQuery   by remember { mutableStateOf<String?>(null) }
     var showStartGraph       by remember { mutableStateOf(false) }
+    val pullRefreshFraction = remember { mutableFloatStateOf(0f) }
+    val updatePullRefreshFraction: (Float) -> Unit = remember(pullRefreshFraction) {
+        { fraction -> pullRefreshFraction.floatValue = fraction }
+    }
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
@@ -259,6 +276,7 @@ fun AppNavigation(
     val relayHealth   by relayManagementVm.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val globalFeedLens by feedViewModel.globalFeedLens.collectAsStateWithLifecycle()
+    val isFeedRefreshing by feedViewModel.isRefreshing.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val hasNewTopPost by feedViewModel.showDot.collectAsStateWithLifecycle()
     val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
@@ -269,6 +287,9 @@ fun AppNavigation(
     val startGraphState by startGraphVm.uiState.collectAsStateWithLifecycle()
     val startGraphAutoOpen by startGraphVm.autoOpen.collectAsStateWithLifecycle()
     val showEmptyFollowingEntry by startGraphVm.showEmptyFollowingEntry.collectAsStateWithLifecycle()
+    val isPowerSaveMode = rememberPowerSaveMode()
+    val animatorDurationScale = rememberAnimatorDurationScale()
+    val headerMotionEnabled = feedHeaderMotionEnabled(isPowerSaveMode, animatorDurationScale)
 
     LaunchedEffect(startGraphAutoOpen) {
         if (startGraphAutoOpen) {
@@ -422,6 +443,7 @@ fun AppNavigation(
                         onAuthorClick      = onAuthorClick,
                         onHashtagClick     = onHashtagClick,
                         onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                        onPullRefreshProgress = updatePullRefreshFraction,
                         showFindPeopleEmptyState = showEmptyFollowingEntry,
                         onFindPeople = {
                             startGraphVm.open()
@@ -501,6 +523,9 @@ fun AppNavigation(
                         feedType = feedType,
                         lens = globalFeedLens,
                         filter = currentFilter,
+                        pullFraction = pullRefreshFraction.floatValue,
+                        isRefreshing = isFeedRefreshing,
+                        motionEnabled = headerMotionEnabled,
                         onLogoClick = { scrollToTopTrigger++ },
                         onSourceClick = { showFeedSheet = true },
                         onLensToggle = feedViewModel::setGlobalFeedLens,
@@ -797,17 +822,39 @@ private fun UnifiedFeedHeader(
     feedType: FeedType,
     lens: GlobalFeedLens,
     filter: FeedFilter,
+    pullFraction: Float,
+    isRefreshing: Boolean,
+    motionEnabled: Boolean,
     onLogoClick: () -> Unit,
     onSourceClick: () -> Unit,
     onLensToggle: (GlobalFeedLens) -> Unit,
     onFilterClick: () -> Unit,
 ) {
     val elements = feedHeaderElements(feedType, lens, filter)
-    val lensAccent = when (elements.lens) {
+    val targetLensAccent = when (elements.lens) {
         GlobalFeedLens.TRUSTED -> Mint
         GlobalFeedLens.RAW -> Zap
         null -> Brand
     }
+    var previousLens by remember { mutableStateOf(elements.lens) }
+    val lensAnimationSpec = remember(elements.lens, motionEnabled) {
+        if (shouldAnimateLensTransition(previousLens, elements.lens, motionEnabled)) {
+            tween<Color>(durationMillis = LENS_TINT_TRANSITION_MS)
+        } else {
+            snap<Color>()
+        }
+    }
+    SideEffect { previousLens = elements.lens }
+    val lensAccent by animateColorAsState(
+        targetValue = targetLensAccent,
+        animationSpec = lensAnimationSpec,
+        label = "feedLensAccent",
+    )
+    val barHeightScale = rememberPullBarHeightScale(
+        pullFraction = pullFraction,
+        isRefreshing = isRefreshing,
+        motionEnabled = motionEnabled,
+    )
 
     Box(
         modifier = Modifier
@@ -815,7 +862,11 @@ private fun UnifiedFeedHeader(
             .height(68.dp),
         contentAlignment = Alignment.Center,
     ) {
-        FeedHeaderHairline(lensAccent)
+        FeedHeaderHairline(
+            accent = lensAccent,
+            isRefreshing = isRefreshing,
+            motionEnabled = motionEnabled,
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -825,8 +876,9 @@ private fun UnifiedFeedHeader(
         ) {
             LogoMark(
                 sizeDp = Spacing.xxl,
-                static = false,
                 firstBarColor = lensAccent,
+                barHeightScale = barHeightScale,
+                static = !motionEnabled,
                 modifier = Modifier
                     .semantics { contentDescription = "Scroll feed to top" }
                     .clickable(
@@ -861,7 +913,55 @@ private fun UnifiedFeedHeader(
 }
 
 @Composable
-private fun FeedHeaderHairline(accent: Color) {
+private fun rememberPullBarHeightScale(
+    pullFraction: Float,
+    isRefreshing: Boolean,
+    motionEnabled: Boolean,
+): Float {
+    val animatedScale = remember { Animatable(1f) }
+    val activePullFraction = if (isRefreshing) 0f else pullFraction
+    LaunchedEffect(activePullFraction, motionEnabled) {
+        val target = effectivePullStretchFactor(activePullFraction, motionEnabled)
+        if (!motionEnabled || activePullFraction > 0f) {
+            animatedScale.snapTo(target)
+        } else {
+            animatedScale.animateTo(
+                targetValue = target,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            )
+        }
+    }
+    return animatedScale.value
+}
+
+@Composable
+private fun FeedHeaderHairline(
+    accent: Color,
+    isRefreshing: Boolean,
+    motionEnabled: Boolean,
+) {
+    val sweepStartState = if (isRefreshing && motionEnabled) {
+        val transition = rememberInfiniteTransition(label = "refreshSweep")
+        transition.animateFloat(
+            initialValue = -REFRESH_SWEEP_SEGMENT_FRACTION,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = REFRESH_SWEEP_PERIOD_MS,
+                    easing = LinearEasing,
+                ),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "refreshSweepPosition",
+        )
+    } else {
+        null
+    }
+    val accentAlpha = if (isRefreshing && !motionEnabled) 0.88f else 0.62f
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -887,11 +987,29 @@ private fun FeedHeaderHairline(accent: Color) {
                 .height(1.dp)
                 .background(
                     Brush.horizontalGradient(
-                        0f to accent.copy(alpha = 0.62f),
+                        0f to accent.copy(alpha = accentAlpha),
                         1f to Color.Transparent,
                     ),
                 ),
         )
+        sweepStartState?.let { startState ->
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val segmentWidth = size.width * REFRESH_SWEEP_SEGMENT_FRACTION
+                val startX = size.width * startState.value
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        0f to Color.Transparent,
+                        0.45f to Color.White.copy(alpha = 0.18f),
+                        0.72f to Color.White.copy(alpha = 0.68f),
+                        1f to Color.Transparent,
+                        startX = startX,
+                        endX = startX + segmentWidth,
+                    ),
+                    topLeft = Offset(startX, 0f),
+                    size = androidx.compose.ui.geometry.Size(segmentWidth, size.height),
+                )
+            }
+        }
     }
 }
 

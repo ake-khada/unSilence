@@ -1,7 +1,6 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -28,6 +27,7 @@ import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -69,7 +69,6 @@ import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
-import com.unsilence.app.ui.theme.BrandDeep
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
@@ -114,6 +113,7 @@ fun FeedScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onQuote: (String) -> Unit = {},
+    onPullRefreshProgress: (Float) -> Unit = {},
     showFindPeopleEmptyState: Boolean = false,
     onFindPeople: () -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(
@@ -293,20 +293,6 @@ fun FeedScreen(
         animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
         label         = "tabRowOffset",
     )
-    val refreshLineOffset = staticTopPadding + tabRowOffset + tabRowHeight
-    val refreshLineProgress = remember { Animatable(0f) }
-    LaunchedEffect(isRefreshing) {
-        if (isRefreshing) {
-            refreshLineProgress.snapTo(0f)
-            refreshLineProgress.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 3000, easing = FastOutSlowInEasing),
-            )
-        } else {
-            refreshLineProgress.snapTo(0f)
-        }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -405,6 +391,13 @@ fun FeedScreen(
 
             else -> {
                 val pullState = rememberPullToRefreshState()
+                LaunchedEffect(pullState, onPullRefreshProgress) {
+                    snapshotFlow { pullState.distanceFraction }
+                        .collect { onPullRefreshProgress(it.coerceAtLeast(0f)) }
+                }
+                DisposableEffect(pullState, onPullRefreshProgress) {
+                    onDispose { onPullRefreshProgress(0f) }
+                }
                 PullToRefreshBox(
                     isRefreshing = isRefreshing,
                     onRefresh    = { viewModel.triggerRefresh() },
@@ -532,17 +525,6 @@ fun FeedScreen(
             }
         }
         } // Crossfade
-        }
-
-        if (isRefreshing && !immersiveMode) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .fillMaxWidth(refreshLineProgress.value)
-                    .offset { IntOffset(0, refreshLineOffset.roundToPx()) }
-                    .height(1.5.dp)
-                    .background(BrandDeep),
-            )
         }
 
         // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
