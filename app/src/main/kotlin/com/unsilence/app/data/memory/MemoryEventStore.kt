@@ -1003,7 +1003,7 @@ class MemoryEventStore @Inject constructor(
             .firstOrNull { it.size >= 2 && it[0] == "k" }
             ?.getOrNull(1)
             ?.toIntOrNull()
-        if (parentKind !in setOf(21, 22, 1111)) return
+        if (parentKind !in setOf(21, 22, 34235, 34236, 1111)) return
 
         val parentId = event.replyToId
             ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
@@ -1023,7 +1023,7 @@ class MemoryEventStore @Inject constructor(
                 .firstOrNull { it.size >= 2 && it[0] == "k" }
                 ?.getOrNull(1)
                 ?.toIntOrNull()
-            if (parentKind !in setOf(21, 22, 1111)) continue
+            if (parentKind !in setOf(21, 22, 34235, 34236, 1111)) continue
             val parentId = event.replyToId
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
                 ?: continue

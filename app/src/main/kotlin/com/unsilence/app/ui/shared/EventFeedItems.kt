@@ -42,11 +42,13 @@ import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.ContentFlow
 import com.unsilence.app.ui.feed.EventCard
+import com.unsilence.app.ui.feed.EventReferenceTarget
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import com.unsilence.app.ui.feed.collectProfileAsState
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
+import com.unsilence.app.ui.feed.buildReplyParentReference
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -90,6 +92,7 @@ data class EventActionCallbacks(
     val lookupProfile: (suspend (String) -> UserEntity?)? = null,
     val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
+    val lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? = null,
     val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     val hasCachedOgMetadata: ((String) -> Boolean)? = null,
     val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
@@ -178,7 +181,7 @@ fun LazyListScope.eventFeedItems(
         // replyToId is the direct parent; rootId is the thread root.
         // Fall back to rootId when replyToId is null (direct reply to root).
         val parentId = row.replyToId ?: row.rootId
-        if (showThreadParents && parentId != null) {
+        if (showThreadParents && (parentId != null || row.kind == 1111)) {
             ThreadedReplyItem(
                 parentId = parentId,
                 replyRow = row,
@@ -220,7 +223,7 @@ fun LazyListScope.eventFeedItems(
  */
 @Composable
 private fun ThreadedReplyItem(
-    parentId: String,
+    parentId: String?,
     replyRow: FeedRow,
     engagement: EngagementSnapshot,
     callbacks: EventActionCallbacks,
@@ -234,14 +237,25 @@ private fun ThreadedReplyItem(
     eventModelProvider: ((String) -> EventModel?)? = null,
     sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
-    // Two-phase parent lookup: MemoryEventStore first, then relay fetch (5s wait).
-    // Pass the reply's source relay as a hint — the parent event is most likely
-    // on the same relay. Without this hint, fetchEventById tries 3 random relays
-    // which may not have the parent (especially for non-indexed content).
-    val parentEvent by produceState<EventEntity?>(null, parentId) {
-        if (callbacks.lookupEvent != null) {
-            value = callbacks.lookupEvent.invoke(parentId, listOf(replyRow.relayUrl))
-        }
+    // Resolve from MES, then source/tag hints, author outbox, and finally the
+    // address coordinate. The wire-derived reference survives snapshot deletion.
+    val parentReference = remember(parentId, replyRow.tags, replyRow.relayUrl) {
+        buildReplyParentReference(
+            eventId = parentId,
+            tagsJson = replyRow.tags,
+            sourceRelay = replyRow.relayUrl,
+        )
+    }
+    val parentEvent by produceState<EventEntity?>(null, parentReference) {
+        val reference = parentReference ?: return@produceState
+        value = callbacks.lookupEventReference?.invoke(reference)
+            ?: reference.eventId?.let { id ->
+                callbacks.lookupEventWithAuthor?.invoke(
+                    id,
+                    reference.relayHints,
+                    reference.authorPubkey,
+                ) ?: callbacks.lookupEvent?.invoke(id, reference.relayHints)
+            }
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
         val pk = parentEvent?.pubkey
@@ -479,6 +493,7 @@ internal fun EventFeedItem(
         lookupProfile       = callbacks.lookupProfile,
         lookupEvent         = callbacks.lookupEvent,
         lookupEventWithAuthor = callbacks.lookupEventWithAuthor,
+        lookupEventReference = callbacks.lookupEventReference,
         lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         hasCachedOgMetadata = callbacks.hasCachedOgMetadata,

@@ -23,6 +23,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.OgMetadata
+import com.unsilence.app.data.relay.ProfilePipeline
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
@@ -58,6 +59,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +96,7 @@ class NoteActionsViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
+    private val profilePipeline: ProfilePipeline,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val cardHydrator: CardHydrator,
@@ -779,7 +783,7 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
 
-    /** Event IDs currently being looked up (prevents concurrent relay requests).
+    /** Event references currently being looked up (prevents concurrent relay requests).
      *  Cleared after each lookup completes so evicted events can be re-fetched. */
     private val fetchingQuoteIds = mutableSetOf<String>()
 
@@ -808,63 +812,138 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Look up an event by ID. Checks MemoryEventStore first; if missing, triggers a one-shot relay
-     * fetch and waits up to 5 seconds for the event to arrive via EventProcessor → MemoryEventStore.
-     * [relayHints] from nevent1 URIs are used for targeted fetching.
-     *
-     * Fetch is triggered once per event ID (fetchedQuoteIds guard), but MES observation
-     * happens every call — so recomposition after a late relay arrival can still resolve.
-     */
+    /** ID-only convenience path used by ordinary quotes and nevent references. */
     suspend fun lookupEvent(
         eventId: String,
         relayHints: List<String> = emptyList(),
         authorPubkey: String? = null,
-    ): EventEntity? {
-        // Fast path: already in MemoryEventStore
-        memoryEventStore.getEventEntity(eventId)?.let {
-            memoryEventStore.markTouched(eventId)  // LRU bump — quoted event actively resolved
-            return it
+    ): EventEntity? = lookupEvent(
+        EventReferenceTarget(
+            eventId = eventId,
+            address = null,
+            authorPubkey = authorPubkey,
+            relayHints = relayHints.mapNotNull(::normalizeRelayUrl).distinct(),
+        )
+    )
+
+    /**
+     * Resolve a referenced event without treating an event-id miss as terminal for
+     * addressable content. The exact-id phases stay batched in RelayPool; the address
+     * phase selects the latest revision by coordinate.
+     */
+    suspend fun lookupEvent(target: EventReferenceTarget): EventEntity? {
+        cachedReference(target)?.let { return it }
+        if (target.lookupKey.isBlank()) return null
+
+        // A restored comment may precede its parent's kind-10002. Start that fetch
+        // immediately; ProfilePipeline coalesces concurrent rows and TTL-caches success.
+        target.authorPubkey?.let { author ->
+            viewModelScope.launch(Dispatchers.IO) {
+                profilePipeline.fetchProfileRelayFacts(author)
+            }
         }
 
-        // Fast-fail: known unresolved (negative cache, 5-min TTL).
-        // Avoids 5s MES-flow wait for events that already failed all outbox phases.
-        if (relayPool.isEventUnresolved(eventId)) return null
-
-        // Build relay hints: caller hints + outbox write relays for the author
-        val outboxHints = authorPubkey?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList()
-        val allHints = (relayHints + outboxHints).distinct()
-
-        // Curated fallback: own read relays, else GLOBAL — matches ThreadViewModel
-        val curatedFallback by lazy {
-            val ownPk = pubkeyHex ?: ""
-            val readRelays = memoryEventStore.getReadWriteRelayConfigs(ownPk)
+        val curatedFallback = run {
+            val ownPk = pubkeyHex.orEmpty()
+            memoryEventStore.getReadWriteRelayConfigs(ownPk)
                 .filter { it.marker == null || it.marker == "read" }
                 .mapNotNull { normalizeRelayUrl(it.url) }
-            readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+                .ifEmpty { GLOBAL_RELAY_URLS }
         }
 
-        // Guard concurrent lookups for the same event — cleared after completion
-        // so evicted events can be re-fetched on next recomposition.
-        val shouldFetch = synchronized(fetchingQuoteIds) { fetchingQuoteIds.add(eventId) }
+        val shouldFetch = synchronized(fetchingQuoteIds) {
+            fetchingQuoteIds.add(target.lookupKey)
+        }
         try {
             if (shouldFetch) {
-                withContext(Dispatchers.IO) {
-                    if (allHints.isNotEmpty()) {
-                        relayPool.fetchEventById(eventId, allHints, bypassDedup = outboxHints.isNotEmpty())
-                    } else {
-                        relayPool.fetchEventById(eventId, curatedFallback, bypassDedup = true)
+                val id = target.eventId
+                val idSuppressed = id?.let(relayPool::isEventUnresolved) == true
+
+                // Phase 1: wire hints/source relay. Completion now means EOSE/timeout,
+                // not merely that the coalescer dispatched the REQ.
+                if (id != null && !idSuppressed && target.relayHints.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        relayPool.fetchEventById(id, target.relayHints)
                     }
+                    cachedReference(target)?.let { return it }
+                }
+
+                // Phase 2: cached/discovered author outbox plus curated read relays.
+                val outboxRelays = target.authorPubkey
+                    ?.let(memoryEventStore::writeRelaysFor)
+                    .orEmpty()
+                val fallbackTargets = (outboxRelays + curatedFallback)
+                    .mapNotNull(::normalizeRelayUrl)
+                    .distinct()
+                if (id != null && !idSuppressed && fallbackTargets.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        relayPool.fetchEventById(id, fallbackTargets, bypassDedup = true)
+                    }
+                    cachedReference(target)?.let { return it }
+                }
+
+                // Phase 3: a stale/missing revision id cannot block an addressable
+                // parent or repost. Include late-arriving outbox facts on this read.
+                target.address?.let { address ->
+                    val addressTargets = (
+                        target.relayHints +
+                            memoryEventStore.writeRelaysFor(address.authorPubkey) +
+                            curatedFallback
+                        ).mapNotNull(::normalizeRelayUrl).distinct()
+                    withContext(Dispatchers.IO) {
+                        relayPool.fetchAddressByCoord(
+                            rawRelayUrls = addressTargets,
+                            kind = address.kind,
+                            author = address.authorPubkey,
+                            dTag = address.dTag,
+                        )
+                    }
+                    cachedReference(target)?.let { return it }
                 }
             }
 
-            // Wait for the event to appear in MemoryEventStore (via EventProcessor)
-            return withTimeoutOrNull(10_000L) {
-                memoryEventStore.eventEntityFlow(eventId).filterNotNull().first()
-            }
+            return awaitReference(target, timeoutMs = 8_000L)
         } finally {
-            synchronized(fetchingQuoteIds) { fetchingQuoteIds.remove(eventId) }
+            synchronized(fetchingQuoteIds) { fetchingQuoteIds.remove(target.lookupKey) }
         }
+    }
+
+    private fun cachedReference(target: EventReferenceTarget): EventEntity? {
+        val resolved = target.eventId?.let(memoryEventStore::getEventEntity)
+            ?: target.address?.let { address ->
+                memoryEventStore.eventIdForAddress(
+                    address.kind,
+                    address.authorPubkey,
+                    address.dTag,
+                )?.let(memoryEventStore::getEventEntity)
+            }
+        resolved?.let { memoryEventStore.markTouched(it.id) }
+        return resolved
+    }
+
+    private suspend fun awaitReference(
+        target: EventReferenceTarget,
+        timeoutMs: Long,
+    ): EventEntity? {
+        cachedReference(target)?.let { return it }
+        val flows = buildList {
+            target.eventId?.let { id ->
+                add(memoryEventStore.eventEntityFlow(id).filterNotNull())
+            }
+            target.address?.let { address ->
+                add(
+                    memoryEventStore.eventIdForAddressFlow(
+                        address.kind,
+                        address.authorPubkey,
+                        address.dTag,
+                    ).mapNotNull { id -> id?.let(memoryEventStore::getEventEntity) }
+                )
+            }
+        }
+        if (flows.isEmpty()) return null
+        return withTimeoutOrNull(timeoutMs) {
+            merge(*flows.toTypedArray()).first()
+        }?.also { memoryEventStore.markTouched(it.id) }
     }
 
     suspend fun fetchOgMetadata(url: String): OgMetadata? =

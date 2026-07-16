@@ -86,6 +86,7 @@ internal fun EmbeddedArticleCard(
         lookupProfile         = actionsVm::lookupProfile,
         lookupEvent           = { id, h -> actionsVm.lookupEvent(id, h) },
         lookupEventWithAuthor = { id, h, pk -> actionsVm.lookupEvent(id, h, pk) },
+        lookupEventReference  = actionsVm::lookupEvent,
         lookupModel           = actionsVm::getEventModel,
         fetchOgMetadata       = actionsVm::fetchOgMetadata,
         hasCachedOgMetadata   = actionsVm::hasCachedOgMetadata,

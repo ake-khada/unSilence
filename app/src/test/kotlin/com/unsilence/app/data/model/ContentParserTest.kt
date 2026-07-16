@@ -653,7 +653,23 @@ class ContentParserTest {
         assertEquals(34236, model.effectiveKind)
         assertTrue(model.shortForm)
         assertEquals(target, model.repost?.targetId)
+        assertEquals("34236:$author:clip", model.repost?.addressCoordinate)
+        assertEquals("wss://relay.divine.video", model.repost?.addressRelayHint)
         assertTrue(model.segments.isEmpty())
+    }
+
+    @Test
+    fun `coordinate-only generic repost retains an address fallback`() {
+        val author = "d".repeat(64)
+        val model = parse(
+            content = "",
+            kind = 16,
+            tagsJson = """[["a","34236:$author:clip","wss://relay.divine.video"],["k","34236"],["p","$author"]]""",
+        )
+
+        assertNull(model.repost?.targetId)
+        assertEquals("34236:$author:clip", model.repost?.addressCoordinate)
+        assertEquals(author, model.repost?.targetAuthorPubkey)
     }
 
     @Test

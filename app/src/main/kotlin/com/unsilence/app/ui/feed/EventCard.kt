@@ -100,6 +100,7 @@ fun EventCard(
     lookupProfile: (suspend (String) -> UserEntity?)?,
     lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
     lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
+    lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? = null,
     lookupModel: ((String) -> EventModel?)? = null,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
     hasCachedOgMetadata: ((String) -> Boolean)? = null,
@@ -441,15 +442,21 @@ fun EventCard(
                 // Routes via target author's outbox relays for bridge content.
                 if (model.repost != null &&
                     model.repost.embeddedJson == null &&
-                    model.repost.targetId != null &&
-                    lookupEventWithAuthor != null
+                    (model.repost.targetId != null || model.repost.addressCoordinate != null) &&
+                    (lookupEventReference != null || lookupEventWithAuthor != null)
                 ) {
                     EmptyRepostBody(
                         targetId = model.repost.targetId,
-                        relayHints = listOfNotNull(model.repost.relayHint, model.relayUrl).distinct(),
+                        addressCoordinate = model.repost.addressCoordinate,
+                        relayHints = listOfNotNull(
+                            model.repost.relayHint,
+                            model.repost.addressRelayHint,
+                            model.relayUrl,
+                        ).distinct(),
                         targetAuthorPubkey = model.repost.targetAuthorPubkey,
                         proxyUrl = model.repost.proxyUrl,
                         lookupEventWithAuthor = lookupEventWithAuthor,
+                        lookupEventReference = lookupEventReference,
                         lookupProfile = lookupProfile,
                         profileFlow = profileFlow,
                         lookupModel = lookupModel,

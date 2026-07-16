@@ -642,6 +642,7 @@ fun ArticleReaderScreen(
                                 lookupProfile         = commentActionsVm::lookupProfile,
                                 lookupEvent           = { id, hints -> commentActionsVm.lookupEvent(id, hints) },
                                 lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
+                                lookupEventReference = commentActionsVm::lookupEvent,
                                 lookupModel           = commentActionsVm::getEventModel,
                                 fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
                                 hasCachedOgMetadata   = commentActionsVm::hasCachedOgMetadata,
