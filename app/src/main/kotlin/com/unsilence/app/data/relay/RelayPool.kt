@@ -308,6 +308,13 @@ class RelayPool @Inject constructor(
     private val missingRefCache = ConcurrentHashMap<String, Long>()
     private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     private val missingRefCacheHits = AtomicLong(0)
+    private val eventIdFetchCoalescer = EventIdFetchCoalescer(scope) { batch ->
+        if (batch.relayHints.isEmpty()) {
+            fetchEventsByIds(batch.eventIds)
+        } else {
+            fetchEventsByIdsWithHints(batch.eventIds, batch.relayHints, bypassDedup = false)
+        }
+    }
 
     // ── Ephemeral WebSocket rate limiting ─────────────────────────────────
     /** Per-URL last-open timestamp (nanos) for ephemeral connections — min 50ms gap. */
@@ -3522,6 +3529,10 @@ class RelayPool @Inject constructor(
      */
     /** Batch fetch events by ID. Deduped via in-flight Deferred map + negative cache. */
     fun fetchEventsByIds(eventIds: List<String>) {
+        eventIds.distinct().chunked(MAX_EVENT_IDS_PER_REQ).forEach(::fetchEventsByIdsBatch)
+    }
+
+    private fun fetchEventsByIdsBatch(eventIds: List<String>) {
         if (eventIds.isEmpty()) return
         // Filter: skip IDs in negative cache or already in-flight
         val novel = mutableListOf<String>()
@@ -3574,11 +3585,7 @@ class RelayPool @Inject constructor(
     /** Single-ID overload — consults MES relay hints before broadcasting. */
     fun fetchEventById(eventId: String) {
         val hints = memoryEventStore.get().relayHintsForEvent(eventId).toList()
-        if (hints.isNotEmpty()) {
-            scope.launch { fetchEventById(eventId, hints) }
-        } else {
-            fetchEventsByIds(listOf(eventId))
-        }
+        eventIdFetchCoalescer.enqueue(eventId, hints)
     }
 
     /** Fetch NIP-88 responses only when a poll card is visible. */
@@ -3689,46 +3696,61 @@ class RelayPool @Inject constructor(
         }
     }
 
-    /**
-     * Fetch a single event by ID using relay hints. Hints-first strategy:
-     * when hints exist, connectAndAwait to ensure the WebSocket is open,
-     * then send REQ only to hint relays — no broadcast fallback.
-     * When no hints exist, sends to at most 6 random relays (non-indexer first).
-     *
-     * @param bypassDedup when true, skip the in-flight Deferred guard (but NOT
-     *   the negative cache). Used by outbox fallback: the same event ID was already
-     *   tried on the source relay, but we need to retry on the author's write relays.
-     *   The negative cache still applies — if a prior completed batch already
-     *   determined this event is unresolvable, retrying won't help.
-     */
+    /** Queue an ordinary lookup into the 150ms batch window. Explicit retry phases bypass it. */
     suspend fun fetchEventById(eventId: String, relayHints: List<String>, bypassDedup: Boolean = false) {
+        if (!bypassDedup) {
+            eventIdFetchCoalescer.enqueue(eventId, relayHints).await()
+            return
+        }
+        fetchEventsByIdsWithHints(listOf(eventId), relayHints, bypassDedup = true)
+    }
+
+    /** Hints-first wire dispatch for one coalesced group or an explicit bypass retry. */
+    internal suspend fun fetchEventsByIdsWithHints(
+        eventIds: List<String>,
+        relayHints: List<String>,
+        bypassDedup: Boolean,
+    ) {
+        eventIds.distinct().chunked(MAX_EVENT_IDS_PER_REQ).forEach { chunk ->
+            fetchEventsByIdsWithHintsBatch(chunk, relayHints, bypassDedup)
+        }
+    }
+
+    private suspend fun fetchEventsByIdsWithHintsBatch(
+        eventIds: List<String>,
+        relayHints: List<String>,
+        bypassDedup: Boolean,
+    ) {
         // Addressable-video v1 relies on the repost's e-tag pointing at the live
         // revision. Falling back from a stale id to its a-coordinate would require
         // a separate kinds+authors+#d REQ and is intentionally deferred.
-        // Negative cache: always check, even for outbox retries. Within a single
-        // hydrateRefs cycle the cache isn't populated yet (written after all phases).
-        // Cross-cycle: prevents redundant outbox retries for known-unresolved refs.
-        if (isEventUnresolved(eventId)) return
-
-        if (!bypassDedup) {
-            // In-flight dedup: another caller is already fetching this event
-            if (eventFetchInFlight.containsKey(eventId)) return
-            val d = CompletableDeferred<NostrEvent?>()
-            if (eventFetchInFlight.putIfAbsent(eventId, d) != null) return // race lost
-            launchFetchMonitor(eventId, d)
-            trackInFlightPeak()
+        val novel = mutableListOf<String>()
+        for (eventId in eventIds) {
+            if (isEventUnresolved(eventId)) continue
+            if (bypassDedup) {
+                novel += eventId
+                continue
+            }
+            if (eventFetchInFlight.containsKey(eventId)) continue
+            val deferred = CompletableDeferred<NostrEvent?>()
+            if (eventFetchInFlight.putIfAbsent(eventId, deferred) == null) {
+                novel += eventId
+                launchFetchMonitor(eventId, deferred)
+            }
         }
+        if (novel.isEmpty()) return
+        trackInFlightPeak()
         // bypassDedup callers (outbox phases) send REQs without registering in the map.
-        // If a monitor is already running for this ID (from the initial broadcast),
+        // If a monitor is already running for an ID (from the initial broadcast),
         // the event arrival will still complete that Deferred.
 
-        val subId = "hint-event-${System.nanoTime()}"
+        val subId = "hint-batch-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
             add(buildJsonObject {
-                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+                put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
                 // Include kinds so relays that require them don't reject with
                 // "filters must specify at least one kind" (purplepag.es, others).
                 put("kinds", buildJsonArray {
@@ -3743,14 +3765,14 @@ class RelayPool @Inject constructor(
         if (relayHints.isNotEmpty()) {
             // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
             // No connectAndAwait — transient hints must not occupy pool slots.
-            // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted {"ids":[id]}
-            // fetch never overlaps the feed filter, and the target may live only there
+            // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted ids fetch
+            // never overlaps the feed filter, and the target may live only there
             // (bridged Ditto reposts). The one-shot sub uses a distinct subId.
-            val hintTargets = relayHints.mapNotNull { normalizeRelayUrl(it) }
+            val hintTargets = canonicalRelayHints(relayHints)
                 .filter { it !in indexerUrls && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
                 hintTargets.forEach { url -> sendOneShotPooledOrEphemeral(url, req, subId) }
-                Log.d(TAG, "fetchEventById: $eventId → ${hintTargets.size} hint relay(s) (pooled-or-ephemeral)")
+                Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${hintTargets.size} hint relay(s) (pooled-or-ephemeral)")
                 return
             }
         }
@@ -3764,11 +3786,11 @@ class RelayPool @Inject constructor(
         }
         val fallbackTargets = (nonIndexer + indexer).take(6)
         if (fallbackTargets.isEmpty()) {
-            Log.d(TAG, "fetchEventById: $eventId → 0 targets (pool empty)")
+            Log.d(TAG, "fetchEventsByIds: ${novel.size} events → 0 targets (pool empty)")
             return
         }
         fallbackTargets.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchEventById: $eventId → ${fallbackTargets.size} fallback relay(s) (no hints)")
+        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${fallbackTargets.size} fallback relay(s) (no hints)")
     }
 
     /**
