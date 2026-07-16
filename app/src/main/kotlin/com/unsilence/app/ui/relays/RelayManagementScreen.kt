@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.Search
@@ -219,15 +220,20 @@ fun RelayManagementScreen(
     // NB: the relay-directory firehose is NO LONGER triggered here — it fires only when the user
     // opens §04 Discovery (the firehose costs nothing until someone asks to discover).
 
-    var showCreateRelaySet by remember { mutableStateOf(false) }
+    var showRelaySetEditor by remember { mutableStateOf(false) }
+    var editingRelaySet by remember { mutableStateOf<RelaySet?>(null) }
     // Item 3: user-initiated "Test" results. value -1 = tested & offline; absent = not tested
     // (falls back to monitor RTT). No background pinger, no persistence (amendment a).
     val testedRtt = remember { mutableStateMapOf<String, Int>() }
     var testing by remember { mutableStateOf(false) }
 
-    if (showCreateRelaySet) {
-        CreateRelaySetScreen(
-            onDismiss = { showCreateRelaySet = false },
+    if (showRelaySetEditor) {
+        RelaySetEditorScreen(
+            relaySet = editingRelaySet,
+            onDismiss = {
+                showRelaySetEditor = false
+                editingRelaySet = null
+            },
             viewModel = viewModel,
         )
         return
@@ -381,7 +387,10 @@ fun RelayManagementScreen(
                     3 -> LazyColumn(modifier = Modifier.fillMaxSize()) {
                         item {
                             TextButton(
-                                onClick = { showCreateRelaySet = true },
+                                onClick = {
+                                    editingRelaySet = null
+                                    showRelaySetEditor = true
+                                },
                                 modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                             ) {
                                 Icon(Icons.Filled.Add, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
@@ -393,6 +402,10 @@ fun RelayManagementScreen(
                             RelaySetRow(
                                 set       = set,
                                 viewModel = viewModel,
+                                onEdit    = {
+                                    editingRelaySet = set
+                                    showRelaySetEditor = true
+                                },
                                 onDelete  = { viewModel.deleteRelaySet(set.dTag) },
                             )
                         }
@@ -741,6 +754,7 @@ private fun FavoriteRelayRow(
 private fun RelaySetRow(
     set: RelaySet,
     viewModel: RelayManagementViewModel,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -768,6 +782,17 @@ private fun RelaySetRow(
                     color = TextSecondary,
                     fontSize = 11.sp,
                 )
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Edit relay set",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
         AnimatedVisibility(visible = expanded) {

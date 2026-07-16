@@ -2254,10 +2254,16 @@ class MemoryEventStore @Inject constructor(
         val title = event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.get(1)
         val description = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)
         val image = event.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.get(1)
-        val members = event.tags
+        val relayTags = event.tags
             .filter { it.size >= 2 && it[0] == "relay" }
+            .map { it.toList() }
+        val members = relayTags
             .map { it[1] }
             .distinct()
+        val modeledTags = setOf("d", "title", "description", "image", "relay")
+        val foreignTags = event.tags
+            .filter { it.firstOrNull() !in modeledTags }
+            .map { it.toList() }
 
         val newSet = RelaySet(
             dTag = dTag,
@@ -2266,6 +2272,8 @@ class MemoryEventStore @Inject constructor(
             description = description,
             image = image,
             members = members,
+            relayTags = relayTags,
+            foreignTags = foreignTags,
         )
 
         relayKindCreatedAt[dedupKey] = event.createdAt

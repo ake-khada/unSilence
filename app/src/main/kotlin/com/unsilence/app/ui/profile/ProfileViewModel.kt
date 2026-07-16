@@ -6,9 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.blossom.BlossomClient
-import com.unsilence.app.data.blossom.BlossomServersStore
-import com.unsilence.app.data.blossom.ImageCompressor
+import com.unsilence.app.data.blossom.BlossomImageUploader
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
@@ -68,9 +66,7 @@ class ProfileViewModel @Inject constructor(
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
-    private val blossomClient: BlossomClient,
-    private val imageCompressor: ImageCompressor,
-    private val blossomServersStore: BlossomServersStore,
+    private val blossomImageUploader: BlossomImageUploader,
     private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
@@ -95,10 +91,6 @@ class ProfileViewModel @Inject constructor(
     /** Init coroutines write this field, so it must be initialized before any init block. */
     val followerCount = MutableStateFlow<Long?>(null)
 
-    init {
-        viewModelScope.launch { blossomServersStore.initialize() }
-    }
-
     fun uploadProfileImage(
         uri: Uri,
         onUrl: (String) -> Unit,
@@ -110,14 +102,8 @@ class ProfileViewModel @Inject constructor(
             loading.value = true
             try {
                 val maxDim = if (isBanner) 1600 else 512
-                val server = blossomServersStore.selectedServer.value
-                val prepared = imageCompressor.prepareImage(uri, "image/jpeg", maxDim, 85)
-                try {
-                    val blob = blossomClient.upload(prepared.file, prepared.mimeType, server).getOrThrow()
-                    launch(Dispatchers.Main) { onUrl(blob.url) }
-                } finally {
-                    prepared.file.delete()
-                }
+                val url = blossomImageUploader.upload(uri, maxDimension = maxDim)
+                launch(Dispatchers.Main) { onUrl(url) }
             } catch (e: Exception) {
                 Log.w(TAG, "Profile image upload failed", e)
                 launch(Dispatchers.Main) { onError(e.message ?: "Upload failed") }

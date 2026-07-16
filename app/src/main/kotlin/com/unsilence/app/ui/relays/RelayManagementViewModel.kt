@@ -1,9 +1,12 @@
 package com.unsilence.app.ui.relays
 
+import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.blossom.BlossomImageUploader
 import com.unsilence.app.data.memory.RelayHealthInfo
 import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -23,6 +26,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -39,6 +44,7 @@ class RelayManagementViewModel @Inject constructor(
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
+    private val blossomImageUploader: BlossomImageUploader,
 ) : ViewModel() {
 
     /** User-initiated one-shot RTT probe for the "Test" action (no background/persistence). */
@@ -101,6 +107,8 @@ class RelayManagementViewModel @Inject constructor(
         memoryEventStore.relayHealthFlow()
 
     val publishing = MutableStateFlow(false)
+    private val _uploadingRelaySetImage = MutableStateFlow(false)
+    val uploadingRelaySetImage: StateFlow<Boolean> = _uploadingRelaySetImage.asStateFlow()
     private val publishMutex = Mutex()
 
     // ── Kind 10002: Read/Write relays ─────────────────────────────────────────
@@ -242,25 +250,44 @@ class RelayManagementViewModel @Inject constructor(
 
     // ── Kind 30002: Relay sets ────────────────────────────────────────────────
 
-    fun createRelaySet(name: String, relays: List<String>) {
-        val baseDTag = name.lowercase().replace(Regex("[^a-z0-9-]"), "-")
+    fun saveRelaySet(draft: RelaySetEditorDraft) {
         val pk = ownerPubkey ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            // Handle d-tag collision: append numeric suffix if needed
-            var dTag = baseDTag
-            var suffix = 1
-            val existingSets = memoryEventStore.getAllRelaySets(pk)
-            val existingDTags = existingSets.map { it.dTag }.toSet()
-            while (dTag in existingDTags) {
-                suffix++
-                dTag = "$baseDTag-$suffix"
-            }
-
-            val members = relays.mapNotNull { normalizeRelayUrl(it) }
-            memoryEventStore.upsertRelaySet(
-                RelaySet(dTag = dTag, ownerPubkey = pk, title = name, members = members)
+            val dTag = draft.dTag ?: uniqueRelaySetDTag(draft.title, pk)
+            val payload = buildRelaySetPublishPayload(dTag, draft)
+            val optimistic = RelaySet(
+                dTag = payload.dTag,
+                ownerPubkey = pk,
+                title = payload.title,
+                description = payload.description,
+                image = payload.image,
+                members = payload.members,
+                relayTags = payload.tags.filter { it.size >= 2 && it[0] == "relay" },
+                foreignTags = payload.tags.filter {
+                    it.firstOrNull() !in setOf("d", "title", "description", "image", "relay")
+                },
             )
-            publishRelaySet(dTag)
+            memoryEventStore.upsertRelaySet(optimistic)
+            publishRelaySetPayload(payload)
+        }
+    }
+
+    fun uploadRelaySetImage(
+        uri: Uri,
+        onUrl: (String) -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _uploadingRelaySetImage.value = true
+            try {
+                val url = blossomImageUploader.upload(uri, maxDimension = 512)
+                launch(Dispatchers.Main) { onUrl(url) }
+            } catch (error: Exception) {
+                Log.w("RelayMgmt", "Relay-set image upload failed", error)
+                launch(Dispatchers.Main) { onError(error.message ?: "Upload failed") }
+            } finally {
+                _uploadingRelaySetImage.value = false
+            }
         }
     }
 
@@ -373,28 +400,26 @@ class RelayManagementViewModel @Inject constructor(
         }
     }
 
-    private suspend fun publishRelaySet(dTag: String): Unit = publishMutex.withLock {
+    private suspend fun publishRelaySet(dTag: String) {
+        val pk = ownerPubkey ?: return
+        val set = memoryEventStore.getRelaySet(pk, dTag)
+        val draft = set?.let(::relaySetEditorDraft) ?: RelaySetEditorDraft(dTag = dTag)
+        publishRelaySetPayload(buildRelaySetPublishPayload(dTag, draft))
+    }
+
+    private suspend fun publishRelaySetPayload(
+        payload: RelaySetPublishPayload,
+    ): Unit = publishMutex.withLock {
         val pk = ownerPubkey ?: return
         publishing.value = true
         try {
             val now = nowSeconds()
-            val set = memoryEventStore.getRelaySet(pk, dTag)
-            val members = set?.members ?: memoryEventStore.getSetMembers(pk, dTag)
-            val tagsList = mutableListOf<Array<String>>()
-            tagsList.add(arrayOf("d", dTag))
-            // Preserve NIP-51 metadata across edits — dropping `title` here was mangling
-            // the set name to the random d-tag on every relay add/remove.
-            set?.title?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("title", it)) }
-            set?.description?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("description", it)) }
-            set?.image?.takeIf { it.isNotBlank() }?.let { tagsList.add(arrayOf("image", it)) }
-            for (url in members) {
-                tagsList.add(arrayOf("relay", url))
-            }
+            val tags = payload.tags.map { it.toTypedArray() }.toTypedArray()
 
             val template = EventTemplate<Event>(
                 createdAt = now,
                 kind      = 30002,
-                tags      = tagsList.toTypedArray(),
+                tags      = tags,
                 content   = "",
             )
             val signed = signingManager.sign(template) ?: return
@@ -411,11 +436,20 @@ class RelayManagementViewModel @Inject constructor(
                 .map { it.url }
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
-            android.util.Log.w("RelayMgmt", "RELAY-LIST published kind=30002 set=$dTag id=${signed.id.take(8)}… tags: " +
-                tagsList.joinToString(", ") { it.joinToString(":") })
+            Log.w("RelayMgmt", "RELAY-LIST published kind=30002 set=${payload.dTag} id=${signed.id.take(8)}… tags: " +
+                payload.tags.joinToString(", ") { it.joinToString(":") })
         } finally {
             publishing.value = false
         }
+    }
+
+    private fun uniqueRelaySetDTag(title: String, owner: String): String {
+        val base = relaySetDTagBase(title)
+        val existing = memoryEventStore.getAllRelaySets(owner).mapTo(mutableSetOf()) { it.dTag }
+        if (base !in existing) return base
+        var suffix = 2
+        while ("$base-$suffix" in existing) suffix++
+        return "$base-$suffix"
     }
 
     private fun nowSeconds() = System.currentTimeMillis() / 1000L
