@@ -149,7 +149,7 @@ import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.profile.ConnectionsScreen
 import com.unsilence.app.ui.profile.ConnectionsTab
 import com.unsilence.app.ui.profile.ProfileRelaysScreen
-import com.unsilence.app.ui.relays.CreateRelaySetScreen
+import com.unsilence.app.ui.relays.RelaySetEditorScreen
 import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
@@ -684,7 +684,7 @@ fun AppNavigation(
 
             // ── Create relay set overlay ──────────────────────────────────────
             if (showCreateRelaySet) {
-                CreateRelaySetScreen(
+                RelaySetEditorScreen(
                     onDismiss = { showCreateRelaySet = false },
                     viewModel = relayManagementVm,
                 )

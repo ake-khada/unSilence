@@ -133,6 +133,10 @@ data class RelaySet(
     val description: String? = null,
     val image: String? = null,
     val members: List<String> = emptyList(),
+    /** Original relay tags are retained so editor round-trips preserve markers and extensions. */
+    val relayTags: List<List<String>> = members.map { listOf("relay", it) },
+    /** Tags not modeled by unSilence, retained byte-for-byte across edits. */
+    val foreignTags: List<List<String>> = emptyList(),
 )
 
 /**

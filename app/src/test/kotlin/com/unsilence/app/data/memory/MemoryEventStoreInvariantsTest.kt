@@ -3668,8 +3668,9 @@ class MemoryEventStoreInvariantsTest {
                 listOf("title", "My Relay Set"),
                 listOf("description", "A test set"),
                 listOf("image", "https://example.com/img.png"),
-                listOf("relay", "wss://relay-z.com"),
+                listOf("relay", "wss://relay-z.com", "write", "extension"),
                 listOf("relay", "wss://relay-a.com"),
+                listOf("client", "foreign-value"),
             ),
         ))
         val sets = store.getAllRelaySets("pk1")
@@ -3683,6 +3684,14 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(2, set.members.size)
         assertEquals("wss://relay-z.com", set.members[0])
         assertEquals("wss://relay-a.com", set.members[1])
+        assertEquals(
+            listOf(
+                listOf("relay", "wss://relay-z.com", "write", "extension"),
+                listOf("relay", "wss://relay-a.com"),
+            ),
+            set.relayTags,
+        )
+        assertEquals(listOf(listOf("client", "foreign-value")), set.foreignTags)
     }
 
     @Test
