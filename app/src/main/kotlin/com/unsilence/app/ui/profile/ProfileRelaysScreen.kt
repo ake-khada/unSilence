@@ -30,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -39,6 +40,9 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.RelayConfig
+import com.unsilence.app.data.relay.ProfileRelaySection
+import com.unsilence.app.data.relay.ProfileRelaySectionEntry
+import com.unsilence.app.data.relay.profileRelaySectionEntries
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.relays.RelayIcon
 import com.unsilence.app.ui.shared.relayDisplayHost
@@ -67,9 +71,11 @@ fun ProfileRelaysScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val facts = state.facts
     LaunchedEffect(facts) { viewModel.prefetchRelayIdentities(facts) }
-    val hasRows = facts.relays.isNotEmpty() ||
-        facts.searchRelays.isNotEmpty() ||
-        facts.blockedRelays.isNotEmpty()
+    val sectionEntries = remember(facts) { profileRelaySectionEntries(facts) }
+    val relayRows = sectionEntries.filter { it.section == ProfileRelaySection.RELAYS }
+    val searchRows = sectionEntries.filter { it.section == ProfileRelaySection.SEARCH }
+    val blockedRows = sectionEntries.filter { it.section == ProfileRelaySection.BLOCKED }
+    val hasRows = sectionEntries.isNotEmpty()
 
     Column(modifier = Modifier.fillMaxSize().background(Black)) {
         Row(
@@ -96,44 +102,42 @@ fun ProfileRelaysScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             when {
                 hasRows -> LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    if (facts.relays.isNotEmpty()) {
-                        item { RelaySectionLabel("RELAYS") }
-                        items(facts.relays.size, key = { index -> facts.relays[index].url }) { index ->
-                            val relay = facts.relays[index]
+                    // LazyColumn keys share one namespace; relay URLs may overlap across sections.
+                    if (relayRows.isNotEmpty()) {
+                        item(key = "header:relays") { RelaySectionLabel("RELAYS") }
+                        items(relayRows, key = ProfileRelaySectionEntry::key) { row ->
                             ProfileRelayRow(
-                                url = relay.url,
-                                iconUrl = state.relayIcons[relay.url],
-                                marker = relay,
-                                onVisible = { viewModel.requestVisibleRelayIdentity(relay.url) },
-                                onClick = { onOpenRelay(relay.url) },
+                                url = row.url,
+                                iconUrl = state.relayIcons[row.url],
+                                marker = RelayConfig(row.url, row.marker),
+                                onVisible = { viewModel.requestVisibleRelayIdentity(row.url) },
+                                onClick = { onOpenRelay(row.url) },
                             )
                         }
                     }
-                    if (facts.searchRelays.isNotEmpty()) {
-                        item { RelaySectionLabel("SEARCH · 10007") }
-                        items(facts.searchRelays.size, key = { index -> facts.searchRelays[index] }) { index ->
-                            val url = facts.searchRelays[index]
+                    if (searchRows.isNotEmpty()) {
+                        item(key = "header:search") { RelaySectionLabel("SEARCH · 10007") }
+                        items(searchRows, key = ProfileRelaySectionEntry::key) { row ->
                             ProfileRelayRow(
-                                url = url,
-                                iconUrl = state.relayIcons[url],
-                                onVisible = { viewModel.requestVisibleRelayIdentity(url) },
-                                onClick = { onOpenRelay(url) },
+                                url = row.url,
+                                iconUrl = state.relayIcons[row.url],
+                                onVisible = { viewModel.requestVisibleRelayIdentity(row.url) },
+                                onClick = { onOpenRelay(row.url) },
                             )
                         }
                     }
-                    if (facts.blockedRelays.isNotEmpty()) {
-                        item { RelaySectionLabel("BLOCKED · 10006") }
-                        items(facts.blockedRelays.size, key = { index -> facts.blockedRelays[index] }) { index ->
-                            val url = facts.blockedRelays[index]
+                    if (blockedRows.isNotEmpty()) {
+                        item(key = "header:blocked") { RelaySectionLabel("BLOCKED · 10006") }
+                        items(blockedRows, key = ProfileRelaySectionEntry::key) { row ->
                             ProfileRelayRow(
-                                url = url,
-                                iconUrl = state.relayIcons[url],
-                                onVisible = { viewModel.requestVisibleRelayIdentity(url) },
-                                onClick = { onOpenRelay(url) },
+                                url = row.url,
+                                iconUrl = state.relayIcons[row.url],
+                                onVisible = { viewModel.requestVisibleRelayIdentity(row.url) },
+                                onClick = { onOpenRelay(row.url) },
                             )
                         }
                     }
-                    item { Spacer(Modifier.height(Spacing.large)) }
+                    item(key = "footer:spacer") { Spacer(Modifier.height(Spacing.large)) }
                 }
                 state.loading -> CircularProgressIndicator(
                     color = Brand,

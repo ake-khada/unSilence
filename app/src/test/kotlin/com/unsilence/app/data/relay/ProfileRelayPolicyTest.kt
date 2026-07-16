@@ -52,6 +52,20 @@ class ProfileRelayPolicyTest {
     }
 
     @Test
+    fun `nip51 plain relay lists deduplicate normalized URLs`() {
+        assertEquals(
+            listOf("wss://pyramid.fiatjaf.com"),
+            parseNip51RelayTags(
+                listOf(
+                    listOf("relay", "wss://pyramid.fiatjaf.com"),
+                    listOf("relay", "wss://pyramid.fiatjaf.com/"),
+                    listOf("relay", "pyramid.fiatjaf.com"),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `replaceable relay policy accepts only a newer event`() {
         assertTrue(shouldAcceptProfileRelayEvent(null, 100L))
         assertTrue(shouldAcceptProfileRelayEvent(100L, 101L))
@@ -98,5 +112,23 @@ class ProfileRelayPolicyTest {
         assertEquals(RELAY_IDENTITY_PREFETCH_CAP, urls.size)
         assertEquals("wss://relay-0.example", urls.first())
         assertEquals("wss://relay-99.example", urls.last())
+    }
+
+    @Test
+    fun `same relay in three sections has three globally distinct row keys`() {
+        val url = "wss://pyramid.fiatjaf.com"
+        val entries = profileRelaySectionEntries(
+            ProfileRelayFacts(
+                relays = listOf(RelayConfig(url, "write"), RelayConfig("$url/", "write")),
+                searchRelays = listOf(url, "$url/"),
+                blockedRelays = listOf(url, "$url/"),
+            ),
+        )
+
+        assertEquals(
+            listOf("relays:$url", "search:$url", "blocked:$url"),
+            entries.map(ProfileRelaySectionEntry::key),
+        )
+        assertEquals(3, entries.map(ProfileRelaySectionEntry::key).distinct().size)
     }
 }
