@@ -148,6 +148,7 @@ import com.unsilence.app.ui.profile.ProfileScreen
 import com.unsilence.app.ui.profile.UserProfileScreen
 import com.unsilence.app.ui.profile.ConnectionsScreen
 import com.unsilence.app.ui.profile.ConnectionsTab
+import com.unsilence.app.ui.profile.ProfileRelaysScreen
 import com.unsilence.app.ui.relays.CreateRelaySetScreen
 import com.unsilence.app.ui.relays.RelayDetailScreen
 import com.unsilence.app.ui.relays.RelayDiscoveryScreen
@@ -155,6 +156,7 @@ import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
 import com.unsilence.app.ui.common.LocalAppSessionKey
+import com.unsilence.app.ui.common.LocalOpenRelayDetail
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalZapPreferences
 import com.unsilence.app.ui.settings.ZapSettingsViewModel
@@ -228,6 +230,7 @@ fun AppNavigation(
     var quoteNoteId          by remember { mutableStateOf<String?>(null) }
     var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
     var connectionsTarget    by remember { mutableStateOf<Pair<String, ConnectionsTab>?>(null) }
+    var profileRelaysPubkey  by remember { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
     var showEmojiSettings    by remember { mutableStateOf(false) }
     var showZapSettings      by remember { mutableStateOf(false) }
@@ -262,6 +265,11 @@ fun AppNavigation(
         feedViewModel.setFeedType(FeedType.SingleRelay(url, lbl))
         relayDetailUrl = null
         showRelaySettings = false
+        showDiscovery = false
+        profileRelaysPubkey = null
+        connectionsTarget = null
+        threadDestination = null
+        userProfilePubkey = null
         selectedTab = 0
     }
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$sessionKey")
@@ -326,6 +334,7 @@ fun AppNavigation(
         replyToEventId = null
         quoteNoteId = null
         connectionsTarget = null
+        profileRelaysPubkey = null
         when (target) {
             is DeepLinkTarget.Profile -> {
                 deepLinkVm.prefetchProfile(target)
@@ -414,6 +423,7 @@ fun AppNavigation(
     CompositionLocalProvider(
         LocalAppSessionKey provides sessionKey,
         LocalShowSnackbar provides showSnackbar,
+        LocalOpenRelayDetail provides { url -> relayDetailUrl = url },
         LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
         com.unsilence.app.ui.common.LocalOpenZapSettings provides { showZapSettings = true },
@@ -477,6 +487,7 @@ fun AppNavigation(
                         onComment = { eventId -> replyToEventId = eventId },
                         onAuthorClick = onAuthorClick,
                         onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
+                        onRelaysClick = { profileRelaysPubkey = ownPubkey },
                         onHashtagClick = onHashtagClick,
                         onBrowseRelay = onBrowseRelayFeed,
                         viewModel = hiltViewModel(key = "profile-$sessionKey"),
@@ -698,17 +709,6 @@ fun AppNavigation(
                 )
             }
 
-            // ── Relay detail overlay (§05) — over discovery + the relay list ─
-            relayDetailUrl?.let { url ->
-                RelayDetailScreen(
-                    relayUrl  = url,
-                    onDismiss = { relayDetailUrl = null },
-                    onOpenProfile = onAuthorClick,
-                    onBrowse = onBrowseRelayFeed,
-                    viewModel = relayManagementVm,
-                )
-            }
-
             // ── Compose overlay ───────────────────────────────────────────────
             if (showCompose) {
                 ComposeScreen(onDismiss = { showCompose = false })
@@ -723,6 +723,7 @@ fun AppNavigation(
                     onComment     = { eventId -> replyToEventId = eventId },
                     onAuthorClick = onAuthorClick,
                     onConnectionsClick = { tab -> connectionsTarget = pubkey to tab },
+                    onRelaysClick = { profileRelaysPubkey = pubkey },
                     onHashtagClick = onHashtagClick,
                     actionsViewModel = noteActionsVm,
                 )
@@ -737,6 +738,14 @@ fun AppNavigation(
                         connectionsTarget = null
                         userProfilePubkey = targetPubkey
                     },
+                )
+            }
+
+            profileRelaysPubkey?.let { pubkey ->
+                ProfileRelaysScreen(
+                    pubkey = pubkey,
+                    onDismiss = { profileRelaysPubkey = null },
+                    onOpenRelay = { url -> relayDetailUrl = url },
                 )
             }
 
@@ -803,6 +812,24 @@ fun AppNavigation(
                     onPersonVisible = startGraphVm::requestVisiblePerson,
                     onDone = startGraphVm::finish,
                     onRetry = startGraphVm::retry,
+                )
+            }
+
+            // Globally topmost content overlay: relay rows can be opened from a profile,
+            // thread, search result, or bottom sheet without dismissing that context.
+            relayDetailUrl?.let { url ->
+                RelayDetailScreen(
+                    relayUrl = url,
+                    onDismiss = { relayDetailUrl = null },
+                    onOpenProfile = { pubkey ->
+                        relayDetailUrl = null
+                        profileRelaysPubkey = null
+                        connectionsTarget = null
+                        threadDestination = null
+                        userProfilePubkey = pubkey
+                    },
+                    onBrowse = onBrowseRelayFeed,
+                    viewModel = relayManagementVm,
                 )
             }
 

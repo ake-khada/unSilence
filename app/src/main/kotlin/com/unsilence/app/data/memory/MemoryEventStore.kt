@@ -38,7 +38,11 @@ import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.identitySearchMatchTier
+import com.unsilence.app.data.relay.deriveProfileRelayCount
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.parseNip51RelayTags
+import com.unsilence.app.data.relay.parseNip65RelayTags
+import com.unsilence.app.data.relay.shouldAcceptProfileRelayEvent
 import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
@@ -61,10 +65,12 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
  *  header. Restore rejects a snapshot whose owner differs from the current
  *  ownPubkey (foreign-account bleed guard). ≤V13 have no owner field and are
  *  trusted as legacy, restamped to V14 on next save. */
-/** V15 appends the own-anon-zap pubkey set (private-zap self-recognition). */
-private const val SNAPSHOT_BINARY_VERSION = 15
+/** V15 appends the own-anon-zap pubkey set (private-zap self-recognition).
+ *  V16 appends bounded device-authoritative NIP-11 relay identities. */
+private const val SNAPSHOT_BINARY_VERSION = 16
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
+private const val RELAY_IDENTITY_CAP = 3_000
 /** Thrown by restoreSnapshotBinary when a V14+ snapshot's stamped owner pubkey
  *  differs from the current session's ownPubkey — a foreign-account snapshot must
  *  not bleed into this user's MES. Thrown before any MES insertion, so the store
@@ -436,6 +442,8 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Relay monitors (kind 30166 / NIP-66) ─────────────────────────────────
     private val relayMonitorsByUrl = ConcurrentHashMap<String, RelayMonitorEntity>()
+    // Device-fetched NIP-11 identity is authoritative and intentionally separate from monitors.
+    private val relayIdentitiesByUrl = ConcurrentHashMap<String, RelayIdentityEntity>()
 
     // ─── Custom emoji (NIP-30) ───────────────────────────────────────────────
     // Kind-30030 emoji sets, keyed by (authorPubkey, setName) coordinate
@@ -574,6 +582,7 @@ class MemoryEventStore @Inject constructor(
     private val _trustScoreSignal = MutableStateFlow(0L)
     private val _wotSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
+    private val _relayIdentitySignal = MutableStateFlow(0L)
     private val _emojiSetSignal = MutableStateFlow(0L)
     private val _snapshotRestoredSignal = MutableStateFlow(0L)
     val snapshotRestoredFlow: StateFlow<Long> = _snapshotRestoredSignal
@@ -1753,26 +1762,11 @@ class MemoryEventStore @Inject constructor(
     private fun handleRelayList(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10002"
         val existingTs = relayKindCreatedAt[key]
-        if (existingTs != null && existingTs >= event.createdAt) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
 
-        val readRelays = mutableListOf<String>()
-        val writeRelays = mutableListOf<String>()
-        val configs = mutableListOf<RelayConfig>()
-
-        for (tag in event.tags) {
-            if (tag.size < 2 || tag[0] != "r") continue
-            val url = tag[1]
-            val marker = tag.getOrNull(2)?.takeIf { it.isNotEmpty() }
-            configs.add(RelayConfig(url, marker))
-            when (marker) {
-                "read" -> readRelays.add(url)
-                "write" -> writeRelays.add(url)
-                else -> {
-                    readRelays.add(url)
-                    writeRelays.add(url)
-                }
-            }
-        }
+        val configs = parseNip65RelayTags(event.tags)
+        val readRelays = configs.filter { it.marker != "write" }.map(RelayConfig::url)
+        val writeRelays = configs.filter { it.marker != "read" }.map(RelayConfig::url)
 
         relayKindCreatedAt[key] = event.createdAt
         relayListsByPubkey[event.pubkey] = RelayList(readRelays, writeRelays)
@@ -1788,12 +1782,9 @@ class MemoryEventStore @Inject constructor(
     private fun handleBlocked(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10006"
         val existingTs = relayKindCreatedAt[key]
-        if (existingTs != null && existingTs >= event.createdAt) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
 
-        val urls = event.tags
-            .filter { it.size >= 2 && it[0] == "relay" }
-            .mapNotNull { normalizeRelayUrl(it[1]) }
-            .distinct()
+        val urls = parseNip51RelayTags(event.tags)
 
         relayKindCreatedAt[key] = event.createdAt
         val existing = blockedRelaysByPubkey[event.pubkey]
@@ -1807,12 +1798,9 @@ class MemoryEventStore @Inject constructor(
     private fun handleSearchRelays(event: NostrEvent, dirty: InsertDirty? = null) {
         val key = "${event.pubkey}:10007"
         val existingTs = relayKindCreatedAt[key]
-        if (existingTs != null && existingTs >= event.createdAt) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
 
-        val urls = event.tags
-            .filter { it.size >= 2 && it[0] == "relay" }
-            .mapNotNull { normalizeRelayUrl(it[1]) }
-            .distinct()
+        val urls = parseNip51RelayTags(event.tags)
 
         relayKindCreatedAt[key] = event.createdAt
         val existing = searchRelaysByPubkey[event.pubkey]
@@ -3946,6 +3934,15 @@ class MemoryEventStore @Inject constructor(
     fun getReadWriteRelayConfigs(pubkey: String): List<RelayConfig> =
         readWriteRelayConfigsByPubkey[pubkey] ?: emptyList()
 
+    fun getProfileRelayFacts(pubkey: String): ProfileRelayFacts = ProfileRelayFacts(
+        relays = getReadWriteRelayConfigs(pubkey),
+        searchRelays = getSearchRelayUrls(pubkey),
+        blockedRelays = getBlockedRelayUrls(pubkey),
+        publishedKinds = setOf(10002, 10006, 10007).filterTo(mutableSetOf()) { kind ->
+            relayKindCreatedAt.containsKey("$pubkey:$kind")
+        },
+    )
+
     // ─── A.5.1 T5a: Relay config reactive Flows ────────────────────────────
 
     fun blockedRelayUrlsFlow(pubkey: String): Flow<List<String>> =
@@ -3965,6 +3962,17 @@ class MemoryEventStore @Inject constructor(
             .map { getReadWriteRelayConfigs(pubkey) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
+
+    fun profileRelayFactsFlow(pubkey: String): Flow<ProfileRelayFacts> =
+        _relayConfigSignal
+            .map { getProfileRelayFacts(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    fun profileRelayCountFlow(pubkey: String): Flow<Int?> =
+        profileRelayFactsFlow(pubkey)
+            .map { facts -> deriveProfileRelayCount(10002 in facts.publishedKinds, facts.relays) }
+            .distinctUntilChanged()
 
     fun favoriteRelayConfigsFlow(pubkey: String): Flow<List<FavoriteEntry>> =
         _relayConfigSignal
@@ -4091,7 +4099,47 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
-    // ─── Combined relay health (trust + monitor) ─────────────────────────
+    fun getRelayIdentity(url: String): RelayIdentityEntity? {
+        val normalized = normalizeRelayUrl(url) ?: return null
+        return relayIdentitiesByUrl[normalized]
+    }
+
+    /** Store a successful device NIP-11 identity read. Newer device reads win. */
+    fun putRelayIdentity(
+        url: String,
+        name: String?,
+        iconUrl: String?,
+        fetchedAt: Long,
+    ): Boolean {
+        val normalized = normalizeRelayUrl(url) ?: return false
+        val incoming = RelayIdentityEntity(
+            relayUrl = normalized,
+            name = name?.trim()?.takeIf(String::isNotBlank),
+            iconUrl = iconUrl?.trim()?.takeIf(String::isNotBlank),
+            fetchedAt = fetchedAt,
+        )
+        var changed = false
+        relayIdentitiesByUrl.compute(normalized) { _, existing ->
+            when {
+                existing != null && existing.fetchedAt > fetchedAt -> existing
+                existing == incoming -> existing
+                else -> incoming.also { changed = true }
+            }
+        }
+        if (!changed) return false
+
+        val overflow = relayIdentitiesByUrl.size - RELAY_IDENTITY_CAP
+        if (overflow > 0) {
+            relayIdentitiesByUrl.entries
+                .sortedBy { it.value.fetchedAt }
+                .take(overflow)
+                .forEach { relayIdentitiesByUrl.remove(it.key, it.value) }
+        }
+        _relayIdentitySignal.value = System.nanoTime()
+        return true
+    }
+
+    // ─── Combined relay health (trust + monitor + device identity) ───────
 
     /**
      * Look up health info for a relay URL, trying both raw and normalized forms.
@@ -4099,17 +4147,29 @@ class MemoryEventStore @Inject constructor(
      * normalized but health data keys are.
      */
     fun getRelayHealth(url: String): RelayHealthInfo? {
-        val score = trustScoresByUrl[url] ?: normalizeRelayUrl(url)?.let { trustScoresByUrl[it] }
-        val monitor = relayMonitorsByUrl[url] ?: normalizeRelayUrl(url)?.let { relayMonitorsByUrl[it] }
-        if (score == null && monitor == null) return null
-        return RelayHealthInfo(relayUrl = url, trustScore = score, monitor = monitor)
+        val normalized = normalizeRelayUrl(url) ?: return null
+        val score = trustScoresByUrl[normalized]
+        val monitor = relayMonitorsByUrl[normalized]
+        val identity = relayIdentitiesByUrl[normalized]
+        if (score == null && monitor == null && identity == null) return null
+        return RelayHealthInfo(
+            relayUrl = normalized,
+            trustScore = score,
+            monitor = monitor,
+            identity = identity,
+        )
     }
 
     fun relayHealthFlow(): Flow<Map<String, RelayHealthInfo>> =
-        combine(_trustScoreSignal, _relayMonitorSignal) { _, _ ->
+        combine(_trustScoreSignal, _relayMonitorSignal, _relayIdentitySignal) { _, _, _ ->
             val result = mutableMapOf<String, RelayHealthInfo>()
             for ((url, score) in trustScoresByUrl) {
-                result[url] = RelayHealthInfo(url, trustScore = score, monitor = relayMonitorsByUrl[url])
+                result[url] = RelayHealthInfo(
+                    relayUrl = url,
+                    trustScore = score,
+                    monitor = relayMonitorsByUrl[url],
+                    identity = relayIdentitiesByUrl[url],
+                )
             }
             for ((url, monitor) in relayMonitorsByUrl) {
                 val existing = result[url]
@@ -4118,7 +4178,19 @@ class MemoryEventStore @Inject constructor(
                         result[url] = existing.copy(monitor = monitor)
                     }
                 } else {
-                    result[url] = RelayHealthInfo(url, monitor = monitor)
+                    result[url] = RelayHealthInfo(
+                        relayUrl = url,
+                        monitor = monitor,
+                        identity = relayIdentitiesByUrl[url],
+                    )
+                }
+            }
+            for ((url, identity) in relayIdentitiesByUrl) {
+                val existing = result[url]
+                if (existing != null) {
+                    if (existing.identity == null) result[url] = existing.copy(identity = identity)
+                } else {
+                    result[url] = RelayHealthInfo(url, identity = identity)
                 }
             }
             result.toMap()
@@ -4704,6 +4776,7 @@ class MemoryEventStore @Inject constructor(
             relayListEntries = relayListsByPubkey.size,
             trustScoreEntries = trustScoresByUrl.size,
             relayMonitorEntries = relayMonitorsByUrl.size,
+            relayIdentityEntries = relayIdentitiesByUrl.size,
             relaySetEntries = relaySetsByCoordinate.size,
             pendingRelayEntries = pendingRelays.size,
             profileAnchoredRefEntries = profileAnchoredIds.size,
@@ -5134,6 +5207,17 @@ class MemoryEventStore @Inject constructor(
         val anons = synchronized(ownAnonZapPubkeys) { ownAnonZapPubkeys.toList() }
         out.writeInt(anons.size)
         for (a in anons) out.writeStr(a)
+
+        // V16: device-authoritative relay identity cache. Appended at the tail so every
+        // V3/V5-V15 section remains byte-compatible and older snapshots still restore.
+        val relayIdentities = relayIdentitiesByUrl.toMap()
+        out.writeInt(relayIdentities.size)
+        for ((url, identity) in relayIdentities) {
+            out.writeStr(url)
+            out.writeStrOrNull(identity.name)
+            out.writeStrOrNull(identity.iconUrl)
+            out.writeLong(identity.fetchedAt)
+        }
     }
 
     suspend fun restoreSnapshotBinary(input: DataInputStream) {
@@ -5438,6 +5522,28 @@ class MemoryEventStore @Inject constructor(
             for (i in 0 until anonCount) addOwnAnonZap(input.readStr())
         }
 
+        // V16: persisted device NIP-11 relay identities (absent in older snapshots).
+        if (version >= 16) {
+            val identityCount = input.readInt()
+            if (identityCount < 0 || identityCount > RELAY_IDENTITY_CAP) {
+                throw IOException("Invalid relay identity count: $identityCount")
+            }
+            for (i in 0 until identityCount) {
+                val url = normalizeRelayUrl(input.readStr())
+                val name = input.readStrOrNull()
+                val iconUrl = input.readStrOrNull()
+                val fetchedAt = input.readLong()
+                if (url != null) {
+                    relayIdentitiesByUrl[url] = RelayIdentityEntity(
+                        relayUrl = url,
+                        name = name?.trim()?.takeIf(String::isNotBlank),
+                        iconUrl = iconUrl?.trim()?.takeIf(String::isNotBlank),
+                        fetchedAt = fetchedAt,
+                    )
+                }
+            }
+        }
+
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
@@ -5462,6 +5568,7 @@ class MemoryEventStore @Inject constructor(
         _actionSignal.value = now
         _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
+        _relayIdentitySignal.value = now
         _emojiSetSignal.value = now
         // Own NIP-51 config (favorites kind-10012, relay sets kind-30002) is
         // materialized via the snapshotDirtySink during the parse loop but the
@@ -6052,11 +6159,13 @@ class MemoryEventStore @Inject constructor(
             ownWotProviderEncryptedUpdatedAt = 0L
         }
         relayMonitorsByUrl.clear()
+        relayIdentitiesByUrl.clear()
         _relaySetSignal.value = 0L
         _emojiSetSignal.value = 0L
         _trustScoreSignal.value = 0L
         _wotSignal.value = 0L
         _relayMonitorSignal.value = 0L
+        _relayIdentitySignal.value = 0L
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
         timelineServiceProvider.get().clear()
     }

@@ -24,6 +24,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.StringReader
 import java.io.StringWriter
 
@@ -144,6 +148,61 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(42, monitor.rttOpen)
         assertEquals(listOf(11), monitor.supportedNips)
         assertEquals("monitor-pk", monitor.monitorPubkey)
+    }
+
+    @Test
+    fun `device relay identity overrides monitor and survives logout and binary snapshot`() = runTest {
+        store.insert(
+            event(
+                id = "monitor-with-stale-icon",
+                pubkey = "monitor-pk",
+                kind = 30166,
+                content = """{"icon":"https://monitor.example/icon.png"}""",
+                createdAt = 1_000,
+                tags = listOf(listOf("d", "wss://primus.nostr1.com")),
+            ),
+        )
+        assertTrue(
+            store.putRelayIdentity(
+                url = "wss://primus.nostr1.com/",
+                name = "Primus",
+                iconUrl = "https://primus.nostr1.com/icon.png",
+                fetchedAt = 2_000,
+            ),
+        )
+        assertEquals(
+            "https://primus.nostr1.com/icon.png",
+            store.getRelayHealth("wss://primus.nostr1.com")?.iconUrl,
+        )
+        store.clearUserState()
+        assertEquals(
+            "https://primus.nostr1.com/icon.png",
+            store.getRelayHealth("wss://primus.nostr1.com")?.iconUrl,
+        )
+
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
+            restored.restoreSnapshotBinary(it)
+        }
+
+        assertEquals(
+            RelayIdentityEntity(
+                relayUrl = "wss://primus.nostr1.com",
+                name = "Primus",
+                iconUrl = "https://primus.nostr1.com/icon.png",
+                fetchedAt = 2_000,
+            ),
+            restored.getRelayIdentity("wss://primus.nostr1.com/"),
+        )
+        assertEquals(
+            "https://primus.nostr1.com/icon.png",
+            restored.getRelayHealth("wss://primus.nostr1.com")?.iconUrl,
+        )
     }
 
     // ── NIP-85 WoT assertions ──────────────────────────────────────────────
@@ -1202,20 +1261,20 @@ class MemoryEventStoreInvariantsTest {
         store.insert(
             event(
                 id = "relaylist-1", pubkey = pk, kind = 10002, createdAt = 100,
-                tags = listOf(listOf("r", "wss://a", "")),
+                tags = listOf(listOf("r", "wss://a.example", "")),
             ),
         )
 
         store.insert(
             event(
                 id = "relaylist-2", pubkey = pk, kind = 10002, createdAt = 200,
-                tags = listOf(listOf("r", "wss://b", "write")),
+                tags = listOf(listOf("r", "wss://b.example", "write")),
             ),
         )
 
         val rl = store.getRelayList(pk)
         assertNotNull(rl)
-        assertEquals(listOf("wss://b"), rl!!.write)
+        assertEquals(listOf("wss://b.example"), rl!!.write)
         assertEquals(emptyList<String>(), rl.read)
     }
 
@@ -1227,20 +1286,20 @@ class MemoryEventStoreInvariantsTest {
             event(
                 id = "relaylist-rw", pubkey = pk, kind = 10002, createdAt = 100,
                 tags = listOf(
-                    listOf("r", "wss://x", "read"),
-                    listOf("r", "wss://y", "write"),
-                    listOf("r", "wss://z"),
+                    listOf("r", "wss://x.example", "read"),
+                    listOf("r", "wss://y.example", "write"),
+                    listOf("r", "wss://z.example"),
                 ),
             ),
         )
 
         val rl = store.getRelayList(pk)!!
-        assertTrue(rl.read.contains("wss://x"))
-        assertTrue(rl.read.contains("wss://z"))
-        assertTrue(rl.write.contains("wss://y"))
-        assertTrue(rl.write.contains("wss://z"))
-        assertFalse(rl.read.contains("wss://y"))
-        assertFalse(rl.write.contains("wss://x"))
+        assertTrue(rl.read.contains("wss://x.example"))
+        assertTrue(rl.read.contains("wss://z.example"))
+        assertTrue(rl.write.contains("wss://y.example"))
+        assertTrue(rl.write.contains("wss://z.example"))
+        assertFalse(rl.read.contains("wss://y.example"))
+        assertFalse(rl.write.contains("wss://x.example"))
     }
 
     // ── Kind 30002 parameterized replaceable ────────────────────────────────
@@ -1614,9 +1673,9 @@ class MemoryEventStoreInvariantsTest {
             event(
                 id = "routing-rl", pubkey = pk, kind = 10002, createdAt = 100,
                 tags = listOf(
-                    listOf("r", "wss://write-only", "write"),
-                    listOf("r", "wss://read-only", "read"),
-                    listOf("r", "wss://both"),
+                    listOf("r", "wss://write-only.example", "write"),
+                    listOf("r", "wss://read-only.example", "read"),
+                    listOf("r", "wss://both.example"),
                 ),
             ),
         )
@@ -1624,13 +1683,13 @@ class MemoryEventStoreInvariantsTest {
         val write = store.writeRelaysFor(pk)
         val read = store.readRelaysFor(pk)
 
-        assertTrue(write.contains("wss://write-only"))
-        assertTrue(write.contains("wss://both"))
-        assertFalse(write.contains("wss://read-only"))
+        assertTrue(write.contains("wss://write-only.example"))
+        assertTrue(write.contains("wss://both.example"))
+        assertFalse(write.contains("wss://read-only.example"))
 
-        assertTrue(read.contains("wss://read-only"))
-        assertTrue(read.contains("wss://both"))
-        assertFalse(read.contains("wss://write-only"))
+        assertTrue(read.contains("wss://read-only.example"))
+        assertTrue(read.contains("wss://both.example"))
+        assertFalse(read.contains("wss://write-only.example"))
     }
 
     // ── Snapshot benchmark (informational — prints metrics) ──────────────────

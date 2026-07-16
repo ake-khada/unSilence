@@ -43,6 +43,7 @@ data class MesSizeSnapshot(
     val relayListEntries: Int,
     val trustScoreEntries: Int,
     val relayMonitorEntries: Int,
+    val relayIdentityEntries: Int,
     val relaySetEntries: Int,
 
     // ── Dedup & provenance ──────────────────────────────────────────────
@@ -66,6 +67,6 @@ data class MesSizeSnapshot(
             followsEntries * 128L +
             followerCountEntries * 48L +
             // Relay config/health: ~300 bytes per entry
-            (relayListEntries + trustScoreEntries + relayMonitorEntries + relaySetEntries) * 300L +
+            (relayListEntries + trustScoreEntries + relayMonitorEntries + relayIdentityEntries + relaySetEntries) * 300L +
             pendingRelayEntries * 128L
 }

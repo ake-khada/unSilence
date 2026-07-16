@@ -114,6 +114,7 @@ fun ProfileScreen(
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
     onConnectionsClick: (ConnectionsTab) -> Unit = {},
+    onRelaysClick: () -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: ProfileViewModel = hiltViewModel(
@@ -129,6 +130,7 @@ fun ProfileScreen(
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
     val followerCount   by viewModel.followerCount.collectAsStateWithLifecycle()
+    val relayCount      by viewModel.relayCount.collectAsStateWithLifecycle()
     val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
     val profileWotLookup by viewModel.profileWotLookup.collectAsStateWithLifecycle()
     val wotProvenance   by viewModel.wotProvenance.collectAsStateWithLifecycle()
@@ -432,7 +434,7 @@ fun ProfileScreen(
                     Spacer(Modifier.height(Spacing.micro))
                 }
 
-                // Following / Followers stats row
+                // Following / Followers / Relays identity facts
                 Row(
                     modifier              = Modifier
                         .fillMaxWidth()
@@ -449,6 +451,12 @@ fun ProfileScreen(
                         label = "Followers",
                         value = followerCount?.let(::formatFollowerCount) ?: "—",
                         onClick = { onConnectionsClick(ConnectionsTab.Followers) },
+                    )
+                    Spacer(Modifier.size(Spacing.large))
+                    StatLabel(
+                        label = "Relays",
+                        value = relayCount?.toString(),
+                        onClick = onRelaysClick,
                     )
                 }
                 (profileWotLookup as? WotLookup.Scored)
@@ -640,6 +648,7 @@ fun ProfileScreen(
         onMuteUser = actionsViewModel::muteUser,
         onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
         onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        relayProvenance = actionsViewModel::relayProvenance,
         onDismiss = { actionsRow = null },
         showModerationActions = false,
     )
@@ -761,19 +770,21 @@ private fun ProfileAvatar(
 }
 
 @Composable
-private fun StatLabel(label: String, value: String, onClick: (() -> Unit)? = null) {
+private fun StatLabel(label: String, value: String?, onClick: (() -> Unit)? = null) {
     Row(
         modifier = (if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text       = value,
-            color      = Color.White,
-            fontSize   = AppType.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.size(4.dp))
+        value?.let {
+            Text(
+                text       = it,
+                color      = Color.White,
+                fontSize   = AppType.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.size(4.dp))
+        }
         Text(
             text     = label,
             color    = TextSecondary,

@@ -198,6 +198,11 @@ class ProfileViewModel @Inject constructor(
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
+    val relayCount: StateFlow<Int?> = pubkeyHex?.let { pubkey ->
+        memoryEventStore.profileRelayCountFlow(pubkey)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    } ?: MutableStateFlow(null)
+
     // ── Profile tabs ─────────────────────────────────────────────────────
 
     val selectedTab = MutableStateFlow(ProfileTab.NOTES)
@@ -223,6 +228,9 @@ class ProfileViewModel @Inject constructor(
             // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
             viewModelScope.launch(Dispatchers.IO) {
                 profilePipeline.fetchFollowerCount(pubkeyHex)?.let { followerCount.value = it }
+            }
+            viewModelScope.launch(Dispatchers.IO) {
+                profilePipeline.fetchProfileRelayFacts(pubkeyHex)
             }
 
             // Eager pipeline: refs + engagement pre-fetched in batch.

@@ -6,6 +6,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -18,6 +19,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.common.LocalOpenRelayDetail
 import com.unsilence.app.ui.feed.PostActionsBottomSheet
 import com.unsilence.app.ui.feed.ReportTypeSheet
 import com.unsilence.app.ui.feed.collectProfileAsState
@@ -36,18 +38,20 @@ fun PostActionsHost(
     onMuteUser: (String) -> MuteResult,
     onReport: (FeedRow, ReportType) -> Unit,
     onDelete: (FeedRow) -> Unit,
+    relayProvenance: (String) -> List<RelayProvenanceItem> = { emptyList() },
     onDismiss: () -> Unit,
     showModerationActions: Boolean = true,
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val showSnackbar = LocalShowSnackbar.current
+    val openRelayDetail = LocalOpenRelayDetail.current
     var reportRow by remember { mutableStateOf<FeedRow?>(null) }
     var deleteRow by remember { mutableStateOf<FeedRow?>(null) }
 
     row?.let { activeRow ->
         val authorProfile = collectProfileAsState(activeRow.pubkey, profileFlow)
-        PostActionsBottomSheet(
+        key(activeRow.id) { PostActionsBottomSheet(
             authorPubkey = activeRow.pubkey,
             authorProfile = authorProfile,
             onDismiss = onDismiss,
@@ -64,6 +68,8 @@ fun PostActionsHost(
                 }
                 context.startActivity(Intent.createChooser(shareIntent, null))
             },
+            relayItemsProvider = { relayProvenance(activeRow.id) },
+            onRelayClick = openRelayDetail,
             onMuteUser = {
                 when (onMuteUser(activeRow.pubkey)) {
                     MuteResult.Queued -> showSnackbar("Muted")
@@ -81,7 +87,7 @@ fun PostActionsHost(
                 onDismiss()
             },
             showModerationActions = showModerationActions,
-        )
+        ) }
     }
 
     deleteRow?.let { activeRow ->

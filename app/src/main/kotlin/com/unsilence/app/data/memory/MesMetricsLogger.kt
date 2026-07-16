@@ -102,7 +102,8 @@ class MesMetricsLogger @Inject constructor(
                 "imgDim=${idcEntries} " +
                 "follows=${s.followsEntries} followerCount=${s.followerCountEntries} " +
                 "relayLists=${s.relayListEntries} trustScores=${s.trustScoreEntries} " +
-                "monitors=${s.relayMonitorEntries} relaySets=${s.relaySetEntries}",
+                "monitors=${s.relayMonitorEntries} identities=${s.relayIdentityEntries} " +
+                "relaySets=${s.relaySetEntries}",
         )
 
         // Eviction anchor counters (cumulative since last snapshot, then reset)

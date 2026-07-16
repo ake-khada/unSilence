@@ -599,6 +599,7 @@ fun SearchScreen(
         onMuteUser = actionsViewModel::muteUser,
         onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
         onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        relayProvenance = actionsViewModel::relayProvenance,
         onDismiss = { actionsRow = null },
     )
 
