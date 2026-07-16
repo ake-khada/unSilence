@@ -127,6 +127,16 @@ class ProfilePipeline @Inject constructor(
         relayFactsFetchedAt.clear()
     }
 
+    /** Explicit entity-search demand: hit declared hints first, then the normal bounded fan-out. */
+    fun fetchProfileMetadata(pubkey: String, relayHints: List<String> = emptyList()) {
+        if (relayHints.isNotEmpty()) {
+            relayPool.fetchProfilesFromHints(mapOf(pubkey to relayHints))
+        }
+        pipelineScope.launch {
+            userRepository.fetchProfilesWithFanout(listOf(pubkey), maxRelays = 4)
+        }
+    }
+
     /** Coalesced profile/screen demand for kinds 10002, 10006, and 10007. */
     suspend fun fetchProfileRelayFacts(pubkey: String, force: Boolean = false): Boolean {
         val now = System.currentTimeMillis()
