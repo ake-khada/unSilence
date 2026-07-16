@@ -6,6 +6,20 @@ import com.unsilence.app.data.memory.RelayConfig
 internal const val RELAY_IDENTITY_REFRESH_MS = 7L * 24 * 60 * 60 * 1_000
 internal const val RELAY_IDENTITY_PREFETCH_CAP = 100
 
+internal enum class ProfileRelaySection(val keyPrefix: String) {
+    RELAYS("relays"),
+    SEARCH("search"),
+    BLOCKED("blocked"),
+}
+
+internal data class ProfileRelaySectionEntry(
+    val section: ProfileRelaySection,
+    val url: String,
+    val marker: String? = null,
+) {
+    val key: String = "${section.keyPrefix}:$url"
+}
+
 private data class RelayAccess(
     val read: Boolean,
     val write: Boolean,
@@ -78,3 +92,20 @@ internal fun relayIdentityPrefetchUrls(facts: ProfileRelayFacts): List<String> =
         .distinct()
         .take(RELAY_IDENTITY_PREFETCH_CAP)
         .toList()
+
+/** Preserve cross-section overlap while making every section internally collision-free. */
+internal fun profileRelaySectionEntries(facts: ProfileRelayFacts): List<ProfileRelaySectionEntry> =
+    buildList {
+        val seen = mutableSetOf<Pair<ProfileRelaySection, String>>()
+
+        fun append(section: ProfileRelaySection, url: String, marker: String? = null) {
+            val normalized = normalizeRelayUrl(url) ?: return
+            if (seen.add(section to normalized)) {
+                this@buildList.add(ProfileRelaySectionEntry(section, normalized, marker))
+            }
+        }
+
+        facts.relays.forEach { append(ProfileRelaySection.RELAYS, it.url, it.marker) }
+        facts.searchRelays.forEach { append(ProfileRelaySection.SEARCH, it) }
+        facts.blockedRelays.forEach { append(ProfileRelaySection.BLOCKED, it) }
+    }
