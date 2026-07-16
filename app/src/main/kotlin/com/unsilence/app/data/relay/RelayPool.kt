@@ -64,6 +64,9 @@ private const val COLD_LANE_FLUSH_MS = 2_500L
 private const val RECONNECT_HEALTHY_WINDOW_MS = 30_000L
 private const val FOLLOW_PACK_RELAY_LIMIT = 6
 private const val FOLLOW_PACK_RELAY_TIMEOUT_MS = 8_000L
+private const val PROFILE_RELAY_FACTS_INDEXER_LIMIT = 4
+private const val PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT = 3
+private const val PROFILE_RELAY_FACTS_TIMEOUT_MS = 8_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
@@ -1741,6 +1744,52 @@ class RelayPool @Inject constructor(
             targets.forEach { sendOneShotToRelay(it, req) }
         }
         Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s) from ${targets.size} relay(s)")
+    }
+
+    /** Fetch one profile's published relay facts without opening a live subscription. */
+    suspend fun fetchProfileRelayFacts(pubkey: String): Boolean {
+        val indexers = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+            .mapNotNull(::normalizeRelayUrl)
+            .distinct()
+            .take(PROFILE_RELAY_FACTS_INDEXER_LIMIT)
+        // NIP-51 lists are frequently published only to the author's outbox. Keep this
+        // fallback narrow; indexers remain the primary lookup path requested by the UI.
+        val authorWriteRelays = memoryEventStore.get().writeRelaysFor(pubkey)
+            .mapNotNull(::normalizeRelayUrl)
+            .filter { it !in indexers }
+            .distinct()
+            .take(PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT)
+        val targets = indexers + authorWriteRelays
+        if (targets.isEmpty()) return false
+
+        val subId = "profile-relays-${System.nanoTime()}"
+        val request = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(10002))
+                    add(JsonPrimitive(10006))
+                    add(JsonPrimitive(10007))
+                })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("limit", JsonPrimitive(3))
+            })
+        }.toString()
+
+        val eose = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eose
+        return try {
+            sendOneShotBatch(
+                urls = targets,
+                reqs = listOf(request),
+                subIds = listOf(subId),
+                timeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
+            )
+            withTimeoutOrNull(PROFILE_RELAY_FACTS_TIMEOUT_MS) { eose.await() } != null
+        } finally {
+            cleanupOneShotSub(subId)
+        }
     }
 
     /**

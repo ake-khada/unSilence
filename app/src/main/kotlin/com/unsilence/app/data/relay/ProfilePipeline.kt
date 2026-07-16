@@ -5,6 +5,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.repository.UserRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -29,6 +30,7 @@ import javax.inject.Singleton
 
 private const val TAG = "ProfilePipeline"
 internal const val MAX_PROFILE_ENGAGEMENT_RELAYS = 12
+private const val PROFILE_RELAY_FACTS_TTL_MS = 2 * 60_000L
 
 internal fun profileNetworkDemandAllowed(
     networkState: NetworkState,
@@ -112,6 +114,8 @@ class ProfilePipeline @Inject constructor(
 
     /** Per-pubkey in-flight follower-count fetches — concurrent callers share one result. */
     private val followerCountInFlight = ConcurrentHashMap<String, Deferred<Long?>>()
+    private val relayFactsInFlight = ConcurrentHashMap<String, Deferred<Boolean>>()
+    private val relayFactsFetchedAt = ConcurrentHashMap<String, Long>()
 
     /** Own pubkeys whose below-head gap was healed this session — heal runs once per login. */
     private val gapHealedOwnPubkeys = ConcurrentHashMap.newKeySet<String>()
@@ -120,6 +124,45 @@ class ProfilePipeline @Inject constructor(
      *  @Singleton that survives logout/login, so the heal flag must be cleared explicitly). */
     fun resetForSession() {
         gapHealedOwnPubkeys.clear()
+        relayFactsFetchedAt.clear()
+    }
+
+    /** Coalesced profile/screen demand for kinds 10002, 10006, and 10007. */
+    suspend fun fetchProfileRelayFacts(pubkey: String, force: Boolean = false): Boolean {
+        val now = System.currentTimeMillis()
+        relayFactsFetchedAt[pubkey]?.let { fetchedAt ->
+            // A profile-open miss must not suppress the explicit screen-open request.
+            // Coalesce in-flight work, but TTL-cache only successful relay coverage.
+            if (!force && now - fetchedAt < PROFILE_RELAY_FACTS_TTL_MS) return true
+        }
+        if (!profileDemandAvailable(pubkey, "relay-facts")) return false
+
+        val newDeferred = pipelineScope.async(start = CoroutineStart.LAZY) {
+            val result = try {
+                relayPool.fetchProfileRelayFacts(pubkey)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Relay-facts fetch failed for ${pubkey.take(8)}…", error)
+                false
+            }
+            if (result) {
+                val completedAt = System.currentTimeMillis()
+                relayFactsFetchedAt[pubkey] = completedAt
+                relayFactsFetchedAt.entries.removeIf { completedAt - it.value >= PROFILE_RELAY_FACTS_TTL_MS }
+            }
+            result
+        }
+        val deferred = relayFactsInFlight.compute(pubkey) { _, existing ->
+            if (existing?.isActive == true) existing else newDeferred
+        }!!
+        if (deferred === newDeferred) {
+            deferred.invokeOnCompletion { relayFactsInFlight.remove(pubkey, deferred) }
+            deferred.start()
+        } else {
+            newDeferred.cancel()
+        }
+        return deferred.await()
     }
 
     /**

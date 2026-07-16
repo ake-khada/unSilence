@@ -32,6 +32,7 @@ import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.shared.relayProvenanceItems
 import java.util.concurrent.ConcurrentHashMap
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.WalletPaymentPendingException
@@ -131,6 +132,12 @@ class NoteActionsViewModel @Inject constructor(
 
     /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
     fun getEventModel(eventId: String) = memoryEventStore.getOrParseEventModel(eventId)
+
+    /** Read at action-sheet open so relay observations that arrived after card creation are included. */
+    fun relayProvenance(eventId: String) = relayProvenanceItems(
+        relays = memoryEventStore.getNostrEvent(eventId)?.relaysSeen?.toList().orEmpty(),
+        iconUrlFor = { url -> memoryEventStore.getRelayHealth(url)?.iconUrl },
+    )
 
     /**
      * CACHE-ONLY EventModel lookup (no parse). Returns null if the model has not

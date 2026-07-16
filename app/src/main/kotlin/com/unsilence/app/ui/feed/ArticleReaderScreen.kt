@@ -711,6 +711,7 @@ fun ArticleReaderScreen(
         onMuteUser = commentActionsVm::muteUser,
         onReport = { activeRow, type -> commentActionsVm.reportEvent(activeRow.id, activeRow.pubkey, type) },
         onDelete = { activeRow -> commentActionsVm.deleteEvent(activeRow.id, activeRow.pubkey, activeRow.relayUrl) },
+        relayProvenance = commentActionsVm::relayProvenance,
         onDismiss = { commentActionsRow = null },
     )
 }

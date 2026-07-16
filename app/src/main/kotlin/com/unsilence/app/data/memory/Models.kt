@@ -114,6 +114,14 @@ data class MuteList(
 /** Kind-10002 relay config with marker info (read/write/both). */
 data class RelayConfig(val url: String, val marker: String?)
 
+/** Latest replaceable relay facts published by one profile. */
+data class ProfileRelayFacts(
+    val relays: List<RelayConfig> = emptyList(),
+    val searchRelays: List<String> = emptyList(),
+    val blockedRelays: List<String> = emptyList(),
+    val publishedKinds: Set<Int> = emptySet(),
+)
+
 /** Kind-10012 favorite entry — either a relay URL or a set reference (["a", "30002:pubkey:dtag"]). */
 data class FavoriteEntry(val url: String?, val setRef: String?)
 
@@ -323,18 +331,27 @@ data class RelayMonitorEntity(
     val createdAt: Long,
 )
 
+/** Device-authoritative NIP-11 identity, kept separate from monitor-sourced metadata. */
+data class RelayIdentityEntity(
+    val relayUrl: String,
+    val name: String? = null,
+    val iconUrl: String? = null,
+    val fetchedAt: Long,
+)
+
 /**
- * Combined relay health: trust quality (kind 30385) + operational liveness (kind 30166).
- * Keyed by normalized relay URL. Either or both sources may be present.
+ * Combined relay facts: trust quality (kind 30385), operational liveness (kind 30166),
+ * and device-authoritative NIP-11 identity. Keyed by normalized relay URL.
  */
 data class RelayHealthInfo(
     val relayUrl: String,
     val trustScore: RelayTrustScoreEntity? = null,
     val monitor: RelayMonitorEntity? = null,
+    val identity: RelayIdentityEntity? = null,
 ) {
     val score: Int? get() = trustScore?.score
     val ping: Int? get() = monitor?.rttOpen ?: monitor?.rttRead
-    val iconUrl: String? get() = monitor?.iconUrl
+    val iconUrl: String? get() = identity?.iconUrl ?: monitor?.iconUrl
 }
 
 /**
