@@ -242,6 +242,7 @@ fun UserProfileScreen(
             lookupProfile = actionsViewModel::lookupProfile,
             lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
             lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+            lookupEventReference = actionsViewModel::lookupEvent,
             fetchOgMetadata = actionsViewModel::fetchOgMetadata,
             hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
             profileFlow = viewModel::profileFlow,

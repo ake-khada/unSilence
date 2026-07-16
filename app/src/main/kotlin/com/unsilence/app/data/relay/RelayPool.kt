@@ -67,6 +67,7 @@ private const val FOLLOW_PACK_RELAY_TIMEOUT_MS = 8_000L
 private const val PROFILE_RELAY_FACTS_INDEXER_LIMIT = 4
 private const val PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT = 3
 private const val PROFILE_RELAY_FACTS_TIMEOUT_MS = 8_000L
+private const val EVENT_REFERENCE_PHASE_TIMEOUT_MS = 4_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
@@ -1527,6 +1528,7 @@ class RelayPool @Inject constructor(
     /** Remove a one-shot sub from all tracking maps, release slots for every
      *  target relay (idempotent — skips already-released), and clean up. */
     internal fun cleanupOneShotSub(subId: String) {
+        _activeOneShotSubs.remove(subId)
         oneShotEoseCallbacks.remove(subId)
         oneShotFirstEose.remove(subId)
         val targets = oneShotSubTargets.remove(subId) ?: emptySet()
@@ -3721,9 +3723,6 @@ class RelayPool @Inject constructor(
         relayHints: List<String>,
         bypassDedup: Boolean,
     ) {
-        // Addressable-video v1 relies on the repost's e-tag pointing at the live
-        // revision. Falling back from a stale id to its a-coordinate would require
-        // a separate kinds+authors+#d REQ and is intentionally deferred.
         val novel = mutableListOf<String>()
         for (eventId in eventIds) {
             if (isEventUnresolved(eventId)) continue
@@ -3762,7 +3761,7 @@ class RelayPool @Inject constructor(
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
 
-        if (relayHints.isNotEmpty()) {
+        val targetUrls = if (relayHints.isNotEmpty()) {
             // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
             // No connectAndAwait — transient hints must not occupy pool slots.
             // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted ids fetch
@@ -3771,26 +3770,47 @@ class RelayPool @Inject constructor(
             val hintTargets = canonicalRelayHints(relayHints)
                 .filter { it !in indexerUrls && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
-                hintTargets.forEach { url -> sendOneShotPooledOrEphemeral(url, req, subId) }
-                Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${hintTargets.size} hint relay(s) (pooled-or-ephemeral)")
-                return
+                hintTargets
+            } else {
+                emptyList()
             }
+        } else {
+            emptyList()
         }
 
-        // No hints (or all hints were indexer/blocked) — broadened fallback.
-        val nonIndexer = connections.values.filter {
-            it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
-        }.shuffled()
-        val indexer = connections.values.filter {
-            it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+        // No usable hints — broadened fallback.
+        val resolvedTargets = targetUrls.ifEmpty {
+            val nonIndexer = connections.values.filter {
+                it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+            }.shuffled()
+            val indexer = connections.values.filter {
+                it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+            }
+            (nonIndexer + indexer).take(6).map { it.url }
         }
-        val fallbackTargets = (nonIndexer + indexer).take(6)
-        if (fallbackTargets.isEmpty()) {
+        if (resolvedTargets.isEmpty()) {
             Log.d(TAG, "fetchEventsByIds: ${novel.size} events → 0 targets (pool empty)")
             return
         }
-        fallbackTargets.forEach { sendOneShotToRelay(it, req) }
-        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${fallbackTargets.size} fallback relay(s) (no hints)")
+
+        // A suspending lookup must complete on relay EOSE/timeout, not when its
+        // coalesced REQ merely leaves the process. This lets the caller advance
+        // from an empty hint phase to outbox/coordinate fallback deterministically.
+        val eose = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eose
+        try {
+            sendOneShotBatch(
+                urls = resolvedTargets,
+                reqs = listOf(req),
+                subIds = listOf(subId),
+                timeoutMs = EVENT_REFERENCE_PHASE_TIMEOUT_MS,
+            )
+            withTimeoutOrNull(EVENT_REFERENCE_PHASE_TIMEOUT_MS) { eose.await() }
+        } finally {
+            cleanupOneShotSub(subId)
+        }
+        val targetKind = if (targetUrls.isNotEmpty()) "hint" else "fallback"
+        Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${resolvedTargets.size} $targetKind relay(s)")
     }
 
     /**
@@ -4021,9 +4041,12 @@ class RelayPool @Inject constructor(
         }.toString()
         val eoseDeferred = CompletableDeferred<Unit>()
         oneShotEoseCallbacks[subId] = eoseDeferred
-        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
-        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
-        if (!eosed) cleanupOneShotSub(subId)
+        try {
+            sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+            withTimeoutOrNull(8_000L) { eoseDeferred.await() }
+        } finally {
+            cleanupOneShotSub(subId)
+        }
     }
 
     /**

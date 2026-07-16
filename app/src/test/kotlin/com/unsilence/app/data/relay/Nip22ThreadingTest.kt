@@ -64,4 +64,39 @@ class Nip22ThreadingTest {
         assertEquals("video-id", replyToId)
         assertEquals("video-id", rootId)
     }
+
+    @Test
+    fun `top-level addressable portrait video comment uses revision id as thread root`() {
+        val (replyToId, rootId) = parseNip22Threading(
+            listOf(
+                listOf("A", "34236:video-author:clip", "wss://relay.divine.video"),
+                listOf("K", "34236"),
+                listOf("P", "video-author", "wss://relay.divine.video"),
+                listOf("a", "34236:video-author:clip", "wss://relay.divine.video"),
+                listOf("e", "video-revision-id", "wss://relay.divine.video"),
+                listOf("k", "34236"),
+                listOf("p", "video-author", "wss://relay.divine.video"),
+            )
+        )
+
+        assertEquals("video-revision-id", replyToId)
+        assertEquals("video-revision-id", rootId)
+    }
+
+    @Test
+    fun `nested addressable video comment keeps direct comment parent from lowercase e`() {
+        val (replyToId, rootId) = parseNip22Threading(
+            listOf(
+                listOf("A", "34236:video-author:clip", "wss://relay.divine.video"),
+                listOf("E", "video-revision-id", "wss://relay.divine.video"),
+                listOf("K", "34236"),
+                listOf("e", "parent-comment-id", "wss://comments.example"),
+                listOf("k", "1111"),
+                listOf("p", "comment-author", "wss://comments.example"),
+            )
+        )
+
+        assertEquals("parent-comment-id", replyToId)
+        assertEquals(null, rootId)
+    }
 }

@@ -48,11 +48,13 @@ private data class EmptyRepostState(
 
 @Composable
 fun EmptyRepostBody(
-    targetId: String,
+    targetId: String?,
+    addressCoordinate: String?,
     relayHints: List<String>,
     targetAuthorPubkey: String?,
     proxyUrl: String?,
-    lookupEventWithAuthor: suspend (String, List<String>, String?) -> EventEntity?,
+    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)?,
+    lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     lookupModel: ((String) -> EventModel?)?,
@@ -80,8 +82,19 @@ fun EmptyRepostBody(
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
-    val state by produceState(EmptyRepostState(), targetId) {
-        val ev = lookupEventWithAuthor(targetId, relayHints, targetAuthorPubkey)
+    val reference = buildRepostTargetReference(
+        eventId = targetId,
+        addressCoordinate = addressCoordinate,
+        authorPubkey = targetAuthorPubkey,
+        relayHints = relayHints,
+    )
+    val state by produceState(EmptyRepostState(), reference) {
+        val ev = reference?.let { ref ->
+            lookupEventReference?.invoke(ref)
+                ?: ref.eventId?.let { id ->
+                    lookupEventWithAuthor?.invoke(id, ref.relayHints, ref.authorPubkey)
+                }
+        }
         if (ev != null) {
             val cachedModel = lookupModel?.invoke(ev.id)
             val model = cachedModel ?: runCatching {
@@ -126,7 +139,9 @@ fun EmptyRepostBody(
                     onAuthorClick       = onAuthorClick,
                     lookupProfile       = lookupProfile,
                     profileFlow         = profileFlow,
-                    lookupEvent         = { id, h -> lookupEventWithAuthor(id, h, null) },
+                    lookupEvent         = lookupEventWithAuthor?.let { lookup ->
+                        { id, hints -> lookup(id, hints, null) }
+                    },
                     lookupModel         = lookupModel,
                     fetchOgMetadata     = fetchOgMetadata,
                     hasCachedOgMetadata = hasCachedOgMetadata,
@@ -158,7 +173,7 @@ fun EmptyRepostBody(
                         if (proxyUrl != null) {
                             runCatching { uriHandler.openUri(proxyUrl) }
                         } else {
-                            onNoteClick(targetId)
+                            targetId?.let(onNoteClick)
                         }
                     }
                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
@@ -187,7 +202,7 @@ fun EmptyRepostBody(
                     content = ev.content,
                     lookupProfile = lookupProfile,
                     onAuthorClick = onAuthorClick,
-                    onTextClick = { onNoteClick(targetId) },
+                    onTextClick = { targetId?.let(onNoteClick) },
                     maxLines = 6,
                 )
             }

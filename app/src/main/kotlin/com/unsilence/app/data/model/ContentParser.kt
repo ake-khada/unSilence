@@ -281,14 +281,22 @@ object ContentParser {
 
         val targetId = extractFirstETagId(tagsJson)
         val relayHint = extractFirstETagRelay(tagsJson)
-        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tagsJson)
+        val addressCoordinate = extractFirstAddressTagValue(tagsJson)
+        val addressRelayHint = extractFirstAddressTagRelay(tagsJson)
+        val coordinateAuthor = addressCoordinate
+            ?.split(':', limit = 3)
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tagsJson) ?: coordinateAuthor
         val proxyUrl = extractActivityPubProxyUrl(tagsJson)
 
-        if (embeddedJson == null && targetId == null) return null
+        if (embeddedJson == null && targetId == null && addressCoordinate == null) return null
 
         return RepostInfo(
             targetId = targetId,
             relayHint = relayHint,
+            addressCoordinate = addressCoordinate,
+            addressRelayHint = addressRelayHint,
             targetAuthorPubkey = targetAuthorPubkey,
             proxyUrl = proxyUrl,
             embeddedJson = embeddedJson,
@@ -820,6 +828,22 @@ object ContentParser {
         val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
         val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
         eTag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun extractFirstAddressTagValue(tagsJson: String): String? = runCatching {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val tag = parsed.firstOrNull {
+            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content in setOf("a", "A")
+        }
+        tag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun extractFirstAddressTagRelay(tagsJson: String): String? = runCatching {
+        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
+        val tag = parsed.firstOrNull {
+            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content in setOf("a", "A")
+        }
+        tag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
     }.getOrNull()
 
     private fun extractQTagHints(tagsJson: String): Map<String, List<String>> {
