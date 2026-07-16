@@ -29,6 +29,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.outlined.SearchOff
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
@@ -97,6 +99,7 @@ import com.unsilence.app.ui.shared.WotSearchSignal
 import com.unsilence.app.ui.shared.eventFeedItems
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.data.relay.ImpersonationRisk
+import com.unsilence.app.ui.navigation.DeepLinkTarget
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BorderSubtle
@@ -186,14 +189,29 @@ fun SearchScreen(
         focusManager.clearFocus()
         onNoteClick(id)
     }
+    val onEntityClickDismiss: (DeepLinkTarget) -> Unit = { target ->
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        viewModel.openEntityTarget(target)
+    }
     var pendingSearch by remember { mutableStateOf(false) }
     val activeEventResults = if (selectedTab == 3) state.tagResults else state.noteResults
+    val peopleBelowEntity = remember(state.entityTarget, state.peopleResults) {
+        peopleBelowEntityResult(state.entityTarget, state.peopleResults)
+    }
 
     @OptIn(FlowPreview::class)
-    LaunchedEffect(activeEventResults, state.peopleResults, selectedTab, cardWidthPx) {
+    LaunchedEffect(activeEventResults, peopleBelowEntity, state.entityTarget, selectedTab, cardWidthPx) {
         if (activeEventResults.isEmpty()) return@LaunchedEffect
+        fun entityOffset(): Int = when {
+            selectedTab == 0 && state.entityTarget != null -> 1
+            selectedTab == 2 && state.entityTarget is DeepLinkTarget.Note -> 1
+            selectedTab == 2 && state.entityTarget is DeepLinkTarget.Address -> 1
+            else -> 0
+        }
         fun warmVisibleRange(first: Int, last: Int) {
-            val noteOffset = if (selectedTab == 0) state.peopleResults.size.coerceAtMost(3) else 0
+            val noteOffset = entityOffset() +
+                if (selectedTab == 0) peopleBelowEntity.size.coerceAtMost(3) else 0
             val dataFirst = (first - noteOffset).coerceAtLeast(0)
             val dataLast = (last - noteOffset).coerceAtMost(activeEventResults.lastIndex)
             if (dataFirst <= dataLast) {
@@ -209,7 +227,8 @@ fun SearchScreen(
 
         if (cardWidthPx > 0) {
             val info = noteListState.layoutInfo
-            val noteOffset = if (selectedTab == 0) state.peopleResults.size.coerceAtMost(3) else 0
+            val noteOffset = entityOffset() +
+                if (selectedTab == 0) peopleBelowEntity.size.coerceAtMost(3) else 0
             val first = info.visibleItemsInfo.firstOrNull()?.index ?: noteOffset
             val last = info.visibleItemsInfo.lastOrNull()?.index ?: (noteOffset + 8)
             warmVisibleRange(first, last)
@@ -232,6 +251,7 @@ fun SearchScreen(
         if (initialQuery == null) focusRequester.requestFocus()
     }
     LaunchedEffect(state.loading) { if (state.loading) pendingSearch = false }
+    LaunchedEffect(state.rejectedSecret) { if (state.rejectedSecret) pendingSearch = false }
     // Consume initial query from hashtag tap navigation
     LaunchedEffect(initialQuery) {
         if (initialQuery != null) {
@@ -415,7 +435,15 @@ fun SearchScreen(
                     }
                 }
 
-                state.loading && state.noteResults.isEmpty() && state.peopleResults.isEmpty() && state.tagResults.isEmpty() -> {
+                state.rejectedSecret -> {
+                    EmptyState(
+                        icon = Icons.Outlined.SearchOff,
+                        message = "Secret keys can't be searched",
+                    )
+                }
+
+                state.loading && state.entityTarget == null && state.noteResults.isEmpty() &&
+                    state.peopleResults.isEmpty() && state.tagResults.isEmpty() -> {
                     if (selectedTab == 1) {
                         // People tab loading
                         Row(
@@ -440,7 +468,8 @@ fun SearchScreen(
 
                 selectedTab == 0 -> {
                     // All tab — mixed results
-                    val hasAny = state.peopleResults.isNotEmpty() || state.noteResults.isNotEmpty()
+                    val hasAny = state.entityTarget != null || peopleBelowEntity.isNotEmpty() ||
+                        state.noteResults.isNotEmpty()
                     if (!hasAny) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
@@ -463,8 +492,21 @@ fun SearchScreen(
                             { row -> actionsRow = row },
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
-                            if (state.peopleResults.isNotEmpty()) {
-                                items(state.peopleResults.take(3), key = { it.pubkey }) { user ->
+                            state.entityTarget?.let { target ->
+                                item(key = "entity:${entityResultKey(target)}") {
+                                    SearchEntityResultRow(
+                                        target = target,
+                                        profile = state.entityProfile,
+                                        wotLookup = (target as? DeepLinkTarget.Profile)?.let {
+                                            wotLookups[it.pubkey]
+                                        },
+                                        onClick = { onEntityClickDismiss(target) },
+                                    )
+                                    FeedDivider()
+                                }
+                            }
+                            if (peopleBelowEntity.isNotEmpty()) {
+                                items(peopleBelowEntity.take(3), key = { it.pubkey }) { user ->
                                     ProfileCard(
                                         user = user,
                                         wotLookup = wotLookups[user.pubkey],
@@ -491,14 +533,26 @@ fun SearchScreen(
 
                 selectedTab == 1 -> {
                     // People tab
-                    if (state.peopleResults.isEmpty()) {
+                    val profileTarget = state.entityTarget as? DeepLinkTarget.Profile
+                    if (peopleBelowEntity.isEmpty() && profileTarget == null) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
                             message = "No results for \u201c${state.query}\u201d",
                         )
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(state.peopleResults, key = { it.pubkey }) { user ->
+                            profileTarget?.let { target ->
+                                item(key = "entity:${entityResultKey(target)}") {
+                                    SearchEntityResultRow(
+                                        target = target,
+                                        profile = state.entityProfile,
+                                        wotLookup = wotLookups[target.pubkey],
+                                        onClick = { onEntityClickDismiss(target) },
+                                    )
+                                    FeedDivider()
+                                }
+                            }
+                            items(peopleBelowEntity, key = { it.pubkey }) { user ->
                                 ProfileCard(
                                     user = user,
                                     wotLookup = wotLookups[user.pubkey],
@@ -514,7 +568,10 @@ fun SearchScreen(
                 else -> {
                     // Notes (2) / Tags (3)
                     val results = if (selectedTab == 3) state.tagResults else state.noteResults
-                    if (results.isEmpty()) {
+                    val noteTarget = state.entityTarget.takeIf {
+                        selectedTab == 2 && (it is DeepLinkTarget.Note || it is DeepLinkTarget.Address)
+                    }
+                    if (results.isEmpty() && noteTarget == null) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
                             message = "No results for \u201c${state.query}\u201d",
@@ -536,6 +593,17 @@ fun SearchScreen(
                             { row -> actionsRow = row },
                         )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
+                            noteTarget?.let { target ->
+                                item(key = "entity:${entityResultKey(target)}") {
+                                    SearchEntityResultRow(
+                                        target = target,
+                                        profile = null,
+                                        wotLookup = null,
+                                        onClick = { onEntityClickDismiss(target) },
+                                    )
+                                    FeedDivider()
+                                }
+                            }
                             eventFeedItems(
                                 events = results,
                                 engagement = engagement,
@@ -626,6 +694,82 @@ fun SearchScreen(
 }
 
 // ── Profile card ──────────────────────────────────────────────────────────────
+
+private fun entityResultKey(target: DeepLinkTarget): String = when (target) {
+    is DeepLinkTarget.Profile -> "profile:${target.pubkey}"
+    is DeepLinkTarget.Note -> "note:${target.eventId}"
+    is DeepLinkTarget.Address -> "address:${target.coordinate}"
+}
+
+@Composable
+private fun SearchEntityResultRow(
+    target: DeepLinkTarget,
+    profile: UserEntity?,
+    wotLookup: WotLookup?,
+    onClick: () -> Unit,
+) {
+    if (target is DeepLinkTarget.Profile) {
+        ProfileCard(
+            user = profile?.takeIf { it.pubkey.equals(target.pubkey, ignoreCase = true) }
+                ?: UserEntity(pubkey = target.pubkey),
+            wotLookup = wotLookup,
+            impersonationRisk = null,
+            onClick = onClick,
+        )
+        return
+    }
+
+    val identity = when (target) {
+        is DeepLinkTarget.Note -> target.eventId
+        is DeepLinkTarget.Address -> target.coordinate
+        is DeepLinkTarget.Profile -> error("Handled above")
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(Sizing.avatar + 8.dp)
+                .clip(CircleShape)
+                .background(BrandSoft),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = null,
+                tint = Brand,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Spacer(Modifier.width(Spacing.small))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Open note",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = AppType.body,
+            )
+            Text(
+                text = identity,
+                color = TextSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = AppType.footnote,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = "Open note",
+            tint = Text3,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
 
 @Composable
 private fun ProfileCard(

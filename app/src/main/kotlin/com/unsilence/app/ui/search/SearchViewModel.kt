@@ -21,6 +21,7 @@ import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.ProtectedProfile
+import com.unsilence.app.data.relay.ProfilePipeline
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.WotHydrationCoalescer
@@ -32,6 +33,8 @@ import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.navigation.DeepLinkRouter
+import com.unsilence.app.ui.navigation.DeepLinkTarget
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -61,6 +64,9 @@ data class SearchUiState(
     val impersonationRisks: Map<String, ImpersonationRisk> = emptyMap(),
     val noteResults: List<FeedRow>      = emptyList(),
     val tagResults: List<FeedRow>       = emptyList(),
+    val entityTarget: DeepLinkTarget?   = null,
+    val entityProfile: UserEntity?      = null,
+    val rejectedSecret: Boolean         = false,
     val loading: Boolean        = false,
     val hasSearched: Boolean    = false,
 )
@@ -90,6 +96,8 @@ class SearchViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val timelineCardData: TimelineCardData,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
+    private val profilePipeline: ProfilePipeline,
+    private val deepLinkRouter: DeepLinkRouter,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SearchUiState())
@@ -113,6 +121,7 @@ class SearchViewModel @Inject constructor(
     private val requestedTrendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
 
     private val _queryFlow = MutableStateFlow("")
+    private val _entityTarget = MutableStateFlow<DeepLinkTarget?>(null)
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
@@ -132,8 +141,50 @@ class SearchViewModel @Inject constructor(
     private val currentSearchToken = AtomicLong(0L)
 
     fun search(query: String) {
+        val entityInput = detectSearchEntityInput(query)
+        val target = (entityInput as? SearchEntityInput.Resolved)?.target
+        _entityTarget.value = target
         _queryFlow.value = query
-        _uiState.update { it.copy(query = query) }
+        _uiState.update { current ->
+            when (entityInput) {
+                is SearchEntityInput.Resolved -> current.copy(
+                    query = query,
+                    peopleResults = emptyList(),
+                    impersonationRisks = emptyMap(),
+                    noteResults = emptyList(),
+                    tagResults = emptyList(),
+                    entityTarget = entityInput.target,
+                    entityProfile = (entityInput.target as? DeepLinkTarget.Profile)?.let {
+                        memoryEventStore.getUserEntity(it.pubkey)
+                    },
+                    rejectedSecret = false,
+                    loading = true,
+                    hasSearched = true,
+                )
+                SearchEntityInput.RejectedSecret -> current.copy(
+                    query = query,
+                    peopleResults = emptyList(),
+                    impersonationRisks = emptyMap(),
+                    noteResults = emptyList(),
+                    tagResults = emptyList(),
+                    entityTarget = null,
+                    entityProfile = null,
+                    rejectedSecret = true,
+                    loading = false,
+                    hasSearched = true,
+                )
+                SearchEntityInput.None -> current.copy(
+                    query = query,
+                    entityTarget = null,
+                    entityProfile = null,
+                    rejectedSecret = false,
+                )
+            }
+        }
+    }
+
+    fun openEntityTarget(target: DeepLinkTarget) {
+        if (_entityTarget.value == target) deepLinkRouter.submit(target)
     }
 
     fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
@@ -220,6 +271,23 @@ class SearchViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            _entityTarget.collectLatest { target ->
+                if (target !is DeepLinkTarget.Profile) {
+                    _uiState.update { it.copy(entityProfile = null) }
+                    return@collectLatest
+                }
+                _wotSubjects.update { it + target.pubkey }
+                wotHydrationCoalescer.requestHydration(listOf(target.pubkey))
+                profilePipeline.fetchProfileMetadata(target.pubkey, target.relayHints)
+                memoryEventStore.userEntityFlow(target.pubkey).collect { profile ->
+                    if (_entityTarget.value == target) {
+                        _uiState.update { it.copy(entityProfile = profile) }
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch {
             _queryFlow
                 .debounce(1000)
                 .filter { it.isEmpty() || it.length >= 3 }
@@ -240,8 +308,31 @@ class SearchViewModel @Inject constructor(
                                 impersonationRisks = emptyMap(),
                                 noteResults   = emptyList(),
                                 tagResults    = emptyList(),
+                                entityTarget = null,
+                                entityProfile = null,
+                                rejectedSecret = false,
                                 loading       = false,
                                 hasSearched   = false,
+                            )
+                        }
+                        return@collectLatest
+                    }
+
+                    if (detectSearchEntityInput(query) == SearchEntityInput.RejectedSecret) {
+                        currentSearchToken.set(0L)
+                        _searchResultEventIds.value = emptySet()
+                        _wotSubjects.value = emptySet()
+                        _uiState.update {
+                            it.copy(
+                                peopleResults = emptyList(),
+                                impersonationRisks = emptyMap(),
+                                noteResults = emptyList(),
+                                tagResults = emptyList(),
+                                entityTarget = null,
+                                entityProfile = null,
+                                rejectedSecret = true,
+                                loading = false,
+                                hasSearched = true,
                             )
                         }
                         return@collectLatest
@@ -338,13 +429,15 @@ class SearchViewModel @Inject constructor(
                             )?.let { user.pubkey to it }
                         }.toMap()
                         val wotSubjects = buildSet {
+                            (_entityTarget.value as? DeepLinkTarget.Profile)?.pubkey?.let(::add)
                             addAll(sortedPeople.map { it.pubkey })
                             addAll(wotSubjectsForFeedRows(mergedNotes, modelProvider = memoryEventStore::getEventModel))
                             addAll(wotSubjectsForFeedRows(tagResults, modelProvider = memoryEventStore::getEventModel))
                         }
                         _wotSubjects.value = wotSubjects
                         wotHydrationCoalescer.requestHydration(wotSubjects)
-                        val hasResults = mergedNotes.isNotEmpty() || sortedPeople.isNotEmpty() || tagResults.isNotEmpty()
+                        val hasResults = _entityTarget.value != null || mergedNotes.isNotEmpty() ||
+                            sortedPeople.isNotEmpty() || tagResults.isNotEmpty()
                         val elapsed = System.currentTimeMillis() - searchStart
                         val doneLoading = hasResults || elapsed > 3_000
                         _uiState.update {
@@ -373,6 +466,7 @@ class SearchViewModel @Inject constructor(
             if (prev != 0L) relayPool.closeSearch(prev)
         }
         _queryFlow.value = ""
+        _entityTarget.value = null
         _searchResultEventIds.value = emptySet()
         _wotSubjects.value = emptySet()
         _uiState.update {
@@ -382,6 +476,9 @@ class SearchViewModel @Inject constructor(
                 impersonationRisks = emptyMap(),
                 noteResults   = emptyList(),
                 tagResults    = emptyList(),
+                entityTarget = null,
+                entityProfile = null,
+                rejectedSecret = false,
                 loading       = false,
                 hasSearched   = false,
             )

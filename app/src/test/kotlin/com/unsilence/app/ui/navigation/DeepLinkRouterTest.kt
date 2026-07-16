@@ -51,6 +51,15 @@ class DeepLinkRouterTest {
     }
 
     @Test
+    fun `resolver treats a 64 hex payload as a profile pubkey`() {
+        assertEquals(
+            DeepLinkTarget.Profile(pubkey),
+            resolveDeepLink("nostr:${pubkey.uppercase()}"),
+        )
+        assertNull(resolveDeepLink("nostr:${pubkey.dropLast(1)}"))
+    }
+
+    @Test
     fun `pending target is a replaceable slot consumed exactly once`() {
         val router = DeepLinkRouter()
         val first = DeepLinkTarget.Note("first")

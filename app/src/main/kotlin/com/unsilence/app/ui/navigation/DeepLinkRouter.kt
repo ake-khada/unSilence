@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+private val HEX_PUBKEY_REGEX = Regex("^[0-9a-fA-F]{64}$")
+
 @Immutable
 sealed interface DeepLinkTarget {
     @Immutable
@@ -50,6 +52,10 @@ internal fun resolveDeepLink(
     }
     val payload = trimmed.substring(separator + 1)
     if (payload.isBlank()) return null
+    if (payload.startsWith("nsec1", ignoreCase = true)) return null
+    if (HEX_PUBKEY_REGEX.matches(payload)) {
+        return DeepLinkTarget.Profile(payload.lowercase())
+    }
 
     return decodePayload(payload)
 }
