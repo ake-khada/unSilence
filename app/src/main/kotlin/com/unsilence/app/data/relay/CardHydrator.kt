@@ -26,6 +26,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -515,6 +517,8 @@ class CardHydrator @Inject constructor(
 
     private suspend fun warmReferencedEvents(refs: List<ReferenceCandidate>, cardWidthPx: Int) {
         val noHintIds = mutableListOf<String>()
+        val coalescedHintFetches = mutableListOf<Pair<String, List<String>>>()
+        val bypassHintFetches = linkedMapOf<List<String>, MutableList<String>>()
         val awaitingIds = LinkedHashSet<String>()
         for (ref in refs) {
             if (memoryEventStore.getEventEntity(ref.eventId) != null) {
@@ -531,14 +535,35 @@ class CardHydrator @Inject constructor(
             val authorHints = ref.authorPubkey?.let { memoryEventStore.writeRelaysFor(it) }.orEmpty()
             val hints = (ref.hints + authorHints).filter { it.isNotBlank() }.distinct()
             if (hints.isNotEmpty()) {
-                relayPool.fetchEventById(
-                    eventId = ref.eventId,
-                    relayHints = hints,
-                    bypassDedup = authorHints.isNotEmpty(),
-                )
+                if (authorHints.isNotEmpty()) {
+                    bypassHintFetches.getOrPut(canonicalRelayHints(hints)) { mutableListOf() }
+                        .add(ref.eventId)
+                } else {
+                    coalescedHintFetches += ref.eventId to hints
+                }
             } else {
                 noHintIds.add(ref.eventId)
             }
+        }
+        // Independent hinted references must enter the same 150ms window together. Awaiting
+        // them serially here would turn the coalescer into one delayed REQ per reference.
+        coroutineScope {
+            val coalescedJobs = coalescedHintFetches.map { (eventId, hints) ->
+                async { relayPool.fetchEventById(eventId, hints) }
+            }
+            // Hydration retries intentionally bypass the global in-flight guard, but they do
+            // not require one wire subscription per ID. Preserve retry semantics while sending
+            // one bounded ids filter for each shared hint set.
+            val bypassJobs = bypassHintFetches.map { (hints, eventIds) ->
+                async {
+                    relayPool.fetchEventsByIdsWithHints(
+                        eventIds = eventIds.distinct(),
+                        relayHints = hints,
+                        bypassDedup = true,
+                    )
+                }
+            }
+            (coalescedJobs + bypassJobs).awaitAll()
         }
         if (noHintIds.isNotEmpty()) relayPool.fetchEventsByIds(noHintIds.distinct())
 
