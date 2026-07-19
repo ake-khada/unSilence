@@ -30,18 +30,28 @@ class UserRepository @Inject constructor(
      * never reach the batching/relay pipeline — eliminates "all fresh, skipping" waste.
      * Default scroll mode: 1 indexer relay.
      */
-    suspend fun fetchMissingProfiles(pubkeys: List<String>) {
+    suspend fun fetchMissingProfiles(
+        pubkeys: List<String>,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+    ) {
         val stale = profileResolver.filterUnresolved(pubkeys.toSet())
         if (stale.isEmpty()) return
-        profileResolver.request(stale.toList())
+        profileResolver.request(
+            pubkeys = stale.toList(),
+            relayHintsByPubkey = relayHintsByPubkey.filterKeys(stale::contains),
+        )
     }
 
     /** Profile screen variant: hits up to [maxRelays] indexer relays for better coverage.
      *  Bypasses [ProfileResolver.filterUnresolved]: the user explicitly navigated here,
      *  so always attempt the fetch. [ProfileResolver.processBatch] + [RelayPool.fetchProfiles]
      *  already have their own dedup (staleness + 2-min attempt TTL). */
-    suspend fun fetchProfilesWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
+    suspend fun fetchProfilesWithFanout(
+        pubkeys: List<String>,
+        maxRelays: Int = 4,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+    ) {
         if (pubkeys.isEmpty()) return
-        profileResolver.requestWithFanout(pubkeys, maxRelays)
+        profileResolver.requestWithFanout(pubkeys, maxRelays, relayHintsByPubkey)
     }
 }

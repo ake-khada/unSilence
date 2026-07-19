@@ -217,6 +217,7 @@ fun ProfileScreen(
         zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
         saveNwcUri = { actionsViewModel.saveNwcUri(it) },
         lookupProfile = actionsViewModel::lookupProfile,
+        lookupProfileWithHints = actionsViewModel::lookupProfileWithHints,
         lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
         lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
         lookupEventReference = actionsViewModel::lookupEvent,

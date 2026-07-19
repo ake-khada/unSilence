@@ -1,7 +1,9 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.relay.NostrJson
-import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.RelayResolutionTargets
+import com.unsilence.app.data.relay.boundedSeenRelayHints
+import com.unsilence.app.data.relay.relayResolutionTargets
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -24,11 +26,34 @@ data class EventReferenceTarget(
 
 internal enum class EventReferenceLookupStep { EVENT_ID, ADDRESS }
 
+internal data class EventReferenceRelayLadder(
+    val eventId: RelayResolutionTargets?,
+    val address: RelayResolutionTargets?,
+)
+
 internal fun eventReferenceLookupSteps(target: EventReferenceTarget): List<EventReferenceLookupStep> =
     buildList {
         if (!target.eventId.isNullOrBlank()) add(EventReferenceLookupStep.EVENT_ID)
         if (target.address != null) add(EventReferenceLookupStep.ADDRESS)
     }
+
+/** Relay targets for both logical phases; locality hints lead each phase. */
+internal fun eventReferenceRelayLadder(
+    target: EventReferenceTarget,
+    browseRelayHints: Collection<String>,
+    idFallbackRelays: Collection<String>,
+    addressFallbackRelays: Collection<String> = idFallbackRelays,
+): EventReferenceRelayLadder {
+    fun targets(fallback: Collection<String>) = relayResolutionTargets(
+        seenRelays = target.relayHints,
+        browseRelays = browseRelayHints,
+        fallbackRelays = fallback,
+    )
+    return EventReferenceRelayLadder(
+        eventId = target.eventId?.takeIf { it.isNotBlank() }?.let { targets(idFallbackRelays) },
+        address = target.address?.let { targets(addressFallbackRelays) },
+    )
+}
 
 internal fun parseEventAddressReference(raw: String?): EventAddressReference? {
     if (raw.isNullOrBlank()) return null
@@ -51,6 +76,7 @@ internal fun buildReplyParentReference(
     eventId: String?,
     tagsJson: String,
     sourceRelay: String?,
+    sourceRelayHints: List<String> = emptyList(),
 ): EventReferenceTarget? {
     val tags = runCatching {
         NostrJson.parseToJsonElement(tagsJson).jsonArray.map { element ->
@@ -68,11 +94,12 @@ internal fun buildReplyParentReference(
         ?: address?.authorPubkey
     val hints = buildList {
         sourceRelay?.let(::add)
+        addAll(sourceRelayHints)
         tags.asSequence()
             .filter { it.getOrNull(0) in setOf("e", "E", "a", "A", "p", "P") }
             .mapNotNull { it.getOrNull(2) }
             .forEach(::add)
-    }.mapNotNull(::normalizeRelayUrl).distinct()
+    }.let { boundedSeenRelayHints(it) }
 
     val normalizedId = eventId?.takeIf { it.isNotBlank() }
     if (normalizedId == null && address == null) return null
@@ -93,6 +120,6 @@ internal fun buildRepostTargetReference(
         eventId = normalizedId,
         address = address,
         authorPubkey = authorPubkey?.takeIf { it.isNotBlank() } ?: address?.authorPubkey,
-        relayHints = relayHints.mapNotNull(::normalizeRelayUrl).distinct(),
+        relayHints = boundedSeenRelayHints(relayHints),
     )
 }

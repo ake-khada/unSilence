@@ -41,6 +41,7 @@ class ProfileResolver @Inject constructor(
     /** Pubkeys already waiting in the batch channel. Prevents repeated card
      *  recompositions from filling the queue with duplicate work. */
     private val queued: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val pendingRelayHints = ConcurrentHashMap<String, List<String>>()
 
     private var requestChannel = Channel<String>(capacity = Channel.UNLIMITED)
 
@@ -77,9 +78,18 @@ class ProfileResolver @Inject constructor(
      * Request profile fetch for [pubkeys]. Non-blocking — pubkeys are enqueued
      * and batched before hitting the relay. Auto-starts the drain loop if stopped.
      */
-    fun request(pubkeys: List<String>) {
+    fun request(
+        pubkeys: List<String>,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+    ) {
         startInternal()
         for (pk in pubkeys) {
+            val hints = relayHintsByPubkey[pk].orEmpty()
+            if (hints.isNotEmpty()) {
+                pendingRelayHints.compute(pk) { _, existing ->
+                    boundedSeenRelayHints(existing.orEmpty() + hints)
+                }
+            }
             if (!queued.add(pk)) continue
             if (requestChannel.trySend(pk).isFailure) queued.remove(pk)
         }
@@ -91,8 +101,12 @@ class ProfileResolver @Inject constructor(
      * 2-minute attempt TTL gates redundant requests. Hits [maxRelays] indexer relays
      * for better coverage than the default scroll mode.
      */
-    fun requestWithFanout(pubkeys: List<String>, maxRelays: Int = 4) {
-        relayPool.get().fetchProfiles(pubkeys, maxRelays)
+    fun requestWithFanout(
+        pubkeys: List<String>,
+        maxRelays: Int = 4,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+    ) {
+        relayPool.get().fetchProfiles(pubkeys, maxRelays, relayHintsByPubkey)
     }
 
     /**
@@ -134,6 +148,7 @@ class ProfileResolver @Inject constructor(
         requestChannel = Channel(capacity = Channel.UNLIMITED)
         inFlight.clear()
         queued.clear()
+        pendingRelayHints.clear()
         Log.d(TAG, "Cleared: jobs cancelled, channel reset, in-flight cleared")
     }
 
@@ -157,14 +172,29 @@ class ProfileResolver @Inject constructor(
 
             val windowMs = (System.nanoTime() - startNs) / 1_000_000L
             try {
-                processBatch(batch.toList(), windowMs = windowMs)
+                val relayHintsByPubkey = batch.associateWith { pubkey ->
+                    boundedSeenRelayHints(pendingRelayHints[pubkey].orEmpty())
+                }
+                processBatch(
+                    pubkeys = batch.toList(),
+                    relayHintsByPubkey = relayHintsByPubkey,
+                    windowMs = windowMs,
+                )
             } finally {
-                batch.forEach(queued::remove)
+                batch.forEach { pubkey ->
+                    queued.remove(pubkey)
+                    pendingRelayHints.remove(pubkey)
+                }
             }
         }
     }
 
-    private suspend fun processBatch(pubkeys: List<String>, maxRelays: Int = DEFAULT_SCROLL_RELAYS, windowMs: Long = -1) {
+    private suspend fun processBatch(
+        pubkeys: List<String>,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+        maxRelays: Int = DEFAULT_SCROLL_RELAYS,
+        windowMs: Long = -1,
+    ) {
         val now = System.currentTimeMillis()
 
         // 1. In-flight guard
@@ -201,6 +231,10 @@ class ProfileResolver @Inject constructor(
 
         val windowStr = if (windowMs >= 0) " collected in ${windowMs}ms" else ""
         Log.d(TAG, "Batch ${pubkeys.size}$windowStr → ${toFetch.size} to fetch (${pubkeys.size - toFetch.size} fresh/in-flight)")
-        relayPool.get().fetchProfiles(toFetch, maxRelays = maxRelays)
+        relayPool.get().fetchProfiles(
+            pubkeys = toFetch,
+            maxRelays = maxRelays,
+            relayHintsByPubkey = relayHintsByPubkey.filterKeys(toFetch.toSet()::contains),
+        )
     }
 }

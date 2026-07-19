@@ -295,6 +295,8 @@ data class FeedRow(
     val replyCount: Int,
     val repostCount: Int,
     val zapCount: Int,
+    /** Bounded snapshot of the relays on which this exact row was observed. */
+    val relaysSeen: List<String> = emptyList(),
 )
 
 /**

@@ -121,4 +121,7 @@ internal class EventIdFetchCoalescer(
 }
 
 internal fun canonicalRelayHints(relayHints: List<String>): List<String> =
-    relayHints.mapNotNull(::normalizeRelayUrl).distinct().sorted()
+    relayHints.mapNotNull(::normalizeRelayUrl)
+        .distinct()
+        .take(MAX_SEEN_RELAY_HINTS)
+        .sorted()

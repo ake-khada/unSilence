@@ -57,6 +57,18 @@ class ConsumerBridgeTest {
     // ── NoteActionsViewModel.lookupEvent: memory hit ───────────────────────
 
     @Test
+    fun `feed row carries bounded relay provenance across duplicate arrivals`() = runTest {
+        store.insert(event(id = "seen-row", relayUrl = "wss://relay.divine.video"))
+        store.insert(event(id = "seen-row", relayUrl = "wss://second.example"))
+
+        val row = store.feedRowsByIds(setOf("seen-row")).single()
+
+        assertEquals("wss://relay.divine.video", row.relaysSeen.first())
+        assertTrue("wss://second.example" in row.relaysSeen)
+        assertTrue(row.relaysSeen.size <= MAX_SEEN_RELAY_HINTS)
+    }
+
+    @Test
     fun `lookupEvent returns memory hit immediately via getEventEntity`() = runTest {
         // This is the exact sequence NoteActionsViewModel.lookupEvent executes:
         // 1. memoryEventStore.getEventEntity(eventId) → fast path

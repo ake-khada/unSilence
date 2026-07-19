@@ -54,9 +54,6 @@ private const val TAG = "CardHydrator"
  *  headroom; oldest IDs evict FIFO when the set exceeds this. */
 private const val HYDRATED_CAP = 500
 
-/** Bound supplementary hint-relay fan-out in ProfilePipeline. Kept here as
- *  the shared fetch budget used by the hydration/profile coordination layer. */
-internal const val MAX_HINT_RELAYS_PER_PASS = 12
 private const val PREFETCH_KEY_CAP = 768
 private const val MAX_PREFETCH_WIDTH_PX = 1600
 private const val MAX_MEDIA_PER_CARD = 4
@@ -244,7 +241,7 @@ class CardHydrator @Inject constructor(
         var videoThumbnails = 0
         var referenceFetches = 0
         var articleFetches = 0
-        val profileCandidates = LinkedHashSet<String>()
+        val profileCandidates = linkedMapOf<String, List<String>>()
         val referenceCandidates = ArrayList<ReferenceCandidate>()
         val articleCandidates = ArrayList<ArticleCandidate>()
         val warmedCachedRefs = HashSet<String>()
@@ -314,15 +311,18 @@ class CardHydrator @Inject constructor(
         }
 
         if (profileCandidates.isNotEmpty() && maxProfileFetches > 0) {
-            val batch = profileCandidates.take(maxProfileFetches)
-            backfillScope.launch { userRepository.fetchMissingProfiles(batch) }
+            val batch = profileCandidates.entries.take(maxProfileFetches)
+            val pubkeys = batch.map { it.key }
+            val hintsByPubkey = batch.associate { it.key to it.value }
+            backfillScope.launch {
+                userRepository.fetchMissingProfiles(pubkeys, hintsByPubkey)
+            }
         }
 
         if (maxReferenceFetches > 0) {
-            val missingRefs = referenceCandidates
+            val missingRefs = mergeReferenceCandidates(referenceCandidates)
                 .asSequence()
                 .filter { memoryEventStore.getEventEntity(it.eventId) == null }
-                .distinctBy { it.eventId }
                 .take(maxReferenceFetches)
                 .toList()
             if (missingRefs.isNotEmpty()) {
@@ -340,10 +340,18 @@ class CardHydrator @Inject constructor(
             for (article in missingArticles) {
                 articleFetches++
                 backfillScope.launch {
-                    val relays = (article.hints + memoryEventStore.writeRelaysFor(article.author))
-                        .filter { it.isNotBlank() }
-                        .distinct()
-                    relayPool.fetchArticleByCoord(relays, article.author, article.dTag)
+                    val targets = relayResolutionTargets(
+                        seenRelays = article.hints,
+                        fallbackRelays = memoryEventStore.writeRelaysFor(article.author),
+                    )
+                    if (targets.hints.isNotEmpty()) {
+                        relayPool.fetchArticleByCoord(targets.hints, article.author, article.dTag)
+                    }
+                    if (memoryEventStore.articleRowByCoord(article.coord) == null &&
+                        targets.fallback.isNotEmpty()
+                    ) {
+                        relayPool.fetchArticleByCoord(targets.fallback, article.author, article.dTag)
+                    }
                 }
                 if (articleFetches >= maxArticleFetches) break
             }
@@ -408,22 +416,28 @@ class CardHydrator @Inject constructor(
     private fun collectProfileCandidates(
         row: FeedRow,
         model: EventModel,
-        out: MutableSet<String>,
+        out: MutableMap<String, List<String>>,
     ) {
-        out.add(row.pubkey)
-        out.add(model.pubkey)
-        out.add(model.sourcePubkey)
-        model.repost?.targetAuthorPubkey?.let(out::add)
-        extractPTagPubkeys(row.tags).forEach(out::add)
+        val hints = rowRelayHints(row)
+        fun add(pubkey: String) {
+            if (pubkey.isBlank()) return
+            out[pubkey] = boundedSeenRelayHints(
+                seenRelays = out[pubkey].orEmpty() + hints,
+            )
+        }
+        add(row.pubkey)
+        add(model.pubkey)
+        add(model.sourcePubkey)
+        model.repost?.targetAuthorPubkey?.let(::add)
+        extractPTagPubkeys(row.tags).forEach(::add)
         for (segment in model.segments) {
             when (segment) {
-                is Segment.MentionPubkey -> out.add(segment.pubkeyHex)
-                is Segment.QuoteEvent -> segment.author?.let(out::add)
-                is Segment.QuoteAddress -> out.add(segment.author)
+                is Segment.MentionPubkey -> add(segment.pubkeyHex)
+                is Segment.QuoteEvent -> segment.author?.let(::add)
+                is Segment.QuoteAddress -> add(segment.author)
                 else -> Unit
             }
         }
-        out.remove("")
     }
 
     private fun collectReferenceCandidates(
@@ -432,13 +446,14 @@ class CardHydrator @Inject constructor(
         refs: MutableList<ReferenceCandidate>,
         articles: MutableList<ArticleCandidate>,
     ) {
+        val rowHints = rowRelayHints(row)
         if (row.kind == 1) {
             val parentId = row.replyToId ?: row.rootId
             if (!parentId.isNullOrBlank() && parentId != row.id) {
                 refs.add(
                     ReferenceCandidate(
                         eventId = parentId,
-                        hints = listOf(row.relayUrl).filter { it.isNotBlank() },
+                        hints = rowHints,
                         authorPubkey = null,
                     ),
                 )
@@ -448,7 +463,13 @@ class CardHydrator @Inject constructor(
             refs.add(
                 ReferenceCandidate(
                     eventId = id,
-                    hints = listOfNotNull(model.repost.relayHint, row.relayUrl.takeIf { it.isNotBlank() }),
+                    hints = boundedSeenRelayHints(
+                        seenRelays = rowHints,
+                        additionalRelays = listOfNotNull(
+                            model.repost.relayHint,
+                            model.repost.addressRelayHint,
+                        ),
+                    ),
                     authorPubkey = model.repost.targetAuthorPubkey,
                 ),
             )
@@ -458,7 +479,10 @@ class CardHydrator @Inject constructor(
                 is Segment.QuoteEvent -> refs.add(
                     ReferenceCandidate(
                         eventId = segment.eventId,
-                        hints = segment.hints,
+                        hints = boundedSeenRelayHints(
+                            seenRelays = rowHints,
+                            additionalRelays = segment.hints,
+                        ),
                         authorPubkey = segment.author,
                     ),
                 )
@@ -470,7 +494,10 @@ class CardHydrator @Inject constructor(
                                 coord = coord,
                                 author = segment.author,
                                 dTag = segment.dTag,
-                                hints = segment.hints,
+                                hints = boundedSeenRelayHints(
+                                    seenRelays = rowHints,
+                                    additionalRelays = segment.hints,
+                                ),
                             ),
                         )
                     }
@@ -485,7 +512,7 @@ class CardHydrator @Inject constructor(
         cardWidthPx: Int,
         remainingVideoThumbnails: Int,
         remainingImagePrefetches: Int,
-        profileCandidates: MutableSet<String>? = null,
+        profileCandidates: MutableMap<String, List<String>>? = null,
     ): WarmedReferenceAssets {
         val refEvent = memoryEventStore.getNostrEvent(eventId) ?: return WarmedReferenceAssets(0, 0)
         val refRow = memoryEventStore.synthesizeFeedRow(refEvent)
@@ -515,11 +542,37 @@ class CardHydrator @Inject constructor(
         )
     }
 
+    private fun rowRelayHints(row: FeedRow): List<String> = feedRowRelayHints(
+        primaryRelay = row.relayUrl,
+        relaysSeen = row.relaysSeen +
+            memoryEventStore.getNostrEvent(row.id)?.relaysSeen.orEmpty(),
+        browseRelays = relayPool.activeFeedRelayHints(),
+    )
+
+    private fun mergeReferenceCandidates(
+        refs: List<ReferenceCandidate>,
+    ): List<ReferenceCandidate> {
+        val merged = linkedMapOf<String, ReferenceCandidate>()
+        for (ref in refs) {
+            val existing = merged[ref.eventId]
+            merged[ref.eventId] = if (existing == null) {
+                ref
+            } else {
+                existing.copy(
+                    hints = boundedSeenRelayHints(existing.hints + ref.hints),
+                    authorPubkey = existing.authorPubkey ?: ref.authorPubkey,
+                )
+            }
+        }
+        return merged.values.toList()
+    }
+
     private suspend fun warmReferencedEvents(refs: List<ReferenceCandidate>, cardWidthPx: Int) {
         val noHintIds = mutableListOf<String>()
         val coalescedHintFetches = mutableListOf<Pair<String, List<String>>>()
-        val bypassHintFetches = linkedMapOf<List<String>, MutableList<String>>()
         val awaitingIds = LinkedHashSet<String>()
+        val refsById = refs.associateBy { it.eventId }
+        val triedRelaysById = mutableMapOf<String, MutableSet<String>>()
         for (ref in refs) {
             if (memoryEventStore.getEventEntity(ref.eventId) != null) {
                 warmCachedReferenceAssets(
@@ -532,15 +585,9 @@ class CardHydrator @Inject constructor(
             }
             if (relayPool.isEventUnresolved(ref.eventId)) continue
             awaitingIds.add(ref.eventId)
-            val authorHints = ref.authorPubkey?.let { memoryEventStore.writeRelaysFor(it) }.orEmpty()
-            val hints = (ref.hints + authorHints).filter { it.isNotBlank() }.distinct()
-            if (hints.isNotEmpty()) {
-                if (authorHints.isNotEmpty()) {
-                    bypassHintFetches.getOrPut(canonicalRelayHints(hints)) { mutableListOf() }
-                        .add(ref.eventId)
-                } else {
-                    coalescedHintFetches += ref.eventId to hints
-                }
+            if (ref.hints.isNotEmpty()) {
+                coalescedHintFetches += ref.eventId to ref.hints
+                triedRelaysById.getOrPut(ref.eventId) { linkedSetOf() }.addAll(ref.hints)
             } else {
                 noHintIds.add(ref.eventId)
             }
@@ -551,21 +598,60 @@ class CardHydrator @Inject constructor(
             val coalescedJobs = coalescedHintFetches.map { (eventId, hints) ->
                 async { relayPool.fetchEventById(eventId, hints) }
             }
-            // Hydration retries intentionally bypass the global in-flight guard, but they do
-            // not require one wire subscription per ID. Preserve retry semantics while sending
-            // one bounded ids filter for each shared hint set.
-            val bypassJobs = bypassHintFetches.map { (hints, eventIds) ->
+            coalescedJobs.awaitAll()
+        }
+        if (noHintIds.isNotEmpty()) relayPool.fetchEventsByIds(noHintIds.distinct())
+
+        // Phase 2: only unresolved hinted references advance to the target author's
+        // outbox. Remove relays already queried by the locality phase.
+        val ownRelayBatches = linkedMapOf<List<String>, MutableList<String>>()
+        for (eventId in coalescedHintFetches.map { it.first }) {
+            if (memoryEventStore.getEventEntity(eventId) != null) continue
+            val ref = refsById[eventId] ?: continue
+            val ownRelays = ref.authorPubkey
+                ?.let(memoryEventStore::writeRelaysFor)
+                .orEmpty()
+            val targets = relayResolutionTargets(
+                seenRelays = ref.hints,
+                fallbackRelays = ownRelays,
+            ).fallback
+            if (targets.isEmpty()) continue
+            triedRelaysById.getOrPut(eventId) { linkedSetOf() }.addAll(targets)
+            ownRelayBatches.getOrPut(normalizedRelayTargets(targets).sorted()) { mutableListOf() }
+                .add(eventId)
+        }
+        coroutineScope {
+            ownRelayBatches.map { (targets, eventIds) ->
                 async {
-                    relayPool.fetchEventsByIdsWithHints(
+                    relayPool.fetchEventsByIdsFromTargets(
                         eventIds = eventIds.distinct(),
-                        relayHints = hints,
+                        targetRelayUrls = targets,
                         bypassDedup = true,
                     )
                 }
-            }
-            (coalescedJobs + bypassJobs).awaitAll()
+            }.awaitAll()
         }
-        if (noHintIds.isNotEmpty()) relayPool.fetchEventsByIds(noHintIds.distinct())
+
+        // Phase 3: broaden only unresolved hinted references to the ordinary pool,
+        // excluding locality/outbox relays already queried for each group.
+        val globalFallbackBatches = linkedMapOf<List<String>, MutableList<String>>()
+        for (eventId in coalescedHintFetches.map { it.first }) {
+            if (memoryEventStore.getEventEntity(eventId) != null) continue
+            val tried = normalizedRelayTargets(triedRelaysById[eventId].orEmpty()).sorted()
+            globalFallbackBatches.getOrPut(tried) { mutableListOf() }.add(eventId)
+        }
+        coroutineScope {
+            globalFallbackBatches.map { (tried, eventIds) ->
+                async {
+                    relayPool.fetchEventsByIdsWithHints(
+                        eventIds = eventIds.distinct(),
+                        relayHints = emptyList(),
+                        bypassDedup = true,
+                        excludedRelayUrls = tried,
+                    )
+                }
+            }.awaitAll()
+        }
 
         coroutineScope {
             for (eventId in awaitingIds) {
