@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -98,6 +99,7 @@ import com.unsilence.app.ui.thread.ThreadViewModel
 import kotlinx.coroutines.delay
 
 private const val IMMERSIVE_OWNER_ID = "feed-immersive"
+private const val IMMERSIVE_LOG_TAG = "ImmersiveVideo"
 private const val LOAD_MORE_DISTANCE = 3
 private const val PROGRESS_POLL_MS = 250L
 private const val SOUNDWAVE_FIRST_BASE_DP = 8f
@@ -170,7 +172,7 @@ internal fun ImmersiveVideoFeed(
     var renderedVideoUrl by remember { mutableStateOf<String?>(null) }
     var startupReadyEventId by remember { mutableStateOf<String?>(null) }
     var sheetEventId by remember { mutableStateOf<String?>(null) }
-    var anchoredEventId by remember { mutableStateOf(sessionItems.first().row.id) }
+    var anchoredContentId by remember { mutableStateOf(sessionItems.first().contentId) }
     var revealedSensitiveIds by remember { mutableStateOf(emptySet<String>()) }
     val isPowerSaveMode = rememberPowerSaveMode()
 
@@ -221,19 +223,26 @@ internal fun ImmersiveVideoFeed(
     }
 
     val settledItem = sessionItems.getOrNull(pagerState.settledPage)
-    val settledItemBlocked = settledItem?.row?.let { row ->
+    val settledItemBlocked = settledItem?.let { item ->
         sensitiveMode == SensitiveContentMode.BLUR &&
-            row.hasContentWarning && row.id !in revealedSensitiveIds
+            item.row.hasContentWarning && item.contentId !in revealedSensitiveIds
     } == true
     LaunchedEffect(
-        settledItem?.row?.id,
+        settledItem?.contentId,
         settledItem?.video?.videoUrl,
         settledItemBlocked,
     ) {
         val item = settledItem ?: return@LaunchedEffect
-        anchoredEventId = item.row.id
+        anchoredContentId = item.contentId
         onPageSettled(item.row)
-        callbacks.onWotSubjectsVisible(setOf(item.row.pubkey))
+        callbacks.onWotSubjectsVisible(setOf(item.authorPubkey))
+        Log.i(
+            IMMERSIVE_LOG_TAG,
+            "IMMERSIVE_SETTLED wrapper=${item.row.id} content=${item.contentId} " +
+                "repost=${item.row.kind == 6 || item.row.kind == 16} " +
+                "sourceAuthor=${item.row.pubkey.take(12)} author=${item.authorPubkey.take(12)} " +
+                "authorSource=${if (item.row.kind == 6 || item.row.kind == 16) "target" else "row"}",
+        )
         if (settledItemBlocked) {
             player.playWhenReady = false
             paused = true
@@ -245,7 +254,7 @@ internal fun ImmersiveVideoFeed(
         val currentEventId = player.currentMediaItem?.mediaId
         if (
             currentUrl != item.video.videoUrl ||
-            currentEventId != item.row.id ||
+            currentEventId != item.contentId ||
             player.mediaItemCount == 0
         ) {
             renderedVideoUrl = null
@@ -253,23 +262,23 @@ internal fun ImmersiveVideoFeed(
             player.playWhenReady = false
             player.stop()
             player.clearMediaItems()
-            holder.setImmersiveMediaItem(item.row.id, item.video)
+            holder.setImmersiveMediaItem(item.contentId, item.video)
             val stillCurrent = awaitStartupBuffer(
                 player = player,
-                expectedEventId = item.row.id,
+                expectedEventId = item.contentId,
                 targetBufferMs = resilientStartupBufferMs(item.video),
             )
             if (!stillCurrent) return@LaunchedEffect
         }
         paused = false
-        startupReadyEventId = item.row.id
+        startupReadyEventId = item.contentId
         player.playWhenReady = true
     }
 
     // Preserve the viewed event when live inserts prepend rows to the filtered feed.
-    LaunchedEffect(sessionItems.map { it.row.id }) {
+    LaunchedEffect(sessionItems.map { it.contentId }) {
         if (pagerState.isScrollInProgress) return@LaunchedEffect
-        val anchoredIndex = sessionItems.indexOfFirst { it.row.id == anchoredEventId }
+        val anchoredIndex = sessionItems.indexOfFirst { it.contentId == anchoredContentId }
         if (anchoredIndex >= 0 && anchoredIndex != pagerState.currentPage) {
             pagerState.scrollToPage(anchoredIndex)
         }
@@ -282,14 +291,14 @@ internal fun ImmersiveVideoFeed(
     )
     val preloadItem = preloadIndex?.let(sessionItems::getOrNull)
     LaunchedEffect(
-        settledItem?.row?.id,
+        settledItem?.contentId,
         startupReadyEventId,
         preloadIndex,
-        preloadItem?.row?.id,
+        preloadItem?.contentId,
         isPowerSaveMode,
     ) {
         val current = settledItem ?: return@LaunchedEffect
-        if (startupReadyEventId != current.row.id) return@LaunchedEffect
+        if (startupReadyEventId != current.contentId) return@LaunchedEffect
         if (
             !isPowerSaveMode &&
             preloadItem != null &&
@@ -298,19 +307,19 @@ internal fun ImmersiveVideoFeed(
             // A high-bitrate current item gets the connection exclusively until
             // it is complete. Starting the next request sooner can starve the
             // playing stream on constrained single-origin video hosts.
-            while (player.currentMediaItem?.mediaId == current.row.id && player.playerError == null) {
+            while (player.currentMediaItem?.mediaId == current.contentId && player.playerError == null) {
                 val durationMs = player.duration
                 if (durationMs > 0L && player.bufferedPosition >= durationMs - PROGRESS_POLL_MS) break
                 delay(PROGRESS_POLL_MS)
             }
-            if (player.currentMediaItem?.mediaId != current.row.id) return@LaunchedEffect
+            if (player.currentMediaItem?.mediaId != current.contentId) return@LaunchedEffect
         }
         holder.updateImmersivePreload(
             currentIndex = pagerState.settledPage,
-            currentEventId = current.row.id,
+            currentEventId = current.contentId,
             currentVideo = current.video,
             nextIndex = preloadIndex,
-            nextEventId = preloadItem?.row?.id,
+            nextEventId = preloadItem?.contentId,
             nextVideo = preloadItem?.video,
             enabled = !isPowerSaveMode,
         )
@@ -333,7 +342,7 @@ internal fun ImmersiveVideoFeed(
             val item = sessionItems[page]
             val active = page == pagerState.settledPage
             val blocked = sensitiveMode == SensitiveContentMode.BLUR &&
-                item.row.hasContentWarning && item.row.id !in revealedSensitiveIds
+                item.row.hasContentWarning && item.contentId !in revealedSensitiveIds
             ImmersiveVideoPage(
                 item = item,
                 player = player,
@@ -345,7 +354,7 @@ internal fun ImmersiveVideoFeed(
                 onTogglePlayback = {
                     if (active) {
                         if (blocked) {
-                            revealedSensitiveIds = revealedSensitiveIds + item.row.id
+                            revealedSensitiveIds = revealedSensitiveIds + item.contentId
                         } else {
                             paused = !paused
                             player.playWhenReady = !paused
@@ -387,23 +396,23 @@ internal fun ImmersiveVideoFeed(
                 item = item,
                 callbacks = callbacks,
                 playing = !paused && !settledItemBlocked,
-                onOpenSheet = { sheetEventId = item.row.id },
+                onOpenSheet = { sheetEventId = item.contentId },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
             PlaybackProgressComet(
                 player = player,
-                eventId = item.row.id,
+                eventId = item.contentId,
                 videoUrl = item.video.videoUrl,
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
     }
 
-    val sheetItem = sheetEventId?.let { id -> sessionItems.firstOrNull { it.row.id == id } }
+    val sheetItem = sheetEventId?.let { id -> sessionItems.firstOrNull { it.contentId == id } }
     if (sheetItem != null) {
         ImmersiveEngagementSheet(
             item = sheetItem,
-            model = eventModelProvider(sheetItem.row.id) ?: sheetItem.row.toEventModel(),
+            model = eventModelProvider(sheetItem.contentId) ?: sheetItem.row.toEventModel(),
             callbacks = callbacks,
             engagement = engagement,
             threadViewModel = threadViewModel,
@@ -527,7 +536,7 @@ private fun ImmersiveVideoPage(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(item.row.id) {
+                .pointerInput(item.contentId) {
                     detectTapGestures(
                         onTap = { onTogglePlayback() },
                         onLongPress = { onLongPress() },
@@ -629,15 +638,20 @@ private fun ImmersiveAuthorBar(
     modifier: Modifier = Modifier,
 ) {
     val row = item.row
-    val profile = collectProfileAsState(row.pubkey, callbacks.profileFlow)
+    // Immersive is a content surface: repost attribution remains on the card,
+    // while the player author bar always represents the original target author.
+    val authorPubkey = item.authorPubkey
+    val rowDescribesAuthor = row.pubkey == authorPubkey
+    val profile = collectProfileAsState(authorPubkey, callbacks.profileFlow)
     val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
         ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-        ?: row.displayName
-        ?: "${row.pubkey.take(6)}…${row.pubkey.takeLast(4)}"
-    val caption = remember(row.content, item.video.videoUrl) {
-        row.content.replace(item.video.videoUrl, "").trim().replace('\n', ' ')
+        ?: row.displayName.takeIf { rowDescribesAuthor }
+        ?: "${authorPubkey.take(6)}…${authorPubkey.takeLast(4)}"
+    val caption = remember(row.kind, row.content, item.video.videoUrl) {
+        if (row.kind == 6 || row.kind == 16) ""
+        else row.content.replace(item.video.videoUrl, "").trim().replace('\n', ' ')
     }
-    var dragAmount by remember(row.id) { mutableFloatStateOf(0f) }
+    var dragAmount by remember(item.contentId) { mutableFloatStateOf(0f) }
 
     Column(
         modifier = modifier
@@ -648,7 +662,7 @@ private fun ImmersiveAuthorBar(
                 ),
             )
             .clickable(onClick = onOpenSheet)
-            .pointerInput(row.id) {
+            .pointerInput(item.contentId) {
                 detectVerticalDragGestures(
                     onDragStart = { dragAmount = 0f },
                     onVerticalDrag = { change, amount ->
@@ -670,14 +684,14 @@ private fun ImmersiveAuthorBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AvatarImage(
-                pubkey = row.pubkey,
-                picture = profile?.picture ?: row.authorPicture,
+                pubkey = authorPubkey,
+                picture = profile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
                 sizeDp = 34.dp,
                 lookupProfile = callbacks.lookupProfile,
                 profileFlow = callbacks.profileFlow,
                 modifier = Modifier
                     .size(34.dp)
-                    .clickable { callbacks.onAuthorClick(row.pubkey) },
+                    .clickable { callbacks.onAuthorClick(authorPubkey) },
             )
             Spacer(Modifier.width(Spacing.small))
             Row(
@@ -693,7 +707,7 @@ private fun ImmersiveAuthorBar(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
-                val lookup = callbacks.wotLookup?.invoke(row.pubkey)
+                val lookup = callbacks.wotLookup?.invoke(authorPubkey)
                 if (lookup is WotLookup.Scored) {
                     Spacer(Modifier.width(Spacing.small))
                     WotInlineLabel(assertion = lookup.assertion, prefix = "")

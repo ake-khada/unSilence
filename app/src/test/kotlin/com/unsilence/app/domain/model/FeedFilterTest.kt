@@ -1,7 +1,6 @@
 package com.unsilence.app.domain.model
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,18 +21,21 @@ class FeedFilterTest {
     }
 
     @Test
-    fun `default kind set keeps generic reposts under all only`() {
-        assertTrue(16 in FeedFilter().enabledKinds)
-        assertFalse(16 in FeedFilter(showTypes = setOf(ShowType.TEXT, ShowType.IMAGES)).enabledKinds)
+    fun `every specific show type pins both repost kinds`() {
+        ShowType.values().filterNot { it == ShowType.ALL }.forEach { showType ->
+            val kinds = FeedFilter(showTypes = setOf(showType)).enabledKinds
+            assertTrue("$showType must query kind 6", 6 in kinds)
+            assertTrue("$showType must query kind 16", 16 in kinds)
+        }
     }
 
     @Test
     fun `specific show types enable only matching relay kinds`() {
         val filter = FeedFilter(showTypes = setOf(ShowType.TEXT, ShowType.IMAGES, ShowType.ARTICLES))
 
-        assertEquals(listOf(1, 1068, 20, 30023), filter.enabledKinds)
+        assertEquals(listOf(1, 6, 16, 1068, 20, 30023), filter.enabledKinds)
         assertTrue(filter.needsMediaFilter)
-        assertFalse(6 in filter.enabledKinds)
+        assertTrue(6 in filter.enabledKinds)
     }
 
     @Test

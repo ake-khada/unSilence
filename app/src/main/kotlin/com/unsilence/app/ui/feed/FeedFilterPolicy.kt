@@ -12,6 +12,11 @@ internal enum class KindOneMediaType {
     VIDEO,
 }
 
+internal data class ResolvedRepostTarget(
+    val content: String,
+    val model: EventModel,
+)
+
 internal fun classifyKindOneMedia(
     content: String,
     model: EventModel?,
@@ -36,11 +41,38 @@ internal fun matchesShowTypes(
     content: String,
     model: EventModel?,
     filter: FeedFilter,
+    resolvedRepostTarget: ResolvedRepostTarget? = null,
 ): Boolean {
     if (kind !in filter.enabledKinds) return false
     if (ShowType.ALL in filter.showTypes) return true
 
-    return when (kind) {
+    if (kind == 6 || kind == 16) {
+        val repost = model?.repost ?: return false
+        val effective = if (repost.embeddedJson != null && repost.resolvedFromInner) {
+            // ContentParser already unwrapped the embedded event into this model.
+            ResolvedRepostTarget(content = "", model = model)
+        } else {
+            // A k/e/a tag alone only describes a reference. Until its target is
+            // hydrated, do not guess its content class in a specific view.
+            resolvedRepostTarget ?: return false
+        }
+        return matchesEffectiveShowType(
+            kind = effective.model.effectiveKind,
+            content = effective.content,
+            model = effective.model,
+            filter = filter,
+        )
+    }
+
+    return matchesEffectiveShowType(kind, content, model, filter)
+}
+
+private fun matchesEffectiveShowType(
+    kind: Int,
+    content: String,
+    model: EventModel?,
+    filter: FeedFilter,
+): Boolean = when (kind) {
         1 -> when (classifyKindOneMedia(content, model)) {
             KindOneMediaType.TEXT -> ShowType.TEXT in filter.showTypes
             KindOneMediaType.IMAGE -> ShowType.IMAGES in filter.showTypes
@@ -52,7 +84,6 @@ internal fun matchesShowTypes(
         30023 -> ShowType.ARTICLES in filter.showTypes
         else -> false
     }
-}
 
 internal fun FeedFilter.hasActivityThresholds(): Boolean =
     minReplies > 0 || minReposts > 0 || minReactions > 0 || minZapSats > 0

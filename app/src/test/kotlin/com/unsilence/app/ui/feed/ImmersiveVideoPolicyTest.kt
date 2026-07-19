@@ -42,7 +42,7 @@ class ImmersiveVideoPolicyTest {
     }
 
     @Test
-    fun `pager selects playable native and kind-one rows only`() {
+    fun `pager selects playable native rows and rejects an unresolved repost`() {
         val rows = listOf(
             row("kind1-video", 1),
             row("kind1-youtube", 1),
@@ -53,13 +53,43 @@ class ImmersiveVideoPolicyTest {
             row("repost", 16),
         )
         val playable = setOf("kind1-video", "normal", "short", "addressable", "addressable-short")
-        val selected = selectImmersiveVideoItems(rows) { id ->
-            if (id in playable) listOf(video.copy(videoUrl = "https://media.example/$id")) else emptyList()
-        }
+        val selected = selectImmersiveVideoItems(
+            rows = rows,
+            videoModelsFor = { id ->
+                if (id in playable) listOf(video.copy(videoUrl = "https://media.example/$id")) else emptyList()
+            },
+        )
 
         assertEquals(playable, selected.map { it.row.id }.toSet())
         assertTrue(selected.none { it.row.id == "kind1-youtube" })
         assertTrue(selected.none { it.row.id == "repost" })
+    }
+
+    @Test
+    fun `pager resolves repost media by target and dedups to newest occurrence`() {
+        val targetId = "target-video"
+        val originalAuthor = "b".repeat(64)
+        val requestedIds = mutableListOf<String>()
+        val rows = listOf(
+            row("newest-repost", 16, rootId = targetId, createdAt = 10L),
+            row("older-repost", 6, rootId = targetId, createdAt = 9L),
+            row(targetId, 22, pubkey = originalAuthor, createdAt = 8L),
+        )
+
+        val selected = selectImmersiveVideoItems(
+            rows = rows,
+            videoModelsFor = { id ->
+                requestedIds += id
+                if (id == targetId) listOf(video) else emptyList()
+            },
+            authorPubkeyFor = { id -> originalAuthor.takeIf { id == targetId } },
+        )
+
+        assertEquals(listOf(targetId), requestedIds)
+        assertEquals(1, selected.size)
+        assertEquals("newest-repost", selected.single().row.id)
+        assertEquals(targetId, selected.single().contentId)
+        assertEquals(originalAuthor, selected.single().authorPubkey)
     }
 
     @Test
@@ -143,6 +173,25 @@ class ImmersiveVideoPolicyTest {
     }
 
     @Test
+    fun `target dedup remains append-only after a newer repost arrives`() {
+        val initial = listOf(
+            item(id = "stable-repost", createdAt = 5, contentId = "viral"),
+            item(id = "shared", createdAt = 4),
+        )
+        val incoming = listOf(
+            item(id = "newer-repost", createdAt = 7, contentId = "viral"),
+            item(id = "shared", createdAt = 4),
+            item(id = "next-repost", createdAt = 3, contentId = "next"),
+            item(id = "duplicate-next", createdAt = 2, contentId = "next"),
+        )
+
+        val merged = mergeImmersiveItems(initial, incoming)
+
+        assertEquals(listOf("viral", "shared", "next"), merged.map { it.contentId })
+        assertEquals(listOf("stable-repost", "shared", "next-repost"), merged.map { it.row.id })
+    }
+
+    @Test
     fun `filter icon mapping is exhaustive and stable`() {
         assertEquals(FilterIconKind.GRID, filterIconKind(ShowType.ALL))
         assertEquals(FilterIconKind.TEXT, filterIconKind(ShowType.TEXT))
@@ -151,16 +200,22 @@ class ImmersiveVideoPolicyTest {
         assertEquals(FilterIconKind.ARTICLE, filterIconKind(ShowType.ARTICLES))
     }
 
-    private fun row(id: String, kind: Int) = FeedRow(
+    private fun row(
+        id: String,
+        kind: Int,
+        rootId: String? = null,
+        pubkey: String = "a".repeat(64),
+        createdAt: Long = 1L,
+    ) = FeedRow(
         id = id,
-        pubkey = "a".repeat(64),
+        pubkey = pubkey,
         kind = kind,
         content = "",
-        createdAt = 1L,
+        createdAt = createdAt,
         tags = "[]",
         relayUrl = "wss://relay.example",
         replyToId = null,
-        rootId = null,
+        rootId = rootId,
         hasContentWarning = false,
         contentWarningReason = null,
         zapTotalSats = 0,
@@ -174,8 +229,13 @@ class ImmersiveVideoPolicyTest {
         zapCount = 0,
     )
 
-    private fun item(id: String, createdAt: Long) = ImmersiveVideoItem(
+    private fun item(
+        id: String,
+        createdAt: Long,
+        contentId: String = id,
+    ) = ImmersiveVideoItem(
         row = row(id, 22).copy(createdAt = createdAt),
         video = video.copy(videoUrl = "https://media.example/$id"),
+        contentId = contentId,
     )
 }
