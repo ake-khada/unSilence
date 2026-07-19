@@ -40,6 +40,7 @@ import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.GlobalFeedLens
+import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -185,6 +186,7 @@ class FeedViewModel @Inject constructor(
 
     private val globalFeedPolicy = GlobalFeedPolicy()
     private val trustedSweepRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val showRepostTraceKeys: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     private val _globalFeedDropCounters = MutableStateFlow(GlobalFeedDropCounters())
     internal val globalFeedDropCounters: StateFlow<GlobalFeedDropCounters> =
@@ -1065,12 +1067,69 @@ class FeedViewModel @Inject constructor(
         nowSec: Long,
     ): Boolean {
         if (evt.kind !in filter.enabledKinds) return false
-        val model = if (evt.kind == 1 && filter.needsMediaFilter) {
-            memoryEventStore.getEventModel(evt.id)
+        val specificShowFilter = ShowType.ALL !in filter.showTypes
+        val model = if (
+            (evt.kind == 1 && filter.needsMediaFilter) ||
+            ((evt.kind == 6 || evt.kind == 16) && specificShowFilter)
+        ) {
+            memoryEventStore.getOrParseEventModel(evt.id)
         } else {
             null
         }
-        if (!matchesShowTypes(evt.kind, evt.content, model, filter)) return false
+        val repostInfo = model?.repost
+        val resolvedRepostTarget = if (
+            specificShowFilter &&
+            (evt.kind == 6 || evt.kind == 16) &&
+            repostInfo != null &&
+            (repostInfo.embeddedJson == null || !repostInfo.resolvedFromInner)
+        ) {
+            val targetId = repostInfo.targetId ?: evt.rootId
+            val targetEvent = targetId?.let(memoryEventStore::getNostrEvent)
+            val targetModel = targetId?.let(memoryEventStore::getOrParseEventModel)
+            if (targetEvent != null && targetModel != null) {
+                ResolvedRepostTarget(targetEvent.content, targetModel)
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+        val matchesShowType = matchesShowTypes(
+            evt.kind,
+            evt.content,
+            model,
+            filter,
+            resolvedRepostTarget,
+        )
+        if (specificShowFilter && (evt.kind == 6 || evt.kind == 16)) {
+            val targetState = when {
+                repostInfo?.embeddedJson != null && repostInfo.resolvedFromInner -> "embedded"
+                resolvedRepostTarget != null -> "resolved"
+                else -> "unresolved"
+            }
+            val effectiveModel = if (targetState == "embedded") model else resolvedRepostTarget?.model
+            val effectiveContent = resolvedRepostTarget?.content.orEmpty()
+            val contentClass = when (effectiveModel?.effectiveKind) {
+                1 -> classifyKindOneMedia(effectiveContent, effectiveModel).name
+                20 -> "IMAGES"
+                21, 22, 34235, 34236 -> "VIDEO"
+                1068 -> "TEXT"
+                30023 -> "ARTICLES"
+                else -> "UNKNOWN"
+            }
+            val show = filter.showTypes.sortedBy { it.ordinal }.joinToString("+") { it.name }
+            val targetId = model?.repost?.targetId ?: evt.rootId ?: "none"
+            val traceKey = "${evt.id}:$show:$targetState:$contentClass:$matchesShowType"
+            if (showRepostTraceKeys.add(traceKey)) {
+                Log.i(
+                    TAG,
+                    "SHOWREPOST wrapper=${evt.id} target=$targetId outer=${evt.kind} " +
+                        "state=$targetState effectiveKind=${effectiveModel?.effectiveKind ?: -1} " +
+                        "class=$contentClass show=$show matched=$matchesShowType",
+                )
+            }
+        }
+        if (!matchesShowType) return false
         val since = filter.sinceHours?.let { hours -> nowSec - hours * 60L * 60L }
         return since == null || evt.createdAt >= since
     }

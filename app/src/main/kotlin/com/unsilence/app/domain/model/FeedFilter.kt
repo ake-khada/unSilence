@@ -37,6 +37,10 @@ data class FeedFilter(
         return buildList {
             // TEXT, IMAGES, VIDEO all need kind 1 in the SQL query
             if (ShowType.TEXT in showTypes || ShowType.IMAGES in showTypes || ShowType.VIDEO in showTypes) add(1)
+            // Reposts are transparent content wrappers: every specific show-type
+            // query must admit them so post-query policy can classify the target.
+            add(6)
+            add(16)
             if (ShowType.TEXT in showTypes) add(1068)
             if (ShowType.IMAGES in showTypes) add(20)
             if (ShowType.VIDEO in showTypes) {

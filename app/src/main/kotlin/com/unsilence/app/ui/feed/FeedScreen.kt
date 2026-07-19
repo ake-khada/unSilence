@@ -184,10 +184,14 @@ fun FeedScreen(
             emptyList()
         } else {
             val rowsById = events.associateBy { it.id }
-            selectImmersiveVideoItems(events) { id ->
-                actionsViewModel.getVideoRenderModels(id).takeIf { it.isNotEmpty() }
-                    ?: rowsById[id]?.let(::buildVideoRenderModels).orEmpty()
-            }
+            selectImmersiveVideoItems(
+                rows = events,
+                videoModelsFor = { id ->
+                    actionsViewModel.getVideoRenderModels(id).takeIf { it.isNotEmpty() }
+                        ?: rowsById[id]?.let(::buildVideoRenderModels).orEmpty()
+                },
+                authorPubkeyFor = { id -> actionsViewModel.getCachedEventModel(id)?.pubkey },
+            )
         }
     }
 

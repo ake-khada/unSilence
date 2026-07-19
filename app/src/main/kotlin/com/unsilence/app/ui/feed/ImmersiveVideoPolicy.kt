@@ -7,6 +7,7 @@ import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.ShowType
 
 private val IMMERSIVE_VIDEO_KINDS = setOf(1, 21, 22, 34235, 34236)
+private val REPOST_KINDS = setOf(6, 16)
 
 internal const val HIGH_BITRATE_VIDEO_BPS = 4_000_000L
 internal const val MAX_RESILIENT_STARTUP_BUFFER_MS = 1_500L
@@ -15,6 +16,10 @@ private const val MIN_RESILIENT_STARTUP_BUFFER_MS = 500L
 internal data class ImmersiveVideoItem(
     val row: FeedRow,
     val video: VideoRenderModel,
+    /** Stable content identity; repost wrappers point at their target event. */
+    val contentId: String = row.id,
+    /** Immersive is a content surface, so this is always the original author. */
+    val authorPubkey: String = row.pubkey,
 )
 
 internal fun FeedFilter.isImmersiveVideoMode(): Boolean =
@@ -31,31 +36,56 @@ internal fun mergeImmersiveItems(
     current: List<ImmersiveVideoItem>,
     incoming: List<ImmersiveVideoItem>,
 ): List<ImmersiveVideoItem> {
-    if (current.isEmpty()) return incoming.distinctBy { it.row.id }
+    if (current.isEmpty()) return incoming.distinctBy { it.contentId }
     if (incoming.isEmpty()) return current
 
-    val currentIds = current.asSequence().map { it.row.id }.toHashSet()
-    val oldestSharedIndex = incoming.indexOfLast { it.row.id in currentIds }
+    val currentIds = current.asSequence().map { it.contentId }.toHashSet()
+    val oldestSharedIndex = incoming.indexOfLast { it.contentId in currentIds }
     if (oldestSharedIndex < 0) return current
 
     val appends = incoming.asSequence()
         .drop(oldestSharedIndex + 1)
-        .filter { it.row.id !in currentIds }
-        .distinctBy { it.row.id }
+        .filter { it.contentId !in currentIds }
+        .distinctBy { it.contentId }
         .toList()
     return if (appends.isEmpty()) current else current + appends
 }
 
 /**
- * Select only directly playable video rows. VideoRenderModel deliberately excludes
- * YouTube page URLs, so a YouTube-only kind-1 post never enters the pager.
+ * Select directly playable content, treating repost rows as aliases of their
+ * target ID. VideoRenderModel deliberately excludes YouTube page URLs, so a
+ * YouTube-only kind-1 post never enters the pager.
  */
 internal fun selectImmersiveVideoItems(
     rows: List<FeedRow>,
     videoModelsFor: (String) -> List<VideoRenderModel>,
-): List<ImmersiveVideoItem> = rows.mapNotNull { row ->
-    if (row.kind !in IMMERSIVE_VIDEO_KINDS) return@mapNotNull null
-    videoModelsFor(row.id).firstOrNull()?.let { ImmersiveVideoItem(row, it) }
+    authorPubkeyFor: (String) -> String? = { null },
+): List<ImmersiveVideoItem> {
+    val seenContentIds = HashSet<String>()
+    return rows.mapNotNull { row ->
+        val contentId = when (row.kind) {
+            in IMMERSIVE_VIDEO_KINDS -> row.id
+            in REPOST_KINDS -> row.rootId?.takeIf { it.isNotBlank() }
+            else -> null
+        } ?: return@mapNotNull null
+        // Feed order is newest-first; the first playable occurrence becomes the
+        // canonical page and later wrappers of the same target do no extra work.
+        if (contentId in seenContentIds) return@mapNotNull null
+        val authorPubkey = if (row.kind in REPOST_KINDS) {
+            authorPubkeyFor(contentId) ?: return@mapNotNull null
+        } else {
+            row.pubkey
+        }
+        videoModelsFor(contentId).firstOrNull()?.let {
+            seenContentIds.add(contentId)
+            ImmersiveVideoItem(
+                row = row,
+                video = it,
+                contentId = contentId,
+                authorPubkey = authorPubkey,
+            )
+        }
+    }
 }
 
 /** Exactly one next item is eligible, and never while Battery Saver is active. */

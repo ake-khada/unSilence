@@ -3,6 +3,7 @@ package com.unsilence.app.ui.feed
 import com.unsilence.app.data.model.ContentWarnings
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.MediaManifest
+import com.unsilence.app.data.model.RepostInfo
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.ThreadRefs
 import com.unsilence.app.data.model.VideoRenderModel
@@ -61,6 +62,110 @@ class FeedFilterPolicyTest {
     }
 
     @Test
+    fun `reposts match only their target content class`() {
+        val video = Segment.Video(
+            VideoRenderModel("https://cdn.example/video.mp4", 16f / 9f, null, null, null),
+        )
+        val cases = listOf(
+            Triple(
+                modelWith(
+                    segments = emptyList(),
+                    kind = 16,
+                    effectiveKind = 22,
+                    repost = repostInfo(embedded = true),
+                ),
+                null,
+                ShowType.VIDEO,
+            ),
+            Triple(
+                modelWith(
+                    segments = emptyList(),
+                    kind = 16,
+                    effectiveKind = 20,
+                    repost = repostInfo(embedded = false),
+                ),
+                ResolvedRepostTarget(
+                    content = "",
+                    model = modelWith(emptyList(), kind = 20, effectiveKind = 20),
+                ),
+                ShowType.IMAGES,
+            ),
+            Triple(
+                modelWith(
+                    segments = emptyList(),
+                    kind = 6,
+                    effectiveKind = 1,
+                    repost = repostInfo(embedded = false),
+                ),
+                ResolvedRepostTarget(
+                    content = "a clip",
+                    model = modelWith(listOf(video), kind = 1, effectiveKind = 1),
+                ),
+                ShowType.VIDEO,
+            ),
+            Triple(
+                modelWith(
+                    segments = listOf(Segment.Text("original text")),
+                    kind = 6,
+                    effectiveKind = 1,
+                    repost = repostInfo(embedded = true),
+                ),
+                null,
+                ShowType.TEXT,
+            ),
+            Triple(
+                modelWith(
+                    segments = emptyList(),
+                    kind = 16,
+                    effectiveKind = 30023,
+                    repost = repostInfo(embedded = true),
+                ),
+                null,
+                ShowType.ARTICLES,
+            ),
+        )
+        val specificTypes = listOf(ShowType.TEXT, ShowType.IMAGES, ShowType.VIDEO, ShowType.ARTICLES)
+
+        cases.forEachIndexed { index, (wrapper, target, expectedType) ->
+            specificTypes.forEach { showType ->
+                assertEquals(
+                    "case=$index show=$showType",
+                    showType == expectedType,
+                    matchesShowTypes(
+                        kind = wrapper.kind,
+                        content = "wrapper content",
+                        model = wrapper,
+                        filter = FeedFilter(showTypes = setOf(showType)),
+                        resolvedRepostTarget = target,
+                    ),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `unresolved repost is excluded from specific views but all is unchanged`() {
+        val unresolved = modelWith(
+            segments = emptyList(),
+            kind = 16,
+            effectiveKind = 22,
+            repost = repostInfo(embedded = false),
+        )
+
+        listOf(ShowType.TEXT, ShowType.IMAGES, ShowType.VIDEO, ShowType.ARTICLES).forEach { showType ->
+            assertFalse(
+                matchesShowTypes(
+                    kind = 16,
+                    content = "",
+                    model = unresolved,
+                    filter = FeedFilter(showTypes = setOf(showType)),
+                ),
+            )
+        }
+        assertTrue(matchesShowTypes(16, "", unresolved, FeedFilter()))
+    }
+
+    @Test
     fun `repost activity thresholds use target stats instead of wrapper stats`() {
         val filter = FeedFilter().withActivityPreset(ActivityPreset.POPULAR)
         val targetId = activityStatsTargetId(kind = 6, id = "wrapper", rootId = "target")
@@ -86,12 +191,28 @@ class FeedFilterPolicyTest {
         assertEquals(null, activityStatsTargetId(kind = 16, id = "wrapper", rootId = null))
     }
 
-    private fun modelWith(segments: List<Segment>): EventModel = EventModel(
+    private fun repostInfo(embedded: Boolean): RepostInfo = RepostInfo(
+        targetId = "target",
+        relayHint = null,
+        addressCoordinate = null,
+        addressRelayHint = null,
+        targetAuthorPubkey = null,
+        proxyUrl = null,
+        embeddedJson = if (embedded) "{}" else null,
+        resolvedFromInner = embedded,
+    )
+
+    private fun modelWith(
+        segments: List<Segment>,
+        kind: Int = 1,
+        effectiveKind: Int = kind,
+        repost: RepostInfo? = null,
+    ): EventModel = EventModel(
         id = "id",
         pubkey = "pubkey",
         sourcePubkey = "pubkey",
-        kind = 1,
-        effectiveKind = 1,
+        kind = kind,
+        effectiveKind = effectiveKind,
         articleContent = null,
         createdAt = 1L,
         sourceCreatedAt = 1L,
@@ -101,7 +222,7 @@ class FeedFilterPolicyTest {
         segments = segments,
         media = MediaManifest(images = emptyList(), videos = emptyList(), ogCandidate = null, youtubes = emptyList()),
         thread = ThreadRefs(replyToId = null, rootId = null),
-        repost = null,
+        repost = repost,
         article = null,
         warnings = ContentWarnings(hasContentWarning = false, reason = null),
     )

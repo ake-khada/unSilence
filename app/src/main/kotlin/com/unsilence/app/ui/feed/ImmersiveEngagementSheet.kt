@@ -82,6 +82,7 @@ internal fun ImmersiveEngagementSheet(
     val threadState by threadViewModel.uiState.collectAsStateWithLifecycle()
     val threadWotLookups by threadViewModel.wotLookups.collectAsStateWithLifecycle()
     val row = item.row
+    val rowDescribesAuthor = row.pubkey == model.pubkey
 
     LaunchedEffect(model.navigateId) {
         threadViewModel.loadThread(model.navigateId)
@@ -139,11 +140,11 @@ internal fun ImmersiveEngagementSheet(
                 item(key = "author-${row.id}") {
                     AuthorHeader(
                         pubkey = model.pubkey,
-                        picture = authorProfile?.picture ?: row.authorPicture,
+                        picture = authorProfile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
                         displayName = authorProfile?.displayName
                             ?: authorProfile?.name
-                            ?: row.displayName,
-                        nip05 = authorProfile?.nip05 ?: row.authorNip05,
+                            ?: row.displayName.takeIf { rowDescribesAuthor },
+                        nip05 = authorProfile?.nip05 ?: row.authorNip05.takeIf { rowDescribesAuthor },
                         createdAt = model.createdAt,
                         onAuthorClick = callbacks.onAuthorClick,
                         onNoteClick = { callbacks.onNoteClick(model.navigateId) },
