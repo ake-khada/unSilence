@@ -197,6 +197,7 @@ class FeedViewModel @Inject constructor(
         feedTrace { "setFeedType: ${_feedType.value} → $restored" }
         _authUnavailableRelay.value = null
         _feedType.value = restored
+        relayPool.setActiveFeedRelayHints(activeRelayHintsFor(restored))
         if (_coldStartState.value == ColdStartState.LOADING) {
             _coldStartState.value = if (restored is FeedType.Following)
                 ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
@@ -607,6 +608,7 @@ class FeedViewModel @Inject constructor(
         feedSubPersistentUrl = newSingleRelayUrl
 
         relayPool.activeSingleRelayFeedUrl = newSingleRelayUrl
+        relayPool.setActiveFeedRelayHints(activeRelayHintsFor(key.type))
 
         feedTrace { "setupSubscription: type=${key.type} ver=${key.ver} refresh=${key.refresh}" }
 
@@ -1024,6 +1026,17 @@ class FeedViewModel @Inject constructor(
         }
     }
 
+    private fun activeRelayHintsFor(type: FeedType): List<String> = when (type) {
+        is FeedType.SingleRelay -> listOf(type.url)
+        is FeedType.RelaySet -> keyManager.getPublicKeyHex()
+            ?.let { memoryEventStore.getSetMembers(it, type.dTag) }
+            .orEmpty()
+            .mapNotNull(::normalizeRelayUrl)
+        is FeedType.Following,
+        is FeedType.Global,
+        -> emptyList()
+    }
+
     override fun onCleared() {
         super.onCleared()
         currentHandle?.close()
@@ -1031,6 +1044,7 @@ class FeedViewModel @Inject constructor(
         feedSubPersistentUrl?.let { relayPool.removePurpose(it, ConnectionPurpose.FEED_SUB) }
         feedSubPersistentUrl = null
         relayPool.activeSingleRelayFeedUrl = null
+        relayPool.setActiveFeedRelayHints(emptyList())
     }
 
     private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean {

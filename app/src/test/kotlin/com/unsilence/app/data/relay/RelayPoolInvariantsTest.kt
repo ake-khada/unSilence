@@ -7,6 +7,7 @@ import org.junit.Test
 class RelayPoolInvariantsTest {
     @Test
     fun `reference fetch kinds retain addressable NIP-71 targets`() {
+        assertTrue(16 in EVENT_REFERENCE_FETCH_KINDS)
         assertTrue(34235 in EVENT_REFERENCE_FETCH_KINDS)
         assertTrue(34236 in EVENT_REFERENCE_FETCH_KINDS)
         assertTrue(1111 in EVENT_REFERENCE_FETCH_KINDS)

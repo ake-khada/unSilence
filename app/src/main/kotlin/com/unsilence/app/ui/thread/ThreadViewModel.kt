@@ -19,6 +19,8 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.boundedSeenRelayHints
+import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
@@ -295,9 +297,15 @@ class ThreadViewModel @Inject constructor(
             // MES: fetchEventById can open an ephemeral hinted connection, while the
             // broader thread fetch below only uses already-pooled connections.
             var event = memoryEventStore.getEventEntity(eventId)
-            if (event == null && relayHints.isNotEmpty()) {
+            val effectiveHints = boundedSeenRelayHints(
+                seenRelays = relayHints +
+                    memoryEventStore.getNostrEvent(eventId)?.relaysSeen.orEmpty(),
+                browseRelays = relayPool.activeFeedRelayHints(),
+                additionalRelays = memoryEventStore.relayHintsForEvent(eventId),
+            )
+            if (event == null && effectiveHints.isNotEmpty()) {
                 withContext(Dispatchers.IO) {
-                    relayPool.fetchEventById(eventId, relayHints, bypassDedup = true)
+                    relayPool.fetchEventById(eventId, effectiveHints, bypassDedup = true)
                 }
                 event = memoryEventStore.getEventEntity(eventId)
             }
@@ -319,7 +327,7 @@ class ThreadViewModel @Inject constructor(
             } else {
                 ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
             }
-            val urls = (relayHints + resolvedUrls).distinct()
+            val urls = (effectiveHints + resolvedUrls).distinct()
 
             if (eventIdFlow.value == bestGuessRoot) return@launch
 
@@ -332,7 +340,11 @@ class ThreadViewModel @Inject constructor(
             // Refine root in background — walk UP the reply chain fetching ancestors
             launch {
                 val trueRoot = withTimeoutOrNull(8_000) {
-                    resolveThreadRoot(eventId, urls)
+                    resolveThreadRoot(
+                        startId = eventId,
+                        initialHints = effectiveHints,
+                        fallbackRelays = resolvedUrls,
+                    )
                 } ?: return@launch
                 if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
                     // Re-resolve relays for the true root's author — may differ
@@ -357,23 +369,54 @@ class ThreadViewModel @Inject constructor(
      * Walk UP the reply chain, fetching missing ancestors, to the true root.
      * Best-effort: returns the highest id reached if a relay never returns one.
      */
-    private suspend fun resolveThreadRoot(startId: String, hints: List<String>): String {
+    private suspend fun resolveThreadRoot(
+        startId: String,
+        initialHints: List<String>,
+        fallbackRelays: List<String>,
+    ): String {
         val visited = mutableSetOf<String>()
         var currentId = startId
+        var currentHints = initialHints
         repeat(50) {                                       // hop cap — pathological guard
             if (!visited.add(currentId)) return currentId   // cycle guard
             val current = memoryEventStore.getEventEntity(currentId)
-                ?: fetchAncestor(currentId, hints)
+                ?: fetchAncestor(currentId, currentHints, fallbackRelays)
                 ?: return currentId                        // unreachable — best-effort root
             val parentId = current.replyToId ?: current.rootId
             if (parentId == null || parentId == currentId) return currentId  // root
+            currentHints = boundedSeenRelayHints(
+                seenRelays = memoryEventStore.getNostrEvent(currentId)?.relaysSeen.orEmpty(),
+                browseRelays = relayPool.activeFeedRelayHints(),
+                additionalRelays = memoryEventStore.relayHintsForEvent(parentId) + initialHints,
+            )
             currentId = parentId
         }
         return currentId
     }
 
-    private suspend fun fetchAncestor(id: String, hints: List<String>): EventEntity? {
-        withContext(Dispatchers.IO) { relayPool.fetchEventById(id, hints) }
+    private suspend fun fetchAncestor(
+        id: String,
+        hints: List<String>,
+        fallbackRelays: List<String>,
+    ): EventEntity? {
+        val targets = relayResolutionTargets(
+            seenRelays = hints,
+            browseRelays = relayPool.activeFeedRelayHints(),
+            fallbackRelays = fallbackRelays,
+        )
+        if (targets.hints.isNotEmpty()) {
+            withContext(Dispatchers.IO) { relayPool.fetchEventById(id, targets.hints) }
+        }
+        if (memoryEventStore.getEventEntity(id) == null && targets.fallback.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                relayPool.fetchEventsByIdsFromTargets(
+                    eventIds = listOf(id),
+                    targetRelayUrls = targets.fallback,
+                    bypassDedup = true,
+                    excludedRelayUrls = targets.hints,
+                )
+            }
+        }
         return withTimeoutOrNull(3_000) {
             memoryEventStore.eventEntityFlow(id).filterNotNull().first()
         }

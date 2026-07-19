@@ -71,7 +71,7 @@ private const val EVENT_REFERENCE_PHASE_TIMEOUT_MS = 4_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
-    listOf(0, 1, 6, 7, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
+    listOf(0, 1, 6, 7, 16, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
 
 internal fun buildCommentParentsReq(subId: String, parentIds: List<String>): String =
     buildJsonArray {
@@ -220,6 +220,18 @@ class RelayPool @Inject constructor(
      */
     @Volatile var activeSingleRelayFeedUrl: String? = null
 
+    @Volatile private var activeFeedRelayHintsSnapshot: List<String> = emptyList()
+
+    /** Bounded SingleRelay/RelaySet locality hints for row-backed hydration. */
+    internal fun setActiveFeedRelayHints(relayUrls: Collection<String>) {
+        activeFeedRelayHintsSnapshot = boundedSeenRelayHints(
+            seenRelays = emptyList(),
+            browseRelays = relayUrls,
+        )
+    }
+
+    internal fun activeFeedRelayHints(): List<String> = activeFeedRelayHintsSnapshot
+
     /** Snapshot of currently-connected relay URLs. Read-only, used by CardHydrator
      *  as fallback when write relays are unknown. */
     fun connectedRelayUrls(): List<String> = connections.keys.toList()
@@ -292,6 +304,7 @@ class RelayPool @Inject constructor(
      *  don't wait for all 4-6 outbox relays to respond. */
     internal val oneShotFirstEose = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
+    private val hintedProfileFetchAttempted = ConcurrentHashMap<String, Long>()
     /** Pubkeys that went through the full indexer+fallback chain and still missed.
      *  5-min TTL prevents scroll-back from re-firing the chain. */
     private val profileFallbackNegCache = ConcurrentHashMap<String, Long>()
@@ -922,6 +935,7 @@ class RelayPool @Inject constructor(
     /** Clear transient caches. Called on logout. */
     fun clearCaches() {
         profileFetchAttempted.clear()
+        hintedProfileFetchAttempted.clear()
         profileFallbackNegCache.clear()
     }
 
@@ -1038,24 +1052,38 @@ class RelayPool @Inject constructor(
         subIds: List<String>,
         timeoutMs: Long = 8_000,
         capabilityBypassRelays: Set<String> = emptySet(),
+        includeActiveFeedRelay: Boolean = false,
     ) {
-        val excluded = activeSingleRelayFeedUrl
+        val activeFeedRelay = activeSingleRelayFeedUrl?.let(::normalizeRelayUrl)
         val bypassRelays = capabilityBypassRelays.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val logBypass = bypassRelays.isNotEmpty()
-        val normalized = urls.mapNotNull { normalizeRelayUrl(it) }.distinct()
+        val normalized = oneShotRelayTargets(
+            relayUrls = urls,
+            activeSingleRelayFeedUrl = activeFeedRelay,
+            includeActiveFeedRelay = includeActiveFeedRelay,
+        )
             .filter { relayUrl ->
                 relayUrl !in blockedUrls &&
-                    relayUrl != excluded &&
                     (relayUrl in bypassRelays || !relayCapabilitiesStore.shouldSkip(relayUrl))
             }
         if (logBypass) {
             Log.i(TAG, "sendOneShotBatch: capability bypass relays=${bypassRelays.joinToString(",")}")
         }
         if (normalized.isEmpty() || reqs.isEmpty()) {
-            if (excluded != null && urls.any { normalizeRelayUrl(it) == excluded }) {
+            if (!includeActiveFeedRelay &&
+                activeFeedRelay != null &&
+                urls.any { normalizeRelayUrl(it) == activeFeedRelay }
+            ) {
                 Log.d(TAG, "one-shot skipped: only feedRelay in target set")
             }
             return
+        }
+        if (includeActiveFeedRelay) {
+            Log.i(
+                TAG,
+                "TARGETWIRE subs=${subIds.joinToString(",") { it.substringBeforeLast('-') }} " +
+                    "relays=${normalized.joinToString(",")}",
+            )
         }
 
         val reused = mutableListOf<String>()
@@ -3180,9 +3208,15 @@ class RelayPool @Inject constructor(
         }
     }
 
-    /** Send a kind 0 profile request for [pubkeys] to indexer relays only (deduped).
-     *  [maxRelays] caps how many relays receive the REQ (1 for scroll, more for profile screen). */
-    fun fetchProfiles(pubkeys: List<String>, maxRelays: Int = 5) {
+    /**
+     * Fetch kind-0 metadata with row locality first, followed by the existing
+     * indexer and author-relay ladder. Empty hints preserve the old ordering.
+     */
+    fun fetchProfiles(
+        pubkeys: List<String>,
+        maxRelays: Int = 5,
+        relayHintsByPubkey: Map<String, List<String>> = emptyMap(),
+    ) {
         if (pubkeys.isEmpty()) return
         val now = System.currentTimeMillis()
         val novel = pubkeys.filter { pk ->
@@ -3194,50 +3228,66 @@ class RelayPool @Inject constructor(
         }
         if (novel.isEmpty()) return
         novel.forEach { profileFetchAttempted[it] = now }
-        val subId = "profiles-${System.nanoTime()}"
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(0))
-                    add(JsonPrimitive(10002))
-                })
-                put("authors", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-            })
-        }.toString()
+
+        val hintGroups = groupProfileHintFetches(novel, relayHintsByPubkey)
+        val hintedUrls = hintGroups.keys.flatten().toSet()
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+            .mapNotNull(::normalizeRelayUrl)
+            .filterNot(hintedUrls::contains)
         val minTargets = minOf(maxRelays, 3)
         val targetUrls = indexerUrls.take(maxRelays).let { indexers ->
             if (indexers.size >= minTargets) indexers
             else {
-                val extras = connections.keys.filter { it !in indexers }.take(minTargets - indexers.size)
+                val extras = connections.keys
+                    .filter { it !in indexers && it !in hintedUrls }
+                    .take(minTargets - indexers.size)
                 indexers + extras
             }
-        }.ifEmpty { connections.keys.take(minTargets).toList() }
+        }.ifEmpty {
+            connections.keys.filterNot(hintedUrls::contains).take(minTargets).toList()
+        }
 
         scope.launch {
-            // Register EOSE callback so sendOneShotBatch tracks per-relay coverage
-            val eoseDeferred = CompletableDeferred<Unit>()
-            oneShotEoseCallbacks[subId] = eoseDeferred
+            // Phase 1: the relays where the feed rows were actually seen. Groups
+            // retain per-pubkey locality instead of broadcasting every author to
+            // the union of every row's hints.
+            coroutineScope {
+                hintGroups.map { (hintUrls, hintedPubkeys) ->
+                    async {
+                        fetchProfilePhase(
+                            pubkeys = hintedPubkeys,
+                            targetUrls = hintUrls,
+                            subIdPrefix = "hint-profiles",
+                            includeActiveFeedRelay = true,
+                        )
+                    }
+                }.awaitAll()
+            }
+            if (hintGroups.isNotEmpty()) delay(COLD_LANE_FLUSH_MS)
 
-            sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
+            val mes = memoryEventStore.get()
 
-            // Wait for all indexer relays to EOSE (ceiling 5s past sendOneShotBatch)
-            withTimeoutOrNull(5_000) { eoseDeferred.await() }
-            oneShotEoseCallbacks.remove(subId)
-            oneShotSubTargets.remove(subId)
-            oneShotSubEosed.remove(subId)
-
-            // Cold-lane flush for kind-0 events
-            delay(COLD_LANE_FLUSH_MS)
+            // Phase 2: ordinary indexer/global profile fan-out, excluding relays
+            // already used by the locality phase.
+            val indexerPubkeys = if (hintGroups.isEmpty()) {
+                novel
+            } else {
+                novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
+            }
+            if (indexerPubkeys.isNotEmpty() && targetUrls.isNotEmpty()) {
+                fetchProfilePhase(
+                    pubkeys = indexerPubkeys,
+                    targetUrls = targetUrls,
+                    subIdPrefix = "profiles",
+                )
+                delay(COLD_LANE_FLUSH_MS)
+            }
 
             // ── Fallback: indexers incomplete → author's own relays (H19b) ─
-            val mes = memoryEventStore.get()
             val stillIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
             if (stillIncomplete.isEmpty()) return@launch
 
-            val triedRelays = targetUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
+            val triedRelays = hintedUrls + normalizedRelayTargets(targetUrls)
             val relayToPks = mutableMapOf<String, MutableList<String>>()
             for (pk in stillIncomplete) {
                 val candidates = mutableSetOf<String>()
@@ -3294,7 +3344,52 @@ class RelayPool @Inject constructor(
                 Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after fallback")
             }
         }
-        Log.d(TAG, "Fetching ${novel.size} profiles+relaylists → ${targetUrls.size} relay(s) (${pubkeys.size - novel.size} deduped)")
+        Log.d(
+            TAG,
+            "Fetching ${novel.size} profiles+relaylists → ${hintedUrls.size} hint + " +
+                "${targetUrls.size} indexer relay(s) (${pubkeys.size - novel.size} deduped)",
+        )
+    }
+
+    private suspend fun fetchProfilePhase(
+        pubkeys: List<String>,
+        targetUrls: List<String>,
+        subIdPrefix: String,
+        includeActiveFeedRelay: Boolean = false,
+    ) {
+        if (pubkeys.isEmpty() || targetUrls.isEmpty()) return
+        val subId = "$subIdPrefix-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(0))
+                    add(JsonPrimitive(10002))
+                })
+                put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
+            })
+        }.toString()
+        val eoseDeferred = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eoseDeferred
+        if (subIdPrefix == "hint-profiles") {
+            Log.i(
+                TAG,
+                "PROFHINT authors=${pubkeys.joinToString(",") { it.take(8) }} " +
+                    "relays=${targetUrls.joinToString(",")}",
+            )
+        }
+        try {
+            sendOneShotBatch(
+                targetUrls,
+                listOf(req),
+                listOf(subId),
+                includeActiveFeedRelay = includeActiveFeedRelay,
+            )
+            withTimeoutOrNull(5_000L) { eoseDeferred.await() }
+        } finally {
+            cleanupOneShotSub(subId)
+        }
     }
 
     /**
@@ -3304,28 +3399,39 @@ class RelayPool @Inject constructor(
     fun fetchProfilesFromHints(pubkeyHints: Map<String, List<String>>) {
         if (pubkeyHints.isEmpty()) return
         val now = System.currentTimeMillis()
-        // Dedup against recent fetches
+        // Hint attempts use their own guard: querying locality must not suppress
+        // the normal indexer/author fallback chain for the same pubkey.
         val novel = pubkeyHints.filter { (pk, _) ->
-            val last = profileFetchAttempted[pk]
+            val last = hintedProfileFetchAttempted[pk]
             last == null || (now - last) > 300_000
         }
         if (novel.isEmpty()) return
 
-        val allHintUrls = novel.values.flatten().distinct()
         val pubkeys = novel.keys.toList()
-        pubkeys.forEach { profileFetchAttempted[it] = now }
-        val subId = "hint-profiles-${System.nanoTime()}"
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
-                put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
-            })
-        }.toString()
-        val targetUrls = allHintUrls.mapNotNull { normalizeRelayUrl(it) }
-        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
-        Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${targetUrls.size} hinted relay(s)")
+        pubkeys.forEach { hintedProfileFetchAttempted[it] = now }
+        val groups = groupProfileHintFetches(pubkeys, novel)
+        for ((targetUrls, groupedPubkeys) in groups) {
+            val subId = "hint-profiles-${System.nanoTime()}"
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                    put("authors", buildJsonArray {
+                        groupedPubkeys.forEach { add(JsonPrimitive(it)) }
+                    })
+                })
+            }.toString()
+            scope.launch {
+                sendOneShotBatch(
+                    targetUrls,
+                    listOf(req),
+                    listOf(subId),
+                    includeActiveFeedRelay = true,
+                )
+            }
+        }
+        Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${groups.size} hint group(s)")
     }
 
     /**
@@ -3355,7 +3461,14 @@ class RelayPool @Inject constructor(
             })
         }.toString()
         val targetUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
-        scope.launch { sendOneShotBatch(targetUrls, listOf(req), listOf(subId)) }
+        scope.launch {
+            sendOneShotBatch(
+                targetUrls,
+                listOf(req),
+                listOf(subId),
+                includeActiveFeedRelay = true,
+            )
+        }
         Log.d(TAG, "fetchProfilesFromSourceRelays: ${novel.size} profiles → ${targetUrls.size} source relay(s)")
     }
 
@@ -3586,7 +3699,10 @@ class RelayPool @Inject constructor(
 
     /** Single-ID overload — consults MES relay hints before broadcasting. */
     fun fetchEventById(eventId: String) {
-        val hints = memoryEventStore.get().relayHintsForEvent(eventId).toList()
+        val hints = boundedSeenRelayHints(
+            seenRelays = memoryEventStore.get().relayHintsForEvent(eventId),
+            browseRelays = activeFeedRelayHintsSnapshot,
+        )
         eventIdFetchCoalescer.enqueue(eventId, hints)
     }
 
@@ -3712,9 +3828,34 @@ class RelayPool @Inject constructor(
         eventIds: List<String>,
         relayHints: List<String>,
         bypassDedup: Boolean,
+        excludedRelayUrls: Collection<String> = emptyList(),
     ) {
         eventIds.distinct().chunked(MAX_EVENT_IDS_PER_REQ).forEach { chunk ->
-            fetchEventsByIdsWithHintsBatch(chunk, relayHints, bypassDedup)
+            fetchEventsByIdsWithHintsBatch(
+                eventIds = chunk,
+                relayHints = relayHints,
+                bypassDedup = bypassDedup,
+                excludedRelayUrls = excludedRelayUrls,
+                capToHintBudget = true,
+            )
+        }
+    }
+
+    /** Explicit own/global ladder phase; unlike seen hints, its established fan-out is not capped to three. */
+    internal suspend fun fetchEventsByIdsFromTargets(
+        eventIds: List<String>,
+        targetRelayUrls: List<String>,
+        bypassDedup: Boolean,
+        excludedRelayUrls: Collection<String> = emptyList(),
+    ) {
+        eventIds.distinct().chunked(MAX_EVENT_IDS_PER_REQ).forEach { chunk ->
+            fetchEventsByIdsWithHintsBatch(
+                eventIds = chunk,
+                relayHints = targetRelayUrls,
+                bypassDedup = bypassDedup,
+                excludedRelayUrls = excludedRelayUrls,
+                capToHintBudget = false,
+            )
         }
     }
 
@@ -3722,6 +3863,8 @@ class RelayPool @Inject constructor(
         eventIds: List<String>,
         relayHints: List<String>,
         bypassDedup: Boolean,
+        excludedRelayUrls: Collection<String>,
+        capToHintBudget: Boolean,
     ) {
         val novel = mutableListOf<String>()
         for (eventId in eventIds) {
@@ -3760,6 +3903,7 @@ class RelayPool @Inject constructor(
 
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val excluded = excludedRelayUrls.mapNotNull(::normalizeRelayUrl).toSet()
 
         val targetUrls = if (relayHints.isNotEmpty()) {
             // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
@@ -3767,8 +3911,12 @@ class RelayPool @Inject constructor(
             // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted ids fetch
             // never overlaps the feed filter, and the target may live only there
             // (bridged Ditto reposts). The one-shot sub uses a distinct subId.
-            val hintTargets = canonicalRelayHints(relayHints)
-                .filter { it !in indexerUrls && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
+            val hintTargets = (if (capToHintBudget) {
+                canonicalRelayHints(relayHints)
+            } else {
+                normalizedRelayTargets(relayHints)
+            })
+                .filter { it !in excluded && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
             if (hintTargets.isNotEmpty()) {
                 hintTargets
             } else {
@@ -3781,16 +3929,23 @@ class RelayPool @Inject constructor(
         // No usable hints — broadened fallback.
         val resolvedTargets = targetUrls.ifEmpty {
             val nonIndexer = connections.values.filter {
-                it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+                it.url !in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url)
             }.shuffled()
             val indexer = connections.values.filter {
-                it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+                it.url in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url)
             }
             (nonIndexer + indexer).take(6).map { it.url }
         }
         if (resolvedTargets.isEmpty()) {
             Log.d(TAG, "fetchEventsByIds: ${novel.size} events → 0 targets (pool empty)")
             return
+        }
+        if (targetUrls.isNotEmpty() && capToHintBudget) {
+            Log.i(
+                TAG,
+                "REFHINT ids=${novel.joinToString(",") { it.take(8) }} " +
+                    "relays=${resolvedTargets.joinToString(",")}",
+            )
         }
 
         // A suspending lookup must complete on relay EOSE/timeout, not when its
@@ -3804,12 +3959,17 @@ class RelayPool @Inject constructor(
                 reqs = listOf(req),
                 subIds = listOf(subId),
                 timeoutMs = EVENT_REFERENCE_PHASE_TIMEOUT_MS,
+                includeActiveFeedRelay = targetUrls.isNotEmpty(),
             )
             withTimeoutOrNull(EVENT_REFERENCE_PHASE_TIMEOUT_MS) { eose.await() }
         } finally {
             cleanupOneShotSub(subId)
         }
-        val targetKind = if (targetUrls.isNotEmpty()) "hint" else "fallback"
+        val targetKind = when {
+            targetUrls.isEmpty() -> "fallback"
+            capToHintBudget -> "hint"
+            else -> "targeted"
+        }
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${resolvedTargets.size} $targetKind relay(s)")
     }
 
@@ -4042,7 +4202,12 @@ class RelayPool @Inject constructor(
         val eoseDeferred = CompletableDeferred<Unit>()
         oneShotEoseCallbacks[subId] = eoseDeferred
         try {
-            sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
+            sendOneShotBatch(
+                relayUrls,
+                listOf(req),
+                listOf(subId),
+                includeActiveFeedRelay = true,
+            )
             withTimeoutOrNull(8_000L) { eoseDeferred.await() }
         } finally {
             cleanupOneShotSub(subId)
@@ -4481,6 +4646,7 @@ class RelayPool @Inject constructor(
         connections.clear()
         connectionPurposes.clear()
         profileFetchAttempted.clear()
+        hintedProfileFetchAttempted.clear()
         // Complete all in-flight monitors so they clean up immediately
         eventFetchInFlight.values.forEach { it.complete(null) }
         eventFetchInFlight.clear()

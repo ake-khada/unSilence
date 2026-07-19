@@ -129,11 +129,17 @@ class ProfilePipeline @Inject constructor(
 
     /** Explicit entity-search demand: hit declared hints first, then the normal bounded fan-out. */
     fun fetchProfileMetadata(pubkey: String, relayHints: List<String> = emptyList()) {
-        if (relayHints.isNotEmpty()) {
-            relayPool.fetchProfilesFromHints(mapOf(pubkey to relayHints))
-        }
         pipelineScope.launch {
-            userRepository.fetchProfilesWithFanout(listOf(pubkey), maxRelays = 4)
+            userRepository.fetchProfilesWithFanout(
+                pubkeys = listOf(pubkey),
+                maxRelays = 4,
+                relayHintsByPubkey = mapOf(
+                    pubkey to boundedSeenRelayHints(
+                        seenRelays = relayHints,
+                        browseRelays = relayPool.activeFeedRelayHints(),
+                    ),
+                ),
+            )
         }
     }
 
@@ -464,29 +470,31 @@ class ProfilePipeline @Inject constructor(
         if (events.isEmpty()) return emptySet()
 
         val referencedIds = mutableSetOf<String>()
-        val relayHints = mutableMapOf<String, String>()
+        val relayHints = mutableMapOf<String, List<String>>()
+        val browseRelayHints = relayPool.activeFeedRelayHints()
 
         for (event in events) {
+            val seenRelays = listOf(event.relayUrl) + event.relaysSeen
+            fun addReference(id: String, additionalHints: Collection<String> = emptyList()) {
+                referencedIds.add(id)
+                relayHints[id] = boundedSeenRelayHints(
+                    seenRelays = relayHints[id].orEmpty() + seenRelays,
+                    browseRelays = browseRelayHints,
+                    additionalRelays = additionalHints,
+                )
+            }
             // Kind-6 / kind-16 repost targets (e-tag). a-tag-only coordinate
             // reposts resolve later (#5); our own reposts embed the original JSON.
             if (event.kind == 6 || event.kind == 16) {
                 extractRepostTargetId(event.tagsJson)?.let { id ->
-                    referencedIds.add(id)
-                    val eTagRelay = extractRepostTargetRelay(event.tagsJson)
-                    relayHints[id] = eTagRelay ?: event.relayUrl
+                    addReference(id, listOfNotNull(extractRepostTargetRelay(event.tagsJson)))
                 }
             }
             // Quoted event IDs from nostr:nevent/note URIs in content
-            extractQuotedEventIds(event.content).forEach { referencedIds.add(it) }
+            extractQuotedEventIds(event.content).forEach { addReference(it) }
             // Thread parent/root IDs
-            event.replyToId?.let { id ->
-                referencedIds.add(id)
-                relayHints.putIfAbsent(id, event.relayUrl)
-            }
-            event.rootId?.let { id ->
-                referencedIds.add(id)
-                relayHints.putIfAbsent(id, event.relayUrl)
-            }
+            event.replyToId?.let { addReference(it) }
+            event.rootId?.let { addReference(it) }
         }
 
         if (referencedIds.isEmpty()) return emptySet()
@@ -496,32 +504,51 @@ class ProfilePipeline @Inject constructor(
         val missingRefs = referencedIds.filter { memoryEventStore.getEventEntity(it) == null }
 
         if (missingRefs.isNotEmpty()) {
-            // Broadcast fetch
-            relayPool.fetchEventsByIds(missingRefs)
+            val hintedIds = missingRefs.filter { !relayHints[it].isNullOrEmpty() }
+            val hintlessIds = missingRefs - hintedIds.toSet()
 
-            // Hint-relay batched fetch (same pattern as CardHydrator.hydrateRefs)
-            val hintBatches = HashMap<String, MutableList<String>>()
-            for (id in missingRefs) {
-                val hint = relayHints[id] ?: continue
-                hintBatches.getOrPut(hint) { mutableListOf() }.add(id)
+            // Locality phase: enqueue together so identical row-hint sets reach
+            // EventIdFetchCoalescer as one ids batch.
+            coroutineScope {
+                hintedIds.map { id ->
+                    async { relayPool.fetchEventById(id, relayHints[id].orEmpty()) }
+                }.awaitAll()
             }
-            val cappedHints = hintBatches.entries
-                .sortedByDescending { it.value.size }
-                .take(MAX_HINT_RELAYS_PER_PASS)
-            if (hintBatches.size > cappedHints.size) {
-                Log.d(TAG, "hint fan-out capped: ${hintBatches.size} → ${cappedHints.size} relays")
-            }
-            for (entry in cappedHints) {
-                relayPool.fetchEventsByIdsFromRelay(entry.key, entry.value, bypassDedup = true)
-            }
+            if (hintlessIds.isNotEmpty()) relayPool.fetchEventsByIds(hintlessIds)
 
             // Wait for responses
             delay(REF_WAIT_MS)
 
-            // Outbox fallback for stragglers (same 3-phase pattern as CardHydrator)
-            val stillMissing = missingRefs.filter { memoryEventStore.getEventEntity(it) == null }
-            if (stillMissing.isNotEmpty()) {
-                outboxFallback(events, stillMissing)
+            // Author-outbox fallback only after locality misses, deduped against
+            // relays already queried for each reference.
+            val stillMissingHinted = hintedIds.filter { memoryEventStore.getEventEntity(it) == null }
+            val outboxTried = if (stillMissingHinted.isNotEmpty()) {
+                outboxFallback(events, stillMissingHinted, relayHints)
+            } else {
+                emptyMap()
+            }
+
+            // Ordinary pool fan-out is last for hinted references. Hintless IDs
+            // already took the unchanged broadcast path above.
+            val globalFallbackBatches = linkedMapOf<List<String>, MutableList<String>>()
+            for (id in stillMissingHinted) {
+                if (memoryEventStore.getEventEntity(id) != null) continue
+                val tried = normalizedRelayTargets(
+                    relayHints[id].orEmpty() + outboxTried[id].orEmpty(),
+                ).sorted()
+                globalFallbackBatches.getOrPut(tried) { mutableListOf() }.add(id)
+            }
+            coroutineScope {
+                globalFallbackBatches.map { (tried, ids) ->
+                    async {
+                        relayPool.fetchEventsByIdsWithHints(
+                            eventIds = ids.distinct(),
+                            relayHints = emptyList(),
+                            bypassDedup = true,
+                            excludedRelayUrls = tried,
+                        )
+                    }
+                }.awaitAll()
             }
         }
 
@@ -532,13 +559,21 @@ class ProfilePipeline @Inject constructor(
         }
 
         // Resolve ref authors
-        val refAuthorPubkeys = mutableSetOf<String>()
+        val refAuthorHints = linkedMapOf<String, List<String>>()
         for (id in referencedIds) {
             val refEvent = memoryEventStore.getNostrEvent(id) ?: continue
-            refAuthorPubkeys.add(refEvent.pubkey)
+            refAuthorHints[refEvent.pubkey] = boundedSeenRelayHints(
+                seenRelays = refAuthorHints[refEvent.pubkey].orEmpty() +
+                    listOf(refEvent.relayUrl) + refEvent.relaysSeen,
+                browseRelays = browseRelayHints,
+                additionalRelays = relayHints[id].orEmpty(),
+            )
         }
-        if (refAuthorPubkeys.isNotEmpty()) {
-            userRepository.fetchMissingProfiles(refAuthorPubkeys.toList())
+        if (refAuthorHints.isNotEmpty()) {
+            userRepository.fetchMissingProfiles(
+                pubkeys = refAuthorHints.keys.toList(),
+                relayHintsByPubkey = refAuthorHints,
+            )
         }
 
         return referencedIds
@@ -548,7 +583,8 @@ class ProfilePipeline @Inject constructor(
     private suspend fun outboxFallback(
         sourceEvents: List<NostrEvent>,
         missingIds: List<String>,
-    ) {
+        relayHintsById: Map<String, List<String>>,
+    ): Map<String, Set<String>> {
         // Extract author pubkeys from source events' p-tags
         val refAuthorPubkeys = mutableSetOf<String>()
         for (event in sourceEvents) {
@@ -557,15 +593,20 @@ class ProfilePipeline @Inject constructor(
                 refAuthorPubkeys.add(event.pubkey)
             }
         }
-        if (refAuthorPubkeys.isEmpty()) return
+        if (refAuthorPubkeys.isEmpty()) return emptyMap()
 
         // Try cached write relays first
         val outboxBatches = HashMap<String, MutableList<String>>()
+        val triedById = mutableMapOf<String, MutableSet<String>>()
         for (id in missingIds) {
+            val hinted = normalizedRelayTargets(relayHintsById[id].orEmpty()).toSet()
             for (pk in refAuthorPubkeys) {
                 val relays = memoryEventStore.writeRelaysFor(pk)
                 for (r in relays) {
-                    outboxBatches.getOrPut(r) { mutableListOf() }.add(id)
+                    val relay = normalizeRelayUrl(r) ?: continue
+                    if (relay in hinted) continue
+                    outboxBatches.getOrPut(relay) { mutableListOf() }.add(id)
+                    triedById.getOrPut(id) { linkedSetOf() }.add(relay)
                 }
             }
         }
@@ -575,6 +616,7 @@ class ProfilePipeline @Inject constructor(
         if (outboxBatches.isNotEmpty()) {
             delay(REF_WAIT_MS)
         }
+        return triedById.mapValues { it.value.toSet() }
     }
 
     // ── Step 4: Engagement batch ────────────────────────────────────────

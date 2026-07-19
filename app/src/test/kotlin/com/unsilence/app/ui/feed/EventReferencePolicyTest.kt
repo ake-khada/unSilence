@@ -94,6 +94,35 @@ class EventReferencePolicyTest {
             listOf(EventReferenceLookupStep.EVENT_ID, EventReferenceLookupStep.ADDRESS),
             reference?.let(::eventReferenceLookupSteps),
         )
+
+        val ladder = eventReferenceRelayLadder(
+            target = requireNotNull(reference),
+            browseRelayHints = listOf("wss://browse.example/"),
+            idFallbackRelays = listOf(
+                "wss://relay.divine.video",
+                "wss://id-fallback.example",
+            ),
+            addressFallbackRelays = listOf(
+                "wss://browse.example",
+                "wss://address-fallback.example",
+            ),
+        )
+        assertEquals(
+            listOf(
+                "wss://relay.divine.video",
+                "wss://browse.example",
+                "wss://id-fallback.example",
+            ),
+            ladder.eventId?.all,
+        )
+        assertEquals(
+            listOf(
+                "wss://relay.divine.video",
+                "wss://browse.example",
+                "wss://address-fallback.example",
+            ),
+            ladder.address?.all,
+        )
     }
 
     @Test

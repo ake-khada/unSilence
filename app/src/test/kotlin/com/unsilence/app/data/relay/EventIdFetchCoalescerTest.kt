@@ -71,6 +71,31 @@ class EventIdFetchCoalescerTest {
     }
 
     @Test
+    fun `hydrator row provenance reaches the coalesced ids batch`() = runTest {
+        val batches = mutableListOf<EventIdFetchBatch>()
+        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val rowHints = feedRowRelayHints(
+            primaryRelay = "wss://relay.divine.video/",
+            relaysSeen = listOf("wss://relay.divine.video", "wss://seen.example/"),
+            browseRelays = listOf("wss://browse.example/"),
+        )
+
+        coalescer.enqueue("repost-target", rowHints)
+        advanceTimeBy(EVENT_ID_FETCH_WINDOW_MS)
+        runCurrent()
+
+        assertEquals(listOf("repost-target"), batches.single().eventIds)
+        assertEquals(
+            listOf(
+                "wss://browse.example",
+                "wss://relay.divine.video",
+                "wss://seen.example",
+            ),
+            batches.single().relayHints,
+        )
+    }
+
+    @Test
     fun `duplicate id shares one dispatch and both callers complete`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
         val coalescer = EventIdFetchCoalescer(this) { batches += it }

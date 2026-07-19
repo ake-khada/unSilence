@@ -90,6 +90,7 @@ data class EventActionCallbacks(
     val zap: (eventId: String, pubkey: String, relayUrl: String, request: ZapRequest) -> Unit = { _, _, _, _ -> },
     val saveNwcUri: (String) -> Unit = {},
     val lookupProfile: (suspend (String) -> UserEntity?)? = null,
+    val lookupProfileWithHints: (suspend (String, List<String>) -> UserEntity?)? = null,
     val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
     val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
     val lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? = null,
@@ -239,11 +240,12 @@ private fun ThreadedReplyItem(
 ) {
     // Resolve from MES, then source/tag hints, author outbox, and finally the
     // address coordinate. The wire-derived reference survives snapshot deletion.
-    val parentReference = remember(parentId, replyRow.tags, replyRow.relayUrl) {
+    val parentReference = remember(parentId, replyRow.tags, replyRow.relayUrl, replyRow.relaysSeen) {
         buildReplyParentReference(
             eventId = parentId,
             tagsJson = replyRow.tags,
             sourceRelay = replyRow.relayUrl,
+            sourceRelayHints = replyRow.relaysSeen,
         )
     }
     val parentEvent by produceState<EventEntity?>(null, parentReference) {
@@ -259,8 +261,12 @@ private fun ThreadedReplyItem(
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
         val pk = parentEvent?.pubkey
-        if (pk != null && callbacks.lookupProfile != null) {
-            value = callbacks.lookupProfile.invoke(pk)
+        if (pk != null) {
+            value = callbacks.lookupProfileWithHints?.invoke(
+                pk,
+                (listOf(replyRow.relayUrl) + replyRow.relaysSeen).distinct(),
+            )
+                ?: callbacks.lookupProfile?.invoke(pk)
         }
     }
 
@@ -436,6 +442,29 @@ internal fun EventFeedItem(
     val model = remember(row.id) {
         eventModelProvider?.invoke(row.id) ?: row.toEventModel()
     }
+    val rowRelayHints = remember(row.id, row.relayUrl, row.relaysSeen) {
+        (listOf(row.relayUrl) + row.relaysSeen).filter { it.isNotBlank() }.distinct()
+    }
+    val lookupProfile: (suspend (String) -> UserEntity?)? = callbacks.lookupProfileWithHints?.let { hintedLookup ->
+        { pubkey: String -> hintedLookup(pubkey, rowRelayHints) }
+    } ?: callbacks.lookupProfile
+    val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = callbacks.lookupEvent?.let { lookup ->
+        { eventId: String, declaredHints: List<String> ->
+            lookup(eventId, (rowRelayHints + declaredHints).distinct())
+        }
+    }
+    val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? =
+        callbacks.lookupEventWithAuthor?.let { lookup ->
+            { eventId: String, declaredHints: List<String>, authorPubkey: String? ->
+                lookup(eventId, (rowRelayHints + declaredHints).distinct(), authorPubkey)
+            }
+        }
+    val lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? =
+        callbacks.lookupEventReference?.let { lookup ->
+            { target: EventReferenceTarget ->
+                lookup(target.copy(relayHints = (rowRelayHints + target.relayHints).distinct()))
+            }
+        }
     val eventEngagement = remember(model.engagementId, engagement) {
         engagement.forEvent(model.engagementId)
     }
@@ -490,10 +519,10 @@ internal fun EventFeedItem(
         onRepost            = onRepost,
         onZap               = onZap,
         onSaveNwcUri        = callbacks.saveNwcUri,
-        lookupProfile       = callbacks.lookupProfile,
-        lookupEvent         = callbacks.lookupEvent,
-        lookupEventWithAuthor = callbacks.lookupEventWithAuthor,
-        lookupEventReference = callbacks.lookupEventReference,
+        lookupProfile       = lookupProfile,
+        lookupEvent         = lookupEvent,
+        lookupEventWithAuthor = lookupEventWithAuthor,
+        lookupEventReference = lookupEventReference,
         lookupModel         = eventModelProvider,
         fetchOgMetadata     = callbacks.fetchOgMetadata,
         hasCachedOgMetadata = callbacks.hasCachedOgMetadata,

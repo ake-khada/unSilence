@@ -37,6 +37,7 @@ import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KIND_SET
 import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
+import com.unsilence.app.data.relay.boundedSeenRelayHints
 import com.unsilence.app.data.relay.identitySearchMatchTier
 import com.unsilence.app.data.relay.deriveProfileRelayCount
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -664,7 +665,9 @@ class MemoryEventStore @Inject constructor(
     fun addRelaySeen(eventId: String, relayUrl: String) {
         val event = eventsById[eventId]
         if (event != null) {
-            event.relaysSeen.add(relayUrl)
+            if (event.relaysSeen.add(relayUrl)) {
+                feedRowCache.remove(eventId)
+            }
         } else {
             // Event not yet flushed from channel — buffer for insert()
             pendingRelays.getOrPut(eventId) { ConcurrentHashMap.newKeySet() }.add(relayUrl)
@@ -804,7 +807,9 @@ class MemoryEventStore @Inject constructor(
         val existing = eventsById.putIfAbsent(event.id, event)
         if (existing != null) {
             // Duplicate — just record the relay
-            existing.relaysSeen.addAll(event.relaysSeen)
+            if (existing.relaysSeen.addAll(event.relaysSeen)) {
+                feedRowCache.remove(event.id)
+            }
             if (event.kind == 10040 && ownWotProviderRegistry == null) {
                 handleWotProviderRegistry(existing, dirty)
             }
@@ -4692,6 +4697,9 @@ class MemoryEventStore @Inject constructor(
             replyCount = replyCount(statsId),
             repostCount = repostCount(statsId),
             zapCount = zap.count,
+            relaysSeen = boundedSeenRelayHints(
+                seenRelays = listOf(event.relayUrl) + event.relaysSeen,
+            ),
         )
 
         feedRowCache[event.id] = CachedFeedRow(row, authorProfileTs, statsTs)
