@@ -373,7 +373,7 @@ class ProfilePipeline @Inject constructor(
     // ── Step 1: Resolve write relays ────────────────────────────────────
 
     private fun resolveWriteRelays(pubkey: String): List<String> {
-        val relays = memoryEventStore.writeRelaysFor(pubkey)
+        val relays = memoryEventStore.lookupWriteRelaysFor(pubkey)
         return relays.ifEmpty { GLOBAL_RELAY_URLS }
     }
 
@@ -601,7 +601,7 @@ class ProfilePipeline @Inject constructor(
         for (id in missingIds) {
             val hinted = normalizedRelayTargets(relayHintsById[id].orEmpty()).toSet()
             for (pk in refAuthorPubkeys) {
-                val relays = memoryEventStore.writeRelaysFor(pk)
+                val relays = memoryEventStore.lookupWriteRelaysFor(pk)
                 for (r in relays) {
                     val relay = normalizeRelayUrl(r) ?: continue
                     if (relay in hinted) continue

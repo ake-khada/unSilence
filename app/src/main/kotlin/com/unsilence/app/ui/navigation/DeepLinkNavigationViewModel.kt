@@ -5,6 +5,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
+import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.filterNotNull
@@ -36,7 +37,7 @@ class DeepLinkNavigationViewModel @Inject constructor(
 
         val relays = buildList {
             addAll(target.relayHints)
-            addAll(memoryEventStore.writeRelaysFor(target.pubkey))
+            addAll(memoryEventStore.lookupWriteRelaysFor(target.pubkey))
             addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
             addAll(GLOBAL_RELAY_URLS)
         }.distinct()
@@ -48,6 +49,16 @@ class DeepLinkNavigationViewModel @Inject constructor(
         )
 
         memoryEventStore.eventIdForAddress(target.kind, target.pubkey, target.dTag)?.let { return it }
+        val bridgeTargets = bridgeFallbackRelayTargets(relays)
+        if (bridgeTargets.isNotEmpty()) {
+            relayPool.fetchAddressByCoord(
+                rawRelayUrls = bridgeTargets,
+                kind = target.kind,
+                author = target.pubkey,
+                dTag = target.dTag,
+            )
+            memoryEventStore.eventIdForAddress(target.kind, target.pubkey, target.dTag)?.let { return it }
+        }
         return withTimeoutOrNull(8_000L) {
             memoryEventStore.eventIdForAddressFlow(target.kind, target.pubkey, target.dTag)
                 .filterNotNull()

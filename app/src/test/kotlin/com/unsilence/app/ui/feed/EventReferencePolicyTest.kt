@@ -123,6 +123,50 @@ class EventReferencePolicyTest {
             ),
             ladder.address?.all,
         )
+        assertEquals(listOf("wss://relay.mostr.pub"), ladder.eventIdBridgeFallback)
+        assertEquals(listOf("wss://relay.mostr.pub"), ladder.addressBridgeFallback)
+        assertEquals(
+            listOf(
+                EventReferenceRelayPhase.EVENT_ID_STANDARD,
+                EventReferenceRelayPhase.ADDRESS_STANDARD,
+                EventReferenceRelayPhase.EVENT_ID_BRIDGE,
+                EventReferenceRelayPhase.ADDRESS_BRIDGE,
+            ),
+            ladder.orderedPhases(),
+        )
+    }
+
+    @Test
+    fun `bridge fetched row retains mostr locality for parent id and coordinate phases`() {
+        val reference = buildReplyParentReference(
+            eventId = "bridged-parent-id",
+            tagsJson = """[["A","34236:bridged-author:post"],["P","bridged-author"]]""",
+            sourceRelay = "wss://relay.mostr.pub/",
+            sourceRelayHints = listOf("relay.mostr.pub"),
+        )
+        val ladder = eventReferenceRelayLadder(
+            target = requireNotNull(reference),
+            browseRelayHints = listOf("wss://browse.example"),
+            idFallbackRelays = listOf("wss://global.example"),
+            addressFallbackRelays = listOf("wss://indexer.example"),
+        )
+
+        assertEquals(
+            listOf("wss://relay.mostr.pub", "wss://browse.example"),
+            ladder.eventId?.hints,
+        )
+        assertEquals(ladder.eventId?.hints, ladder.address?.hints)
+        // The bridge was already queried first as row locality, so the miss tier
+        // must not send a duplicate request to the same relay.
+        assertEquals(emptyList<String>(), ladder.eventIdBridgeFallback)
+        assertEquals(emptyList<String>(), ladder.addressBridgeFallback)
+        assertEquals(
+            listOf(
+                EventReferenceRelayPhase.EVENT_ID_STANDARD,
+                EventReferenceRelayPhase.ADDRESS_STANDARD,
+            ),
+            ladder.orderedPhases(),
+        )
     }
 
     @Test

@@ -450,6 +450,13 @@ class EventProcessor @Inject constructor(
             }
             trimDedupCacheIfNeeded()
         }
+        if (relayUrl in BRIDGE_FALLBACK_RELAY_URLS) {
+            Log.i(
+                TAG,
+                "BRIDGEHIT id=${nostrEvent.id.take(8)} kind=${nostrEvent.kind} " +
+                    "author=${nostrEvent.pubkey.take(8)} relay=$relayUrl",
+            )
+        }
 
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES

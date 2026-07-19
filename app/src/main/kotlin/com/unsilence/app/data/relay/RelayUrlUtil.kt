@@ -82,3 +82,12 @@ val GLOBAL_RELAY_URLS = listOf(
     "wss://relay.nostr.net",
     "wss://relay.primal.net",
 )
+
+/**
+ * Lookup-only bridge relays. These are deliberately separate from
+ * [GLOBAL_RELAY_URLS]: they are consulted only after ordinary resolution
+ * targets miss and must never become default feed subscriptions.
+ */
+val BRIDGE_FALLBACK_RELAY_URLS = listOf(
+    "wss://relay.mostr.pub",
+)

@@ -14,6 +14,7 @@ import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -139,10 +140,16 @@ class ArticleReaderViewModel @Inject constructor(
         viewModelScope.launch {
             val relays = buildSet {
                 addAll(hints)
-                addAll(memoryEventStore.writeRelaysFor(author))
+                addAll(memoryEventStore.lookupWriteRelaysFor(author))
                 addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
             }.toList()
             relayPool.fetchArticleByCoord(relays, author, dTag)
+            if (memoryEventStore.articleRowByCoord(coord) == null) {
+                val bridgeTargets = bridgeFallbackRelayTargets(relays)
+                if (bridgeTargets.isNotEmpty()) {
+                    relayPool.fetchArticleByCoord(bridgeTargets, author, dTag)
+                }
+            }
         }
     }
 
