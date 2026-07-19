@@ -878,7 +878,7 @@ class NoteActionsViewModel @Inject constructor(
                 val idSuppressed = id?.let(relayPool::isEventUnresolved) == true
 
                 val outboxRelays = target.authorPubkey
-                    ?.let(memoryEventStore::writeRelaysFor)
+                    ?.let(memoryEventStore::lookupWriteRelaysFor)
                     .orEmpty()
                 val relayLadder = eventReferenceRelayLadder(
                     target = target,
@@ -913,14 +913,17 @@ class NoteActionsViewModel @Inject constructor(
 
                 // Phase 3: a stale/missing revision id cannot block an addressable
                 // parent or repost. Include late-arriving outbox facts on this read.
-                target.address?.let { address ->
-                    val addressTargets = eventReferenceRelayLadder(
+                val addressLadder = target.address?.let { address ->
+                    eventReferenceRelayLadder(
                         target = target,
                         browseRelayHints = relayPool.activeFeedRelayHints(),
                         idFallbackRelays = emptyList(),
                         addressFallbackRelays =
-                            memoryEventStore.writeRelaysFor(address.authorPubkey) + curatedFallback,
-                    ).address
+                            memoryEventStore.lookupWriteRelaysFor(address.authorPubkey) + curatedFallback,
+                    )
+                }
+                target.address?.let { address ->
+                    val addressTargets = addressLadder?.address
                     val addressHintTargets = addressTargets?.hints.orEmpty()
                     val addressFallbackTargets = addressTargets?.fallback.orEmpty()
                     if (addressHintTargets.isNotEmpty()) {
@@ -938,6 +941,34 @@ class NoteActionsViewModel @Inject constructor(
                         withContext(Dispatchers.IO) {
                             relayPool.fetchAddressByCoord(
                                 rawRelayUrls = addressFallbackTargets,
+                                kind = address.kind,
+                                author = address.authorPubkey,
+                                dTag = address.dTag,
+                            )
+                        }
+                    }
+                    cachedReference(target)?.let { return it }
+                }
+
+                // Final miss tier: the bridge is intentionally after every existing
+                // ID and coordinate phase. It is never part of curated/global traffic.
+                val bridgeIdTargets = relayLadder.eventIdBridgeFallback
+                if (id != null && bridgeIdTargets.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        relayPool.fetchEventsByIdsFromBridgeOnMiss(
+                            eventIds = listOf(id),
+                            alreadyTriedRelayUrls = idTargets?.all.orEmpty(),
+                        )
+                    }
+                    cachedReference(target)?.let { return it }
+                }
+
+                target.address?.let { address ->
+                    val bridgeAddressTargets = addressLadder?.addressBridgeFallback.orEmpty()
+                    if (bridgeAddressTargets.isNotEmpty()) {
+                        withContext(Dispatchers.IO) {
+                            relayPool.fetchAddressByCoord(
+                                rawRelayUrls = bridgeAddressTargets,
                                 kind = address.kind,
                                 author = address.authorPubkey,
                                 dTag = address.dTag,

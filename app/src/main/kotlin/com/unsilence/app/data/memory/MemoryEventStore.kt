@@ -43,6 +43,7 @@ import com.unsilence.app.data.relay.deriveProfileRelayCount
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.parseNip51RelayTags
 import com.unsilence.app.data.relay.parseNip65RelayTags
+import com.unsilence.app.data.relay.profileDerivedBridgeOutbox
 import com.unsilence.app.data.relay.shouldAcceptProfileRelayEvent
 import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -409,6 +410,9 @@ class MemoryEventStore @Inject constructor(
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
+    /** Lookup-only bootstrap outboxes derived from accepted profile metadata.
+     *  Kept separate from kind-10002 so feed subscription resolution never sees them. */
+    private val profileDerivedLookupRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
     /** Epoch-seconds floor: reject own kind-10000 relay events older than this.
      *  Set by addPrivateMute/removePrivateMute; cleared when a relay event
@@ -911,6 +915,14 @@ class MemoryEventStore @Inject constructor(
                 existing
             }
         }
+        val derivedLookupRelays = profileDerivedBridgeOutbox(
+            profileFieldsCache[event.pubkey]?.get("nip05"),
+        )
+        if (derivedLookupRelays.isEmpty()) {
+            profileDerivedLookupRelaysByPubkey.remove(event.pubkey)
+        } else {
+            profileDerivedLookupRelaysByPubkey[event.pubkey] = derivedLookupRelays
+        }
         trimProfilesIfNeeded()
     }
 
@@ -974,6 +986,7 @@ class MemoryEventStore @Inject constructor(
             profileFieldsCache.remove(pubkey)
             profileAccessedAt.remove(pubkey)
             relayListsByPubkey.remove(pubkey)
+            profileDerivedLookupRelaysByPubkey.remove(pubkey)
             removed++
         }
         if (removed > 0) {
@@ -3910,6 +3923,15 @@ class MemoryEventStore @Inject constructor(
     override fun writeRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.write ?: emptyList()
 
+    /**
+     * Author outboxes for on-demand resolution. A real kind-10002 always wins;
+     * only authors whose accepted kind-0 identifies them as a mostr bridge get
+     * the recorded bootstrap relay when no relay list exists.
+     */
+    fun lookupWriteRelaysFor(pubkey: String): List<String> =
+        relayListsByPubkey[pubkey]?.write
+            ?: profileDerivedLookupRelaysByPubkey[pubkey].orEmpty()
+
     /** Write relays sorted by trust score (descending). Unknown relays get score 50 (middle rank). */
     fun writeRelaysForRanked(pubkey: String): List<String> {
         val relays = writeRelaysFor(pubkey)
@@ -6124,6 +6146,7 @@ class MemoryEventStore @Inject constructor(
         profileUpdatedAt.clear()
         profileFieldsCache.clear()
         profileAccessedAt.clear()
+        profileDerivedLookupRelaysByPubkey.clear()
         feedRowCache.clear()
         feedRowAccessedAt.clear()
         followsByPubkey.clear()

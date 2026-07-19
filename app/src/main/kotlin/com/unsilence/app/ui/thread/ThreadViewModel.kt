@@ -19,6 +19,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.boundedSeenRelayHints
 import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
@@ -72,6 +73,19 @@ internal fun threadProjectionParentId(
         parentId !in availableReplyIds
     ) focusedId else parentId
 }
+
+/** Relay locality for the next hop in an ancestor walk. The relay that supplied
+ * the current event leads, followed by active browse and declared parent hints. */
+internal fun nextAncestorRelayHints(
+    sourceRelaysSeen: Collection<String>,
+    browseRelays: Collection<String>,
+    parentRelayHints: Collection<String>,
+    initialHints: Collection<String>,
+): List<String> = boundedSeenRelayHints(
+    seenRelays = sourceRelaysSeen,
+    browseRelays = browseRelays,
+    additionalRelays = parentRelayHints + initialHints,
+)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -319,11 +333,14 @@ class ThreadViewModel @Inject constructor(
                 ?: memoryEventStore.getEventEntity(bestGuessRoot)?.pubkey
 
             val resolvedUrls = if (rootAuthorPubkey != null) {
-                outboxResolver.resolveEngagementRelays(
-                    authorPubkey = rootAuthorPubkey,
-                    ownReadRelays = ownReadRelays,
-                    blockedRelays = blockedRelays,
-                )
+                (
+                    memoryEventStore.lookupWriteRelaysFor(rootAuthorPubkey) +
+                        outboxResolver.resolveEngagementRelays(
+                            authorPubkey = rootAuthorPubkey,
+                            ownReadRelays = ownReadRelays,
+                            blockedRelays = blockedRelays,
+                        )
+                    ).distinct()
             } else {
                 ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
             }
@@ -352,11 +369,14 @@ class ThreadViewModel @Inject constructor(
                     val trueRootEvent = memoryEventStore.getEventEntity(trueRoot)
                     val trueRootAuthor = trueRootEvent?.pubkey
                     val refinedUrls = if (trueRootAuthor != null && trueRootAuthor != rootAuthorPubkey) {
-                        outboxResolver.resolveEngagementRelays(
-                            authorPubkey = trueRootAuthor,
-                            ownReadRelays = ownReadRelays,
-                            blockedRelays = blockedRelays,
-                        )
+                        (
+                            memoryEventStore.lookupWriteRelaysFor(trueRootAuthor) +
+                                outboxResolver.resolveEngagementRelays(
+                                    authorPubkey = trueRootAuthor,
+                                    ownReadRelays = ownReadRelays,
+                                    blockedRelays = blockedRelays,
+                                )
+                            ).distinct()
                     } else urls
 
                     applyRoot(trueRoot, refinedUrls)
@@ -384,10 +404,11 @@ class ThreadViewModel @Inject constructor(
                 ?: return currentId                        // unreachable — best-effort root
             val parentId = current.replyToId ?: current.rootId
             if (parentId == null || parentId == currentId) return currentId  // root
-            currentHints = boundedSeenRelayHints(
-                seenRelays = memoryEventStore.getNostrEvent(currentId)?.relaysSeen.orEmpty(),
+            currentHints = nextAncestorRelayHints(
+                sourceRelaysSeen = memoryEventStore.getNostrEvent(currentId)?.relaysSeen.orEmpty(),
                 browseRelays = relayPool.activeFeedRelayHints(),
-                additionalRelays = memoryEventStore.relayHintsForEvent(parentId) + initialHints,
+                parentRelayHints = memoryEventStore.relayHintsForEvent(parentId),
+                initialHints = initialHints,
             )
             currentId = parentId
         }
@@ -415,6 +436,17 @@ class ThreadViewModel @Inject constructor(
                     bypassDedup = true,
                     excludedRelayUrls = targets.hints,
                 )
+            }
+        }
+        if (memoryEventStore.getEventEntity(id) == null) {
+            val bridgeTargets = bridgeFallbackRelayTargets(targets.all)
+            if (bridgeTargets.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    relayPool.fetchEventsByIdsFromBridgeOnMiss(
+                        eventIds = listOf(id),
+                        alreadyTriedRelayUrls = targets.all,
+                    )
+                }
             }
         }
         return withTimeoutOrNull(3_000) {

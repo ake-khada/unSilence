@@ -342,7 +342,7 @@ class CardHydrator @Inject constructor(
                 backfillScope.launch {
                     val targets = relayResolutionTargets(
                         seenRelays = article.hints,
-                        fallbackRelays = memoryEventStore.writeRelaysFor(article.author),
+                        fallbackRelays = memoryEventStore.lookupWriteRelaysFor(article.author),
                     )
                     if (targets.hints.isNotEmpty()) {
                         relayPool.fetchArticleByCoord(targets.hints, article.author, article.dTag)
@@ -351,6 +351,16 @@ class CardHydrator @Inject constructor(
                         targets.fallback.isNotEmpty()
                     ) {
                         relayPool.fetchArticleByCoord(targets.fallback, article.author, article.dTag)
+                    }
+                    if (memoryEventStore.articleRowByCoord(article.coord) == null) {
+                        val bridgeTargets = bridgeFallbackRelayTargets(targets.all)
+                        if (bridgeTargets.isNotEmpty()) {
+                            relayPool.fetchArticleByCoord(
+                                bridgeTargets,
+                                article.author,
+                                article.dTag,
+                            )
+                        }
                     }
                 }
                 if (articleFetches >= maxArticleFetches) break
@@ -609,7 +619,7 @@ class CardHydrator @Inject constructor(
             if (memoryEventStore.getEventEntity(eventId) != null) continue
             val ref = refsById[eventId] ?: continue
             val ownRelays = ref.authorPubkey
-                ?.let(memoryEventStore::writeRelaysFor)
+                ?.let(memoryEventStore::lookupWriteRelaysFor)
                 .orEmpty()
             val targets = relayResolutionTargets(
                 seenRelays = ref.hints,

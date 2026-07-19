@@ -68,6 +68,8 @@ private const val PROFILE_RELAY_FACTS_INDEXER_LIMIT = 4
 private const val PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT = 3
 private const val PROFILE_RELAY_FACTS_TIMEOUT_MS = 8_000L
 private const val EVENT_REFERENCE_PHASE_TIMEOUT_MS = 4_000L
+private const val EVENT_PROCESSOR_SETTLE_MS = 200L
+private const val BRIDGE_EVENT_FETCH_TTL_MS = 5 * 60_000L
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
@@ -320,6 +322,8 @@ class RelayPool @Inject constructor(
      *  Values = timestamp (epoch ms). TTL 5 min. Written by CardHydrator, checked
      *  by every fetchEventById/fetchEventsByIds entry point. */
     private val missingRefCache = ConcurrentHashMap<String, Long>()
+    /** Per-ID guard for the single miss-tier bridge attempt. */
+    private val bridgeEventFetchAttempted = ConcurrentHashMap<String, Long>()
     private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     private val missingRefCacheHits = AtomicLong(0)
     private val eventIdFetchCoalescer = EventIdFetchCoalescer(scope) { batch ->
@@ -760,6 +764,7 @@ class RelayPool @Inject constructor(
                 val cutoff = System.currentTimeMillis() - 300_000
                 // eventFetchInFlight: self-cleaning via launchFetchMonitor finally blocks
                 missingRefCache.entries.removeIf { it.value < cutoff } // same 5-min TTL
+                bridgeEventFetchAttempted.entries.removeIf { it.value < cutoff }
                 profileFetchAttempted.entries.removeIf { it.value < cutoff }
                 profileFallbackNegCache.entries.removeIf { it.value < cutoff }
                 sourceProfileAttempted.entries.removeIf { it.value < cutoff }
@@ -937,6 +942,7 @@ class RelayPool @Inject constructor(
         profileFetchAttempted.clear()
         hintedProfileFetchAttempted.clear()
         profileFallbackNegCache.clear()
+        bridgeEventFetchAttempted.clear()
     }
 
     /**
@@ -1791,42 +1797,63 @@ class RelayPool @Inject constructor(
             .take(PROFILE_RELAY_FACTS_INDEXER_LIMIT)
         // NIP-51 lists are frequently published only to the author's outbox. Keep this
         // fallback narrow; indexers remain the primary lookup path requested by the UI.
-        val authorWriteRelays = memoryEventStore.get().writeRelaysFor(pubkey)
+        val mes = memoryEventStore.get()
+        val authorWriteRelays = mes.lookupWriteRelaysFor(pubkey)
             .mapNotNull(::normalizeRelayUrl)
             .filter { it !in indexers }
             .distinct()
             .take(PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT)
         val targets = indexers + authorWriteRelays
-        if (targets.isEmpty()) return false
 
-        val subId = "profile-relays-${System.nanoTime()}"
-        val request = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(10002))
-                    add(JsonPrimitive(10006))
-                    add(JsonPrimitive(10007))
+        suspend fun fetchPhase(
+            urls: List<String>,
+            subIdPrefix: String,
+            includeActiveFeedRelay: Boolean = false,
+        ): Boolean {
+            if (urls.isEmpty()) return false
+            val subId = "$subIdPrefix-${System.nanoTime()}"
+            val request = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray {
+                        add(JsonPrimitive(10002))
+                        add(JsonPrimitive(10006))
+                        add(JsonPrimitive(10007))
+                    })
+                    put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                    put("limit", JsonPrimitive(3))
                 })
-                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
-                put("limit", JsonPrimitive(3))
-            })
-        }.toString()
-
-        val eose = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = eose
-        return try {
-            sendOneShotBatch(
-                urls = targets,
-                reqs = listOf(request),
-                subIds = listOf(subId),
-                timeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
-            )
-            withTimeoutOrNull(PROFILE_RELAY_FACTS_TIMEOUT_MS) { eose.await() } != null
-        } finally {
-            cleanupOneShotSub(subId)
+            }.toString()
+            val eose = CompletableDeferred<Unit>()
+            oneShotEoseCallbacks[subId] = eose
+            return try {
+                sendOneShotBatch(
+                    urls = urls,
+                    reqs = listOf(request),
+                    subIds = listOf(subId),
+                    timeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
+                    includeActiveFeedRelay = includeActiveFeedRelay,
+                )
+                withTimeoutOrNull(PROFILE_RELAY_FACTS_TIMEOUT_MS) { eose.await() } != null
+            } finally {
+                cleanupOneShotSub(subId)
+            }
         }
+
+        val standardCovered = fetchPhase(targets, "profile-relays")
+        if (targets.isNotEmpty()) delay(EVENT_PROCESSOR_SETTLE_MS)
+        if (mes.getRelayList(pubkey) != null) return standardCovered
+
+        val bridgeTargets = bridgeFallbackRelayTargets(targets)
+        if (bridgeTargets.isEmpty()) return standardCovered
+        Log.i(TAG, "BRIDGEPROFILEFACTS author=${pubkey.take(8)} relays=${bridgeTargets.joinToString(",")}")
+        val bridgeCovered = fetchPhase(
+            urls = bridgeTargets,
+            subIdPrefix = "bridge-profile-relays",
+            includeActiveFeedRelay = true,
+        )
+        return standardCovered || bridgeCovered
     }
 
     /**
@@ -3291,7 +3318,7 @@ class RelayPool @Inject constructor(
             val relayToPks = mutableMapOf<String, MutableList<String>>()
             for (pk in stillIncomplete) {
                 val candidates = mutableSetOf<String>()
-                candidates.addAll(mes.writeRelaysFor(pk))
+                candidates.addAll(mes.lookupWriteRelaysFor(pk))
                 candidates.addAll(mes.relaysSeenForPubkey(pk))
                 candidates.removeAll(triedRelays)
                 // sendOneShotBatch filters blocked+shouldSkip; pre-filter for accurate grouping
@@ -3300,13 +3327,6 @@ class RelayPool @Inject constructor(
                     relayToPks.getOrPut(url) { mutableListOf() }.add(pk)
                 }
             }
-            if (relayToPks.isEmpty()) {
-                val fbNow = System.currentTimeMillis()
-                stillIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
-                Log.w(TAG, "PROFFB: ${stillIncomplete.size} pk(s) incomplete — no relay signal")
-                return@launch
-            }
-
             // Pick relays that cover the most pks, capped
             val fbRelayEntries = relayToPks.entries
                 .sortedByDescending { it.value.size }
@@ -3314,34 +3334,42 @@ class RelayPool @Inject constructor(
             val fbRelayUrls = fbRelayEntries.map { it.key }
             val fbPks = fbRelayEntries.flatMap { it.value }.distinct()
 
-            Log.w(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
-                fbPks.joinToString(",") { it.take(8) } + " → " +
-                fbRelayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") })
+            if (fbPks.isNotEmpty()) {
+                Log.w(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
+                    fbPks.joinToString(",") { it.take(8) } + " → " +
+                    fbRelayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") })
+                fetchProfilePhase(
+                    pubkeys = fbPks,
+                    targetUrls = fbRelayUrls,
+                    subIdPrefix = "prof-fb",
+                )
+                delay(COLD_LANE_FLUSH_MS)
+            } else {
+                Log.w(TAG, "PROFFB: ${stillIncomplete.size} pk(s) incomplete — no author relay signal")
+            }
 
-            val fbSubId = "prof-fb-${System.nanoTime()}"
-            val fbReq = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(fbSubId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray {
-                        add(JsonPrimitive(0))
-                        add(JsonPrimitive(10002))
-                    })
-                    put("authors", buildJsonArray { fbPks.forEach { add(JsonPrimitive(it)) } })
-                })
-            }.toString()
+            // Final miss tier: one lookup-only bridge relay, deduped against every
+            // locality, indexer/global, and author relay already attempted.
+            val bridgePks = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
+            val bridgeTargets = bridgeFallbackRelayTargets(triedRelays + fbRelayUrls)
+            if (bridgePks.isNotEmpty() && bridgeTargets.isNotEmpty()) {
+                fetchProfilePhase(
+                    pubkeys = bridgePks,
+                    targetUrls = bridgeTargets,
+                    subIdPrefix = "bridge-profiles",
+                    includeActiveFeedRelay = true,
+                )
+                delay(COLD_LANE_FLUSH_MS)
+            }
 
-            sendOneShotBatch(fbRelayUrls, listOf(fbReq), listOf(fbSubId))
-            delay(COLD_LANE_FLUSH_MS)
-
-            // Negative-cache remaining incomplete avatars; log successes for field validation
+            // Negative-cache only after every standard phase and the bridge miss tier.
             val fbNow = System.currentTimeMillis()
-            val finalIncomplete = fbPks.filter { profileMissingPicture(mes.getUserEntity(it)) }
-            val resolved = fbPks.size - finalIncomplete.size
+            val finalIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
+            val resolved = stillIncomplete.size - finalIncomplete.size
             if (resolved > 0) Log.w(TAG, "PROFFB: $resolved pk(s) resolved avatar via fallback")
             finalIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
             if (finalIncomplete.isNotEmpty()) {
-                Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after fallback")
+                Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after bridge fallback")
             }
         }
         Log.d(
@@ -3376,6 +3404,12 @@ class RelayPool @Inject constructor(
             Log.i(
                 TAG,
                 "PROFHINT authors=${pubkeys.joinToString(",") { it.take(8) }} " +
+                    "relays=${targetUrls.joinToString(",")}",
+            )
+        } else if (subIdPrefix == "bridge-profiles") {
+            Log.i(
+                TAG,
+                "BRIDGEPROFILE authors=${pubkeys.joinToString(",") { it.take(8) }} " +
                     "relays=${targetUrls.joinToString(",")}",
             )
         }
@@ -3689,6 +3723,10 @@ class RelayPool @Inject constructor(
             it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
         }
         val targets = (nonIndexer + indexer).take(6)
+        scheduleBridgeEventFallback(
+            eventIds = novel,
+            alreadyTriedRelayUrls = targets.map { it.url },
+        )
         if (targets.isEmpty()) {
             Log.d(TAG, "fetchEventsByIds: 0 targets (pool empty)")
             return
@@ -3837,6 +3875,7 @@ class RelayPool @Inject constructor(
                 bypassDedup = bypassDedup,
                 excludedRelayUrls = excludedRelayUrls,
                 capToHintBudget = true,
+                includeBridgeMissTier = relayHints.isEmpty(),
             )
         }
     }
@@ -3855,6 +3894,7 @@ class RelayPool @Inject constructor(
                 bypassDedup = bypassDedup,
                 excludedRelayUrls = excludedRelayUrls,
                 capToHintBudget = false,
+                includeBridgeMissTier = false,
             )
         }
     }
@@ -3865,10 +3905,12 @@ class RelayPool @Inject constructor(
         bypassDedup: Boolean,
         excludedRelayUrls: Collection<String>,
         capToHintBudget: Boolean,
+        includeBridgeMissTier: Boolean,
+        ignoreNegativeCache: Boolean = false,
     ) {
         val novel = mutableListOf<String>()
         for (eventId in eventIds) {
-            if (isEventUnresolved(eventId)) continue
+            if (!ignoreNegativeCache && isEventUnresolved(eventId)) continue
             if (bypassDedup) {
                 novel += eventId
                 continue
@@ -3938,6 +3980,12 @@ class RelayPool @Inject constructor(
         }
         if (resolvedTargets.isEmpty()) {
             Log.d(TAG, "fetchEventsByIds: ${novel.size} events → 0 targets (pool empty)")
+            if (includeBridgeMissTier) {
+                fetchEventsByIdsFromBridgeOnMiss(
+                    eventIds = novel,
+                    alreadyTriedRelayUrls = excluded,
+                )
+            }
             return
         }
         if (targetUrls.isNotEmpty() && capToHintBudget) {
@@ -3962,8 +4010,18 @@ class RelayPool @Inject constructor(
                 includeActiveFeedRelay = targetUrls.isNotEmpty(),
             )
             withTimeoutOrNull(EVENT_REFERENCE_PHASE_TIMEOUT_MS) { eose.await() }
+            // EVENT messages precede EOSE on the wire but feed/control handlers
+            // publish into MES on short batching lanes. Let that insert land before
+            // deciding that the established phase missed and querying the bridge.
+            delay(EVENT_PROCESSOR_SETTLE_MS)
         } finally {
             cleanupOneShotSub(subId)
+        }
+        if (includeBridgeMissTier) {
+            fetchEventsByIdsFromBridgeOnMiss(
+                eventIds = novel,
+                alreadyTriedRelayUrls = excluded + resolvedTargets,
+            )
         }
         val targetKind = when {
             targetUrls.isEmpty() -> "fallback"
@@ -3971,6 +4029,60 @@ class RelayPool @Inject constructor(
             else -> "targeted"
         }
         Log.d(TAG, "fetchEventsByIds: ${novel.size} events → ${resolvedTargets.size} $targetKind relay(s)")
+    }
+
+    private fun scheduleBridgeEventFallback(
+        eventIds: List<String>,
+        alreadyTriedRelayUrls: Collection<String>,
+    ) {
+        scope.launch {
+            delay(EVENT_REFERENCE_PHASE_TIMEOUT_MS)
+            fetchEventsByIdsFromBridgeOnMiss(eventIds, alreadyTriedRelayUrls)
+        }
+    }
+
+    /**
+     * Final lookup-only ID tier. Successful standard lookups make this a no-op;
+     * unresolved IDs share one guarded request to the single configured bridge.
+     */
+    internal suspend fun fetchEventsByIdsFromBridgeOnMiss(
+        eventIds: List<String>,
+        alreadyTriedRelayUrls: Collection<String> = emptyList(),
+    ) {
+        val targetUrls = bridgeFallbackRelayTargets(alreadyTriedRelayUrls)
+        if (targetUrls.isEmpty()) return
+        val mes = memoryEventStore.get()
+        val now = System.currentTimeMillis()
+        val missing = eventIds.distinct().filter { eventId ->
+            if (mes.getEventEntity(eventId) != null) return@filter false
+            var admitted = false
+            bridgeEventFetchAttempted.compute(eventId) { _, previous ->
+                if (previous == null || now - previous >= BRIDGE_EVENT_FETCH_TTL_MS) {
+                    admitted = true
+                    now
+                } else {
+                    previous
+                }
+            }
+            admitted
+        }
+        if (missing.isEmpty()) return
+        Log.i(
+            TAG,
+            "BRIDGEREF ids=${missing.joinToString(",") { it.take(8) }} " +
+                "relays=${targetUrls.joinToString(",")}",
+        )
+        missing.chunked(MAX_EVENT_IDS_PER_REQ).forEach { chunk ->
+            fetchEventsByIdsWithHintsBatch(
+                eventIds = chunk,
+                relayHints = targetUrls,
+                bypassDedup = true,
+                excludedRelayUrls = alreadyTriedRelayUrls,
+                capToHintBudget = false,
+                includeBridgeMissTier = false,
+                ignoreNegativeCache = true,
+            )
+        }
     }
 
     /**
@@ -4209,6 +4321,7 @@ class RelayPool @Inject constructor(
                 includeActiveFeedRelay = true,
             )
             withTimeoutOrNull(8_000L) { eoseDeferred.await() }
+            delay(EVENT_PROCESSOR_SETTLE_MS)
         } finally {
             cleanupOneShotSub(subId)
         }
@@ -4647,6 +4760,7 @@ class RelayPool @Inject constructor(
         connectionPurposes.clear()
         profileFetchAttempted.clear()
         hintedProfileFetchAttempted.clear()
+        bridgeEventFetchAttempted.clear()
         // Complete all in-flight monitors so they clean up immediately
         eventFetchInFlight.values.forEach { it.complete(null) }
         eventFetchInFlight.clear()

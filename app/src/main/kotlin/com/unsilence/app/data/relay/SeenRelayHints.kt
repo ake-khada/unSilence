@@ -91,6 +91,23 @@ internal fun relayResolutionTargets(
     return RelayResolutionTargets(hints = hints, fallback = fallback)
 }
 
+/** One final lookup-only tier, deduped against every relay already attempted. */
+internal fun bridgeFallbackRelayTargets(
+    alreadyTriedRelays: Collection<String>,
+): List<String> {
+    val tried = normalizedRelayTargets(alreadyTriedRelays).toSet()
+    return normalizedRelayTargets(BRIDGE_FALLBACK_RELAY_URLS)
+        .filterNot(tried::contains)
+}
+
+/** NIP-05 bootstrap for identities bridged by mostr. */
+internal fun profileDerivedBridgeOutbox(nip05: String?): List<String> =
+    if (nip05?.trim()?.lowercase()?.endsWith("@mostr.pub") == true) {
+        BRIDGE_FALLBACK_RELAY_URLS
+    } else {
+        emptyList()
+    }
+
 /** Group profile authors by their bounded locality target set for one wire REQ. */
 internal fun groupProfileHintFetches(
     pubkeys: Collection<String>,

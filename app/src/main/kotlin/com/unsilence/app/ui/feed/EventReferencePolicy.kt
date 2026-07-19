@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.RelayResolutionTargets
+import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.boundedSeenRelayHints
 import com.unsilence.app.data.relay.relayResolutionTargets
 import kotlinx.serialization.json.jsonArray
@@ -29,7 +30,24 @@ internal enum class EventReferenceLookupStep { EVENT_ID, ADDRESS }
 internal data class EventReferenceRelayLadder(
     val eventId: RelayResolutionTargets?,
     val address: RelayResolutionTargets?,
+    val eventIdBridgeFallback: List<String>,
+    val addressBridgeFallback: List<String>,
 )
+
+internal enum class EventReferenceRelayPhase {
+    EVENT_ID_STANDARD,
+    ADDRESS_STANDARD,
+    EVENT_ID_BRIDGE,
+    ADDRESS_BRIDGE,
+}
+
+/** Execution order: every established phase completes before either bridge lookup. */
+internal fun EventReferenceRelayLadder.orderedPhases(): List<EventReferenceRelayPhase> = buildList {
+    if (eventId != null) add(EventReferenceRelayPhase.EVENT_ID_STANDARD)
+    if (address != null) add(EventReferenceRelayPhase.ADDRESS_STANDARD)
+    if (eventIdBridgeFallback.isNotEmpty()) add(EventReferenceRelayPhase.EVENT_ID_BRIDGE)
+    if (addressBridgeFallback.isNotEmpty()) add(EventReferenceRelayPhase.ADDRESS_BRIDGE)
+}
 
 internal fun eventReferenceLookupSteps(target: EventReferenceTarget): List<EventReferenceLookupStep> =
     buildList {
@@ -49,9 +67,17 @@ internal fun eventReferenceRelayLadder(
         browseRelays = browseRelayHints,
         fallbackRelays = fallback,
     )
+    val eventIdTargets = target.eventId?.takeIf { it.isNotBlank() }?.let { targets(idFallbackRelays) }
+    val addressTargets = target.address?.let { targets(addressFallbackRelays) }
     return EventReferenceRelayLadder(
-        eventId = target.eventId?.takeIf { it.isNotBlank() }?.let { targets(idFallbackRelays) },
-        address = target.address?.let { targets(addressFallbackRelays) },
+        eventId = eventIdTargets,
+        address = addressTargets,
+        eventIdBridgeFallback = eventIdTargets
+            ?.let { bridgeFallbackRelayTargets(it.all) }
+            .orEmpty(),
+        addressBridgeFallback = addressTargets
+            ?.let { bridgeFallbackRelayTargets(it.all) }
+            .orEmpty(),
     )
 }
 

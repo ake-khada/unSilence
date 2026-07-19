@@ -5,6 +5,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.ui.thread.nextAncestorRelayHints
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -66,6 +67,31 @@ class ConsumerBridgeTest {
         assertEquals("wss://relay.divine.video", row.relaysSeen.first())
         assertTrue("wss://second.example" in row.relaysSeen)
         assertTrue(row.relaysSeen.size <= MAX_SEEN_RELAY_HINTS)
+    }
+
+    @Test
+    fun `bridge event provenance becomes the first hint for the next thread ancestor`() = runTest {
+        store.insert(event(
+            id = "bridged-reply",
+            pubkey = "bridged-author",
+            relayUrl = "wss://relay.mostr.pub",
+            replyToId = "bridged-parent",
+        ))
+
+        val stored = requireNotNull(store.getNostrEvent("bridged-reply"))
+        assertEquals(
+            listOf(
+                "wss://relay.mostr.pub",
+                "wss://browse.example",
+                "wss://parent-hint.example",
+            ),
+            nextAncestorRelayHints(
+                sourceRelaysSeen = stored.relaysSeen,
+                browseRelays = listOf("wss://browse.example"),
+                parentRelayHints = listOf("wss://parent-hint.example"),
+                initialHints = listOf("wss://initial.example"),
+            ),
+        )
     }
 
     @Test
@@ -133,6 +159,37 @@ class ConsumerBridgeTest {
         assertEquals("https://example.com/a.jpg", user.picture)
         assertEquals("Alice W", user.displayName)
         assertEquals("alice@example.com", user.nip05)
+    }
+
+    @Test
+    fun `profile ingest records mostr lookup outbox without changing feed relays`() = runTest {
+        store.insert(event(
+            id = "p-mostr", kind = 0, pubkey = "bridged-author",
+            content = """{"name":"Bridged","nip05":"alice@mostr.pub"}""",
+            relayUrl = "wss://relay.mostr.pub",
+        ))
+        store.insert(event(
+            id = "p-ordinary", kind = 0, pubkey = "ordinary-author",
+            content = """{"name":"Ordinary","nip05":"alice@example.com"}""",
+        ))
+
+        assertTrue(store.writeRelaysFor("bridged-author").isEmpty())
+        assertEquals(
+            listOf("wss://relay.mostr.pub"),
+            store.lookupWriteRelaysFor("bridged-author"),
+        )
+        assertTrue(store.lookupWriteRelaysFor("ordinary-author").isEmpty())
+
+        // Once the bridge's real kind-10002 arrives, it takes precedence over
+        // the profile-derived bootstrap data.
+        store.insert(event(
+            id = "rl-mostr", kind = 10002, pubkey = "bridged-author",
+            tags = listOf(listOf("r", "wss://author-outbox.example", "write")),
+        ))
+        assertEquals(
+            listOf("wss://author-outbox.example"),
+            store.lookupWriteRelaysFor("bridged-author"),
+        )
     }
 
     // ── ProfileResolver.filterUnresolved ────────────────────────────────────

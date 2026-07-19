@@ -94,4 +94,31 @@ class SeenRelayHintsTest {
         )
         assertTrue(groups.values.flatten().none { it == "hintless" })
     }
+
+    @Test
+    fun `bridge fallback is one normalized relay deduped against prior fanout`() {
+        assertEquals(
+            listOf("wss://relay.mostr.pub"),
+            bridgeFallbackRelayTargets(
+                listOf("wss://one.example/", "one.example"),
+            ),
+        )
+        assertTrue(
+            bridgeFallbackRelayTargets(
+                listOf("relay.mostr.pub", "wss://relay.mostr.pub/"),
+            ).isEmpty(),
+        )
+        assertTrue(BRIDGE_FALLBACK_RELAY_URLS.none { it in GLOBAL_RELAY_URLS })
+    }
+
+    @Test
+    fun `mostr nip05 derives lookup outbox while ordinary nip05 does not`() {
+        assertEquals(
+            listOf("wss://relay.mostr.pub"),
+            profileDerivedBridgeOutbox("  Alice@MOSTR.PUB  "),
+        )
+        assertTrue(profileDerivedBridgeOutbox("alice@example.com").isEmpty())
+        assertTrue(profileDerivedBridgeOutbox("alice@sub.mostr.pub").isEmpty())
+        assertTrue(profileDerivedBridgeOutbox(null).isEmpty())
+    }
 }
