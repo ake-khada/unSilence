@@ -41,6 +41,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,20 +100,23 @@ fun SettingsScreen(
     ),
 ) {
     BackHandler(onBack = onDismiss)
-    var showRelays by remember { mutableStateOf(false) }
-    var relayDetailUrl by remember { mutableStateOf<String?>(null) }
-    var showDiscovery by remember { mutableStateOf(false) }
-    var showMediaUpload by remember { mutableStateOf(false) }
-    var showFilters by remember { mutableStateOf(false) }
-    var showKeys by remember { mutableStateOf(false) }
-    var showConsole by remember { mutableStateOf(false) }
-    var showSocialGraph by remember { mutableStateOf(false) }
-    var showCustomEmojis by remember { mutableStateOf(false) }
-    var showDrafts by remember { mutableStateOf(false) }
-    var draftToResume by remember { mutableStateOf<Draft?>(null) }
+    var showRelays by rememberSaveable { mutableStateOf(false) }
+    var relayDetailUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var showDiscovery by rememberSaveable { mutableStateOf(false) }
+    var showMediaUpload by rememberSaveable { mutableStateOf(false) }
+    var showFilters by rememberSaveable { mutableStateOf(false) }
+    var showKeys by rememberSaveable { mutableStateOf(false) }
+    var showConsole by rememberSaveable { mutableStateOf(false) }
+    var showSocialGraph by rememberSaveable { mutableStateOf(false) }
+    var showCustomEmojis by rememberSaveable { mutableStateOf(false) }
+    var showDrafts by rememberSaveable { mutableStateOf(false) }
+    var draftToResumeKey by rememberSaveable { mutableStateOf<String?>(null) }
     var showLogoutConfirm by remember { mutableStateOf(false) }
     val openZapSettings = LocalOpenZapSettings.current
     val drafts by draftsViewModel.drafts.collectAsStateWithLifecycle()
+    val draftToResume = remember(drafts, draftToResumeKey) {
+        drafts.firstOrNull { it.key == draftToResumeKey }
+    }
 
     // One-shot snapshots, read on open (lean — no ticker).
     val profile = remember(viewModel) { viewModel.ownProfile() }
@@ -265,14 +269,14 @@ fun SettingsScreen(
             onDismiss = { showDrafts = false },
             onResume = { draft ->
                 showDrafts = false
-                draftToResume = draft
+                draftToResumeKey = draft.key
             },
             viewModel = draftsViewModel,
         )
     }
     draftToResume?.let { draft ->
         ComposeScreen(
-            onDismiss = { draftToResume = null },
+            onDismiss = { draftToResumeKey = null },
             replyToEventId = (draft.context as? DraftContext.Reply)?.parentId,
             quoteEventId = (draft.context as? DraftContext.Quote)?.eventId,
             articleCommentTarget = (draft.context as? DraftContext.ArticleComment)?.toArticleCommentTarget(),

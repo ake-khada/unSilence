@@ -150,6 +150,21 @@ fun ComposeScreen(
         ?: (initialContext as? DraftContext.Reply)?.parentId
     val effectiveQuoteEventId = quoteEventId
         ?: (initialContext as? DraftContext.Quote)?.eventId
+    val composeSessionKey = remember(
+        effectiveReplyToEventId,
+        effectiveQuoteEventId,
+        effectiveArticleTarget,
+        initialDraft?.key,
+    ) {
+        when {
+            initialDraft != null -> "draft:${initialDraft.key}"
+            effectiveArticleTarget != null ->
+                "article:${effectiveArticleTarget.articleCoord}:${effectiveArticleTarget.parentId ?: "root"}"
+            effectiveReplyToEventId != null -> "reply:$effectiveReplyToEventId"
+            effectiveQuoteEventId != null -> "quote:$effectiveQuoteEventId"
+            else -> "new"
+        }
+    }
     val isReply = effectiveReplyToEventId != null || effectiveArticleTarget != null
     val isQuote = effectiveQuoteEventId != null
     val replyToRow = viewModel.replyToRow
@@ -167,32 +182,42 @@ fun ComposeScreen(
         initialDraft?.key,
     ) { mutableStateOf(false) }
 
+    fun finishAndDismiss() {
+        viewModel.finishComposeSession(composeSessionKey)
+        onDismiss()
+    }
+
     fun requestDismiss() {
         when {
             isConfirming -> viewModel.cancelSend()
             hasUnsavedDraftChanges && !isPublishing -> showCloseDraftSheet = true
-            else -> onDismiss()
+            else -> finishAndDismiss()
         }
     }
 
-    // Reset ViewModel state on open (activity-scoped VM survives recomposition)
-    LaunchedEffect(effectiveReplyToEventId, effectiveQuoteEventId, effectiveArticleTarget, initialDraft?.key) {
-        viewModel.reset()
+    // Initialize once per explicit compose session. Reattaching the composition
+    // after an Activity recreation must not reset the activity-scoped editor VM.
+    LaunchedEffect(composeSessionKey) {
+        val beginsNewSession = viewModel.beginComposeSession(composeSessionKey)
+        if (beginsNewSession) {
+            viewModel.reset()
+        }
+        // Reference models are cheap to rebind and are not stored in saved state.
         if (effectiveReplyToEventId != null) viewModel.loadReplyTo(effectiveReplyToEventId)
         if (effectiveQuoteEventId != null) viewModel.loadQuoteTo(effectiveQuoteEventId)
         if (effectiveArticleTarget != null) viewModel.loadArticleComment(effectiveArticleTarget)
-        if (initialDraft != null) viewModel.restoreDraft(initialDraft)
+        if (beginsNewSession && initialDraft != null) viewModel.restoreDraft(initialDraft)
         initialized = true
     }
 
     // Auto-dismiss once the note is published
     LaunchedEffect(viewModel.published, initialized) {
-        if (initialized && viewModel.published) onDismiss()
+        if (initialized && viewModel.published) finishAndDismiss()
     }
 
     // Dismiss on Sent state
     LaunchedEffect(sendState, initialized) {
-        if (initialized && sendState is SendState.Sent) onDismiss()
+        if (initialized && sendState is SendState.Sent) finishAndDismiss()
         if (sendState is SendState.Confirming) keyboardController?.hide()
     }
 
@@ -915,12 +940,12 @@ fun ComposeScreen(
                 val saved = viewModel.saveCurrentDraft()
                 showCloseDraftSheet = false
                 if (saved) showSnackbar("Draft saved")
-                onDismiss()
+                finishAndDismiss()
             },
             onDiscard = {
                 viewModel.discardCurrentDraft()
                 showCloseDraftSheet = false
-                onDismiss()
+                finishAndDismiss()
             },
             onContinueEditing = { showCloseDraftSheet = false },
         )

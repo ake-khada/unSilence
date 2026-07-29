@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.AppBootstrapper
@@ -19,6 +20,7 @@ import javax.inject.Inject
 
 @HiltViewModel
 class RootViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     val keyManager: KeyManager,
     private val bootstrapper: AppBootstrapper,
     private val zapPreferencesStore: ZapPreferencesStore,
@@ -34,7 +36,7 @@ class RootViewModel @Inject constructor(
 
     /** Incremented on each login — ensures hiltViewModel(key) creates fresh VMs
      *  even when the same pubkey re-logs in. */
-    var sessionId by mutableIntStateOf(0)
+    var sessionId by mutableIntStateOf(savedStateHandle[SESSION_ID_KEY] ?: 0)
         private set
 
     init {
@@ -55,6 +57,7 @@ class RootViewModel @Inject constructor(
         val pubkey = keyManager.getPublicKeyHex() ?: return
         selectPreferenceOwner(pubkey)
         sessionId++
+        savedStateHandle[SESSION_ID_KEY] = sessionId
         isLoggedIn = true
         viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
     }
@@ -86,5 +89,9 @@ class RootViewModel @Inject constructor(
         zapPreferencesStore.selectOwner(pubkey)
         blossomServersStore.selectOwner(pubkey)
         settingsStore.selectOwner(pubkey)
+    }
+
+    private companion object {
+        const val SESSION_ID_KEY = "root_session_id"
     }
 }
