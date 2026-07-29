@@ -1084,14 +1084,6 @@ class RelayPool @Inject constructor(
             }
             return
         }
-        if (includeActiveFeedRelay) {
-            Log.i(
-                TAG,
-                "TARGETWIRE subs=${subIds.joinToString(",") { it.substringBeforeLast('-') }} " +
-                    "relays=${normalized.joinToString(",")}",
-            )
-        }
-
         val reused = mutableListOf<String>()
         val ephemeral = mutableListOf<String>()
 
@@ -1847,7 +1839,6 @@ class RelayPool @Inject constructor(
 
         val bridgeTargets = bridgeFallbackRelayTargets(targets)
         if (bridgeTargets.isEmpty()) return standardCovered
-        Log.i(TAG, "BRIDGEPROFILEFACTS author=${pubkey.take(8)} relays=${bridgeTargets.joinToString(",")}")
         val bridgeCovered = fetchPhase(
             urls = bridgeTargets,
             subIdPrefix = "bridge-profile-relays",
@@ -3400,19 +3391,6 @@ class RelayPool @Inject constructor(
         }.toString()
         val eoseDeferred = CompletableDeferred<Unit>()
         oneShotEoseCallbacks[subId] = eoseDeferred
-        if (subIdPrefix == "hint-profiles") {
-            Log.i(
-                TAG,
-                "PROFHINT authors=${pubkeys.joinToString(",") { it.take(8) }} " +
-                    "relays=${targetUrls.joinToString(",")}",
-            )
-        } else if (subIdPrefix == "bridge-profiles") {
-            Log.i(
-                TAG,
-                "BRIDGEPROFILE authors=${pubkeys.joinToString(",") { it.take(8) }} " +
-                    "relays=${targetUrls.joinToString(",")}",
-            )
-        }
         try {
             sendOneShotBatch(
                 targetUrls,
@@ -3988,14 +3966,6 @@ class RelayPool @Inject constructor(
             }
             return
         }
-        if (targetUrls.isNotEmpty() && capToHintBudget) {
-            Log.i(
-                TAG,
-                "REFHINT ids=${novel.joinToString(",") { it.take(8) }} " +
-                    "relays=${resolvedTargets.joinToString(",")}",
-            )
-        }
-
         // A suspending lookup must complete on relay EOSE/timeout, not when its
         // coalesced REQ merely leaves the process. This lets the caller advance
         // from an empty hint phase to outbox/coordinate fallback deterministically.
@@ -4067,11 +4037,6 @@ class RelayPool @Inject constructor(
             admitted
         }
         if (missing.isEmpty()) return
-        Log.i(
-            TAG,
-            "BRIDGEREF ids=${missing.joinToString(",") { it.take(8) }} " +
-                "relays=${targetUrls.joinToString(",")}",
-        )
         missing.chunked(MAX_EVENT_IDS_PER_REQ).forEach { chunk ->
             fetchEventsByIdsWithHintsBatch(
                 eventIds = chunk,
