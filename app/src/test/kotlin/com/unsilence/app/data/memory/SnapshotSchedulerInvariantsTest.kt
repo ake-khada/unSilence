@@ -89,13 +89,22 @@ class SnapshotSchedulerInvariantsTest {
         assertNull(store.getProfile("anything"))
     }
 
-    // ── Test 2: Valid round-trip via saveNow + restoreIfPresent ─────────────
+    // ── Test 2: Writer + streamed-reader round-trip ─────────────────────────
 
     @Test
-    fun `saveNow then restoreIfPresent restores all events and aggregates`() = runTest {
+    fun `saveNow writer and streamed restore round-trip events and aggregates`() = runTest {
+        val boundaryCrossingContent = "streamed-payload-".repeat(2_048)
         // Populate store
         store.insert(event(id = "sched-1", kind = 1, createdAt = 100))
-        store.insert(event(id = "sched-2", kind = 1, createdAt = 101, replyToId = "sched-1"))
+        store.insert(
+            event(
+                id = "sched-2",
+                kind = 1,
+                content = boundaryCrossingContent,
+                createdAt = 101,
+                replyToId = "sched-1",
+            ),
+        )
         store.insert(
             event(id = "sched-profile", pubkey = "sched-pk", kind = 0,
                 content = """{"name":"scheduler-test"}""", createdAt = 200),
@@ -123,6 +132,10 @@ class SnapshotSchedulerInvariantsTest {
         assertEquals(4, restoredStore.eventsByIds(
             setOf("sched-1", "sched-2", "sched-profile", "sched-reaction"),
         ).size)
+        assertEquals(
+            boundaryCrossingContent,
+            restoredStore.eventsByIds(setOf("sched-2")).single().content,
+        )
 
         // Verify aggregates
         assertEquals(1, restoredStore.replyCount("sched-1"))
@@ -159,18 +172,49 @@ class SnapshotSchedulerInvariantsTest {
         assertEquals("USNS", magic)
     }
 
-    // ── Test 4: Corrupt file does not crash, store stays empty ─────────────
+    // ── Test 4: Corrupt file self-heals after one cold start ───────────────
 
     @Test
-    fun `restoreIfPresent with corrupt file does not crash`() = runTest {
-        // Write garbage to the snapshot file
+    fun `corrupt binary restore is quarantined and the second launch is clean`() = runTest {
         val snapshotFile = File(tmpDir, "test.snapshot")
-        snapshotFile.writeText("SNAPSHOT_V1\nthis\tis\tnot\ta\tvalid\tevent\tline\n")
+        store.insert(event(id = "partial-before-failure", kind = 1, createdAt = 100))
+        scheduler.saveNow()
 
-        scheduler.restoreIfPresent()
+        // Truncate a valid V16 file at its tail. Restore inserts the event before
+        // it reaches the missing relay-identity bytes, exercising partial-restore
+        // cleanup rather than only an early header failure.
+        val corruptBytes = snapshotFile.readBytes().let { it.copyOf(it.size - 1) }
+        snapshotFile.writeBytes(corruptBytes)
+        val badFile = File(tmpDir, "test.snapshot.bad")
+        badFile.writeText("older post-mortem artifact")
 
-        // Store should remain empty — malformed lines are skipped
-        assertTrue(store.eventsByIds(setOf("anything")).isEmpty())
+        val restoredStore = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        val restoredScheduler = SnapshotScheduler(restoredStore, AtomicFile(snapshotFile))
+        restoredScheduler.restoreIfPresent()
+
+        assertTrue("failed live snapshot must be moved aside", !snapshotFile.exists())
+        assertTrue("post-mortem artifact must be retained", badFile.exists())
+        assertTrue(
+            "the latest failed bytes must overwrite the previous artifact",
+            badFile.readBytes().contentEquals(corruptBytes),
+        )
+        assertTrue(
+            "a late parse failure must clear partially restored rows",
+            restoredStore.eventsByIds(setOf("partial-before-failure")).isEmpty(),
+        )
+
+        // A second process launch sees no live snapshot and starts normally.
+        val secondLaunchStore = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        SnapshotScheduler(secondLaunchStore, AtomicFile(snapshotFile)).restoreIfPresent()
+
+        assertTrue(secondLaunchStore.eventsByIds(setOf("partial-before-failure")).isEmpty())
+        assertTrue("second launch must not consume the artifact", badFile.exists())
     }
 
     // ── Test 5: Concurrent saves don't corrupt ─────────────────────────────
@@ -432,10 +476,10 @@ class SnapshotSchedulerInvariantsTest {
         }
     }
 
-    // ── Test 12: foreign-owner snapshot is rejected, deleted, MES empty ─────
+    // ── Test 12: foreign-owner snapshot is rejected, quarantined, MES empty ─
 
     @Test
-    fun `snapshot from a different owner is rejected and deleted`() = runTest {
+    fun `snapshot from a different owner is rejected and quarantined`() = runTest {
         val ownerA = "account-A-pubkey"
         store.ownPubkey = ownerA
         store.insert(event(id = "A-note-1", kind = 1, createdAt = 100))
@@ -452,12 +496,17 @@ class SnapshotSchedulerInvariantsTest {
         val restoredScheduler = SnapshotScheduler(restored, AtomicFile(snapshotFile))
         restoredScheduler.restoreIfPresent()
 
-        // The throw fires before any insertion, so MES stays empty; file deleted.
+        // The throw fires before any insertion, so MES stays empty; file is
+        // quarantined so the next launch cannot retry it.
         assertTrue(
             "MES must stay empty on owner mismatch",
             restored.eventsByIds(setOf("A-note-1", "A-note-2")).isEmpty(),
         )
-        assertTrue("foreign snapshot file must be deleted", !snapshotFile.exists())
+        assertTrue("foreign snapshot file must leave the live path", !snapshotFile.exists())
+        assertTrue(
+            "foreign snapshot must be retained as a post-mortem artifact",
+            File(tmpDir, "test.snapshot.bad").exists(),
+        )
     }
 
     // ── Test 13: same-owner snapshot restores normally ─────────────────────
