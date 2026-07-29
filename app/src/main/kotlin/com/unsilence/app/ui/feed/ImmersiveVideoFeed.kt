@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -99,7 +98,6 @@ import com.unsilence.app.ui.thread.ThreadViewModel
 import kotlinx.coroutines.delay
 
 private const val IMMERSIVE_OWNER_ID = "feed-immersive"
-private const val IMMERSIVE_LOG_TAG = "ImmersiveVideo"
 private const val LOAD_MORE_DISTANCE = 3
 private const val PROGRESS_POLL_MS = 250L
 private const val SOUNDWAVE_FIRST_BASE_DP = 8f
@@ -236,13 +234,6 @@ internal fun ImmersiveVideoFeed(
         anchoredContentId = item.contentId
         onPageSettled(item.row)
         callbacks.onWotSubjectsVisible(setOf(item.authorPubkey))
-        Log.i(
-            IMMERSIVE_LOG_TAG,
-            "IMMERSIVE_SETTLED wrapper=${item.row.id} content=${item.contentId} " +
-                "repost=${item.row.kind == 6 || item.row.kind == 16} " +
-                "sourceAuthor=${item.row.pubkey.take(12)} author=${item.authorPubkey.take(12)} " +
-                "authorSource=${if (item.row.kind == 6 || item.row.kind == 16) "target" else "row"}",
-        )
         if (settledItemBlocked) {
             player.playWhenReady = false
             paused = true

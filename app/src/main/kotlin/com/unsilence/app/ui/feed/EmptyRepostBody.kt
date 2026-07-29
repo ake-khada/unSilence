@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -113,17 +112,8 @@ fun EmptyRepostBody(
                     contentWarningReason = ev.contentWarningReason,
                 )
             }.getOrNull()
-            Log.i(
-                "EmptyRepostBody",
-                "REPOSTRESOLVED id=${ev.id.take(8)} kind=${ev.kind} relay=${ev.relayUrl}",
-            )
             value = EmptyRepostState(event = ev, model = model, loading = false)
         } else {
-            Log.w(
-                "EmptyRepostBody",
-                "REPOSTUNRESOLVED id=${reference?.eventId?.take(8).orEmpty()} " +
-                    "hints=${reference?.relayHints.orEmpty().joinToString(",")}",
-            )
             value = EmptyRepostState(loading = false, unresolved = true)
         }
     }
