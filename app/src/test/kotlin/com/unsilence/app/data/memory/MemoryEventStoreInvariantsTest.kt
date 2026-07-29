@@ -1517,6 +1517,177 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `snapshot persistence keeps anchors then LRU and newest content within separate caps`() {
+        assertEquals(5_000, PERSISTED_CONTENT_EVENT_CAP)
+        assertEquals(1_000, PERSISTED_NON_CONTENT_LRU_CAP)
+        assertEquals(500, PERSISTED_FOLLOWS_LRU_CAP)
+        assertEquals(3 * 1024 * 1024, PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP)
+        assertEquals(1_000, FOLLOWS_ACCESS_INDEX_CAP)
+        assertEquals(200, FOLLOWS_ACCESS_INDEX_TRIM)
+
+        val own = "own-pk"
+        val followed = "followed-pk"
+        val ownControl = event(
+            id = "own-control", pubkey = own, kind = 0, createdAt = 1, firstSeenAt = 1,
+        )
+        val followedControl = event(
+            id = "followed-control", pubkey = followed, kind = 10002,
+            createdAt = 2, firstSeenAt = 2,
+        )
+        val hotControl = event(
+            id = "hot-control", pubkey = "hot-pk", kind = 10006,
+            createdAt = 3, firstSeenAt = 3,
+        )
+        val warmControl = event(
+            id = "warm-control", pubkey = "warm-pk", kind = 0,
+            createdAt = 4, firstSeenAt = 4,
+        )
+        val coldControl = event(
+            id = "cold-control", pubkey = "cold-pk", kind = 0,
+            createdAt = 5, firstSeenAt = 5,
+        )
+        val content = (1..4).map { index ->
+            event(
+                id = "content-$index",
+                pubkey = "content-pk-$index",
+                kind = 1,
+                createdAt = index.toLong(),
+                firstSeenAt = index.toLong(),
+            )
+        }
+
+        val selected = selectSnapshotEventsForPersistence(
+            events = listOf(
+                ownControl,
+                followedControl,
+                hotControl,
+                warmControl,
+                coldControl,
+                event(id = "raw-kind-3", pubkey = own, kind = 3),
+            ) + content,
+            ownPubkey = own,
+            followedPubkeys = setOf(followed),
+            lastTouchedAt = mapOf(
+                hotControl.id to 300L,
+                warmControl.id to 200L,
+                coldControl.id to 100L,
+            ),
+            contentCap = 2,
+            nonContentLruCap = 2,
+        )
+
+        assertEquals(
+            setOf("own-control", "followed-control", "hot-control", "warm-control"),
+            selected.nonContentEvents.mapTo(mutableSetOf()) { it.id },
+        )
+        assertEquals(listOf("content-4", "content-3"), selected.contentEvents.map { it.id })
+        assertEquals(5, selected.nonContentCandidateCount)
+        assertEquals(4, selected.contentCandidateCount)
+        assertEquals(2, selected.anchoredNonContentCount)
+    }
+
+    @Test
+    fun `snapshot follows persistence keeps own then prioritizes followed and LRU`() {
+        val own = "own-pk"
+        val followed = "followed-pk"
+        val selected = selectSnapshotFollowsForPersistence(
+            followsByPubkey = mapOf(
+                own to setOf(followed),
+                followed to setOf("friend"),
+                "hot-pk" to setOf("hot-friend"),
+                "warm-pk" to setOf("warm-friend"),
+                "cold-pk" to setOf("cold-friend"),
+            ),
+            followsCreatedAt = mapOf(
+                own to 1L,
+                followed to 2L,
+                "hot-pk" to 3L,
+                "warm-pk" to 4L,
+                "cold-pk" to 5L,
+            ),
+            followsAccessedAt = mapOf(
+                "hot-pk" to 300L,
+                "warm-pk" to 200L,
+                "cold-pk" to 100L,
+            ),
+            ownPubkey = own,
+            followedPubkeys = setOf(followed),
+            lruCap = 2,
+            payloadByteCap = Int.MAX_VALUE,
+        )
+
+        assertEquals(
+            setOf(own, followed, "hot-pk"),
+            selected.entries.mapTo(mutableSetOf()) { it.pubkey },
+        )
+        assertEquals(5, selected.candidateCount)
+        assertEquals(1, selected.anchoredCount)
+    }
+
+    @Test
+    fun `snapshot follows payload cap keeps whole entries and skips oversized lists`() {
+        val ownEntry = SnapshotFollowsEntry("own-pk", setOf("own-friend"), 1L)
+        val smallEntry = SnapshotFollowsEntry("small-pk", setOf("small-friend"), 2L)
+        val oversizedEntry = SnapshotFollowsEntry(
+            "oversized-pk",
+            (1..100).mapTo(mutableSetOf()) { "friend-$it-${"x".repeat(64)}" },
+            3L,
+        )
+        val selected = selectSnapshotFollowsForPersistence(
+            followsByPubkey = mapOf(
+                ownEntry.pubkey to ownEntry.followedPubkeys,
+                smallEntry.pubkey to smallEntry.followedPubkeys,
+                oversizedEntry.pubkey to oversizedEntry.followedPubkeys,
+            ),
+            followsCreatedAt = mapOf(
+                ownEntry.pubkey to ownEntry.createdAt,
+                smallEntry.pubkey to smallEntry.createdAt,
+                oversizedEntry.pubkey to oversizedEntry.createdAt,
+            ),
+            followsAccessedAt = mapOf(
+                oversizedEntry.pubkey to 300L,
+                smallEntry.pubkey to 200L,
+            ),
+            ownPubkey = ownEntry.pubkey,
+            followedPubkeys = emptySet(),
+            lruCap = 10,
+            payloadByteCap = snapshotFollowsEntryBinarySize(smallEntry),
+        )
+
+        assertEquals(
+            listOf(ownEntry.pubkey, smallEntry.pubkey),
+            selected.entries.map { it.pubkey },
+        )
+        assertTrue(
+            selected.entries
+                .filterNot { it.pubkey == ownEntry.pubkey }
+                .sumOf(::snapshotFollowsEntryBinarySize) <=
+                snapshotFollowsEntryBinarySize(smallEntry),
+        )
+    }
+
+    @Test
+    fun `follows access index prunes stale and oldest entries while retaining own`() {
+        val accessTimes = buildMap {
+            put("own-pk", 0L)
+            put("stale-pk", 10_000L)
+            for (index in 1..5) put("live-$index", index.toLong())
+        }
+        val livePubkeys = setOf("own-pk") + (1..5).map { "live-$it" }
+
+        val toPrune = selectFollowsAccessKeysToPrune(
+            accessTimes = accessTimes,
+            livePubkeys = livePubkeys,
+            ownPubkey = "own-pk",
+            cap = 5,
+            trim = 2,
+        )
+
+        assertEquals(setOf("stale-pk", "live-1", "live-2", "live-3"), toPrune)
+        assertFalse("own recency must stay anchored", "own-pk" in toPrune)
+    }
+
+    @Test
     fun `snapshot round-trip preserves latest empty contact list`() = runTest {
         store.updateFollows("unfollower", emptySet(), createdAt = 2_000L)
         val tmpFile = java.io.File.createTempFile("empty-follows", ".bin")
