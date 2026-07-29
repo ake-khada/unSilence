@@ -18,9 +18,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.File
 import java.io.InputStreamReader
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -109,9 +109,9 @@ class SnapshotScheduler @Inject constructor(
      *   - V3 binary: first 4 bytes "USNS" → [MemoryEventStore.restoreSnapshotBinary]
      *   - V2 TSV (or anything else): falls through to [MemoryEventStore.restoreSnapshotFrom]
      *
-     * The full file is read into a byte buffer first so we can peek the magic
-     * without losing the bytes; for typical 5MB snapshots this is ~50ms on
-     * flash storage and avoids any reader-rewind contortions.
+     * The binary path is streamed end to end. [BufferedInputStream.mark] /
+     * [BufferedInputStream.reset] preserve the four magic bytes for the reader
+     * without copying the full snapshot into memory.
      */
     suspend fun restoreIfPresent() = withContext(snapshotDispatcher) {
         val baseFile = snapshotFile.baseFile
@@ -122,34 +122,86 @@ class SnapshotScheduler @Inject constructor(
         }
         mutex.withLock {
             try {
-                val bytes = snapshotFile.openRead().use { it.readBytes() }
-                val isBinary = bytes.size >= 4 &&
-                    bytes[0] == SNAPSHOT_BINARY_MAGIC[0] &&
-                    bytes[1] == SNAPSHOT_BINARY_MAGIC[1] &&
-                    bytes[2] == SNAPSHOT_BINARY_MAGIC[2] &&
-                    bytes[3] == SNAPSHOT_BINARY_MAGIC[3]
-                if (isBinary) {
-                    DataInputStream(BufferedInputStream(ByteArrayInputStream(bytes))).use { input ->
-                        memoryEventStore.restoreSnapshotBinary(input)
+                val snapshotBytes = baseFile.length()
+                snapshotFile.openRead().use { fileInput ->
+                    val buffered = BufferedInputStream(fileInput)
+                    buffered.mark(SNAPSHOT_BINARY_MAGIC.size)
+                    val magic = ByteArray(SNAPSHOT_BINARY_MAGIC.size)
+                    val magicBytesRead = buffered.read(magic)
+                    buffered.reset()
+
+                    if (magicBytesRead == SNAPSHOT_BINARY_MAGIC.size &&
+                        magic.contentEquals(SNAPSHOT_BINARY_MAGIC)
+                    ) {
+                        DataInputStream(buffered).use { input ->
+                            memoryEventStore.restoreSnapshotBinary(input)
+                        }
+                        Log.d(TAG, "Snapshot restored (binary V3) from ${snapshotBytes / 1024}KB")
+                    } else {
+                        InputStreamReader(buffered).buffered().use { reader ->
+                            memoryEventStore.restoreSnapshotFrom(reader)
+                        }
+                        Log.d(TAG, "Snapshot restored (V2 TSV migration path) from ${snapshotBytes / 1024}KB")
                     }
-                    Log.d(TAG, "Snapshot restored (binary V3) from ${bytes.size / 1024}KB")
-                } else {
-                    InputStreamReader(ByteArrayInputStream(bytes)).buffered().use { reader ->
-                        memoryEventStore.restoreSnapshotFrom(reader)
-                    }
-                    Log.d(TAG, "Snapshot restored (V2 TSV migration path) from ${bytes.size / 1024}KB")
                 }
-            } catch (e: SnapshotOwnerMismatchException) {
-                // Foreign-account snapshot — MES was left empty by the throw.
-                // Reject and delete so the new account starts clean.
-                Log.w(TAG, "SNAPSHOT-OWNER mismatch: snapshot=${e.snapshotOwner.take(8)}… " +
-                    "current=${e.currentOwner.take(8)}… — rejected+deleted")
-                deleteSnapshot()
-            } catch (e: Exception) {
-                Log.e(TAG, "Snapshot restore failed, starting fresh", e)
-            } finally {
+                restored = true
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+
+                // A reader can fail after inserting part of the file. Make the
+                // fallback a true cold start, then quarantine the source so the
+                // next process launch cannot retry the same failure.
+                memoryEventStore.clear()
+                val badFile = quarantineSnapshot()
+                val artifact = badFile?.absolutePath ?: "unavailable"
+                if (t is SnapshotOwnerMismatchException) {
+                    Log.w(
+                        TAG,
+                        "SNAPSHOT-OWNER mismatch: snapshot=${t.snapshotOwner.take(8)}… " +
+                            "current=${t.currentOwner.take(8)}… — quarantined=$artifact",
+                    )
+                } else {
+                    Log.e(
+                        TAG,
+                        "Snapshot restore failed; starting fresh, quarantined=$artifact",
+                        t,
+                    )
+                }
                 restored = true
             }
+        }
+    }
+
+    /**
+     * Move a failed snapshot beside the live file for post-mortem inspection.
+     * Same-directory rename is the normal, allocation-free path. The streaming
+     * copy fallback handles filesystems whose rename cannot replace a prior file.
+     */
+    private fun quarantineSnapshot(): File? {
+        val source = snapshotFile.baseFile
+        if (!source.exists()) return null
+        val bad = File(source.parentFile, "${source.name}.bad")
+        if (bad.exists() && !bad.delete()) {
+            Log.e(TAG, "Could not replace prior bad snapshot at ${bad.absolutePath}")
+            snapshotFile.delete()
+            return null
+        }
+        if (source.renameTo(bad)) return bad
+
+        return try {
+            source.inputStream().buffered().use { input ->
+                bad.outputStream().buffered().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            snapshotFile.delete()
+            bad
+        } catch (copyFailure: Throwable) {
+            // Loop-breaking takes precedence if the post-mortem copy itself
+            // cannot be created (for example, a full filesystem).
+            snapshotFile.delete()
+            Log.e(TAG, "Could not quarantine failed snapshot", copyFailure)
+            null
         }
     }
 
