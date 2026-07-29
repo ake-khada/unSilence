@@ -252,10 +252,31 @@ class SnapshotScheduler @Inject constructor(
                 try {
                     // V3 binary writer is the only writer. V2 TSV writer remains
                     // in MES for restore-side migration but is no longer called.
-                    DataOutputStream(BufferedOutputStream(stream)).use { out ->
-                        memoryEventStore.saveSnapshotBinary(out)
-                    }
+                    // AtomicFile owns the FileOutputStream: flush the wrapper,
+                    // then let finishWrite fsync and close the still-open stream.
+                    val out = DataOutputStream(BufferedOutputStream(stream))
+                    val sections = memoryEventStore.saveSnapshotBinary(out)
+                    out.flush()
                     snapshotFile.finishWrite(stream)
+                    Log.w(
+                        TAG,
+                        "Snapshot sections: totalBytes=${sections.totalBytes} " +
+                            "headerBytes=${sections.headerBytes} " +
+                            "followsBytes=${sections.followsBytes} " +
+                            "eventsBytes=${sections.eventsBytes} " +
+                            "aggregatesBytes=${sections.aggregatesBytes} " +
+                            "relayHealthBytes=${sections.relayHealthBytes} " +
+                            "timelinesBytes=${sections.timelinesBytes} " +
+                            "tailBytes=${sections.tailBytes} eventCount=${sections.eventCount} " +
+                            "nonContent=${sections.nonContentEventCount}/" +
+                            "${sections.nonContentCandidateCount}" +
+                            "(anchored=${sections.anchoredNonContentCount}) " +
+                            "content=${sections.contentEventCount}/" +
+                            "${sections.contentCandidateCount} " +
+                            "followsEntries=${sections.followsEntryCount}/" +
+                            "${sections.followsCandidateCount}" +
+                            "(anchored=${sections.anchoredFollowsCount})",
+                    )
                     Log.d(TAG, "Snapshot saved (${snapshotFile.baseFile.length() / 1024}KB, binary V3)")
                 } catch (t: Throwable) {
                     // Preserve the previous AtomicFile even when serialization fails

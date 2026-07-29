@@ -92,7 +92,13 @@ private const val MAX_SNAPSHOT_STR_LEN = 1024 * 1024
 
 private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
-private const val MAX_CONTENT_EVENTS = 10_000
+/** Disk warm-cache limits are deliberately lower than the in-memory kind caps. */
+internal const val PERSISTED_CONTENT_EVENT_CAP = 5_000
+internal const val PERSISTED_NON_CONTENT_LRU_CAP = 1_000
+internal const val PERSISTED_FOLLOWS_LRU_CAP = 500
+internal const val PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP = 3 * 1024 * 1024
+internal const val FOLLOWS_ACCESS_INDEX_CAP = 1_000
+internal const val FOLLOWS_ACCESS_INDEX_TRIM = 200
 private const val FEED_ROW_CACHE_CAP = 2000
 private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
@@ -115,6 +121,182 @@ private val CONTENT_KINDS = setOf(
 private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
+
+internal data class SnapshotEventSelection(
+    val nonContentEvents: List<NostrEvent>,
+    val contentEvents: List<NostrEvent>,
+    val nonContentCandidateCount: Int,
+    val contentCandidateCount: Int,
+    val anchoredNonContentCount: Int,
+)
+
+internal fun selectSnapshotEventsForPersistence(
+    events: Collection<NostrEvent>,
+    ownPubkey: String?,
+    followedPubkeys: Set<String>,
+    lastTouchedAt: Map<String, Long>,
+    contentCap: Int = PERSISTED_CONTENT_EVENT_CAP,
+    nonContentLruCap: Int = PERSISTED_NON_CONTENT_LRU_CAP,
+): SnapshotEventSelection {
+    require(contentCap >= 0)
+    require(nonContentLruCap >= 0)
+
+    val anchoredPubkeys = HashSet<String>(followedPubkeys.size + 1).apply {
+        addAll(followedPubkeys)
+        ownPubkey?.let(::add)
+    }
+    val contentCandidates = ArrayList<NostrEvent>()
+    val anchoredNonContent = ArrayList<NostrEvent>()
+    val lruNonContent = ArrayList<NostrEvent>()
+
+    for (event in events) {
+        when {
+            event.kind == 3 -> Unit // Persisted in the dedicated follows section.
+            event.kind in CONTENT_KINDS -> contentCandidates.add(event)
+            event.pubkey in anchoredPubkeys -> anchoredNonContent.add(event)
+            else -> lruNonContent.add(event)
+        }
+    }
+
+    val newestFirst = compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id }
+    contentCandidates.sortWith(newestFirst)
+    anchoredNonContent.sortWith(newestFirst)
+
+    // Snapshot mutable touch values before sorting. Reading the live CHM from a
+    // comparator can violate TimSort's ordering contract while hydration updates it.
+    val touchSnapshot = HashMap<String, Long>(lruNonContent.size)
+    for (event in lruNonContent) {
+        touchSnapshot[event.id] = lastTouchedAt[event.id] ?: event.firstSeenAt
+    }
+    lruNonContent.sortWith(
+        compareByDescending<NostrEvent> { touchSnapshot[it.id] ?: it.firstSeenAt }
+            .thenByDescending { it.createdAt }
+            .thenBy { it.id },
+    )
+
+    return SnapshotEventSelection(
+        nonContentEvents = anchoredNonContent + lruNonContent.take(nonContentLruCap),
+        contentEvents = contentCandidates.take(contentCap),
+        nonContentCandidateCount = anchoredNonContent.size + lruNonContent.size,
+        contentCandidateCount = contentCandidates.size,
+        anchoredNonContentCount = anchoredNonContent.size,
+    )
+}
+
+internal data class SnapshotFollowsEntry(
+    val pubkey: String,
+    val followedPubkeys: Set<String>,
+    val createdAt: Long,
+)
+
+internal data class SnapshotFollowsSelection(
+    val entries: List<SnapshotFollowsEntry>,
+    val candidateCount: Int,
+    val anchoredCount: Int,
+)
+
+internal fun selectSnapshotFollowsForPersistence(
+    followsByPubkey: Map<String, Set<String>>,
+    followsCreatedAt: Map<String, Long>,
+    followsAccessedAt: Map<String, Long>,
+    ownPubkey: String?,
+    followedPubkeys: Set<String>,
+    lruCap: Int = PERSISTED_FOLLOWS_LRU_CAP,
+    payloadByteCap: Int = PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP,
+): SnapshotFollowsSelection {
+    require(lruCap >= 0)
+    require(payloadByteCap >= 0)
+    val anchored = ArrayList<SnapshotFollowsEntry>()
+    val lru = ArrayList<SnapshotFollowsEntry>()
+    for ((pubkey, follows) in followsByPubkey) {
+        val entry = SnapshotFollowsEntry(
+            pubkey = pubkey,
+            followedPubkeys = follows,
+            createdAt = followsCreatedAt[pubkey] ?: 0L,
+        )
+        if (pubkey == ownPubkey) anchored.add(entry) else lru.add(entry)
+    }
+    anchored.sortBy { it.pubkey }
+
+    val accessSnapshot = HashMap<String, Long>(lru.size)
+    for (entry in lru) {
+        accessSnapshot[entry.pubkey] =
+            followsAccessedAt[entry.pubkey] ?: (entry.createdAt * 1_000L)
+    }
+    lru.sortWith(
+        compareByDescending<SnapshotFollowsEntry> { it.pubkey in followedPubkeys }
+            .thenByDescending {
+            accessSnapshot[it.pubkey] ?: (it.createdAt * 1_000L)
+        }.thenByDescending { it.createdAt }
+            .thenBy { it.pubkey },
+    )
+    var selectedPayloadBytes = 0
+    val selectedLru = ArrayList<SnapshotFollowsEntry>(minOf(lruCap, lru.size))
+    for (entry in lru) {
+        if (selectedLru.size >= lruCap) break
+        val entryBytes = snapshotFollowsEntryBinarySize(entry)
+        if (entryBytes > payloadByteCap - selectedPayloadBytes) continue
+        selectedLru.add(entry)
+        selectedPayloadBytes += entryBytes
+    }
+    return SnapshotFollowsSelection(
+        entries = anchored + selectedLru,
+        candidateCount = followsByPubkey.size,
+        anchoredCount = anchored.size,
+    )
+}
+
+internal fun snapshotFollowsEntryBinarySize(entry: SnapshotFollowsEntry): Int {
+    var bytes = Int.SIZE_BYTES + entry.pubkey.toByteArray(Charsets.UTF_8).size +
+        Long.SIZE_BYTES + Int.SIZE_BYTES
+    for (followedPubkey in entry.followedPubkeys) {
+        bytes += Int.SIZE_BYTES + followedPubkey.toByteArray(Charsets.UTF_8).size
+    }
+    return bytes
+}
+
+internal fun selectFollowsAccessKeysToPrune(
+    accessTimes: Map<String, Long>,
+    livePubkeys: Set<String>,
+    ownPubkey: String?,
+    cap: Int = FOLLOWS_ACCESS_INDEX_CAP,
+    trim: Int = FOLLOWS_ACCESS_INDEX_TRIM,
+): Set<String> {
+    require(cap > 0)
+    require(trim in 1..cap)
+
+    val stale = accessTimes.keys.filterTo(mutableSetOf()) { it !in livePubkeys }
+    val liveCount = accessTimes.size - stale.size
+    val overflow = (liveCount - (cap - trim)).coerceAtLeast(0)
+    if (overflow == 0) return stale
+
+    accessTimes.entries.asSequence()
+        .filter { (pubkey, _) -> pubkey in livePubkeys && pubkey != ownPubkey }
+        .sortedWith(compareBy<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+        .take(overflow)
+        .mapTo(stale) { it.key }
+    return stale
+}
+
+internal data class SnapshotSectionSizes(
+    val headerBytes: Int,
+    val followsBytes: Int,
+    val eventsBytes: Int,
+    val aggregatesBytes: Int,
+    val relayHealthBytes: Int,
+    val timelinesBytes: Int,
+    val tailBytes: Int,
+    val totalBytes: Int,
+    val eventCount: Int,
+    val nonContentEventCount: Int,
+    val nonContentCandidateCount: Int,
+    val anchoredNonContentCount: Int,
+    val contentEventCount: Int,
+    val contentCandidateCount: Int,
+    val followsEntryCount: Int,
+    val followsCandidateCount: Int,
+    val anchoredFollowsCount: Int,
+)
 
 @Singleton
 class MemoryEventStore @Inject constructor(
@@ -409,6 +591,9 @@ class MemoryEventStore @Inject constructor(
 
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
+    /** Epoch-ms recency for bounding non-anchored contact lists on disk.
+     *  Independently LRU-bounded so the side index cannot outgrow its purpose. */
+    private val followsAccessedAt = ConcurrentHashMap<String, Long>()
     private val relayListsByPubkey = ConcurrentHashMap<String, RelayList>()
     /** Lookup-only bootstrap outboxes derived from accepted profile metadata.
      *  Kept separate from kind-10002 so feed subscription resolution never sees them. */
@@ -2677,7 +2862,11 @@ class MemoryEventStore @Inject constructor(
 
     fun getProfile(pubkey: String): NostrEvent? = profilesByPubkey[pubkey]
     fun hasProfile(pubkey: String): Boolean = profilesByPubkey.containsKey(pubkey)
-    fun getFollows(pubkey: String): Set<String>? = followsByPubkey[pubkey]
+    fun getFollows(pubkey: String): Set<String>? {
+        val follows = followsByPubkey[pubkey]
+        if (follows != null) recordFollowsAccess(pubkey, System.currentTimeMillis())
+        return follows
+    }
     fun getFollowsCreatedAt(pubkey: String): Long? = followsCreatedAt[pubkey]
     fun followersOf(pubkey: String): Set<String> = followsByPubkey.entries
         .asSequence()
@@ -2736,6 +2925,7 @@ class MemoryEventStore @Inject constructor(
             val existing = followsByPubkey[pubkey]
             val changed = existing == null || existing != followedPubkeys
             followsByPubkey[pubkey] = followedPubkeys
+            recordFollowsAccess(pubkey, System.currentTimeMillis())
             if (changed) {
                 if (dirty != null) dirty.follows = true
                 else _followsSignal.value = System.nanoTime()
@@ -4827,6 +5017,52 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
+    private fun snapshotEventSelection(): SnapshotEventSelection {
+        val own = ownPubkey
+        val followed = own?.let { followsByPubkey[it] }.orEmpty()
+        return selectSnapshotEventsForPersistence(
+            events = eventsById.values.toList(),
+            ownPubkey = own,
+            followedPubkeys = followed,
+            lastTouchedAt = lastTouchedAt,
+        )
+    }
+
+    private fun snapshotFollowsSelection(): SnapshotFollowsSelection {
+        trimFollowsAccessIndex(forceStalePrune = true)
+        val own = ownPubkey
+        val followed = own?.let { followsByPubkey[it] }.orEmpty()
+        return selectSnapshotFollowsForPersistence(
+            followsByPubkey = followsByPubkey.toMap(),
+            followsCreatedAt = followsCreatedAt.toMap(),
+            followsAccessedAt = followsAccessedAt.toMap(),
+            ownPubkey = own,
+            followedPubkeys = followed,
+        )
+    }
+
+    private fun recordFollowsAccess(pubkey: String, accessedAt: Long) {
+        followsAccessedAt[pubkey] = accessedAt
+        if (followsAccessedAt.size > FOLLOWS_ACCESS_INDEX_CAP) {
+            trimFollowsAccessIndex(forceStalePrune = false)
+        }
+    }
+
+    private fun trimFollowsAccessIndex(forceStalePrune: Boolean) {
+        if (!forceStalePrune && followsAccessedAt.size <= FOLLOWS_ACCESS_INDEX_CAP) return
+        val accessSnapshot = followsAccessedAt.toMap()
+        val toPrune = selectFollowsAccessKeysToPrune(
+            accessTimes = accessSnapshot,
+            livePubkeys = followsByPubkey.keys.toSet(),
+            ownPubkey = ownPubkey,
+        )
+        for (pubkey in toPrune) {
+            accessSnapshot[pubkey]?.let { captured ->
+                followsAccessedAt.remove(pubkey, captured)
+            }
+        }
+    }
+
     /** V2 TSV writer — TEST-ONLY. Production writes V3 binary exclusively
      *  (saveSnapshotBinary); this remains so the V2→V3 migration round-trip
      *  tests can exercise restoreSnapshotFrom. Delete together with the V2
@@ -4840,30 +5076,24 @@ class MemoryEventStore @Inject constructor(
         // event parse completes; placing follows first eliminates the race.
         writer.write("---FOLLOWS---")
         writer.newLine()
-        for ((pubkey, follows) in followsByPubkey) {
-            val createdAt = followsCreatedAt[pubkey] ?: continue
-            writer.write("follows|$pubkey|$createdAt|${follows.joinToString(",")}")
+        val followsSelection = snapshotFollowsSelection()
+        for (entry in followsSelection.entries) {
+            writer.write(
+                "follows|${entry.pubkey}|${entry.createdAt}|" +
+                    entry.followedPubkeys.joinToString(","),
+            )
             writer.newLine()
         }
         // Events section — explicit marker so reader can switch from follows.
         // Old snapshots (pre-marker) start events implicitly at section 0.
         writer.write("---EVENTS---")
         writer.newLine()
-        val contentEvents = mutableListOf<NostrEvent>()
-        val nonContentEvents = mutableListOf<NostrEvent>()
-        for (event in eventsById.values) {
-            if (event.kind in CONTENT_KINDS) contentEvents.add(event)
-            else nonContentEvents.add(event)
-        }
-        contentEvents.sortByDescending { it.createdAt }
-        val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
-
-        for (event in nonContentEvents) {
-            if (event.kind == 3) continue // Follows persisted in ---FOLLOWS--- section
+        val eventSelection = snapshotEventSelection()
+        for (event in eventSelection.nonContentEvents) {
             writer.write(serializeEvent(event))
             writer.newLine()
         }
-        for (event in cappedContent) {
+        for (event in eventSelection.contentEvents) {
             writer.write(serializeEvent(event))
             writer.newLine()
         }
@@ -5009,21 +5239,21 @@ class MemoryEventStore @Inject constructor(
     // V2 TSV files are still readable — SnapshotScheduler peeks the first
     // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
 
-    suspend fun saveSnapshotBinary(out: DataOutputStream) {
+    internal suspend fun saveSnapshotBinary(out: DataOutputStream): SnapshotSectionSizes {
         // Serialize each section once, compute offsets from the live buffer sizes,
         // then stream those buffers directly. This keeps peak memory near the
         // snapshot size instead of duplicating 15-20MB into contiguous arrays.
+        val writeStart = out.size()
 
+        val followsSelection = snapshotFollowsSelection()
         val followsBuf = ByteArrayOutputStream(8 * 1024)
         DataOutputStream(followsBuf).use { d ->
-            val pairs = followsByPubkey.toList()
-            d.writeInt(pairs.size)
-            for ((pubkey, follows) in pairs) {
-                val createdAt = followsCreatedAt[pubkey] ?: 0L
-                d.writeStr(pubkey)
-                d.writeLong(createdAt)
-                d.writeInt(follows.size)
-                for (f in follows) d.writeStr(f)
+            d.writeInt(followsSelection.entries.size)
+            for (entry in followsSelection.entries) {
+                d.writeStr(entry.pubkey)
+                d.writeLong(entry.createdAt)
+                d.writeInt(entry.followedPubkeys.size)
+                for (f in entry.followedPubkeys) d.writeStr(f)
             }
 
             // V5: Own-user engaged sets — written here (FOLLOWS section) so they
@@ -5038,24 +5268,18 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        // Build the events list: nonContent (profiles, relay configs, stats
-        // events) first, then content sorted DESC by createdAt and capped.
-        // kind-3 is persisted in the FOLLOWS section, not as raw events.
-        val contentEvents = mutableListOf<NostrEvent>()
-        val nonContentEvents = mutableListOf<NostrEvent>()
-        for (event in eventsById.values) {
-            if (event.kind in CONTENT_KINDS) contentEvents.add(event)
-            else if (event.kind != 3) nonContentEvents.add(event)
-        }
-        contentEvents.sortByDescending { it.createdAt }
-        val cappedContent = contentEvents.take(MAX_CONTENT_EVENTS)
-        val totalEvents = nonContentEvents.size + cappedContent.size
+        // Keep all own/followed control-plane rows plus the hottest remaining
+        // rows, and a separate newest-content warm cache. Relay subscriptions
+        // backfill everything beyond these persistence-only bounds.
+        val eventSelection = snapshotEventSelection()
+        val totalEvents =
+            eventSelection.nonContentEvents.size + eventSelection.contentEvents.size
 
         val eventsBuf = ByteArrayOutputStream(2 * 1024 * 1024)
         DataOutputStream(eventsBuf).use { d ->
             d.writeInt(totalEvents)
-            for (event in nonContentEvents) d.writeEventBinary(event)
-            for (event in cappedContent) d.writeEventBinary(event)
+            for (event in eventSelection.nonContentEvents) d.writeEventBinary(event)
+            for (event in eventSelection.contentEvents) d.writeEventBinary(event)
         }
 
         val aggregatesBuf = ByteArrayOutputStream(64 * 1024)
@@ -5232,6 +5456,7 @@ class MemoryEventStore @Inject constructor(
         // The section offsets above intentionally do NOT include this prefix
         // (informational only; see header-layout comment TODO).
         out.writeStr(ownPubkey ?: "")
+        val headerBytes = out.size() - writeStart
 
         // Sections in offset order.
         followsBuf.writeTo(out)
@@ -5256,6 +5481,32 @@ class MemoryEventStore @Inject constructor(
             out.writeStrOrNull(identity.iconUrl)
             out.writeLong(identity.fetchedAt)
         }
+        val totalBytes = out.size() - writeStart
+        val knownSectionBytes = headerBytes +
+            followsBuf.size() +
+            eventsBuf.size() +
+            aggregatesBuf.size() +
+            relayHealthBuf.size() +
+            timelinesBuf.size()
+        return SnapshotSectionSizes(
+            headerBytes = headerBytes,
+            followsBytes = followsBuf.size(),
+            eventsBytes = eventsBuf.size(),
+            aggregatesBytes = aggregatesBuf.size(),
+            relayHealthBytes = relayHealthBuf.size(),
+            timelinesBytes = timelinesBuf.size(),
+            tailBytes = totalBytes - knownSectionBytes,
+            totalBytes = totalBytes,
+            eventCount = totalEvents,
+            nonContentEventCount = eventSelection.nonContentEvents.size,
+            nonContentCandidateCount = eventSelection.nonContentCandidateCount,
+            anchoredNonContentCount = eventSelection.anchoredNonContentCount,
+            contentEventCount = eventSelection.contentEvents.size,
+            contentCandidateCount = eventSelection.contentCandidateCount,
+            followsEntryCount = followsSelection.entries.size,
+            followsCandidateCount = followsSelection.candidateCount,
+            anchoredFollowsCount = followsSelection.anchoredCount,
+        )
     }
 
     suspend fun restoreSnapshotBinary(input: DataInputStream) {
@@ -5306,6 +5557,7 @@ class MemoryEventStore @Inject constructor(
             for (j in 0 until followCount) pks.add(input.readStr())
             followsByPubkey[pubkey] = pks
             followsCreatedAt[pubkey] = createdAt
+            recordFollowsAccess(pubkey, createdAt * 1_000L)
         }
 
         // V5+: Own-user engaged sets — in FOLLOWS section for instant icon
@@ -5955,6 +6207,7 @@ class MemoryEventStore @Inject constructor(
         val pks = parts[3].split(",").filterTo(mutableSetOf()) { it.isNotBlank() }
         followsByPubkey[pubkey] = pks
         followsCreatedAt[pubkey] = createdAt
+        recordFollowsAccess(pubkey, createdAt * 1_000L)
     }
 
     // ─── Serialization (NDJSON) ─────────────────────────────────────────────
@@ -6086,6 +6339,7 @@ class MemoryEventStore @Inject constructor(
     fun clearUserState() {
         followsByPubkey.clear()
         followsCreatedAt.clear()
+        followsAccessedAt.clear()
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
@@ -6151,6 +6405,7 @@ class MemoryEventStore @Inject constructor(
         feedRowAccessedAt.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
+        followsAccessedAt.clear()
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
