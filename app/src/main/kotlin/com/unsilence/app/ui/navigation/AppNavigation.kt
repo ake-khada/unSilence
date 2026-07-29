@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.navigation
 
+import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -93,6 +94,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -186,6 +188,45 @@ private data class ThreadDestination(
     val openArticleOnLoad: Boolean = false,
 )
 
+private val ThreadDestinationSaver = Saver<ThreadDestination?, Bundle>(
+    save = { destination ->
+        Bundle().apply {
+            destination?.let {
+                putString("eventId", it.eventId)
+                putStringArrayList("relayHints", ArrayList(it.relayHints))
+                putBoolean("openArticleOnLoad", it.openArticleOnLoad)
+            }
+        }
+    },
+    restore = { saved ->
+        saved.getString("eventId")?.let { eventId ->
+            ThreadDestination(
+                eventId = eventId,
+                relayHints = saved.getStringArrayList("relayHints").orEmpty(),
+                openArticleOnLoad = saved.getBoolean("openArticleOnLoad"),
+            )
+        }
+    },
+)
+
+private val ConnectionsDestinationSaver = Saver<Pair<String, ConnectionsTab>?, Bundle>(
+    save = { destination ->
+        Bundle().apply {
+            destination?.let {
+                putString("pubkey", it.first)
+                putString("tab", it.second.name)
+            }
+        }
+    },
+    restore = { saved ->
+        val pubkey = saved.getString("pubkey")
+        val tab = saved.getString("tab")?.let {
+            runCatching { ConnectionsTab.valueOf(it) }.getOrNull()
+        }
+        if (pubkey != null && tab != null) pubkey to tab else null
+    },
+)
+
 private val TABS = listOf(
     NavTab(Icons.Outlined.Home,          "Home"),
     NavTab(Icons.Outlined.Search,        "Search"),
@@ -218,24 +259,28 @@ fun AppNavigation(
     }
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
-    var showCompose          by remember { mutableStateOf(false) }
-    var showFeedSheet        by remember { mutableStateOf(false) }
-    var showFilter           by remember { mutableStateOf(false) }
-    var showCreateRelaySet   by remember { mutableStateOf(false) }
-    var showRelaySettings    by remember { mutableStateOf(false) }
-    var relayDetailUrl       by remember { mutableStateOf<String?>(null) }
-    var showDiscovery        by remember { mutableStateOf(false) }
-    var threadDestination    by remember { mutableStateOf<ThreadDestination?>(null) }
-    var replyToEventId       by remember { mutableStateOf<String?>(null) }
-    var quoteNoteId          by remember { mutableStateOf<String?>(null) }
-    var userProfilePubkey    by remember { mutableStateOf<String?>(null) }
-    var connectionsTarget    by remember { mutableStateOf<Pair<String, ConnectionsTab>?>(null) }
-    var profileRelaysPubkey  by remember { mutableStateOf<String?>(null) }
+    var showCompose          by rememberSaveable { mutableStateOf(false) }
+    var showFeedSheet        by rememberSaveable { mutableStateOf(false) }
+    var showFilter           by rememberSaveable { mutableStateOf(false) }
+    var showCreateRelaySet   by rememberSaveable { mutableStateOf(false) }
+    var showRelaySettings    by rememberSaveable { mutableStateOf(false) }
+    var relayDetailUrl       by rememberSaveable { mutableStateOf<String?>(null) }
+    var showDiscovery        by rememberSaveable { mutableStateOf(false) }
+    var threadDestination    by rememberSaveable(stateSaver = ThreadDestinationSaver) {
+        mutableStateOf<ThreadDestination?>(null)
+    }
+    var replyToEventId       by rememberSaveable { mutableStateOf<String?>(null) }
+    var quoteNoteId          by rememberSaveable { mutableStateOf<String?>(null) }
+    var userProfilePubkey    by rememberSaveable { mutableStateOf<String?>(null) }
+    var connectionsTarget    by rememberSaveable(stateSaver = ConnectionsDestinationSaver) {
+        mutableStateOf<Pair<String, ConnectionsTab>?>(null)
+    }
+    var profileRelaysPubkey  by rememberSaveable { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
-    var showEmojiSettings    by remember { mutableStateOf(false) }
-    var showZapSettings      by remember { mutableStateOf(false) }
-    var hashtagSearchQuery   by remember { mutableStateOf<String?>(null) }
-    var showStartGraph       by remember { mutableStateOf(false) }
+    var showEmojiSettings    by rememberSaveable { mutableStateOf(false) }
+    var showZapSettings      by rememberSaveable { mutableStateOf(false) }
+    var hashtagSearchQuery   by rememberSaveable { mutableStateOf<String?>(null) }
+    var showStartGraph       by rememberSaveable { mutableStateOf(false) }
     val pullRefreshFraction = remember { mutableFloatStateOf(0f) }
     val updatePullRefreshFraction: (Float) -> Unit = remember(pullRefreshFraction) {
         { fraction -> pullRefreshFraction.floatValue = fraction }

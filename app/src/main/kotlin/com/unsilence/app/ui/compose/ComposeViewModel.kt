@@ -2,11 +2,13 @@ package com.unsilence.app.ui.compose
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.os.Bundle
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
@@ -66,6 +68,23 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 private const val TAG = "ComposeViewModel"
+
+internal class ComposeSessionGate(initialSessionKey: String? = null) {
+    var activeSessionKey: String? = initialSessionKey
+        private set
+
+    fun begin(sessionKey: String): Boolean {
+        if (activeSessionKey == sessionKey) return false
+        activeSessionKey = sessionKey
+        return true
+    }
+
+    fun finish(sessionKey: String): Boolean {
+        if (activeSessionKey != sessionKey) return false
+        activeSessionKey = null
+        return true
+    }
+}
 
 @androidx.compose.runtime.Immutable
 data class PollDraftOption(val id: String, val label: String = "")
@@ -162,6 +181,7 @@ data class NotifyCandidate(
 
 @HiltViewModel
 class ComposeViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
@@ -179,6 +199,29 @@ class ComposeViewModel @Inject constructor(
     val imageDimensionCache: com.unsilence.app.ui.feed.ImageDimensionCache,
     val videoThumbnailCache: com.unsilence.app.ui.feed.VideoThumbnailCache,
 ) : ViewModel() {
+
+    private val restoredEditor = decodeComposeEditor(
+        savedStateHandle.get<Bundle>(EDITOR_STATE_KEY)?.getString(EDITOR_JSON_KEY),
+    )
+    private val composeSessionGate = ComposeSessionGate(
+        savedStateHandle.get<String>(ACTIVE_SESSION_KEY).takeIf { restoredEditor != null },
+    )
+
+    internal fun beginComposeSession(sessionKey: String): Boolean {
+        val beginsNewSession = composeSessionGate.begin(sessionKey)
+        if (beginsNewSession) {
+            savedStateHandle[ACTIVE_SESSION_KEY] = sessionKey
+            savedStateHandle.remove<Bundle>(EDITOR_STATE_KEY)
+        }
+        return beginsNewSession
+    }
+
+    internal fun finishComposeSession(sessionKey: String) {
+        if (composeSessionGate.finish(sessionKey)) {
+            savedStateHandle.remove<String>(ACTIVE_SESSION_KEY)
+            savedStateHandle.remove<Bundle>(EDITOR_STATE_KEY)
+        }
+    }
 
     /** Pubkey for the avatar in the compose UI. */
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
@@ -205,13 +248,13 @@ class ComposeViewModel @Inject constructor(
 
     // ── Block-based content model ───────────────────────────────────────────
 
-    private val _blocks = MutableStateFlow<List<ComposeBlock>>(
-        listOf(ComposeBlock.Text(""))
+    private val _blocks = MutableStateFlow(
+        restoredEditor?.restoreBlocks() ?: listOf(ComposeBlock.Text("")),
     )
     val blocks: StateFlow<List<ComposeBlock>> = _blocks.asStateFlow()
     private val attachmentUploadJobs = mutableMapOf<String, Job>()
 
-    private val _pollDraft = MutableStateFlow(PollDraft())
+    private val _pollDraft = MutableStateFlow(restoredEditor?.restorePoll() ?: PollDraft())
     val pollDraft: StateFlow<PollDraft> = _pollDraft.asStateFlow()
 
     private fun newPollOption() = PollDraftOption(UUID.randomUUID().toString().replace("-", "").take(10))
@@ -311,7 +354,7 @@ class ComposeViewModel @Inject constructor(
 
     // ── NIP-36 sensitive toggle ─────────────────────────────────────────────
 
-    private val _isSensitive = MutableStateFlow(false)
+    private val _isSensitive = MutableStateFlow(restoredEditor?.isSensitive ?: false)
     val isSensitive: StateFlow<Boolean> = _isSensitive.asStateFlow()
 
     private val _savedDraftFingerprint = MutableStateFlow<String?>(null)
@@ -413,7 +456,9 @@ class ComposeViewModel @Inject constructor(
 
     // Picker selections are payload data, not just editor text. Retain their URLs so
     // an emoji-set hydration/replacement race cannot publish an untagged shortcode.
-    private val _selectedEmojiUrls = MutableStateFlow<Map<String, String>>(emptyMap())
+    private val _selectedEmojiUrls = MutableStateFlow(
+        restoredEditor?.selectedEmojiUrls.orEmpty(),
+    )
 
     fun consumeEmojiInsert() { _pendingEmojiInsert.value = null }
 
@@ -485,6 +530,20 @@ class ComposeViewModel @Inject constructor(
 
     init {
         viewModelScope.launch { blossomServersStore.initialize() }
+        savedStateHandle.setSavedStateProvider(EDITOR_STATE_KEY) {
+            Bundle().apply {
+                if (composeSessionGate.activeSessionKey != null) {
+                    encodeComposeEditor(
+                        captureComposeEditor(
+                            blocks = _blocks.value,
+                            poll = _pollDraft.value,
+                            isSensitive = _isSensitive.value,
+                            selectedEmojiUrls = _selectedEmojiUrls.value,
+                        ),
+                    )?.let { putString(EDITOR_JSON_KEY, it) }
+                }
+            }
+        }
     }
 
     fun restoreDraft(draft: Draft) {
@@ -1014,6 +1073,12 @@ class ComposeViewModel @Inject constructor(
     private fun deleteCurrentDraft() {
         val pk = pubkeyHex ?: return
         draftStore.delete(pk, currentContext().key)
+    }
+
+    private companion object {
+        const val ACTIVE_SESSION_KEY = "compose_active_session"
+        const val EDITOR_STATE_KEY = "compose_editor_state"
+        const val EDITOR_JSON_KEY = "editor_json"
     }
 
     // ── Confirm flow ────────────────────────────────────────────────────────

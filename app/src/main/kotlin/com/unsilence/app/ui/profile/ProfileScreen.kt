@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.FlowPreview
@@ -146,8 +147,8 @@ fun ProfileScreen(
     val clipboard        = LocalClipboardManager.current
     val showSnackbar     = LocalShowSnackbar.current
 
-    var showEditProfile by remember { mutableStateOf(false) }
-    var showSettings    by remember { mutableStateOf(false) }
+    var showEditProfile by rememberSaveable { mutableStateOf(false) }
+    var showSettings    by rememberSaveable { mutableStateOf(false) }
     var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
     var actionsRow      by remember { mutableStateOf<FeedRow?>(null) }
     var showWotBreakdown by remember { mutableStateOf(false) }
