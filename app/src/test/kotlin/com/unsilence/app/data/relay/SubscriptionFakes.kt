@@ -1,9 +1,9 @@
 package com.unsilence.app.data.relay
 
-import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.serialization.decodeFromString
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** Trivial RelayTransport fake: records sends, controllable success per URL. */
@@ -44,10 +44,6 @@ class FakeRelayCapabilitiesStore : RelaySkipCheck {
     fun markSkipped(url: String) { skipped.add(url) }
 }
 
-class FakeSignatureVerifier(private val result: Boolean = true) : SignatureVerifier() {
-    override fun verify(event: NostrEvent): Boolean = result
-}
-
 /** No-op TimelineEventLoader for tests. */
 class StubEventLoader : TimelineEventLoader {
     override suspend fun getEvents(ids: List<String>): List<NostrEvent> = emptyList()
@@ -61,7 +57,6 @@ fun stubTimelineServiceProvider(): javax.inject.Provider<TimelineService> {
             FakeTapRegistration(),
             FakeReconnectSource(),
             FakeRelayCapabilitiesStore(),
-            FakeSignatureVerifier(),
         ),
         StubEventLoader(),
     )
@@ -80,8 +75,22 @@ class FakeTapRegistration : TapRegistration {
         registrations.remove(tap)
     }
 
-    /** Test helper: fire all registered taps synchronously. */
+    /**
+     * Test helper: adapt wire fixtures at the EventProcessor boundary. EVENT
+     * fixtures become typed envelopes; control messages remain raw. Signature
+     * validity itself is covered by EventProcessor/SignatureVerifier tests.
+     */
     fun fire(raw: String, relayUrl: String) {
-        for (tap in registrations) tap.onMessage(raw, relayUrl)
+        val message = if (raw.startsWith("[\"EVENT\"")) {
+            val subId = extractSubscriptionIdFromRaw(raw) ?: return
+            val start = findEventObjectStart(raw)
+            val end = if (start >= 0) findMatchingBraceEnd(raw, start) else -1
+            if (start < 0 || end < 0) return
+            val dto = NostrJson.decodeFromString<EventDto>(raw.substring(start, end + 1))
+            RelayTapMessage.VerifiedEvent(subId, dto.toNostrEvent(relayUrl))
+        } else {
+            RelayTapMessage.Control(raw, relayUrl)
+        }
+        for (tap in registrations) tap.onMessage(message)
     }
 }

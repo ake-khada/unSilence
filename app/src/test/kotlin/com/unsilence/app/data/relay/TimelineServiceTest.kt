@@ -28,7 +28,6 @@ class TimelineServiceTest {
             tapRegistry,
             FakeReconnectSource(),
             FakeRelayCapabilitiesStore(),
-            FakeSignatureVerifier(),
         )
         service = TimelineService(subscription, eventLoader)
         service.subscribeDispatcher = Dispatchers.Unconfined
