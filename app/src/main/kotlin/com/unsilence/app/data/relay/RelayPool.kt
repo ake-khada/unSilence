@@ -26,6 +26,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Semaphore
 import com.unsilence.app.data.WOT_REGISTRY_LOOKUP_RELAYS
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -70,6 +71,16 @@ private const val PROFILE_RELAY_FACTS_TIMEOUT_MS = 8_000L
 private const val EVENT_REFERENCE_PHASE_TIMEOUT_MS = 4_000L
 private const val EVENT_PROCESSOR_SETTLE_MS = 200L
 private const val BRIDGE_EVENT_FETCH_TTL_MS = 5 * 60_000L
+internal const val MAX_EPHEMERAL_CONNECTIONS = 4
+private const val FOREGROUND_RECONNECT_STAGGER_MS = 200L
+
+internal fun reconnectPriority(purposes: Set<ConnectionPurpose>): Int = when {
+    ConnectionPurpose.FEED_SUB in purposes -> 0
+    ConnectionPurpose.PERSISTENT in purposes -> 1
+    ConnectionPurpose.BROWSE in purposes -> 2
+    ConnectionPurpose.FEED_WARM in purposes -> 3
+    else -> 4
+}
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
 internal val EVENT_REFERENCE_FETCH_KINDS =
@@ -177,6 +188,8 @@ class RelayPool @Inject constructor(
     private val wsDispatcher = Dispatchers.IO.limitedParallelism(8)
     private val scope = CoroutineScope(SupervisorJob() + wsDispatcher)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
+    private val socketLifecycleLock = Any()
+    private val socketTransportSuspended = AtomicBoolean(false)
 
     /** Relay URLs deferred during network-down/DNS-degraded. Drained with jitter
      *  when the network recovers (checked in the 60s sweep). */
@@ -204,7 +217,7 @@ class RelayPool @Inject constructor(
      *  outside this set (and not in the persistent pool) are skipped. */
     fun setOutboxAllowlist(urls: Set<String>) {
         outboxAllowlist = urls
-        Log.w(TAG, "Outbox allowlist updated: ${urls.size} relays")
+        Log.d(TAG, "Outbox allowlist updated: ${urls.size} relays")
     }
 
     /** Read-only access to blocked relay URLs for allowlist construction. */
@@ -236,7 +249,68 @@ class RelayPool @Inject constructor(
 
     /** Snapshot of currently-connected relay URLs. Read-only, used by CardHydrator
      *  as fallback when write relays are unknown. */
-    fun connectedRelayUrls(): List<String> = connections.keys.toList()
+    fun connectedRelayUrls(): List<String> = connections.values
+        .filter { it.isConnected }
+        .map { it.url }
+
+    /**
+     * Open [connection] only while foreground transport is allowed. The lock
+     * closes the race where ProcessLifecycle.onStop lands between a caller's
+     * background check and RelayConnection.connect().
+     */
+    private fun connectIfTransportActive(connection: RelayConnection): Boolean =
+        synchronized(socketLifecycleLock) {
+            if (socketTransportSuspended.get()) {
+                false
+            } else {
+                connection.connect()
+                true
+            }
+        }
+
+    private suspend fun connectTrackedEphemeral(connection: RelayConnection): Boolean {
+        ephemeralSemaphore.acquire()
+        activeEphemeralConnections.add(connection)
+        if (connectIfTransportActive(connection)) return true
+        activeEphemeralConnections.remove(connection)
+        ephemeralSemaphore.release()
+        return false
+    }
+
+    private fun closeTrackedEphemeral(connection: RelayConnection) {
+        if (activeEphemeralConnections.remove(connection)) {
+            ephemeralSemaphore.release()
+        }
+        connection.close()
+    }
+
+    /**
+     * Close every pooled and ephemeral WebSocket when the app loses its
+     * foreground lifecycle. Connection-purpose, auth-policy, and subscription
+     * state are retained so foreground recovery can recreate the channels and
+     * replay REQs without a cold bootstrap.
+     */
+    fun suspendSocketsForBackground() {
+        val pooled: List<RelayConnection>
+        val ephemeral: List<RelayConnection>
+        synchronized(socketLifecycleLock) {
+            if (!socketTransportSuspended.compareAndSet(false, true)) return
+            pooled = connections.values.toList()
+            ephemeral = activeEphemeralConnections.toList()
+            pooled.forEach { it.close() }
+            ephemeral.forEach { it.close() }
+        }
+        updateConnectionStates()
+        Log.d(TAG, "Background socket suspend: pooled=${pooled.size} ephemeral=${ephemeral.size}")
+    }
+
+    /** Allow transport again and recreate suspended pooled channels in priority order. */
+    fun resumeSocketsForForeground() {
+        if (!socketTransportSuspended.compareAndSet(true, false)) return
+        reconnectAll()
+    }
+
+    internal fun socketsSuspendedForTest(): Boolean = socketTransportSuspended.get()
 
     // ── Connection purpose tracking ────────────────────────────────────────
     // A relay can serve multiple purposes simultaneously (e.g. PERSISTENT + BROWSE).
@@ -301,10 +375,6 @@ class RelayPool @Inject constructor(
      *  Idempotency guard for [releaseOneShotForRelay] — prevents double-decrement
      *  when both handleEose and cleanupOneShotSub fire for the same (subId, url). */
     private val oneShotReleased = ConcurrentHashMap<String, MutableSet<String>>()
-    /** Per-subId first-EOSE completion signal. Completed when ANY single relay
-     *  EOSE's the sub. Used by engagement dispatch (first-EOSE-wins) so callers
-     *  don't wait for all 4-6 outbox relays to respond. */
-    internal val oneShotFirstEose = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
     private val hintedProfileFetchAttempted = ConcurrentHashMap<String, Long>()
     /** Pubkeys that went through the full indexer+fallback chain and still missed.
@@ -338,6 +408,9 @@ class RelayPool @Inject constructor(
     /** Per-URL last-open timestamp (nanos) for ephemeral connections — min 50ms gap. */
     private val ephemeralLastOpenNanos = ConcurrentHashMap<String, AtomicLong>()
     private val MIN_EPHEMERAL_GAP_NS = 50_000_000L // 50ms
+    /** Global handshake/connection cap: weak links must not fan out dozens in parallel. */
+    private val ephemeralSemaphore = Semaphore(MAX_EPHEMERAL_CONNECTIONS)
+    private val activeEphemeralConnections = ConcurrentHashMap.newKeySet<RelayConnection>()
 
     /** Relays that have completed NIP-42 auth successfully. */
     private val authenticatedRelays = ConcurrentHashMap.newKeySet<String>()
@@ -588,7 +661,7 @@ class RelayPool @Inject constructor(
 
     /**
      * Dispatch a one-shot REQ to [url]: reuse the pooled connection if one exists,
-     * otherwise open an ephemeral connection (no pool slot, no cap, auto-closes
+     * otherwise open an ephemeral connection (no pool slot, globally capped, auto-closes
      * after EOSE/timeout). NEVER connectAndAwait — transient hint/ref fetches must
      * not occupy pool slots (Slice 8: 192-relay hint fan-out exhausted the pool).
      */
@@ -664,7 +737,7 @@ class RelayPool @Inject constructor(
                 }
             }
         }
-        Log.w(TAG, "Pool: total=${connections.size} $purposeCounts")
+        Log.d(TAG, "Pool: total=${connections.size} $purposeCounts")
     }
 
     /**
@@ -774,6 +847,7 @@ class RelayPool @Inject constructor(
         scope.launch {
             while (true) {
                 delay(60_000)
+                if (socketTransportSuspended.get()) continue
                 logPoolState()
                 // Sweep unused connections (existing per-url release pass)
                 for (url in connections.keys.toList()) {
@@ -955,6 +1029,7 @@ class RelayPool @Inject constructor(
         timeoutMs: Long,
         forceEvict: Boolean,
     ): Int {
+        if (socketTransportSuspended.get()) return 0
         val newConns = mutableListOf<RelayConnection>()
         for (rawUrl in relayUrls) {
             val url = normalizeRelayUrl(rawUrl) ?: continue
@@ -972,7 +1047,7 @@ class RelayPool @Inject constructor(
             if (existing != null) {
                 val s = existing.state.value
                 if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
-                    Log.w(TAG, "connectAndAwait REUSE: $url state=$s")
+                    Log.d(TAG, "connectAndAwait REUSE: $url state=$s")
                     continue
                 }
                 // Stale (DISCONNECTED/FAILED) — evict and replace
@@ -983,10 +1058,11 @@ class RelayPool @Inject constructor(
                 connections[url] = replacement  // map-before-close
                 existing.close()
                 connectionLastActivity[url] = System.currentTimeMillis()
-                replacement.connect()
-                scope.launch { listenForEvents(replacement) }
-                newConns.add(replacement)
-                Log.w(TAG, "connectAndAwait REPLACE: $url (was $s, pool=${connections.size})")
+                if (connectIfTransportActive(replacement)) {
+                    scope.launch { listenForEvents(replacement) }
+                    newConns.add(replacement)
+                }
+                Log.d(TAG, "connectAndAwait REPLACE: $url (was $s, pool=${connections.size})")
                 continue
             }
             // No existing entry — create new (subject to pool cap)
@@ -997,10 +1073,11 @@ class RelayPool @Inject constructor(
             val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
             connections[url] = candidate
             connectionLastActivity[url] = System.currentTimeMillis()
-            candidate.connect()
-            scope.launch { listenForEvents(candidate) }
-            newConns.add(candidate)
-            Log.w(TAG, "connectAndAwait NEW: $url (pool=${connections.size})")
+            if (connectIfTransportActive(candidate)) {
+                scope.launch { listenForEvents(candidate) }
+                newConns.add(candidate)
+            }
+            Log.d(TAG, "connectAndAwait NEW: $url (pool=${connections.size})")
         }
         if (newConns.isEmpty()) {
             // All URLs already in pool — wait for at least one to be connected.
@@ -1050,7 +1127,8 @@ class RelayPool @Inject constructor(
      * For URLs NOT in pool: opens ephemeral WebSocket (no cap, no reconnect),
      * sends REQs, collects events until EOSE, then closes.
      *
-     * Ephemeral connections never enter [connections] map and don't count against the cap.
+     * Ephemeral connections never enter [connections] and are globally limited by
+     * [MAX_EPHEMERAL_CONNECTIONS], independently of the persistent-pool cap.
      */
     suspend fun sendOneShotBatch(
         urls: List<String>,
@@ -1060,6 +1138,12 @@ class RelayPool @Inject constructor(
         capabilityBypassRelays: Set<String> = emptySet(),
         includeActiveFeedRelay: Boolean = false,
     ) {
+        if (socketTransportSuspended.get()) {
+            subIds.forEach { subId ->
+                oneShotEoseCallbacks[subId]?.complete(Unit)
+            }
+            return
+        }
         val activeFeedRelay = activeSingleRelayFeedUrl?.let(::normalizeRelayUrl)
         val bypassRelays = capabilityBypassRelays.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val logBypass = bypassRelays.isNotEmpty()
@@ -1174,62 +1258,73 @@ class RelayPool @Inject constructor(
             return // CAS race — another caller won
         }
 
-        val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+        ephemeralSemaphore.acquire()
         try {
-            conn.connect()
-            // Wait for WebSocket ready (max 2s)
-            val state = withTimeoutOrNull(2_000) {
-                conn.state.first {
-                    it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
-                }
-            }
-            if (state != RelayState.CONNECTED) {
-                if (logInfo) Log.i(TAG, "Ephemeral connect failed: $url (state=$state)")
-                else Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
+            if (socketTransportSuspended.get()) {
+                subIds.forEach { recordOneShotRelayCoverage(it, url) }
                 return
             }
+            val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+            activeEphemeralConnections.add(conn)
+            try {
+                if (!connectIfTransportActive(conn)) return
+                // Wait for WebSocket ready (max 2s)
+                val state = withTimeoutOrNull(2_000) {
+                    conn.state.first {
+                        it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+                    }
+                }
+                if (state != RelayState.CONNECTED) {
+                    if (logInfo) Log.i(TAG, "Ephemeral connect failed: $url (state=$state)")
+                    else Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
+                    return
+                }
 
-            // Send all REQs
-            reqs.forEach { conn.send(it) }
+                // Send all REQs
+                reqs.forEach { conn.send(it) }
 
-            // Collect events until all sub-IDs EOSE'd or timeout
-            val pendingSubs = subIds.toMutableSet()
-            withTimeoutOrNull(timeoutMs) {
-                conn.messages.consumeEach { raw ->
-                    when {
-                        raw.startsWith("[\"EVENT\"") -> {
-                            processor.process(raw, url)
-                        }
-                        raw.startsWith("[\"EOSE\"") -> {
-                            val eoseSubId = extractEoseSubId(raw)
-                            if (eoseSubId != null && eoseSubId in pendingSubs) {
-                                conn.send("""["CLOSE","$eoseSubId"]""")
-                                recordOneShotRelayCoverage(eoseSubId, url)
-                                pendingSubs.remove(eoseSubId)
-                                if (pendingSubs.isEmpty()) return@withTimeoutOrNull
+                // Collect events until all sub-IDs EOSE'd or timeout
+                val pendingSubs = subIds.toMutableSet()
+                withTimeoutOrNull(timeoutMs) {
+                    conn.messages.consumeEach { raw ->
+                        when {
+                            raw.startsWith("[\"EVENT\"") -> {
+                                processor.process(raw, url)
                             }
-                        }
-                        raw.startsWith("[\"AUTH\"") -> {
-                            val challenge = raw.substringAfter("[\"AUTH\",\"", "")
-                                .substringBefore("\"")
-                            if (challenge.isNotEmpty()) {
-                                handleAuthChallenge(conn, challenge)
+                            raw.startsWith("[\"EOSE\"") -> {
+                                val eoseSubId = extractEoseSubId(raw)
+                                if (eoseSubId != null && eoseSubId in pendingSubs) {
+                                    conn.send("""["CLOSE","$eoseSubId"]""")
+                                    recordOneShotRelayCoverage(eoseSubId, url)
+                                    pendingSubs.remove(eoseSubId)
+                                    if (pendingSubs.isEmpty()) return@withTimeoutOrNull
+                                }
                             }
-                        }
-                        raw.startsWith("[\"OK\"") -> {
-                            handleOk(conn, raw)
+                            raw.startsWith("[\"AUTH\"") -> {
+                                val challenge = raw.substringAfter("[\"AUTH\",\"", "")
+                                    .substringBefore("\"")
+                                if (challenge.isNotEmpty()) {
+                                    handleAuthChallenge(conn, challenge)
+                                }
+                            }
+                            raw.startsWith("[\"OK\"") -> {
+                                handleOk(conn, raw)
+                            }
                         }
                     }
                 }
+                val eosed = subIds.size - pendingSubs.size
+                if (logInfo) Log.i(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
+                else Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
+            } finally {
+                // A failed connection or a relay that omits EOSE is still complete from
+                // the caller's perspective. Coverage is idempotent for real EOSEs.
+                subIds.forEach { recordOneShotRelayCoverage(it, url) }
+                activeEphemeralConnections.remove(conn)
+                conn.close()
             }
-            val eosed = subIds.size - pendingSubs.size
-            if (logInfo) Log.i(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
-            else Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
         } finally {
-            // A failed connection or a relay that omits EOSE is still complete from
-            // the caller's perspective. Coverage is idempotent for real EOSEs.
-            subIds.forEach { recordOneShotRelayCoverage(it, url) }
-            conn.close()
+            ephemeralSemaphore.release()
         }
     }
 
@@ -1258,6 +1353,7 @@ class RelayPool @Inject constructor(
     }
 
     fun connect(relayUrls: List<String>) {
+        if (socketTransportSuspended.get()) return
         val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }
         for (url in normalizedUrls) {
             if (url in blockedUrls) {
@@ -1274,7 +1370,7 @@ class RelayPool @Inject constructor(
             if (existing != null) {
                 val s = existing.state.value
                 if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
-                    Log.w(TAG, "connect REUSE: $url state=$s")
+                    Log.d(TAG, "connect REUSE: $url state=$s")
                     continue
                 }
                 // Stale (DISCONNECTED/FAILED) — evict and replace
@@ -1283,10 +1379,11 @@ class RelayPool @Inject constructor(
                 existing.close()
                 connectionLastActivity[url] = System.currentTimeMillis()
                 scope.launch {
-                    replacement.connect()
-                    listenForEvents(replacement)
+                    if (connectIfTransportActive(replacement)) {
+                        listenForEvents(replacement)
+                    }
                 }
-                Log.w(TAG, "connect REPLACE: $url (was $s, pool=${connections.size})")
+                Log.d(TAG, "connect REPLACE: $url (was $s, pool=${connections.size})")
                 continue
             }
             // No existing entry — create new (subject to pool cap)
@@ -1298,11 +1395,12 @@ class RelayPool @Inject constructor(
             connections[url] = candidate
             connectionLastActivity[url] = System.currentTimeMillis()
             scope.launch {
-                candidate.connect()
-                listenForEvents(candidate)
+                if (connectIfTransportActive(candidate)) {
+                    listenForEvents(candidate)
+                }
             }
         }
-        Log.w(TAG, "Pool has ${connections.size} connections")
+        Log.d(TAG, "Pool has ${connections.size} connections")
     }
 
     private suspend fun listenForEvents(conn: RelayConnection) {
@@ -1473,7 +1571,7 @@ class RelayPool @Inject constructor(
             // Skip the reconnect decision if we're being cancelled (scope teardown).
             // A `return` here would swallow the propagating CancellationException, so
             // gate with `if (isActive)` and use NO `return` statements in this block.
-            if (currentCoroutineContext().isActive) {
+            if (currentCoroutineContext().isActive && !socketTransportSuspended.get()) {
                 val url = conn.url
                 val current = connections[url]
                 if (current !== conn) {
@@ -1556,7 +1654,6 @@ class RelayPool @Inject constructor(
     internal fun cleanupOneShotSub(subId: String) {
         _activeOneShotSubs.remove(subId)
         oneShotEoseCallbacks.remove(subId)
-        oneShotFirstEose.remove(subId)
         val targets = oneShotSubTargets.remove(subId) ?: emptySet()
         oneShotSubEosed.remove(subId)
 
@@ -1572,9 +1669,8 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Record a relay as done for a one-shot sub. Completes [oneShotFirstEose]
-     * on the first relay response and [oneShotEoseCallbacks] when ALL target
-     * relays have responded (EOSE or CLOSED).
+     * Record a relay as done for a one-shot sub. Completes
+     * [oneShotEoseCallbacks] when ALL target relays have responded (EOSE or CLOSED).
      * Falls back to first-EOSE if no target set was registered.
      */
     private fun recordOneShotRelayCoverage(subId: String, relayUrl: String) {
@@ -1582,7 +1678,6 @@ class RelayPool @Inject constructor(
         if (targets == null) {
             // No target set registered — fall back to old behavior (complete on first)
             oneShotEoseCallbacks.remove(subId)?.complete(Unit)
-            oneShotFirstEose.remove(subId)?.complete(Unit)
             return
         }
         val eosed = oneShotSubEosed.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
@@ -1590,12 +1685,6 @@ class RelayPool @Inject constructor(
         val covered = eosed.size
         val total = targets.size
         Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
-
-        // First relay response: complete the first-EOSE deferred immediately.
-        // Engagement subs await this instead of full coverage.
-        if (covered == 1) {
-            oneShotFirstEose.remove(subId)?.complete(Unit)
-        }
 
         // Full coverage: complete the main deferred and clean up tracking maps.
         // oneShotReleased is NOT removed here — late duplicate EOSEs from flaky relays
@@ -1881,7 +1970,7 @@ class RelayPool @Inject constructor(
         for (url in allTargets) {
             connections[url]?.let { sendOneShotToRelay(it, req) }
         }
-        Log.w(TAG, "NIP-51 ecosystem fetch: indexers=${indexerRelayUrls.size} writeRelays=${writeRelayUrls.size} writeList=$writeRelayUrls (ownWrite=${memoryEventStore.get().writeRelaysFor(pubkeyHex).size})")
+        Log.d(TAG, "NIP-51 ecosystem fetch: indexers=${indexerRelayUrls.size} writeRelays=${writeRelayUrls.size} writeList=$writeRelayUrls (ownWrite=${memoryEventStore.get().writeRelaysFor(pubkeyHex).size})")
     }
 
     /**
@@ -2478,7 +2567,7 @@ class RelayPool @Inject constructor(
     ): List<NostrEvent> {
         val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
         return try {
-            conn.connect()
+            if (!connectTrackedEphemeral(conn)) return emptyList()
             val state = withTimeoutOrNull(3_000L) {
                 conn.state.first {
                     it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
@@ -2523,7 +2612,7 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "Follow-pack fetch failed on $relayUrl: ${e.message}")
             emptyList()
         } finally {
-            conn.close()
+            closeTrackedEphemeral(conn)
         }
     }
 
@@ -2568,7 +2657,7 @@ class RelayPool @Inject constructor(
     ): Boolean {
         val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
         return try {
-            conn.connect()
+            if (!connectTrackedEphemeral(conn)) return false
             val state = withTimeoutOrNull(2_000) {
                 conn.state.first {
                     it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
@@ -2585,7 +2674,7 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "WoT fetch failed for chunk $page/$totalPages on $relayUrl: ${e.message}")
             false
         } finally {
-            conn.close()
+            closeTrackedEphemeral(conn)
         }
     }
 
@@ -2881,7 +2970,7 @@ class RelayPool @Inject constructor(
         val conn = RelayConnection(u, okHttpClient, relayCapabilitiesStore)
         val start = System.nanoTime()
         return try {
-            conn.connect()
+            if (!connectTrackedEphemeral(conn)) return null
             val state = withTimeoutOrNull(5_000) {
                 conn.state.first { it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED }
             }
@@ -2889,7 +2978,7 @@ class RelayPool @Inject constructor(
         } catch (_: Exception) {
             null
         } finally {
-            conn.close()
+            closeTrackedEphemeral(conn)
         }
     }
 
@@ -3138,7 +3227,7 @@ class RelayPool @Inject constructor(
         }.toString()
 
         try {
-            conn.connect()
+            if (!connectTrackedEphemeral(conn)) return collected to verifyFailed
             val state = withTimeoutOrNull(2_000) {
                 conn.state.first { it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED }
             }
@@ -3194,7 +3283,7 @@ class RelayPool @Inject constructor(
         } catch (e: Exception) {
             Log.w(TAG, "DIRECTORY: collect failed on $url — ${e.message}")
         } finally {
-            conn.close()
+            closeTrackedEphemeral(conn)
         }
         return collected to verifyFailed
     }
@@ -3215,7 +3304,7 @@ class RelayPool @Inject constructor(
         val conn = RelayConnection(normalized, okHttpClient, relayCapabilitiesStore)
         connections[normalized] = conn
         connectionLastActivity[normalized] = System.currentTimeMillis()
-        conn.connect()
+        if (!connectIfTransportActive(conn)) return null
         scope.launch { listenForEvents(conn) }
         return try {
             conn.awaitConnected(timeoutMs = 5_000)
@@ -3326,7 +3415,7 @@ class RelayPool @Inject constructor(
             val fbPks = fbRelayEntries.flatMap { it.value }.distinct()
 
             if (fbPks.isNotEmpty()) {
-                Log.w(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
+                Log.d(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
                     fbPks.joinToString(",") { it.take(8) } + " → " +
                     fbRelayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") })
                 fetchProfilePhase(
@@ -3357,7 +3446,7 @@ class RelayPool @Inject constructor(
             val fbNow = System.currentTimeMillis()
             val finalIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
             val resolved = stillIncomplete.size - finalIncomplete.size
-            if (resolved > 0) Log.w(TAG, "PROFFB: $resolved pk(s) resolved avatar via fallback")
+            if (resolved > 0) Log.d(TAG, "PROFFB: $resolved pk(s) resolved avatar via fallback")
             finalIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
             if (finalIncomplete.isNotEmpty()) {
                 Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after bridge fallback")
@@ -4426,14 +4515,22 @@ class RelayPool @Inject constructor(
      * Creates new RelayConnection instances (Channel can't be reused after close).
      */
     fun reconnectAll() {
+        if (socketTransportSuspended.get()) return
         val dropped = connections.entries
             .filter { it.value.state.value == RelayState.DISCONNECTED ||
                       it.value.state.value == RelayState.FAILED }
             .map { it.key }
-        for (url in dropped) {
-            reconnectWithBackoff(url)
+            .sortedBy { url -> reconnectPriority(connectionPurposes[url].orEmpty()) }
+        for ((index, url) in dropped.withIndex()) {
+            scope.launch {
+                // Keep a true trickle even for very large relay sets. Capping the
+                // delay made every relay after index 25 wake together at 5 s.
+                val staggerMs = index * FOREGROUND_RECONNECT_STAGGER_MS
+                if (staggerMs > 0L) delay(staggerMs)
+                if (!socketTransportSuspended.get()) reconnectWithBackoff(url)
+            }
         }
-        if (dropped.isNotEmpty()) Log.d(TAG, "Reconnecting ${dropped.size} relay(s)")
+        if (dropped.isNotEmpty()) Log.d(TAG, "Reconnecting ${dropped.size} relay(s) with foreground stagger")
     }
 
     /**
@@ -4441,6 +4538,7 @@ class RelayPool @Inject constructor(
      * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
      */
     private fun reconnectWithBackoff(url: String, attempt: Int = reconnectAttempts[url] ?: 0) {
+        if (socketTransportSuspended.get()) return
         // Only block reconnect for permanent policy rejections (restricted).
         // Transport strikes heal on successful connection — let the 8-attempt
         // backoff handle transient failures without the strike system killing it.
@@ -4469,11 +4567,27 @@ class RelayPool @Inject constructor(
                     delay(delayMs)
                 }
 
+                if (socketTransportSuspended.get()) {
+                    guard.set(false)
+                    return@launch
+                }
+
                 // Re-check after delay — network may have gone down during backoff
                 if (relayCapabilitiesStore.isNetworkDown) {
                     pendingReconnect.add(url)
                     guard.set(false)
                     Log.w(TAG, "reconnectWithBackoff: network down after delay, deferring $url")
+                    return@launch
+                }
+
+                // Another foreground path (for example the warm-relay recheck)
+                // may already have restored this URL while our stagger/backoff
+                // elapsed. Never replace a healthy or in-flight handshake.
+                val current = connections[url]
+                if (current?.state?.value == RelayState.CONNECTED ||
+                    current?.state?.value == RelayState.CONNECTING
+                ) {
+                    guard.set(false)
                     return@launch
                 }
 
@@ -4490,7 +4604,10 @@ class RelayPool @Inject constructor(
                 pendingAuthEventIds.values.removeAll { it == url }
                 old?.close()
                 connectionLastActivity[url] = System.currentTimeMillis()
-                conn.connect()
+                if (!connectIfTransportActive(conn)) {
+                    guard.set(false)
+                    return@launch
+                }
 
                 // Wait briefly for connection to establish
                 var waited = 0
@@ -4522,7 +4639,7 @@ class RelayPool @Inject constructor(
                             Log.d(TAG, "Reconnect backoff reset after healthy window: $url")
                         }
                     }
-                    Log.w(TAG, "Reconnected $url (attempt=$attempt)")
+                    Log.d(TAG, "Reconnected $url (attempt=$attempt)")
                 } else {
                     guard.set(false)
                     if (attempt < 8) {
@@ -4697,6 +4814,7 @@ class RelayPool @Inject constructor(
 
     /** Send a message to a specific relay by URL. Returns false if the connection doesn't exist. */
     override fun sendToRelay(url: String, msg: String): Boolean {
+        if (socketTransportSuspended.get()) return false
         val normalized = normalizeRelayUrl(url) ?: return false
         return connections[normalized]?.send(msg) == true
     }
@@ -4721,6 +4839,7 @@ class RelayPool @Inject constructor(
     fun disconnectAll() {
         // Map-before-close: snapshot then clear so listenForEvents.finally sees empty map
         val snapshot = ArrayList(connections.values)
+        val ephemeralSnapshot = ArrayList(activeEphemeralConnections)
         connections.clear()
         connectionPurposes.clear()
         profileFetchAttempted.clear()
@@ -4743,6 +4862,7 @@ class RelayPool @Inject constructor(
         connectionLastActivity.clear()
         // Close after all maps are cleared
         snapshot.forEach { it.close() }
-        Log.d(TAG, "disconnectAll: all connections, purposes, and auth state cleared")
+        ephemeralSnapshot.forEach { it.close() }
+        Log.d(TAG, "disconnectAll: all pooled/ephemeral connections, purposes, and auth state cleared")
     }
 }

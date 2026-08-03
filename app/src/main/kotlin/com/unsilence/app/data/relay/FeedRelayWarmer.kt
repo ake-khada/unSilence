@@ -8,12 +8,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "FeedWarmer"
 private const val WARM_CAP = 10
+private const val FOREGROUND_WARM_RECHECK_DELAY_MS = 6_000L
+private const val FOREGROUND_WARM_STAGGER_MS = 200L
 
 /**
  * Pre-warms feed-switcher relays as connected sockets (no subscription).
@@ -36,6 +39,7 @@ class FeedRelayWarmer @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
+    private var foregroundJob: Job? = null
     @Volatile private var activeWarmUrls: Set<String> = emptySet()
 
     /**
@@ -46,6 +50,7 @@ class FeedRelayWarmer @Inject constructor(
     fun start() {
         val pk = keyManager.getPublicKeyHex() ?: return
         job?.cancel()
+        foregroundJob?.cancel()
         job = scope.launch {
             // Carousel relays = the user's kind-10012 favorites (the local pinned store is retired).
             memoryEventStore.favoriteRelayConfigsFlow(pk)
@@ -57,15 +62,28 @@ class FeedRelayWarmer @Inject constructor(
     }
 
     /**
-     * Re-warm sockets dropped during background. Idempotent — [relayPool.connect]
-     * is REUSE for live sockets, NEW only for reaped ones. No purpose/diff changes.
-     * Call from UnsilenceApp ON_START.
+     * Re-check warm sockets after RelayPool has scheduled its prioritized foreground
+     * recovery. The delay avoids racing that recovery and replacing a channel which
+     * is already reconnecting; missing warm-only channels are then trickled in.
      */
     fun onForeground() {
         if (relayCapabilitiesStore.isNetworkDown) return
-        val urls = activeWarmUrls.toList()
-        if (urls.isEmpty()) return
-        relayPool.connect(urls)
+        foregroundJob?.cancel()
+        foregroundJob = scope.launch {
+            delay(FOREGROUND_WARM_RECHECK_DELAY_MS)
+            val urls = activeWarmUrls.toList()
+            for ((index, url) in urls.withIndex()) {
+                if (relayCapabilitiesStore.isNetworkDown) return@launch
+                if (index > 0) delay(FOREGROUND_WARM_STAGGER_MS)
+                relayPool.connect(listOf(url))
+            }
+        }
+    }
+
+    /** Cancel a pending warm-only recheck when foreground is lost. */
+    fun onBackground() {
+        foregroundJob?.cancel()
+        foregroundJob = null
     }
 
     private fun recompute(pk: String, pinnedUrls: List<String>) {
@@ -93,6 +111,6 @@ class FeedRelayWarmer @Inject constructor(
         }
 
         activeWarmUrls = candidates
-        Log.w(TAG, "warmed +${added.size} -${removed.size} total=${candidates.size}")
+        Log.d(TAG, "warmed +${added.size} -${removed.size} total=${candidates.size}")
     }
 }

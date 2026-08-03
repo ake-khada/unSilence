@@ -25,6 +25,16 @@ private const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
 
 enum class NetworkState { ONLINE, OFFLINE, UNKNOWN }
 
+data class NetworkConditions(
+    val state: NetworkState = NetworkState.UNKNOWN,
+    val isMetered: Boolean = true,
+    val isCellular: Boolean = false,
+) {
+    /** Conservative gate for speculative work; user-requested loads still run. */
+    val isConstrained: Boolean
+        get() = state != NetworkState.ONLINE || isMetered || isCellular
+}
+
 /**
  * Wraps [ConnectivityManager.registerDefaultNetworkCallback] to expose
  * the device's network reachability as a [StateFlow].
@@ -40,6 +50,9 @@ class NetworkMonitor @Inject constructor(
 ) {
     private val _state = MutableStateFlow(NetworkState.UNKNOWN)
     val state: StateFlow<NetworkState> = _state.asStateFlow()
+    private val _conditions = MutableStateFlow(NetworkConditions())
+    val conditions: StateFlow<NetworkConditions> = _conditions.asStateFlow()
+    val currentConditions: NetworkConditions get() = _conditions.value
 
     /** Emits when the default network identity changes (VPN toggle, WiFi↔cellular).
      *  DNS resolvability is a property of the current network — relay DNS-dead state
@@ -56,19 +69,33 @@ class NetworkMonitor @Inject constructor(
     init {
         val cm = context.getSystemService(ConnectivityManager::class.java)
         if (cm != null) {
+            fun updateConditions(state: NetworkState, caps: NetworkCapabilities?) {
+                _state.value = state
+                _conditions.value = NetworkConditions(
+                    state = state,
+                    isMetered = runCatching { cm.isActiveNetworkMetered }.getOrDefault(true),
+                    isCellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true,
+                )
+            }
             // Seed with current state before callback fires
             val active = cm.activeNetwork
             val caps = active?.let { cm.getNetworkCapabilities(it) }
-            _state.value = when {
+            lastDefaultNetwork.set(active)
+            val initialState = when {
                 active == null -> NetworkState.OFFLINE
                 caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true -> NetworkState.ONLINE
                 else -> NetworkState.UNKNOWN
             }
+            updateConditions(initialState, caps)
 
             cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    _state.value = NetworkState.ONLINE
                     val prev = lastDefaultNetwork.getAndSet(network)
+                    val currentCaps = cm.getNetworkCapabilities(network)
+                    val availableState = if (
+                        currentCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+                    ) NetworkState.ONLINE else NetworkState.UNKNOWN
+                    updateConditions(availableState, currentCaps)
                     if (prev != null && prev != network) {
                         val now = System.currentTimeMillis()
                         if (now - lastNetworkChangedAt.get() >= NETWORK_CHANGE_DEBOUNCE_MS) {
@@ -81,19 +108,30 @@ class NetworkMonitor @Inject constructor(
                 }
 
                 override fun onLost(network: Network) {
-                    _state.value = NetworkState.OFFLINE
-                    Log.w(TAG, "Network lost")
+                    // Android can report the old default network as lost after a
+                    // replacement has already become available. Only the network
+                    // we still consider current may move the app to OFFLINE.
+                    if (lastDefaultNetwork.compareAndSet(network, null)) {
+                        updateConditions(NetworkState.OFFLINE, null)
+                        Log.w(TAG, "Default network lost")
+                    } else {
+                        Log.d(TAG, "Ignoring loss of superseded network")
+                    }
                 }
 
                 override fun onCapabilitiesChanged(
                     network: Network,
                     capabilities: NetworkCapabilities,
                 ) {
+                    val current = lastDefaultNetwork.get()
+                    if (current != null && current != network) return
+                    lastDefaultNetwork.compareAndSet(null, network)
                     val validated = capabilities.hasCapability(
                         NetworkCapabilities.NET_CAPABILITY_VALIDATED
                     )
-                    if (validated && _state.value != NetworkState.ONLINE) {
-                        _state.value = NetworkState.ONLINE
+                    val nextState = if (validated) NetworkState.ONLINE else NetworkState.UNKNOWN
+                    updateConditions(nextState, capabilities)
+                    if (validated) {
                         Log.d(TAG, "Network validated")
                     }
                 }
@@ -101,6 +139,11 @@ class NetworkMonitor @Inject constructor(
         } else {
             Log.w(TAG, "ConnectivityManager unavailable — assuming ONLINE")
             _state.value = NetworkState.ONLINE
+            _conditions.value = NetworkConditions(
+                state = NetworkState.ONLINE,
+                isMetered = true,
+                isCellular = false,
+            )
         }
     }
 }
