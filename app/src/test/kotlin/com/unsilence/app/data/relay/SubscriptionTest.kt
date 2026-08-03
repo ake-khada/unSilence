@@ -33,7 +33,6 @@ class SubscriptionTest {
             tapRegistry,
             FakeReconnectSource(),
             FakeRelayCapabilitiesStore(),
-            FakeSignatureVerifier(),
         )
     }
 
@@ -77,14 +76,7 @@ class SubscriptionTest {
     }
 
     @Test
-    fun `onevent does not fire when signature verification fails`() = runTest {
-        subscription = Subscription(
-            transport,
-            tapRegistry,
-            FakeReconnectSource(),
-            FakeRelayCapabilitiesStore(),
-            FakeSignatureVerifier(result = false),
-        )
+    fun `onevent rejects an event beyond the future timestamp grace`() = runTest {
         val received = CopyOnWriteArrayList<NostrEvent>()
         subscription.subscribe(
             urls = listOf("wss://a.example"),
@@ -92,7 +84,11 @@ class SubscriptionTest {
             onevent = { received.add(it) },
         )
         val subId = transport.sends.first().subId()
-        val evtJson = sampleEventJson(id = "a".repeat(64), kind = 1)
+        val evtJson = sampleEventJson(
+            id = "a".repeat(64),
+            kind = 1,
+            createdAt = System.currentTimeMillis() / 1000L + 61L,
+        )
         tapRegistry.fire("""["EVENT","$subId",$evtJson]""", "wss://a.example")
         assertEquals(0, received.size)
     }
@@ -291,7 +287,8 @@ class SubscriptionTest {
         id: String,
         kind: Int = 1,
         content: String = "test note",
-    ): String = """{"id":"$id","pubkey":"${"b".repeat(64)}","kind":$kind,"created_at":1700000000,"content":"$content","tags":[],"sig":"${"c".repeat(128)}"}"""
+        createdAt: Long = 1_700_000_000L,
+    ): String = """{"id":"$id","pubkey":"${"b".repeat(64)}","kind":$kind,"created_at":$createdAt,"content":"$content","tags":[],"sig":"${"c".repeat(128)}"}"""
 
     private fun FakeRelayTransport.SentMessage.subId(): String {
         // Parse ["REQ","sub-id",{...}] to extract sub-id

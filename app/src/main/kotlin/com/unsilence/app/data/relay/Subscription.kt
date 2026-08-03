@@ -1,10 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
-import com.unsilence.app.data.auth.SignatureVerifier
 import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.tagsToJson
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -57,8 +54,7 @@ private const val RELAY_REPLAY_DEBOUNCE_MS = 1_000L
  * RelayBrowseSession) handle reconnect-and-resub.
  *
  * Thread safety: subscribe() is suspend (network I/O). Callbacks fire on
- * whatever thread the tap fires on (currently EventProcessor's drainer
- * thread — IO-bound). Callbacks must not block.
+ * EventProcessor's bounded Default dispatcher. Callbacks must not block.
  */
 interface ReconnectSource {
     val onRelayReconnected: SharedFlow<String>
@@ -70,7 +66,6 @@ class Subscription @Inject constructor(
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
     private val relayCapabilitiesStore: RelaySkipCheck,
-    private val signatureVerifier: SignatureVerifier,
 ) : ActiveSubsSource {
     /** Active subscription state, keyed by subId. */
     private data class SubState(
@@ -122,8 +117,8 @@ class Subscription @Inject constructor(
      * The single tap registered with [TapRegistration]. Demuxes by subId,
      * dispatches to per-sub callbacks. Registered lazily on first subscribe.
      */
-    private val tap = RelayMessageTap { raw, relayUrl ->
-        dispatchMessage(raw, relayUrl)
+    private val tap = RelayMessageTap { message ->
+        dispatchMessage(message)
     }
     private var tapRegistered = false
     private val tapLock = Any()
@@ -154,7 +149,7 @@ class Subscription @Inject constructor(
             onclose = onclose,
         )
         subs[subId] = state
-        Log.w(TAG, "SUB-DISPATCH: $subId to ${urls.size} relays, filter=${filter.toJsonObject()}")
+        Log.d(TAG, "SUB-OPEN: $subId to ${urls.size} relays, filter=${filter.toJsonObject()}")
 
         try {
             // Connection establishment is the caller's responsibility for
@@ -292,7 +287,7 @@ class Subscription @Inject constructor(
             !state.isPaused && normalized in state.urls
         }
         if (matching.isEmpty()) {
-            Log.w(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
+            Log.d(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
             return
         }
         if (!claimReplayWindow(normalized, nowMs)) return
@@ -304,7 +299,7 @@ class Subscription @Inject constructor(
             transport.sendToRelay(normalized, state.reqPayload)
             count++
         }
-        Log.w(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+        Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
     }
 
     private fun claimReplayWindow(url: String, nowMs: Long): Boolean {
@@ -335,9 +330,17 @@ class Subscription @Inject constructor(
      * type tag and subId without full JSON deserialization for the common
      * EVENT case.
      */
-    private fun dispatchMessage(raw: String, relayUrl: String) {
+    private fun dispatchMessage(message: RelayTapMessage) {
+        when (message) {
+            is RelayTapMessage.VerifiedEvent ->
+                dispatchEvent(message.subscriptionId, message.event)
+            is RelayTapMessage.Control ->
+                dispatchControlMessage(message.raw, message.relayUrl)
+        }
+    }
+
+    private fun dispatchControlMessage(raw: String, relayUrl: String) {
         when {
-            raw.startsWith("[\"EVENT\"") -> dispatchEvent(raw, relayUrl)
             raw.startsWith("[\"EOSE\"") -> {
                 val subId = extractSubId(raw) ?: return
                 handleRelayEose(subId, relayUrl)
@@ -352,23 +355,15 @@ class Subscription @Inject constructor(
         }
     }
 
-    private fun dispatchEvent(raw: String, relayUrl: String) {
-        // Extract subId via substring scan — same trick used for EOSE/CLOSED.
-        // This lets us early-return for events on other taps' subs WITHOUT
-        // any JSON allocation. Hot path: a relay with multiple active subs
-        // sends all events through every tap, so most arrivals here are
-        // for other subscriptions.
-        val subId = extractSubId(raw) ?: return
+    private fun dispatchEvent(subId: String, event: NostrEvent) {
         val state = subs[subId] ?: return  // not our sub, or already closed
         if (state.isPaused) return  // drop in-flight events during lifecycle pause
 
-        // Extract event id without parsing — Nostr event ids are 64-char
-        // lowercase hex right after the `"id":"` marker. Cross-relay dedup
-        // before paying for the full streaming decode.
-        val eventId = extractEventIdFromRaw(raw) ?: return
-        if (eventId in state.knownIds) return
-
-        val event = parseEvent(raw, eventId, relayUrl) ?: return
+        if (event.id in state.knownIds) return
+        // Reject future-dated events — prevents a poisoned since cursor. Signature
+        // and id-hash validity are guaranteed by RelayTapMessage.VerifiedEvent.
+        val nowSec = System.currentTimeMillis() / 1000L
+        if (event.createdAt > nowSec + 60L) return
         if (!state.knownIds.add(event.id)) return
         state.lastEventAt = android.os.SystemClock.elapsedRealtime()
         try {
@@ -383,7 +378,7 @@ class Subscription @Inject constructor(
         if (state.isPaused) return  // ignore EOSE during lifecycle pause
         if (!state.eosedRelays.add(relayUrl)) return  // already EOSE'd this relay
         val allEosed = state.eosedRelays.size >= state.urls.size
-        Log.w(TAG, "EOSE: $subId from $relayUrl (${state.eosedRelays.size}/${state.urls.size} allEosed=$allEosed events=${state.knownIds.size})")
+        Log.d(TAG, "EOSE: $subId from $relayUrl (${state.eosedRelays.size}/${state.urls.size} allEosed=$allEosed events=${state.knownIds.size})")
         try {
             state.oneose(allEosed)
         } catch (t: Throwable) {
@@ -404,62 +399,6 @@ class Subscription @Inject constructor(
         if (!state.eosedRelays.contains(relayUrl)) {
             handleRelayEose(subId, relayUrl)
         }
-    }
-
-    /**
-     * Slice the inner event object out of [raw] and stream-decode straight
-     * into [EventDto], then map to [NostrEvent]. Mirrors the EventProcessor
-     * fast path — no JsonObject / JsonArray tree, no per-field JsonPrimitive
-     * allocation. NIP-10 threading and NIP-36 content-warning are parsed
-     * here so FeedViewModel can filter Notes vs Conversations immediately.
-     */
-    private fun parseEvent(raw: String, expectedId: String, relayUrl: String): NostrEvent? {
-        val objStart = findEventObjectStart(raw)
-        if (objStart < 0) return null
-        val objEnd = findMatchingBraceEnd(raw, objStart)
-        if (objEnd < 0) return null
-        val eventJson = raw.substring(objStart, objEnd + 1)
-        val dto = try {
-            NostrJson.decodeFromString<EventDto>(eventJson)
-        } catch (_: Exception) {
-            return null
-        }
-        // Sanity: the precomputed id must match the decoded one. A relay
-        // returning a tampered or mis-aligned message gets refused here —
-        // same defense EventProcessor.process applies.
-        if (dto.id != expectedId) return null
-
-        // Reject future-dated events — prevents poisoned-since cursor.
-        val nowSec = System.currentTimeMillis() / 1000L
-        if (dto.createdAt > nowSec + 60L) {
-            return null
-        }
-
-        val (replyToId, rootId) = when (dto.kind) {
-            1111 -> parseNip22Threading(dto.tags)
-            1, 6, 16, 9734, 9735, 20, 21, 22, 34235, 34236, 30023 -> parseNip10Threading(dto.tags)
-            else -> Pair(null, null)
-        }
-        val (hasCw, cwReason) = effectiveContentWarning(dto.kind, dto.content, dto.tags)
-
-        val event = NostrEvent(
-            id = dto.id,
-            pubkey = dto.pubkey,
-            kind = dto.kind,
-            createdAt = dto.createdAt,
-            content = dto.content,
-            tags = dto.tags,
-            tagsJson = tagsToJson(dto.tags),
-            sig = dto.sig,
-            relayUrl = relayUrl,
-            replyToId = replyToId,
-            rootId = rootId,
-            hasContentWarning = hasCw,
-            contentWarningReason = cwReason,
-            firstSeenAt = System.currentTimeMillis(),
-            relaysSeen = ConcurrentHashMap.newKeySet<String>().also { it.add(relayUrl) },
-        )
-        return if (signatureVerifier.verify(event)) event else null
     }
 
     private fun generateSubId(urls: List<String>): String {
@@ -534,7 +473,8 @@ class Subscription @Inject constructor(
     }
 
     /** Test-only: synchronous direct dispatch. Avoid in production paths. */
-    internal fun dispatchForTest(raw: String, relayUrl: String) = dispatchMessage(raw, relayUrl)
+    internal fun dispatchForTest(raw: String, relayUrl: String) =
+        dispatchControlMessage(raw, relayUrl)
 
     /** Test-only: drop all subs and unregister tap. */
     internal fun resetForTest() {

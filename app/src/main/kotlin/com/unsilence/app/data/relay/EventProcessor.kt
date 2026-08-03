@@ -45,6 +45,40 @@ internal data class EventDto(
     val sig: String,
 )
 
+internal fun EventDto.toNostrEvent(relayUrl: String): NostrEvent {
+    val (replyToId, rootId) = when (kind) {
+        1111 -> parseNip22Threading(tags)
+        1, 6, 16, 9734, 9735, 20, 21, 22, 34235, 34236, 30023 -> parseNip10Threading(tags)
+        else -> Pair(null, null)
+    }
+    val (hasCw, cwReason) = effectiveContentWarning(kind, content, tags)
+    return NostrEvent(
+        id = id,
+        pubkey = pubkey,
+        kind = kind,
+        content = content,
+        createdAt = createdAt,
+        tags = tags,
+        tagsJson = tagsToJson(tags),
+        sig = sig,
+        relayUrl = relayUrl,
+        replyToId = replyToId,
+        rootId = rootId,
+        hasContentWarning = hasCw,
+        contentWarningReason = cwReason,
+        firstSeenAt = System.currentTimeMillis(),
+        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
+    )
+}
+
+private fun NostrEvent.forRelay(relayUrl: String): NostrEvent {
+    if (this.relayUrl == relayUrl) return this
+    return copy(
+        relayUrl = relayUrl,
+        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
+    )
+}
+
 private const val TAG = "EventProcessor"
 
 /** Fetches kind-30002 relay sets by coordinate from hint relays.
@@ -56,27 +90,35 @@ fun interface RelaySetRefFetcher {
 // Dedup cache limits
 private const val DEDUP_MAX  = 10_000
 private const val DEDUP_TRIM = 2_000
+// Full event objects are much heavier than IDs (especially long-form content).
+// Overlapping subscription copies normally arrive close together, so a small
+// bounded window captures the duplicate crypto win without retaining the feed.
+private const val VERIFIED_CACHE_MAX = 1_024
+private const val VERIFIED_CACHE_TRIM = 256
 
 /**
  * Parses raw relay wire messages and writes valid events to [MemoryEventStore].
  *
- * Performance architecture (fixes phone overheating from 19-relay fan-out):
+ * Performance architecture (bounds CPU/allocation pressure from relay fan-out):
  *
  *  1. DEDUP FIRST — event ID extracted via substring scan BEFORE JSON parsing.
- *     ConcurrentHashMap<String, Unit> seen cache (≤10 k entries) eliminates ~80 % of
- *     processing since the same event arrives from multiple relays simultaneously.
+ *     A bounded verified-event cache eliminates repeat parsing/crypto while still
+ *     delivering one event that matches multiple subscription IDs.
  *
  *  2. EARLY RETURN — messages that don't start with ["EVENT" are rejected in one
  *     startsWith() call. EOSE, OK, NOTICE, CLOSED never reach the JSON parser.
  *
- *  3. PRIORITY LANES — two channels:
+ *  3. SINGLE VERIFIED ENVELOPE — Subscription receives the same decoded,
+ *     id-checked, Schnorr-verified NostrEvent that feeds MES.
+ *
+ *  4. PRIORITY LANES — two channels:
  *       HOT  (cap 500): feed content, including all NIP-71 video kinds, flushed every 100 ms.
  *       COLD (cap 500): kinds 0, 7, 9735           — background data, flushed every 2 s.
  *
- *  4. BATCHED WRITES — drainer coroutines collect from their channel, then call
+ *  5. BATCHED WRITES — drainer coroutines collect from their channel, then call
  *     MemoryEventStore.insert() for deduplicated batches.
  *
- *  5. WRITE COALESCING — before each flush, duplicates are removed by primary key so
+ *  6. WRITE COALESCING — before each flush, duplicates are removed by primary key so
  *     that one event arriving from 5 relays produces exactly one insert.
  */
 @Singleton
@@ -92,8 +134,9 @@ class EventProcessor @Inject constructor(
     private val nowSeconds: Long get() = System.currentTimeMillis() / 1000L
 
     // ── Subscription tap registry ─────────────────────────────────────────────
-    // Subscriptions register a tap to receive raw relay messages (EVENT/EOSE/
-    // CLOSED) before our dedup. Demuxing by subId is the tap's responsibility.
+    // Subscriptions receive verified EVENT envelopes plus raw control messages.
+    // This keeps subscription demux independent from MES dedup without decoding
+    // or verifying the same EVENT twice.
     // CopyOnWriteArrayList — registrations are rare, iterations frequent.
     private val taps = java.util.concurrent.CopyOnWriteArrayList<RelayMessageTap>()
 
@@ -204,6 +247,13 @@ class EventProcessor @Inject constructor(
      */
     internal val seenIds = ConcurrentHashMap<String, Unit>(DEDUP_MAX + DEDUP_TRIM)
 
+    /**
+     * Recently verified events shared with subscription delivery. A globally
+     * deduplicated event may still be novel to a second subscription id, so its
+     * verified object must remain available for that delivery.
+     */
+    private val verifiedEvents = ConcurrentHashMap<String, NostrEvent>(VERIFIED_CACHE_MAX + VERIFIED_CACHE_TRIM)
+
     // ── 3. Priority channels ──────────────────────────────────────────────────
 
     /** HOT lane: feed content, including all NIP-71 video kinds. Flushed every 100 ms.
@@ -258,6 +308,7 @@ class EventProcessor @Inject constructor(
         drainerJob?.cancel()
         drainerJob = null
         seenIds.clear()
+        verifiedEvents.clear()
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
@@ -279,35 +330,30 @@ class EventProcessor @Inject constructor(
     suspend fun process(raw: String, rawRelayUrl: String) {
         val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: rawRelayUrl
 
-        // ── Subscription taps fire for ALL relay messages (EVENT/EOSE/CLOSED).
-        // Taps are registered by Subscription instances; they demux by subId.
-        // Must fire before our EVENT-only dedup so non-EVENT messages reach taps.
-        if (taps.isNotEmpty()) {
-            for (tap in taps) {
-                try {
-                    tap.onMessage(raw, relayUrl)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "tap.onMessage threw", t)
-                }
-            }
+        // ── Early return for non-EVENT messages (existing behavior) ────────────
+        if (!raw.startsWith("[\"EVENT\"")) {
+            dispatchToTaps(RelayTapMessage.Control(raw, relayUrl))
+            return
         }
 
-        // ── Early return for non-EVENT messages (existing behavior) ────────────
-        if (!raw.startsWith("[\"EVENT\"")) return
-
         // ── Dedup by event ID, extracted without JSON parsing ──────────────────
-        // This is a read-only fast path. The cache is claimed only after signature
-        // verification, so a bad-sig copy cannot suppress a genuine relay copy.
         val eventId = extractEventIdFromRaw(raw) ?: return
-        // Kind-10040 provider registries are account-scoped control state. On a
-        // restored settings screen they can arrive before MES has claimed the
-        // account owner; MES must be allowed to reject then accept the same id
-        // once ownership is known.
-        val isWotProviderRegistryEvent = raw.contains("\"kind\":10040")
-        if (!isWotProviderRegistryEvent && seenIds.containsKey(eventId)) {
-            // Already processed — just record this relay as a source so
-            // relay-specific feeds (browse mode) include the event.
-            memoryEventStore.addRelaySeen(eventId, relayUrl)
+        val subscriptionId = extractSubscriptionIdFromRaw(raw)
+
+        // Global dedup must not suppress a second matching subscription. Reuse
+        // the already-verified object and let Subscription apply its own knownIds.
+        verifiedEvents[eventId]?.let { cached ->
+            val relayed = cached.forRelay(relayUrl)
+            if (subscriptionId != null) {
+                dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
+            }
+            // Kind-10040 is account-scoped control state and intentionally
+            // re-enters MES: it can first arrive before the owner is established.
+            if (cached.kind != 10040 && seenIds.containsKey(eventId)) {
+                memoryEventStore.addRelaySeen(eventId, relayUrl)
+                return
+            }
+            handleVerifiedEvent(relayed)
             return
         }
 
@@ -331,13 +377,36 @@ class EventProcessor @Inject constructor(
         // relay returned a tampered or mis-aligned message, refuse it now
         // before we touch MES state.
         if (dto.id != eventId) return
-        handleEvent(dto, relayUrl)
+        val event = dto.toNostrEvent(relayUrl)
+
+        // Schnorr signature + id-hash verification happens before either
+        // consumer sees the event. A bad copy cannot poison the cache or dedup.
+        if (!verifySig(event)) return
+
+        val canonical = verifiedEvents.putIfAbsent(event.id, event) ?: event
+        trimVerifiedCacheIfNeeded()
+        val relayed = canonical.forRelay(relayUrl)
+        if (subscriptionId != null) {
+            dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
+        }
+        handleVerifiedEvent(relayed)
+    }
+
+    private fun dispatchToTaps(message: RelayTapMessage) {
+        if (taps.isEmpty()) return
+        for (tap in taps) {
+            try {
+                tap.onMessage(message)
+            } catch (t: Throwable) {
+                Log.w(TAG, "tap.onMessage threw", t)
+            }
+        }
     }
 
     /**
      * Parse + signature-verify a raw EVENT message and RETURN the verified event without
      * inserting into MES. For the relay-directory firehose (A1): the ephemeral collector
-     * bypasses [process]/[handleEvent], so the SAME id-hash + Schnorr verification must be
+     * bypasses [process]/[handleVerifiedEvent], so the SAME id-hash + Schnorr verification must be
      * re-applied before any directory parse — a forgeable directory is an attack surface.
      * Returns null on malformed JSON, id-mismatch, or invalid signature. Author allow-listing
      * (event.pubkey ∈ trusted monitors) is the caller's responsibility — verification proves
@@ -354,34 +423,12 @@ class EventProcessor @Inject constructor(
             return null
         }
         if (dto.id != eventId) return null
-        val (replyToId, rootId) = when (dto.kind) {
-            1111 -> parseNip22Threading(dto.tags)
-            1, 6, 16, 9734, 9735, 20, 21, 22, 34235, 34236, 30023 -> parseNip10Threading(dto.tags)
-            else -> Pair(null, null)
-        }
-        val event = NostrEvent(
-            id = dto.id,
-            pubkey = dto.pubkey,
-            kind = dto.kind,
-            content = dto.content,
-            createdAt = dto.createdAt,
-            tags = dto.tags,
-            tagsJson = tagsToJson(dto.tags),
-            sig = dto.sig,
-            relayUrl = relayUrl,
-            replyToId = replyToId,
-            rootId = rootId,
-            hasContentWarning = false,
-            contentWarningReason = null,
-            firstSeenAt = System.currentTimeMillis(),
-            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
-        )
+        val event = dto.toNostrEvent(relayUrl)
         return if (verifySig(event)) event else null
     }
 
     // ── Dedup helpers ─────────────────────────────────────────────────────────
-    // extractEventIdFromRaw / findEventObjectStart / findMatchingBraceEnd
-    // live as top-level helpers in RawEventJson.kt — shared with Subscription.
+    // Raw substring scanners live in RawEventJson.kt.
 
     internal fun trimDedupCacheIfNeeded() {
         if (seenIds.size <= DEDUP_MAX) return
@@ -390,6 +437,18 @@ class EventProcessor @Inject constructor(
         var trimmed = 0
         val iter = seenIds.keys.iterator()
         while (iter.hasNext() && trimmed < DEDUP_TRIM) {
+            val id = iter.next()
+            iter.remove()
+            verifiedEvents.remove(id)
+            trimmed++
+        }
+    }
+
+    private fun trimVerifiedCacheIfNeeded() {
+        if (verifiedEvents.size <= VERIFIED_CACHE_MAX) return
+        var trimmed = 0
+        val iter = verifiedEvents.keys.iterator()
+        while (iter.hasNext() && trimmed < VERIFIED_CACHE_TRIM) {
             iter.next()
             iter.remove()
             trimmed++
@@ -398,8 +457,8 @@ class EventProcessor @Inject constructor(
 
     // ── Event routing ─────────────────────────────────────────────────────────
 
-    private suspend fun handleEvent(dto: EventDto, relayUrl: String) {
-        val tags = dto.tags
+    private suspend fun handleVerifiedEvent(nostrEvent: NostrEvent) {
+        val tags = nostrEvent.tags
 
         // NIP-40: skip events that have already expired.
         val expiration = tags.firstOrNull { it.size >= 2 && it[0] == "expiration" }
@@ -408,44 +467,15 @@ class EventProcessor @Inject constructor(
 
         // Skip machine-generated spam: JSON payloads and broadcast protocols
         // posted as kind-1 notes. Normal notes are always plain text/markdown.
-        if (dto.kind == 1 && (dto.content.startsWith("{") || dto.content.startsWith("xitchat-broadcast-v1-"))) return
+        if (nostrEvent.kind == 1 &&
+            (nostrEvent.content.startsWith("{") || nostrEvent.content.startsWith("xitchat-broadcast-v1-"))
+        ) return
 
-        // Parse threading for content event kinds. NIP-22 kind-1111 uses
-        // uppercase root scope and lowercase parent scope, not NIP-10 markers.
-        val (replyToId, rootId) = when (dto.kind) {
-            1111 -> parseNip22Threading(tags)
-            1, 6, 16, 9734, 9735, 20, 21, 22, 34235, 34236, 30023 -> parseNip10Threading(tags)
-            else -> Pair(null, null)
-        }
-
-        val (hasCw, cwReason) = effectiveContentWarning(dto.kind, dto.content, tags)
-
-        val nostrEvent = NostrEvent(
-            id = dto.id,
-            pubkey = dto.pubkey,
-            kind = dto.kind,
-            content = dto.content,
-            createdAt = dto.createdAt,
-            tags = tags,
-            tagsJson = tagsToJson(tags),
-            sig = dto.sig,
-            relayUrl = relayUrl,
-            replyToId = replyToId,
-            rootId = rootId,
-            hasContentWarning = hasCw,
-            contentWarningReason = cwReason,
-            firstSeenAt = System.currentTimeMillis(),
-            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
-        )
-
-        // Signature verification — Schnorr sig + id-hash check.
-        // Before claiming seenIds, so an invalid copy cannot censor the valid one.
-        if (!verifySig(nostrEvent)) return
         // 10040 intentionally bypasses seenIds; MES handles own-pubkey and
         // created_at staleness, and duplicate 10040s are rare.
-        if (dto.kind != 10040) {
+        if (nostrEvent.kind != 10040) {
             if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
-                memoryEventStore.addRelaySeen(nostrEvent.id, relayUrl)
+                memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 return
             }
             trimDedupCacheIfNeeded()
@@ -453,13 +483,13 @@ class EventProcessor @Inject constructor(
         // ── Kind-3 follows update (not stored in eventsById) ─────────────────
         // Updates the followsByPubkey index directly without entering MES
         // proper. Snapshot persists followsByPubkey so this is reconstructible.
-        if (dto.kind == 3) {
+        if (nostrEvent.kind == 3) {
             val follows = tags
                 .filter { it.size >= 2 && it[0] == "p" }
                 .map { it[1] }
                 .toSet()
-            memoryEventStore.updateFollows(dto.pubkey, follows, dto.createdAt)
-            Log.d(TAG, "Kind-3 direct path: pubkey=${dto.pubkey.take(8)}… ${follows.size} follows (createdAt=${dto.createdAt})")
+            memoryEventStore.updateFollows(nostrEvent.pubkey, follows, nostrEvent.createdAt)
+            Log.d(TAG, "Kind-3 direct path: pubkey=${nostrEvent.pubkey.take(8)}… ${follows.size} follows (createdAt=${nostrEvent.createdAt})")
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
         // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
@@ -468,8 +498,8 @@ class EventProcessor @Inject constructor(
         // in burst — capacity-2000 channel handles the largest observed burst).
         // The drainer flushes via insertBatch so per-event signal bumps coalesce.
         // Kind-10012 relay set refs are resolved inside flushControlBatch.
-        val isControlKind = when (dto.kind) {
-            30382 -> memoryEventStore.isActiveWotProvider(dto.pubkey)
+        val isControlKind = when (nostrEvent.kind) {
+            30382 -> memoryEventStore.isActiveWotProvider(nostrEvent.pubkey)
             10000, 10002, 10006, 10007, 10012, 10030, 10040, 10063, 30002, 30030, 30166, 30385 -> true
             else -> false
         }
@@ -485,11 +515,11 @@ class EventProcessor @Inject constructor(
         // local writes + legacy kind-1 had other paths). The feed filter's `kinds`
         // Feed content kinds exclude 1111, so it never leaks into Notes/replies —
         // it surfaces only in the article reader (commentIdsByCoord) + notifications.
-        val shouldChannel = dto.kind in setOf(0, 1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 34235, 34236, 30023, 1111)
+        val shouldChannel = nostrEvent.kind in setOf(0, 1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 34235, 34236, 30023, 1111)
         if (shouldChannel) {
-            val isHot = dto.kind == 1 || dto.kind == 6 || dto.kind == 16 || dto.kind == 20 ||
-                dto.kind == 21 || dto.kind == 22 || dto.kind == 34235 || dto.kind == 34236 ||
-                dto.kind == 1068 || dto.kind == 30023 || dto.kind == 1111
+            val isHot = nostrEvent.kind == 1 || nostrEvent.kind == 6 || nostrEvent.kind == 16 || nostrEvent.kind == 20 ||
+                nostrEvent.kind == 21 || nostrEvent.kind == 22 || nostrEvent.kind == 34235 || nostrEvent.kind == 34236 ||
+                nostrEvent.kind == 1068 || nostrEvent.kind == 30023 || nostrEvent.kind == 1111
             // trySend is non-suspending: drops if full rather than blocking relay consumption.
             // Channels are sized so drops are extremely rare under realistic Nostr traffic.
             if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)

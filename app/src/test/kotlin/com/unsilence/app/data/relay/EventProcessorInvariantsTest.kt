@@ -17,6 +17,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Invariant tests for EventProcessor behavior after the A.2 rewrite
@@ -127,18 +129,51 @@ class EventProcessorInvariantsTest {
     }
 
     @Test
+    fun `one verified envelope serves overlapping subscriptions without reverify`() = runTest {
+        val verificationCount = AtomicInteger(0)
+        processor.setTestVerifier(object : SignatureVerifier() {
+            override fun verify(event: NostrEvent): Boolean {
+                verificationCount.incrementAndGet()
+                return true
+            }
+        })
+        val deliveredSubIds = CopyOnWriteArrayList<String>()
+        processor.registerTap(RelayMessageTap { message ->
+            if (message is RelayTapMessage.VerifiedEvent) {
+                deliveredSubIds += message.subscriptionId
+            }
+        })
+
+        val (firstRaw, relay) = rawEvent(28)
+        val secondRaw = firstRaw.replace("\"sub-1\"", "\"sub-2\"")
+        processor.process(firstRaw, relay)
+        processor.process(secondRaw, relay)
+        processor.drainForTest()
+
+        assertEquals("Schnorr/id verification should run once", 1, verificationCount.get())
+        assertEquals(listOf("sub-1", "sub-2"), deliveredSubIds.toList())
+        assertEquals(1, store.eventsByIds(setOf(eventId(28))).size)
+    }
+
+    @Test
     fun `bad signature copy does not poison seenIds before valid copy arrives`() = runTest {
         val (raw, relay) = rawEvent(29)
+        val delivered = AtomicInteger(0)
+        processor.registerTap(RelayMessageTap { message ->
+            if (message is RelayTapMessage.VerifiedEvent) delivered.incrementAndGet()
+        })
 
         processor.setTestVerifier(failVerifier)
         processor.process(raw, relay)
         processor.drainForTest()
         assertTrue("Bad signature event must not be stored", store.eventsByIds(setOf(eventId(29))).isEmpty())
+        assertEquals("Bad signature event must not reach subscriptions", 0, delivered.get())
 
         processor.setTestVerifier(passVerifier)
         processor.process(raw, relay)
         processor.drainForTest()
         assertEquals("Valid copy with same id must still be accepted", 1, store.eventsByIds(setOf(eventId(29))).size)
+        assertEquals("Valid copy should reach subscriptions", 1, delivered.get())
     }
 
     // ── Test 3: trimDedupCache evicts when over 10000 ───────────────────────

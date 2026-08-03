@@ -4,11 +4,21 @@ package com.unsilence.app.data.relay
  * Substring-level scanners over raw `["EVENT", subId, {...}]` wire messages.
  *
  * Shared by [EventProcessor] (top-level dedup + streaming decode into MES)
- * and [Subscription.dispatchEvent] (per-subscription delivery to taps).
- * Both paths receive the same raw text; centralising the scan avoids
- * double-parsing into a JsonElement tree just to extract `id` / slice the
+ * and its subscription-envelope dispatch. Centralising the scan avoids
+ * parsing into a JsonElement tree just to extract `id` / `subId` or slice the
  * event object substring.
  */
+
+/** Extract the subscription id from EVENT/EOSE/CLOSED wire messages. */
+internal fun extractSubscriptionIdFromRaw(raw: String): String? {
+    val firstComma = raw.indexOf(',')
+    if (firstComma < 0) return null
+    val quoteOpen = raw.indexOf('"', firstComma + 1)
+    if (quoteOpen < 0) return null
+    val quoteClose = raw.indexOf('"', quoteOpen + 1)
+    if (quoteClose < 0) return null
+    return raw.substring(quoteOpen + 1, quoteClose)
+}
 
 /**
  * Extract the 64-hex event id from a raw EVENT message without JSON parsing.
