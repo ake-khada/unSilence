@@ -214,6 +214,109 @@ class TimelineServiceTest {
         assertTrue(older.all { it.createdAt < 300L })
     }
 
+    @Test
+    fun `fetchOlderTimeline repairs unresolved refs by id without a time-window redownload`() = runTest {
+        val relayUrl = "wss://a.example"
+        val sr = SubRequest(listOf(relayUrl), NostrFilter(kinds = listOf(1), limit = 10))
+        val handle = service.subscribeTimeline(
+            subRequests = listOf(sr),
+            onEvents = { _, _ -> },
+        )
+        val subId = transport.lastReqSubId()
+        val events = listOf(
+            makeEvent("a".repeat(64), 100L),
+            makeEvent("b".repeat(64), 200L),
+            makeEvent("c".repeat(64), 300L),
+        )
+        for (event in events) {
+            eventLoader.putRemote(event)
+            tapRegistry.fire(eventMessage(subId, event.id, event.createdAt), relayUrl)
+        }
+        tapRegistry.fire("""["EOSE","$subId"]""", relayUrl)
+        val wireSendsBeforeRepair = transport.sends.size
+
+        val older = service.fetchOlderTimeline(
+            timelineKey = handle.timelineKey,
+            until = 400L,
+            limit = 3,
+        )
+
+        assertEquals(listOf(300L, 200L, 100L), older.map { it.createdAt })
+        assertEquals(1, eventLoader.repairCalls.size)
+        assertEquals(
+            listOf("c".repeat(64), "b".repeat(64), "a".repeat(64)),
+            eventLoader.repairCalls.single().first,
+        )
+        assertEquals(listOf(relayUrl), eventLoader.repairCalls.single().second)
+        assertEquals(
+            "ID repair must not fall through to a duplicate time-window REQ",
+            wireSendsBeforeRepair,
+            transport.sends.size,
+        )
+    }
+
+    @Test
+    fun `sparse repaired page stops at first unresolved ref`() = runTest {
+        val relayUrl = "wss://a.example"
+        val sr = SubRequest(listOf(relayUrl), NostrFilter(kinds = listOf(1), limit = 10))
+        val handle = service.subscribeTimeline(
+            subRequests = listOf(sr),
+            onEvents = { _, _ -> },
+        )
+        val subId = transport.lastReqSubId()
+        val newest = makeEvent("d".repeat(64), 300L)
+        val middle = makeEvent("e".repeat(64), 200L)
+        val oldest = makeEvent("f".repeat(64), 100L)
+        eventLoader.putRemote(newest)
+        eventLoader.putRemote(middle)
+        for (event in listOf(oldest, middle, newest)) {
+            tapRegistry.fire(eventMessage(subId, event.id, event.createdAt), relayUrl)
+        }
+        tapRegistry.fire("""["EOSE","$subId"]""", relayUrl)
+        val wireSendsBeforeRepair = transport.sends.size
+
+        val older = service.fetchOlderTimeline(handle.timelineKey, until = 400L, limit = 3)
+
+        assertEquals(listOf(300L, 200L), older.map { it.createdAt })
+        assertEquals(
+            "Returning a later resolved event would advance pagination across the hole",
+            wireSendsBeforeRepair,
+            transport.sends.size,
+        )
+    }
+
+    @Test
+    fun `initial cache emit never crosses an unresolved persisted ref`() = runTest {
+        val relayUrl = "wss://a.example"
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val key = service.generateTimelineKey(listOf(relayUrl), filter)
+        val newest = makeEvent("1".repeat(64), 300L)
+        val oldest = makeEvent("3".repeat(64), 100L)
+        eventLoader.put(newest)
+        eventLoader.put(oldest)
+        service.restoreFromSnapshot(
+            mapOf(
+                key to TimelineService.Timeline(
+                    refs = listOf(
+                        TimelineRef(newest.id, newest.createdAt),
+                        TimelineRef("2".repeat(64), 200L),
+                        TimelineRef(oldest.id, oldest.createdAt),
+                    ),
+                    filter = filter,
+                    urls = listOf(relayUrl),
+                ),
+            ),
+        )
+        val emitted = CopyOnWriteArrayList<List<NostrEvent>>()
+
+        service.subscribeTimeline(
+            subRequests = listOf(SubRequest(listOf(relayUrl), filter)),
+            onEvents = { events, _ -> emitted += events },
+        )
+
+        assertEquals(listOf(newest.id), emitted.first().map { it.id })
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
 
     private fun makeEvent(id: String, createdAt: Long): NostrEvent {
@@ -257,10 +360,21 @@ class TimelineServiceTest {
 
 class FakeEventLoader : TimelineEventLoader {
     private val store = ConcurrentHashMap<String, NostrEvent>()
+    private val remote = ConcurrentHashMap<String, NostrEvent>()
+    val repairCalls = CopyOnWriteArrayList<Pair<List<String>, List<String>>>()
 
     fun put(evt: NostrEvent) { store[evt.id] = evt }
+    fun putRemote(evt: NostrEvent) { remote[evt.id] = evt }
 
-    override suspend fun getEvents(ids: List<String>): List<NostrEvent> =
-        ids.mapNotNull { store[it] }
-            .sortedWith(compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id })
+    override suspend fun getEvents(ids: List<String>): TimelineEventResolution =
+        timelineEventResolution(ids, ids.mapNotNull { store[it] })
+
+    override suspend fun repairEvents(
+        ids: List<String>,
+        relayHints: List<String>,
+    ): TimelineEventResolution {
+        repairCalls += ids to relayHints
+        ids.mapNotNull(remote::get).forEach { store[it.id] = it }
+        return getEvents(ids)
+    }
 }

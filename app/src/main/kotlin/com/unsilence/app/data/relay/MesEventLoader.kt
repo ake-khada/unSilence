@@ -12,12 +12,20 @@ import javax.inject.Singleton
 @Singleton
 class MesEventLoader @Inject constructor(
     private val mes: MemoryEventStore,
+    private val relayPool: dagger.Lazy<RelayPool>,
 ) : TimelineEventLoader {
-    override suspend fun getEvents(ids: List<String>): List<NostrEvent> {
-        if (ids.isEmpty()) return emptyList()
-        // mes.eventsByIds returns an unordered set — sort desc by createdAt
-        // to match the contract.
-        return mes.eventsByIds(ids.toSet())
-            .sortedWith(compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id })
+    override suspend fun getEvents(ids: List<String>): TimelineEventResolution {
+        if (ids.isEmpty()) return TimelineEventResolution(emptyList(), emptyList())
+        return timelineEventResolution(ids, mes.eventsByIds(ids.toSet()))
+    }
+
+    override suspend fun repairEvents(
+        ids: List<String>,
+        relayHints: List<String>,
+    ): TimelineEventResolution {
+        val local = getEvents(ids)
+        if (local.missingIds.isEmpty()) return local
+        relayPool.get().fetchTimelineEventsByIds(local.missingIds, relayHints)
+        return getEvents(ids)
     }
 }

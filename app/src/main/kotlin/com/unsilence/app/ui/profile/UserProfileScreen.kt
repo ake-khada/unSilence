@@ -275,7 +275,7 @@ fun UserProfileScreen(
             .distinctUntilChanged()
             .collect { oldestVisiblePageCursor ->
                 if (oldestVisiblePageCursor != null) {
-                    viewModel.loadMore(oldestVisiblePageCursor)
+                    viewModel.loadMore()
                 }
             }
     }

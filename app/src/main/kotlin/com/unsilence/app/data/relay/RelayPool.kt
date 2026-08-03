@@ -3947,6 +3947,41 @@ class RelayPool @Inject constructor(
         }
     }
 
+    /**
+     * Repair persisted timeline refs by ID. Persisted refs are stronger evidence
+     * than the short-lived negative cache, so this narrow path bypasses that cache
+     * while retaining the ordinary in-flight dedup and 50-ID wire bound.
+     */
+    internal suspend fun fetchTimelineEventsByIds(
+        eventIds: List<String>,
+        relayHints: List<String>,
+    ) {
+        val ids = eventIds.distinct().take(MAX_EVENT_IDS_PER_REQ)
+        if (ids.isEmpty()) return
+        fetchEventsByIdsWithHintsBatch(
+            eventIds = ids,
+            relayHints = relayHints,
+            bypassDedup = false,
+            excludedRelayUrls = emptyList(),
+            capToHintBudget = true,
+            includeBridgeMissTier = relayHints.isEmpty(),
+            ignoreNegativeCache = true,
+        )
+        // Capture after dispatch: the batch registers monitors for novel IDs.
+        // An absent deferred now means either the event landed and its monitor
+        // removed itself, or there is nothing left for this phase to await.
+        val pending = ids.mapNotNull(eventFetchInFlight::get)
+        if (pending.isNotEmpty()) {
+            withTimeoutOrNull(EVENT_REFERENCE_PHASE_TIMEOUT_MS + EVENT_PROCESSOR_SETTLE_MS) {
+                pending.forEach { it.await() }
+            }
+        }
+        val mes = memoryEventStore.get()
+        ids.forEach { id ->
+            if (mes.getNostrEvent(id) != null) missingRefCache.remove(id)
+        }
+    }
+
     /** Explicit own/global ladder phase; unlike seen hints, its established fan-out is not capped to three. */
     internal suspend fun fetchEventsByIdsFromTargets(
         eventIds: List<String>,
