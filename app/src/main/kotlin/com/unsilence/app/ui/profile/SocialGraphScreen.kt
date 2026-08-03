@@ -630,7 +630,7 @@ private fun NeutralStanding(text: String) {
             modifier = Modifier
                 .size(38.dp)
                 .clip(RoundedCornerShape(999.dp))
-                .border(1.dp, Text4, RoundedCornerShape(999.dp)),
+                .border(1.dp, BorderSubtle, RoundedCornerShape(999.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Filled.AccountTree, null, tint = Text3, modifier = Modifier.size(18.dp))

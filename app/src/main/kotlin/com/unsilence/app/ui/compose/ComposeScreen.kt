@@ -104,6 +104,11 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Warn
 import kotlinx.coroutines.delay
 
+internal enum class ComposerBackAction { DISMISS, CONFIRM_DISCARD }
+
+internal fun composerBackAction(hasUnsavedDraftChanges: Boolean): ComposerBackAction =
+    if (hasUnsavedDraftChanges) ComposerBackAction.CONFIRM_DISCARD else ComposerBackAction.DISMISS
+
 @Composable
 fun ComposeScreen(
     onDismiss: () -> Unit,
@@ -226,8 +231,15 @@ fun ComposeScreen(
         viewModel.cancelSend()
     }
 
-    BackHandler(enabled = sendState is SendState.Composing && hasUnsavedDraftChanges) {
-        showCloseDraftSheet = true
+    // Always consume system back while composing. A dirty editor asks before
+    // discarding; an untouched editor closes immediately. Leaving this handler
+    // disabled for an empty editor lets back fall through to the tab beneath the
+    // full-screen composer instead of dismissing it.
+    BackHandler(enabled = sendState is SendState.Composing) {
+        when (composerBackAction(hasUnsavedDraftChanges)) {
+            ComposerBackAction.CONFIRM_DISCARD -> showCloseDraftSheet = true
+            ComposerBackAction.DISMISS -> finishAndDismiss()
+        }
     }
 
     LaunchedEffect(saveNotice) {

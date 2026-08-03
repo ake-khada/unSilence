@@ -1,9 +1,12 @@
 package com.unsilence.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -30,6 +33,31 @@ object AppType {
     val title       = 22.sp  // article reader titles
     val display     = 24.sp  // onboarding hero text
 }
+
+/**
+ * Material 3 typography backed by the same compact scale as [AppType].
+ *
+ * Most hand-tuned screens still reference [AppType] directly; installing the
+ * scale here makes Material components and new code inherit the same sizes and
+ * line heights instead of silently using Material's much larger defaults.
+ */
+internal val UnsilenceTypography = Typography(
+    displayLarge = TextStyle(fontSize = AppType.display, lineHeight = 32.sp, fontWeight = FontWeight.Normal),
+    displayMedium = TextStyle(fontSize = AppType.display, lineHeight = 32.sp, fontWeight = FontWeight.Normal),
+    displaySmall = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.Normal),
+    headlineLarge = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold),
+    headlineMedium = TextStyle(fontSize = AppType.heading, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
+    headlineSmall = TextStyle(fontSize = AppType.subheading, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+    titleLarge = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.Medium),
+    titleMedium = TextStyle(fontSize = AppType.subheading, lineHeight = 24.sp, fontWeight = FontWeight.Medium),
+    titleSmall = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+    bodyLarge = TextStyle(fontSize = AppType.bodyLarge, lineHeight = 22.sp, fontWeight = FontWeight.Normal),
+    bodyMedium = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Normal),
+    bodySmall = TextStyle(fontSize = AppType.bodySmall, lineHeight = 18.sp, fontWeight = FontWeight.Normal),
+    labelLarge = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+    labelMedium = TextStyle(fontSize = AppType.footnote, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
+    labelSmall = TextStyle(fontSize = AppType.caption, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
+)
 
 object Sizing {
     val avatar            = 32.dp
@@ -69,6 +97,7 @@ private val UnsilenceColorScheme = darkColorScheme(
 fun UnsilenceTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = UnsilenceColorScheme,
+        typography = UnsilenceTypography,
         content = content,
     )
 }
