@@ -29,8 +29,13 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "ProfilePipeline"
-internal const val MAX_PROFILE_ENGAGEMENT_RELAYS = 12
+internal const val MAX_PROFILE_ENGAGEMENT_RELAYS = 4
+internal const val PROFILE_EAGER_ENGAGEMENT_LIMIT = 30
+internal const val PROFILE_EAGER_ENGAGEMENT_LIMIT_CONSTRAINED = 10
 private const val PROFILE_RELAY_FACTS_TTL_MS = 2 * 60_000L
+
+internal fun profileEagerEngagementLimit(constrained: Boolean): Int =
+    if (constrained) PROFILE_EAGER_ENGAGEMENT_LIMIT_CONSTRAINED else PROFILE_EAGER_ENGAGEMENT_LIMIT
 
 internal fun profileNetworkDemandAllowed(
     networkState: NetworkState,
@@ -66,9 +71,9 @@ enum class AnchorPolicy {
 }
 
 /**
- * Bounded eager pipeline that pre-fetches everything needed for a profile
- * in one pass: notes, referenced events (quoted notes, repost targets,
- * thread parents), engagement, and own-engagement markers.
+ * Bounded pipeline that pre-fetches profile notes/references plus engagement
+ * for the newest screenful. Older engagement hydrates from the UI viewport,
+ * avoiding a full-history network sweep.
  *
  * Replaces lazy viewport-driven hydration for profile screens.
  *
@@ -252,13 +257,17 @@ class ProfilePipeline @Inject constructor(
         if (!profileDemandAvailable(pubkey, "engagement")) return
 
         // ── Step 4: Engagement batch ───────────────────────────────────
-        val noteIds = noteEvents.map { it.id }
+        // Eager work is for first paint only. The profile screens hydrate the
+        // remaining posts from their viewport as the user scrolls.
+        val eagerEngagementEvents = noteEvents
+            .sortedWith(compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id })
+            .take(profileEagerEngagementLimit(networkMonitor.currentConditions.isConstrained))
         try {
-            fetchEngagement(noteEvents, writeRelays)
+            fetchEngagement(eagerEngagementEvents, writeRelays)
         } catch (e: Exception) {
             Log.w(TAG, "Step4 failed: ${e.message}")
         }
-        Log.d(TAG, "Step4: engagement fetched for ${noteIds.size} notes")
+        Log.d(TAG, "Step4: eager engagement fetched for ${eagerEngagementEvents.size}/${noteEvents.size} notes")
 
         // ── Step 5: Own-engagement marker ──────────────────────────────
         // Only when viewing someone else's profile. The viewer's outbox relays
@@ -269,7 +278,7 @@ class ProfilePipeline @Inject constructor(
         if (!isOwn) {
             if (!profileDemandAvailable(pubkey, "own-engagement")) return
             try {
-                fetchOwnEngagement(noteEvents)
+                fetchOwnEngagement(eagerEngagementEvents)
             } catch (e: Exception) {
                 Log.w(TAG, "Step5 failed: ${e.message}")
             }
@@ -649,11 +658,12 @@ class ProfilePipeline @Inject constructor(
             Triple(id, coord, source)
         }
 
-        val readRelays = relayPreferencesStore.indexerRelayUrlsSnapshot() + writeRelays
+        val readRelays = writeRelays + relayPreferencesStore.indexerRelayUrlsSnapshot()
         val targetUrls = selectProfileEngagementRelays(
             preferredRelays = readRelays,
             sourceRelaysByEvent = targets.map { it.third },
         )
+        if (targetUrls.isEmpty()) return
         Log.d(TAG, "Step4: relay fan-out capped to ${targetUrls.size}/$MAX_PROFILE_ENGAGEMENT_RELAYS")
 
         // Chunk small (per-post budget invariant) — REQ via the shared builder so
@@ -673,10 +683,12 @@ class ProfilePipeline @Inject constructor(
 
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
-            relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
-
-            withTimeoutOrNull(ENGAGEMENT_TIMEOUT_MS) { eoseDeferred.await() }
-            relayPool.cleanupOneShotSub(subId)
+            try {
+                relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
+                withTimeoutOrNull(ENGAGEMENT_TIMEOUT_MS) { eoseDeferred.await() }
+            } finally {
+                relayPool.cleanupOneShotSub(subId)
+            }
 
             if (index < chunks.size - 1) {
                 delay(100) // brief pause between chunks to avoid relay rate limiting
@@ -691,8 +703,16 @@ class ProfilePipeline @Inject constructor(
         if (noteEvents.isEmpty()) return
 
         // Use the VIEWER's write relays, not the profile owner's
-        val viewerWriteRelays = memoryEventStore.writeRelaysFor(ownPk)
-            .ifEmpty { relayPool.connectedRelayUrls() }
+        val configuredViewerRelays = memoryEventStore.writeRelaysFor(ownPk)
+            .mapNotNull(::normalizeRelayUrl)
+            .distinct()
+        val viewerWriteRelays = configuredViewerRelays
+            .ifEmpty {
+                relayPool.connectedRelayUrls()
+                    .mapNotNull(::normalizeRelayUrl)
+                    .distinct()
+            }
+            .take(MAX_PROFILE_ENGAGEMENT_RELAYS)
         if (viewerWriteRelays.isEmpty()) return
 
         // Same coord derivation as step 4 so own coordinate-targeted likes light up.
@@ -724,10 +744,12 @@ class ProfilePipeline @Inject constructor(
 
             val eoseDeferred = CompletableDeferred<Unit>()
             relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
-            relayPool.sendOneShotBatch(viewerWriteRelays, listOf(req), listOf(subId))
-
-            withTimeoutOrNull(ENGAGEMENT_TIMEOUT_MS) { eoseDeferred.await() }
-            relayPool.cleanupOneShotSub(subId)
+            try {
+                relayPool.sendOneShotBatch(viewerWriteRelays, listOf(req), listOf(subId))
+                withTimeoutOrNull(ENGAGEMENT_TIMEOUT_MS) { eoseDeferred.await() }
+            } finally {
+                relayPool.cleanupOneShotSub(subId)
+            }
 
             if (index < chunks.size - 1) {
                 delay(100)

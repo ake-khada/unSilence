@@ -336,7 +336,8 @@ class UserProfileViewModel @Inject constructor(
         val atTop = first <= 0
         if (_isAtTop.value != atTop) _isAtTop.value = atTop
         requestVisibleWotHydration(first, last)
-        // Engagement pre-fetched by ProfilePipeline — no viewport-driven hydration needed.
+        // Recent engagement is eager; the screen's card-window hydrator covers
+        // older posts as they enter the viewport.
     }
 
     private fun requestVisibleWotHydration(first: Int, last: Int) {

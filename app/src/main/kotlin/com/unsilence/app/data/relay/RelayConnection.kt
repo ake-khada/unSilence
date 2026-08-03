@@ -135,7 +135,7 @@ class RelayConnection(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             _state.value = RelayState.CONNECTED
             capabilitiesStore?.clearTransportStrikes(url)
-            Log.w(TAG, "Connected: $url")
+            Log.d(TAG, "Connected: $url")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {

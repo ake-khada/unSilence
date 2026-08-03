@@ -569,7 +569,7 @@ fun ProfileScreen(
                         first = dataFirst,
                         last = dataLast,
                         cardWidthPx = cardWidthPx,
-                        hydrateEngagement = false,
+                        hydrateEngagement = true,
                     )
                 }
             }

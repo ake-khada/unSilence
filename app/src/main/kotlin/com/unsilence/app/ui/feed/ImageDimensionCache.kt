@@ -22,8 +22,8 @@ private const val MAX_ASPECT_RATIO = 5.0f  // widest allowed  (5:1)
  * Resolves dimensions via [BitmapFactory.Options.inJustDecodeBounds] which reads
  * only the image header (IHDR/SOF/VP8 — typically < 1 KB) without decoding the
  * full bitmap. An HTTP Range header limits the download to the first 32 KB as a
- * safety net; servers that ignore Range still work because BitmapFactory stops
- * reading after the header.
+ * safety net. The response stream is additionally capped in-process, so a
+ * server that ignores Range cannot turn a dimension probe into a full download.
  *
  * Used by [CardHydrator] during hydration (pre-fetch) and by [MediaImage] as a
  * secondary dimension source after imeta tags. When [MediaImage] resolves
@@ -78,10 +78,18 @@ class ImageDimensionCache @Inject constructor(
                     if (!response.isSuccessful && response.code != 206) {
                         return@withContext null
                     }
-                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    response.body.byteStream().use { stream ->
-                        BitmapFactory.decodeStream(stream, null, options)
+                    val headerBytes = response.body.byteStream().use { stream ->
+                        val bytes = ByteArray(MAX_PROBE_BYTES)
+                        var count = 0
+                        while (count < bytes.size) {
+                            val read = stream.read(bytes, count, bytes.size - count)
+                            if (read <= 0) break
+                            count += read
+                        }
+                        if (count == bytes.size) bytes else bytes.copyOf(count)
                     }
+                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(headerBytes, 0, headerBytes.size, options)
                     if (options.outWidth > 0 && options.outHeight > 0) {
                         val ratio = (options.outWidth.toFloat() / options.outHeight)
                             .coerceIn(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
@@ -149,5 +157,6 @@ class ImageDimensionCache @Inject constructor(
 
     private companion object {
         const val MAX_ENTRIES = 512
+        const val MAX_PROBE_BYTES = 32 * 1024
     }
 }

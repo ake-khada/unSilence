@@ -83,10 +83,12 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) {
                 subscription.pauseAll()
+                feedRelayWarmer.onBackground()
+                relayPool.suspendSocketsForBackground()
                 sharedPlayerHolder.releaseForLifecycle("app backgrounded")
             }
             override fun onStart(owner: LifecycleOwner) {
-                relayPool.reconnectAll()
+                relayPool.resumeSocketsForForeground()
                 subscription.resumeAll()
                 feedRelayWarmer.onForeground()
             }

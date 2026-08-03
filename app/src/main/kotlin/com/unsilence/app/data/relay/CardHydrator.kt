@@ -58,6 +58,46 @@ private const val PREFETCH_KEY_CAP = 768
 private const val MAX_PREFETCH_WIDTH_PX = 1600
 private const val MAX_MEDIA_PER_CARD = 4
 
+internal data class AssetWarmBudget(
+    val rows: Int,
+    val images: Int,
+    val og: Int,
+    val videoThumbnails: Int,
+    val profiles: Int,
+    val references: Int,
+    val articles: Int,
+)
+
+internal fun assetWarmBudget(
+    maxRows: Int,
+    maxImages: Int,
+    maxOg: Int,
+    maxVideoThumbnails: Int,
+    maxProfiles: Int,
+    maxReferences: Int,
+    maxArticles: Int,
+    constrained: Boolean,
+    networkDown: Boolean,
+): AssetWarmBudget = when {
+    networkDown -> AssetWarmBudget(0, 0, 0, 0, 0, 0, 0)
+    constrained -> AssetWarmBudget(
+        rows = maxRows.coerceAtMost(4),
+        images = 0,
+        og = 0,
+        videoThumbnails = 0,
+        profiles = maxProfiles.coerceAtMost(4),
+        references = maxReferences.coerceAtMost(1),
+        articles = 0,
+    )
+    else -> AssetWarmBudget(
+        maxRows, maxImages, maxOg, maxVideoThumbnails,
+        maxProfiles, maxReferences, maxArticles,
+    )
+}
+
+internal fun hasUsableAspectMetadata(aspectRatio: Float?): Boolean =
+    aspectRatio?.let { it.isFinite() && it > 0f } == true
+
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
 /** Negative cache for NIP-19 bech32 URIs that fail to decode. Thread-safe. */
@@ -99,6 +139,8 @@ class CardHydrator @Inject constructor(
     private val imageDimensionCache: ImageDimensionCache,
     private val ogFetcher: OgFetcher,
     private val outboxResolver: OutboxRelayResolver,
+    private val networkMonitor: NetworkMonitor,
+    private val relayCapabilitiesStore: RelayCapabilitiesStore,
 ) {
     private val imageLoader by lazy { SingletonImageLoader.get(context) }
 
@@ -219,9 +261,8 @@ class CardHydrator @Inject constructor(
     /**
      * Independent media pipeline — no relay queries, no dependencies on ref resolution.
      *
-     * @param mmrAllowed When true, MediaMetadataRetriever is used for video thumbnails
-     *   (REST-only — 300ms/video codec work). When false, only image dimensions are
-     *   resolved (IDLE-safe — BitmapFactory header-only, ~50ms each).
+     * Speculative media work is automatically disabled on cellular, metered, or
+     * degraded networks. Visible components still load on demand.
      */
     fun warmUpcomingAssets(
         events: List<FeedRow>,
@@ -235,6 +276,18 @@ class CardHydrator @Inject constructor(
         maxArticleFetches: Int = 2,
     ) {
         if (events.isEmpty() || cardWidthPx <= 0) return
+        val budget = assetWarmBudget(
+            maxRows = maxRows,
+            maxImages = maxImagePrefetches,
+            maxOg = maxOgFetches,
+            maxVideoThumbnails = maxVideoThumbnails,
+            maxProfiles = maxProfileFetches,
+            maxReferences = maxReferenceFetches,
+            maxArticles = maxArticleFetches,
+            constrained = networkMonitor.currentConditions.isConstrained,
+            networkDown = relayCapabilitiesStore.isNetworkDown,
+        )
+        if (budget.rows == 0) return
 
         var imagePrefetches = 0
         var ogFetches = 0
@@ -250,23 +303,23 @@ class CardHydrator @Inject constructor(
         // already dedupe real work, while row-level marking can starve assets:
         // a row may be marked "warmed" in a pass where another asset cap was
         // spent before its primary image or OG preview was attempted.
-        for (row in events.take(maxRows)) {
+        for (row in events.take(budget.rows)) {
             val model = memoryEventStore.getOrParseEventModel(row.id) ?: row.toEventModel()
             collectProfileCandidates(row, model, profileCandidates)
             val referenceStart = referenceCandidates.size
             collectReferenceCandidates(model, row, referenceCandidates, articleCandidates)
 
-            if (imagePrefetches < maxImagePrefetches) {
+            if (imagePrefetches < budget.images) {
                 for (candidate in imageCandidates(model)) {
-                    if (imagePrefetches >= maxImagePrefetches) break
-                    warmImageDimensions(candidate.url)
+                    if (imagePrefetches >= budget.images) break
+                    if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url)
                     if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
                         imagePrefetches++
                     }
                 }
             }
 
-            if (ogFetches < maxOgFetches) {
+            if (ogFetches < budget.og) {
                 val url = model.media.ogCandidate?.url
                 if (!url.isNullOrBlank()) {
                     val countedAsFetch = warmOgMetadata(
@@ -279,21 +332,21 @@ class CardHydrator @Inject constructor(
 
             videoThumbnails += warmVideoThumbnails(
                 model = model,
-                remaining = maxVideoThumbnails - videoThumbnails,
+                remaining = budget.videoThumbnails - videoThumbnails,
             )
 
             // If a referenced event is already cached, warm its nested assets now.
             // If not cached, collect it below for a bounded relay prefetch.
-            if (maxReferenceFetches > 0 && warmedCachedRefs.size < maxReferenceFetches) {
+            if (budget.references > 0 && warmedCachedRefs.size < budget.references) {
                 val newReferences = referenceCandidates.subList(referenceStart, referenceCandidates.size)
                 for (ref in newReferences) {
-                    if (warmedCachedRefs.size >= maxReferenceFetches) break
+                    if (warmedCachedRefs.size >= budget.references) break
                     if (!warmedCachedRefs.add(ref.eventId)) continue
                     val warmed = warmCachedReferenceAssets(
                         eventId = ref.eventId,
                         cardWidthPx = cardWidthPx,
-                        remainingVideoThumbnails = maxVideoThumbnails - videoThumbnails,
-                        remainingImagePrefetches = maxImagePrefetches - imagePrefetches,
+                        remainingVideoThumbnails = budget.videoThumbnails - videoThumbnails,
+                        remainingImagePrefetches = budget.images - imagePrefetches,
                         profileCandidates = profileCandidates,
                     )
                     videoThumbnails += warmed.videoThumbnails
@@ -301,17 +354,17 @@ class CardHydrator @Inject constructor(
                 }
             }
 
-            if (imagePrefetches >= maxImagePrefetches &&
-                ogFetches >= maxOgFetches &&
-                videoThumbnails >= maxVideoThumbnails &&
-                profileCandidates.size >= maxProfileFetches &&
-                referenceCandidates.size >= maxReferenceFetches &&
-                articleCandidates.size >= maxArticleFetches
+            if (imagePrefetches >= budget.images &&
+                ogFetches >= budget.og &&
+                videoThumbnails >= budget.videoThumbnails &&
+                profileCandidates.size >= budget.profiles &&
+                referenceCandidates.size >= budget.references &&
+                articleCandidates.size >= budget.articles
             ) break
         }
 
-        if (profileCandidates.isNotEmpty() && maxProfileFetches > 0) {
-            val batch = profileCandidates.entries.take(maxProfileFetches)
+        if (profileCandidates.isNotEmpty() && budget.profiles > 0) {
+            val batch = profileCandidates.entries.take(budget.profiles)
             val pubkeys = batch.map { it.key }
             val hintsByPubkey = batch.associate { it.key to it.value }
             backfillScope.launch {
@@ -319,23 +372,23 @@ class CardHydrator @Inject constructor(
             }
         }
 
-        if (maxReferenceFetches > 0) {
+        if (budget.references > 0) {
             val missingRefs = mergeReferenceCandidates(referenceCandidates)
                 .asSequence()
                 .filter { memoryEventStore.getEventEntity(it.eventId) == null }
-                .take(maxReferenceFetches)
+                .take(budget.references)
                 .toList()
             if (missingRefs.isNotEmpty()) {
                 backfillScope.launch { warmReferencedEvents(missingRefs, cardWidthPx) }
             }
         }
 
-        if (maxArticleFetches > 0) {
+        if (budget.articles > 0) {
             val missingArticles = articleCandidates
                 .asSequence()
                 .filter { memoryEventStore.articleRowByCoord(it.coord) == null }
                 .distinctBy { it.coord }
-                .take(maxArticleFetches)
+                .take(budget.articles)
                 .toList()
             for (article in missingArticles) {
                 articleFetches++
@@ -363,7 +416,7 @@ class CardHydrator @Inject constructor(
                         }
                     }
                 }
-                if (articleFetches >= maxArticleFetches) break
+                if (articleFetches >= budget.articles) break
             }
         }
     }
@@ -371,6 +424,7 @@ class CardHydrator @Inject constructor(
     private data class ImageCandidate(
         val url: String,
         val aspectRatio: Float,
+        val dimensionsKnown: Boolean,
     )
 
     private data class ReferenceCandidate(
@@ -393,21 +447,31 @@ class CardHydrator @Inject constructor(
 
     private fun imageCandidates(model: EventModel): List<ImageCandidate> = buildList {
         val articleImage = model.article?.image
-        if (!articleImage.isNullOrBlank()) add(ImageCandidate(articleImage, 16f / 9f))
+        if (!articleImage.isNullOrBlank()) add(ImageCandidate(articleImage, 16f / 9f, dimensionsKnown = false))
 
         for (image in model.media.images.take(MAX_MEDIA_PER_CARD)) {
-            add(ImageCandidate(image.url, feedSafeAspect(image.imetaAspect)))
+            val imetaKnown = hasUsableAspectMetadata(image.imetaAspect)
+            add(ImageCandidate(image.url, feedSafeAspect(image.imetaAspect), imetaKnown))
         }
 
         for (video in model.media.videos.take(MAX_MEDIA_PER_CARD).map { it.model }) {
             val poster = video.posterUrl
             if (!poster.isNullOrBlank()) {
-                add(ImageCandidate(poster, feedSafeAspect(video.aspectRatio)))
+                // VideoRenderModel falls back to 16:9 when imeta dimensions are
+                // absent; only raw width/height make this authoritative enough
+                // to suppress the poster probe.
+                val aspectKnown = video.widthPx != null &&
+                    video.heightPx != null && video.heightPx > 0
+                add(ImageCandidate(poster, feedSafeAspect(video.aspectRatio), aspectKnown))
             }
         }
 
         for (youtube in model.media.youtubes.take(MAX_MEDIA_PER_CARD)) {
-            add(ImageCandidate("https://img.youtube.com/vi/${youtube.videoId}/hqdefault.jpg", 16f / 9f))
+            add(ImageCandidate(
+                "https://img.youtube.com/vi/${youtube.videoId}/hqdefault.jpg",
+                16f / 9f,
+                dimensionsKnown = true,
+            ))
         }
     }
 
@@ -539,7 +603,7 @@ class CardHydrator @Inject constructor(
         if (remainingImagePrefetches > 0) {
             for (candidate in imageCandidates(refModel)) {
                 if (imagePrefetches >= remainingImagePrefetches) break
-                warmImageDimensions(candidate.url)
+                if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url)
                 if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
                     imagePrefetches++
                 }
