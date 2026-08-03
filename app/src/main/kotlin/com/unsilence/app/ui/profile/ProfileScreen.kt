@@ -109,6 +109,7 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
+    scrollToTopTrigger: Int = 0,
     onLogout: () -> Unit = {},
     onBack: () -> Unit = {},
     onNoteClick: (String) -> Unit = {},
@@ -166,6 +167,10 @@ fun ProfileScreen(
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(scrollToTopTrigger) {
+        if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
+    }
 
     // Intercept avatar tap: own pubkey → scroll to top, other → navigate
     val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
