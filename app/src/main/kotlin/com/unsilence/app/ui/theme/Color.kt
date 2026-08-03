@@ -13,8 +13,13 @@ val Black = Color(0xFF000000)
 val White = Color(0xFFFFFFFF)
 val TextSecondary = Color(0xFF888888)
 val SurfaceVariant = Color(0xFF080808)
-val Text3 = Color(0xFF666666)    // tertiary / metadata
-val Text4 = Color(0xFF3A3A3A)    // disabled / hairlines
+// Small text must remain readable on the app's black/surface backgrounds.
+// Text3 (#848484) is 5.62:1 on black and 4.93:1 on Surface2; Text4 (#808080)
+// is 5.32:1 and 4.67:1 respectively. Both clear WCAG AA's 4.5:1 threshold on
+// normal card/sheet surfaces. Hairlines use the dedicated Border* tokens below
+// instead of borrowing a text color.
+val Text3 = Color(0xFF848484)    // tertiary / metadata
+val Text4 = Color(0xFF808080)    // disabled / lowest-emphasis text
 
 // ── Semantic ────────────────────────────────────────────────────────────
 val Zap  = Color(0xFFFFAB00)     // sats / warnings
