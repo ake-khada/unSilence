@@ -234,6 +234,17 @@ private val TABS = listOf(
     NavTab(Icons.Outlined.Person,        "Profile"),
 )
 
+internal enum class TabReselectAction { NONE, FEED_TOP, PROFILE_TOP }
+
+internal fun tabReselectAction(tappedTab: Int, selectedTab: Int): TabReselectAction {
+    if (tappedTab != selectedTab) return TabReselectAction.NONE
+    return when (tappedTab) {
+        0 -> TabReselectAction.FEED_TOP
+        3 -> TabReselectAction.PROFILE_TOP
+        else -> TabReselectAction.NONE
+    }
+}
+
 private val animSpec = tween<androidx.compose.ui.unit.Dp>(250, easing = FastOutSlowInEasing)
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -277,6 +288,7 @@ fun AppNavigation(
     }
     var profileRelaysPubkey  by rememberSaveable { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
+    var profileScrollToTopTrigger by remember { mutableIntStateOf(0) }
     var showEmojiSettings    by rememberSaveable { mutableStateOf(false) }
     var showZapSettings      by rememberSaveable { mutableStateOf(false) }
     var hashtagSearchQuery   by rememberSaveable { mutableStateOf<String?>(null) }
@@ -526,6 +538,7 @@ fun AppNavigation(
                         viewModel        = notifViewModel,
                     )
                     3    -> ProfileScreen(
+                        scrollToTopTrigger = profileScrollToTopTrigger,
                         onLogout = onLogout,
                         onBack = { selectedTab = 0 },
                         onNoteClick = { eventId -> threadDestination = ThreadDestination(eventId) },
@@ -640,9 +653,13 @@ fun AppNavigation(
                     val iconSize   = 24.dp  // constant — selection via tint only
 
                     IconButton(onClick = {
-                        if (index == 0 && selectedTab == 0) {
-                            scrollToTopTrigger++
-                            feedViewModel.clearNewTopPost()
+                        when (tabReselectAction(index, selectedTab)) {
+                            TabReselectAction.FEED_TOP -> {
+                                scrollToTopTrigger++
+                                feedViewModel.clearNewTopPost()
+                            }
+                            TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
+                            TabReselectAction.NONE -> Unit
                         }
                         if (index == 2) notifViewModel.markSeen()
                         selectedTab = index
